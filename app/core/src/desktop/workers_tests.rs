@@ -97,7 +97,7 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path, vers
         r#"#!/bin/sh
 MODE='{mode}'
 WT=$(pwd -P)
-[ "$1" = --version ] && {{ echo '{version}'; exit 0; }}
+[ "$1" = --version ] && {{ if [ -f '{log}.upgraded' ]; then echo '9.9.9 (Claude Code)'; else echo '{version}'; fi; exit 0; }}
 case "$1" in
   -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
@@ -119,6 +119,7 @@ case "$MODE" in
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
   504) echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
+  504_upgrade) touch '{log}.upgraded'; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
   hang) exec sleep 600 ;;
   rewrite_dotgit) edit; echo 'gitdir: /tmp/elsewhere' > .git ;;
   commit) edit; git -c core.hooksPath=/dev/null -c user.name=W -c user.email=w@e commit -qam worker ;;
@@ -180,6 +181,8 @@ struct Opts {
     redact: Redactor,
     /// What the fake harness answers to `--version`; the default is a build S4 proved.
     claude_version: &'static str,
+    /// Claude is `canary_claude` (a build only a self-test here can prove); `Some(true)` is the leaky one.
+    canary: Option<bool>,
     hooks: Hooks,
     spoil: Option<&'static str>,
     steer: Option<Steer>,
@@ -188,7 +191,7 @@ struct Opts {
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_version: PROVEN_VERSION, hooks: Hooks::default(), spoil: None, gate: None, steer: None }
+        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_version: PROVEN_VERSION, canary: None, hooks: Hooks::default(), spoil: None, gate: None, steer: None }
     }
 }
 
@@ -234,7 +237,10 @@ fn rig(tag: &str, o: Opts) -> Rig {
         home: home.clone(),
         data: data.canonicalize().unwrap(),
         codex: bin.clone(),
-        claude: bin,
+        claude: match o.canary {
+            Some(leaky) => canary_claude(&d, leaky),
+            None => bin,
+        },
         codex_home,
         tools: WriterTools::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundled-agents")),
         account_caps: o.caps,
@@ -689,13 +695,15 @@ fn a_claude_worker_runs_through_its_profile_now_that_s4_passed() {
 }
 
 /// #180 bhishma: S4 proved one Claude Code build, but users auto-update. A build no S4 run proved (with today's flag
-/// shape) is refused, as a task worker and as a check, before any worktree or flag file exists and before it runs.
+/// shape) and no self-test here proved is refused, before any worktree or flag file exists and before it runs. Here
+/// the self-test can't start (no Vajra guard is installed in this home), so it fails closed.
 #[test]
 fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() {
     let r = rig("claude-unproven", Opts { claude_version: "9.9.9 (Claude Code)", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
-    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
     assert!(v.worktree.is_none() && !r.gw.work.join("p/r1/t1-r1").exists(), "refused before any worktree exists");
+    assert!(!r.gw.data.join("control/claude-proven.json").exists(), "nothing was added to this Mac's list");
     assert!(std::fs::read_dir(r.gw.data.join("profiles")).map_or(true, |d| d.count() == 0), "no flag file was written");
     assert!(!r.d.join("log").exists(), "the harness never ran");
     // A version probe that fails is refused the same way (fail closed).
@@ -707,6 +715,113 @@ fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() 
     let r = rig("codex-unaffected", Opts { claude_version: "9.9.9 (Claude Code)", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+/// A stand-in for a new Claude Code build: `--version` says 9.9.9; with ANTHROPIC_BASE_URL set (the self-test) it
+/// talks to the stub and refuses data-dir writes the way the guard and deny rules do (or, `leaky`, lets an Edit
+/// through); without it (a real worker run) it starts and edits like the shell fake. Each self-test is counted.
+fn canary_claude(dir: &Path, leaky: bool) -> PathBuf {
+    let p = dir.join("canary-claude");
+    let script = format!(
+        r#"#!/usr/bin/python3 -I
+import json, os, sys, urllib.request
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("9.9.9 (Claude Code)"); sys.exit(0)
+tools = args[args.index("--tools") + 1].split(",")
+print(json.dumps({{"type": "system", "subtype": "init", "model": "claude-fake-1", "tools": tools, "permissionMode": "dontAsk"}}), flush=True)
+base = os.environ.get("ANTHROPIC_BASE_URL")
+if not base:
+    open("src/lib.rs", "a").write("worker line\n"); sys.exit(0)
+open("{count}", "a").write("selftest\n")
+msgs = [{{"role": "user", "content": args[-1]}}]
+while True:
+    req = urllib.request.Request(base + "/v1/messages", data=json.dumps({{"tools": [{{"name": t}} for t in tools], "messages": msgs}}).encode(), headers={{"content-type": "application/json"}})
+    evs = [json.loads(l[6:]) for l in urllib.request.urlopen(req, timeout=10).read().decode().splitlines() if l.startswith("data: ")]
+    start = next(e for e in evs if e["type"] == "content_block_start")["content_block"]
+    if start["type"] == "text":
+        print(json.dumps({{"type": "result", "subtype": "success", "is_error": False}})); sys.exit(0)
+    inp = json.loads(next(e for e in evs if e["type"] == "content_block_delta")["delta"]["partial_json"])
+    name, err, text = start["name"], False, "ok"
+    if "VajraDesktop" in (inp.get("file_path") or inp.get("command", "")):
+        if name == "Bash":
+            err, text = True, "Vajra guard blocked this Bash call"
+        elif name == "Edit" and {leaky}:
+            open(inp["file_path"], "w").write("edited\n")
+        else:
+            err, text = True, "File is in a directory that is denied by your permission settings."
+    elif name == "Write":
+        open(inp["file_path"], "w").write(inp["content"])
+    msgs += [{{"role": "assistant", "content": [{{"type": "tool_use", "id": start["id"], "name": name, "input": inp}}]}},
+             {{"role": "user", "content": [{{"type": "tool_result", "tool_use_id": start["id"], "is_error": err, "content": text}}]}}]
+"#,
+        count = dir.join("selftests").display(),
+        leaky = if leaky { "True" } else { "False" },
+    );
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// A rig whose Claude is `canary_claude`, with the repo's guard hooks installed where the app installs them.
+fn canary_rig(tag: &str, leaky: bool) -> Rig {
+    let r = rig(tag, Opts { canary: Some(leaky), ..Opts::default() });
+    let hooks = r.home.join(".claude/skills/vajra/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    for e in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks")).unwrap().flatten() {
+        if e.file_type().unwrap().is_file() {
+            std::fs::copy(e.path(), hooks.join(e.file_name())).unwrap();
+        }
+    }
+    r
+}
+
+fn selftests(r: &Rig) -> usize {
+    std::fs::read_to_string(r.d.join("selftests")).map_or(0, |t| t.lines().count())
+}
+
+/// Canary A: a build not on the built-in list passes its self-test on this Mac, so its pair is added to this Mac's
+/// list and the worker runs; the next dispatch finds the pair and does not test again.
+#[test]
+fn an_unproven_build_that_passes_its_self_test_here_runs_and_is_not_tested_again() {
+    let r = canary_rig("canary-pass", false);
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1);
+    let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
+    assert_eq!(list["pairs"], json!([{"version": "9.9.9 (Claude Code)", "shape": profiles::claude_worker_flag_shape().unwrap()}]));
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1, "a proven pair is not tested again");
+}
+
+/// Canary A: a build whose self-test fails stays refused with a clear reason, is not added to the list, and is not
+/// tested again on every dispatch (`claude_canary::RETRY_AFTER`). Codex workers still run.
+#[test]
+fn an_unproven_build_that_fails_its_self_test_stays_refused_and_codex_still_runs() {
+    let r = canary_rig("canary-fail", true);
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    assert!(v.worktree.is_none(), "refused before any worktree exists");
+    assert!(!r.gw.data.join("control/claude-proven.json").exists());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.reason.as_deref(), Some("claude_selftest_failed"), "{v:?}");
+    assert_eq!(selftests(&r), 1, "a failure is remembered, not re-tested on every dispatch");
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t3"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+/// #186 bhishma: a retry, after its backoff, asks the binary again. The CLI updated in place during the backoff to a
+/// build that is not proven (and can't be self-tested here: no guard installed), so the retry never starts.
+#[test]
+fn a_retry_asks_the_claude_binary_again_and_an_update_during_the_backoff_is_refused() {
+    let r = rig("claude-reprobe", Opts { mode: "504_upgrade", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    let starts = std::fs::read_to_string(r.d.join("log")).unwrap().lines().filter(|l| l.starts_with("start ")).count();
+    assert_eq!(starts, 1, "the second attempt never ran");
+    assert_eq!(r.clock.slept(), vec![errors::BACKOFF[0]], "it was a retry, after the first backoff");
 }
 
 /// A Claude task worker's steering channel is opened by its own session id before it starts, and its brief carries

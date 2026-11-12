@@ -399,6 +399,21 @@ fn only_a_claude_build_s4_proved_with_todays_flag_shape_is_dispatched() {
     assert_eq!(CLAUDE_UNPROVEN.reason, "claude_unproven");
 }
 
+/// #186 bhishma Low: the shape covers the worker argv S4 relied on, not only the flag file, so dropping or changing
+/// `--setting-sources user`, `--permission-mode dontAsk` or the `--tools` pair needs a new S4 PASS too.
+#[test]
+fn the_flag_shape_covers_the_worker_argv_flags_s4_relied_on() {
+    let input = claude_worker_shape_input().unwrap();
+    let argv: Vec<String> = serde_json::from_str(input.rsplit_once('\n').unwrap().1).unwrap();
+    for pair in [["--setting-sources", "user"], ["--permission-mode", "dontAsk"], ["--tools", "Read,Grep,Glob,Bash,Edit,Write"], ["--allowedTools", "Read,Grep,Glob,Bash,Edit,Write"], ["--output-format", "stream-json"]] {
+        assert!(argv.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]), "{pair:?} in {argv:?}");
+    }
+    assert!(argv.iter().any(|a| a == "-p") && argv.iter().any(|a| a == "--settings"), "{argv:?}");
+    let flag: serde_json::Value = serde_json::from_str(input.rsplit_once('\n').unwrap().0).unwrap();
+    assert_eq!(flag["permissions"]["defaultMode"], "dontAsk", "the flag file is the first part");
+    assert_eq!(claude_worker_flag_shape().unwrap(), crate::control::sha256::hex_digest(input.as_bytes()));
+}
+
 #[test]
 fn the_claude_worker_profile_is_supported_once_s4_passed() {
     const { assert!(CLAUDE_WORKER_S4_PASSED) };

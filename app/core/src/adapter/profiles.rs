@@ -111,20 +111,40 @@ pub const CLAUDE_WORKER_S4_PASSED: bool = true;
 pub const CLAUDE_WORKER_PROVEN: &[(&str, &str)] = &[
     // The owner's S4 PASS on batch-3 1f5641f4, 2026-11-12 (the extended run: the guard and the deny rules refused
     // Bash, Write and Edit into the data dir).
-    ("2.1.296 (Claude Code)", "5badf13b1b3ce79c515613171b73fc8a8b82938cf1b2d08b1ca9837945546faa"),
+    // The shape since the argv flags joined it (#186 bhishma): pending the owner's S4 rerun on this branch.
+    ("2.1.296 (Claude Code)", "fba4d33fce05db1a9c6122417d20cc307a019d7f110c49ced370e6e7fafb8591"),
 ];
+
+/// Canary A: a build not on `CLAUDE_WORKER_PROVEN` whose self-test on this Mac failed, timed out or could not run (no
+/// Vajra guard installed). Codex workers are unaffected.
+pub const CLAUDE_SELFTEST_FAILED: Unsupported = Unsupported {
+    reason: "claude_selftest_failed",
+    detail: "This Claude Code version failed Vajra's safety self-test, so Claude workers stay off. Codex workers still run.",
+};
 
 pub const CLAUDE_UNPROVEN: Unsupported = Unsupported {
     reason: "claude_unproven",
     detail: "Vajra hasn't verified this Claude Code version with its worker settings yet. Use a verified version, or a Codex worker.",
 };
 
-/// The sha256 of the worker flag file built over fixed placeholder paths: the same on every machine and for every
-/// ticket, and changed by any change to the deny-rule tables, the hooks or the flag's own fields.
-pub fn claude_worker_flag_shape() -> Result<String, String> {
+/// What `claude_worker_flag_shape` hashes: the worker flag file and the worker argv, both built by the real builders
+/// over fixed placeholders (paths, session id, prompt, a writer's full tool list). The same on every machine and for
+/// every ticket, and changed by any change to the deny-rule tables, the hooks, the flag's fields, or the argv flags S4
+/// relies on (`--setting-sources`, `--permission-mode`, `--tools`, `--allowedTools`, ...; #186 bhishma).
+pub fn claude_worker_shape_input() -> Result<String, String> {
     let p = |s: &str| PathBuf::from(format!("/vajra-flag-shape/{s}"));
     let body = claude_worker_flag(&p("home"), &p("work"), &[p("repo")], &p("data"))?;
-    Ok(crate::control::sha256::hex_digest(body.as_bytes()))
+    let tmp = p("tmp");
+    let l = WorkerLaunch { kind: RoleKind::Worker, prompt: "vajra flag shape", model: None, effort: None, network: false, ticket_tmp: &tmp };
+    let (claude, settings) = (p("claude"), p("flag.json"));
+    let c = ClaudeWorker { claude: &claude, session_id: "00000000-0000-4000-8000-000000000000", settings: &settings, tools: "Read,Grep,Glob,Bash,Edit,Write" };
+    let argv = claude_worker_argv(&l, &c).map_err(|e| format!("{}: {}", e.field, e.reason))?;
+    Ok(format!("{body}\n{}", serde_json::to_string(&argv).map_err(|e| e.to_string())?))
+}
+
+/// The sha256 of `claude_worker_shape_input`.
+pub fn claude_worker_flag_shape() -> Result<String, String> {
+    Ok(crate::control::sha256::hex_digest(claude_worker_shape_input()?.as_bytes()))
 }
 
 /// Whether this `claude --version` output, with today's flag shape, is a pair S4 proved.
