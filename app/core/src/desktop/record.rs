@@ -119,6 +119,8 @@ pub trait LedgerStore: Send + Sync {
     fn save(&self, l: &Ledger) -> Result<(), String>;
     /// The campaign and task graph as they are now, signature and features definition checked.
     fn read_back(&self, slug: &str) -> Result<ReadBack, String>;
+    /// The sha256 of the evidence file the core is about to hand a task close (the bytes the script will hash).
+    fn evidence_sha256(&self, path: &std::path::Path) -> Result<String, String>;
 }
 
 /// A campaign write through the ledger: marked pending (and saved) before it runs, so a crash mid-write leaves it
@@ -128,6 +130,14 @@ fn ledgered(store: &dyn LedgerStore, ledger: &Mutex<Ledger>, req: &Request, run:
         return run();
     }
     let what = format!("{req:?}").split([' ', '{', '(']).next().unwrap_or("write").to_string();
+    // A close's evidence is hashed before the script reads it: bytes swapped in between hash differently, so the
+    // record then fails its check rather than counting someone else's evidence as the core's.
+    let evidence = match req {
+        Request::TasksClose { evidence, .. } => {
+            Some(store.evidence_sha256(evidence).map_err(|e| Fail::Never(format!("the task's evidence can't be read: {e}")))?)
+        }
+        _ => None,
+    };
     {
         let mut l = crate::lock(ledger);
         l.pending = Some(what.clone());
@@ -137,7 +147,7 @@ fn ledgered(store: &dyn LedgerStore, ledger: &Mutex<Ledger>, req: &Request, run:
     let mut l = crate::lock(ledger);
     l.pending = None;
     match &r {
-        Ok(_) => l.apply(req),
+        Ok(o) => l.applied(req, &o.stdout, evidence.as_deref()),
         Err(Fail::Timeout(_)) => l.uncertain = Some(what),
         Err(_) => {}
     }

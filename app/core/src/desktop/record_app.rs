@@ -90,6 +90,12 @@ impl record::LedgerStore for AppLedgerStore {
         fsx::write_atomic(&self.dir, &self.file(), &bytes).map(|_| ()).map_err(|e| e.to_string())
     }
 
+    fn evidence_sha256(&self, path: &Path) -> Result<String, String> {
+        // The script reads at most 5 MB of evidence; a bigger file is refused, never hashed short.
+        let b = fsx::read_nofollow_capped(path, 5_000_000).map_err(|e| e.to_string())?;
+        Ok(crate::control::sha256::hex_digest(&b))
+    }
+
     fn read_back(&self, slug: &str) -> Result<record::ReadBack, String> {
         use crate::control::sha256::hex_digest;
         use crate::vajra::bridge::Request;

@@ -101,6 +101,9 @@ impl LedgerStore for MemStore {
     fn read_back(&self, _: &str) -> Result<ReadBack, String> {
         crate::lock(&self.back).clone().ok_or_else(|| "no read-back".into())
     }
+    fn evidence_sha256(&self, p: &Path) -> Result<String, String> {
+        Ok(crate::control::sha256::hex_digest(p.to_string_lossy().as_bytes()))
+    }
 }
 
 fn mem() -> Arc<dyn LedgerStore> {
@@ -752,6 +755,56 @@ fn the_ledger_matches_only_the_cores_own_writes() {
     let mut u = l.clone();
     u.uncertain = Some("CampaignProgress".into());
     assert!(u.check(&back).is_err());
+}
+
+#[test]
+fn n1_a_report_swapped_for_another_signed_one_is_not_the_cores() {
+    let (mut l, back) = ledger_and_back();
+    let b64 = "IyByZXBvcnQK"; // "# report\n"
+    l.apply(&Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: fnv32(b64), base64: b64.into() });
+    assert_eq!(l.report.as_deref(), Some(crate::control::sha256::hex_digest(b"# report\n").as_str()));
+    let mut b = back.clone();
+    b.campaign["reportSha256"] = crate::control::sha256::hex_digest(b"# report\n").into();
+    l.check(&b).unwrap();
+    // An agent's own report, saved and signed by the same script: a report exists, but it isn't the core's.
+    b.campaign["reportSha256"] = crate::control::sha256::hex_digest(b"# all good, ship it\n").into();
+    assert!(l.check(&b).unwrap_err().contains("report"));
+}
+
+#[test]
+fn n2_only_the_cores_own_close_with_its_evidence_commit_and_branch_counts() {
+    let (base, back) = ledger_and_back();
+    let close = Request::TasksClose {
+        slug: SLUG.into(),
+        id: "t1".into(),
+        evidence: PathBuf::from("/wt/data/walkthroughs/t1/evidence.json"),
+        head: "a".repeat(40),
+        commit: "b".repeat(40),
+        branch: "ao/t1".into(),
+        base_commit: String::new(),
+        changed: vec![],
+        repo: PathBuf::from("/wt"),
+    };
+    let sha = crate::control::sha256::hex_digest(b"core evidence");
+    let mut done = back.clone();
+    let t = &mut done.tasks["tasks"][0];
+    t["status"] = "done".into();
+    t["evidence"] = serde_json::json!({"sha256": sha, "path": "/wt/data/walkthroughs/t1/evidence.json"});
+    t["commit"] = "b".repeat(40).into();
+    t["branch"] = "ao/t1".into();
+    let mut l = base.clone();
+    l.applied(&close, r#"{"ok": true, "id": "t1", "result": "closed", "status": "done"}"#, Some(&sha));
+    l.check(&done).unwrap();
+    // Evidence, commit or branch other than the core's close stored: not the core's.
+    for (k, v) in [("evidence", serde_json::json!({"sha256": "0".repeat(64)})), ("commit", "c".repeat(40).into()), ("branch", "agent/own".into()), ("base_commit", "d".repeat(40).into())] {
+        let mut b = done.clone();
+        b.tasks["tasks"][0][k] = v;
+        assert!(l.check(&b).is_err(), "{k}");
+    }
+    // The script found it already done (someone closed it first, with their evidence): exit 0, but not the core's.
+    let mut l = base.clone();
+    l.applied(&close, r#"{"ok": true, "id": "t1", "result": "already done", "status": "done"}"#, Some(&sha));
+    assert!(l.check(&done).unwrap_err().contains("isn't the core's"));
 }
 
 #[test]
