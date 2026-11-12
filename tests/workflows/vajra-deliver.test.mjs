@@ -425,6 +425,36 @@ await scenario('resume (/vajra continue): only {campaign, run_id}; builds on the
   assert.match(r.result.report, /Earlier runs of this campaign/)
   assert.match(own(call(r, 'campaign.deliver').prompt), /close deliver-20261010-0900 --status done/)
 })
+await scenario('resume of a campaign whose evidence ran outside the guard carries the label (N17, 6k)', async () => {
+  const MARK = '[evidence ran outside the Vajra guard]'
+  const deliverOf = (r) => wrapped(call(r, 'campaign.deliver').prompt, 'quoted_arguments') + own(call(r, 'campaign.deliver').prompt)
+  const marked = (r) => {
+    assert.equal(r.result.status, 'done')
+    assert.equal(r.result.artifacts.evidence_outside_guard, true)
+    const first = r.result.report.split('\n')[0]
+    assert.ok(first.startsWith(`${MARK} # Delivery:`), first)
+    assert.match(r.result.report, /2\/2 criteria verified \(evidence ran outside the guard\)/)
+    const d = deliverOf(r)
+    assert.equal((d.match(/\[evidence ran outside the Vajra guard\] npm test -- export \(exit 0\)/g) || []).length, 1, d)
+    assert.match(d, /\[evidence ran outside the Vajra guard\] grep -q -- --json README\.md \(exit 0\)/)
+    assert.match(d, /progress '\[evidence ran outside the Vajra guard\] run 20261011-0930 delivered /)
+    assert.match(d, /checkpoint '\[evidence ran outside the Vajra guard\] delivered /)
+  }
+  // The -og slug alone marks it.
+  const s = await go({ campaign: 'deliver-20261010-0900-og', run_id: RUN }, { 'campaign.load': resumeCamp, preflight: { ...base.preflight, base: PREV } })
+  marked(s)
+  // The goal's marker alone marks it, and is never part of the ask.
+  const g = await go({ campaign: 'deliver-20261010-0900', run_id: RUN }, { 'campaign.load': { ...resumeCamp, goal: `${MARK} ${resumeCamp.goal}` }, preflight: { ...base.preflight, base: PREV } })
+  marked(g)
+  assert.match(call(g, 'understand').prompt, /<artifact from="ask">\nExport command gains a --json flag\n/)
+  // Unmarked: no label anywhere.
+  const u = await go({ campaign: 'deliver-20261010-0900', run_id: RUN }, { 'campaign.load': resumeCamp, preflight: { ...base.preflight, base: PREV } })
+  assert.equal(u.result.artifacts.evidence_outside_guard, false)
+  assert.ok(!/outside the (Vajra )?guard/.test(u.result.report + deliverOf(u)))
+  // A fresh run is never marked by the CLI.
+  const f = await go(ARGS)
+  assert.equal(f.result.artifacts.evidence_outside_guard, false)
+})
 await scenario('resume: recorded base missing from the repo -> error; explicit args.base wins', async () => {
   const miss = await go({ campaign: 'deliver-20261010-0900', run_id: RUN }, { 'campaign.load': resumeCamp, preflight: { ...base.preflight, base: '' } })
   assert.equal(miss.result.status, 'error'); assert.equal(miss.result.node, 'preflight'); assert.match(miss.result.error, /e333333 not found/)

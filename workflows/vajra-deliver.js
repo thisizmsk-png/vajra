@@ -372,6 +372,12 @@ const UNRUN_RE = /\b(did not|didn't|could not|couldn't|was not able to|wasn't ab
 // 1. Understand
 phase('Understand')
 let resumed = null
+// A CLI resume of a marked campaign carries the label (ADR-16 16.5a): the marker goes first in every pass --evidence
+// text, the closing progress line, the checkpoint label and the report's first line. Every cut is from the end, so the
+// marker is never the part that is cut.
+const OG_MARK = '[evidence ran outside the Vajra guard]'
+let OG = false
+const og = (s) => (OG ? `${OG_MARK} ${s}` : s)
 if (RESUME) {
   const r = await step('campaign.load', 'abhimanyu',
     `Run exactly this command and nothing else: ${CAMPAIGN_SH} show ${RESUME} --json\n` +
@@ -387,7 +393,11 @@ if (RESUME) {
   if (r.out.status !== 'active') return { status: 'error', node: 'campaign.load', error: `campaign ${RESUME} is ${oneLine(r.out.status, 20)}`, artifacts: {} }
   if (r.out.features.length < 1) return { status: 'error', node: 'campaign.load', error: `campaign ${RESUME} has no features`, artifacts: {} }
   resumed = r.out
-  if (ASK.length < 10) ASK = clean(resumed.goal)
+  // N17: Vajra Desktop marked this campaign because its evidence ran outside the Vajra guard (the slug ends -og, or the
+  // goal starts with the marker). The marker is never part of the ask.
+  const goal = clean(resumed.goal)
+  OG = RESUME.endsWith('-og') || goal.startsWith(OG_MARK)
+  if (ASK.length < 10) ASK = clean(goal.startsWith(OG_MARK) ? goal.slice(OG_MARK.length) : goal)
   if (ASK.length < 10) return { status: 'error', node: 'campaign.load', error: `campaign ${RESUME} has no goal; relaunch with the ask`, artifacts: {} }
 }
 
@@ -861,9 +871,9 @@ else {
 }
 
 await recordCampaign('campaign.deliver', 'Deliver', [
-  ...CRITERIA.map((c) => [`${CAMPAIGN_SH} pass ${c.id} --evidence `, U(byC[c.id].command + ' (exit 0)'), ` --campaign ${CAMPAIGN}`]),
-  [`${CAMPAIGN_SH} progress `, sq(`run ${RUN} delivered ${merge.branch} @ ${merge.commit}`), ` --campaign ${CAMPAIGN}`],
-  [`${CAMPAIGN_SH} checkpoint `, sq('delivered ' + merge.commit), ` --campaign ${CAMPAIGN}`],
+  ...CRITERIA.map((c) => [`${CAMPAIGN_SH} pass ${c.id} --evidence `, U(og(byC[c.id].command + ' (exit 0)')), ` --campaign ${CAMPAIGN}`]),
+  [`${CAMPAIGN_SH} progress `, sq(og(`run ${RUN} delivered ${merge.branch} @ ${merge.commit}`)), ` --campaign ${CAMPAIGN}`],
+  [`${CAMPAIGN_SH} checkpoint `, sq(og('delivered ' + merge.commit)), ` --campaign ${CAMPAIGN}`],
   [`${CAMPAIGN_SH} close ${CAMPAIGN} --status done`],
 ])
 
@@ -933,8 +943,9 @@ const risks = [
   ...campaignNotes,
 ]
 const md = []
-md.push(`# Delivery: ${oneLine(understanding.restated, 200)}`, '')
-md.push(`Branch \`${merge.branch}\` at \`${merge.commit}\` (based on \`${ORIGIN.slice(0, 12)}\`, ${CRITERIA.length}/${CRITERIA.length} criteria verified). Campaign: \`${CAMPAIGN}\`.`, '')
+md.push(og(`# Delivery: ${oneLine(understanding.restated, 200)}`), '')
+md.push(`Branch \`${merge.branch}\` at \`${merge.commit}\` (based on \`${ORIGIN.slice(0, 12)}\`, ${CRITERIA.length}/${CRITERIA.length} criteria ` +
+  `${OG ? 'verified (evidence ran outside the guard)' : 'verified'}). Campaign: \`${CAMPAIGN}\`.`, '')
 md.push('## What was built')
 for (const id of ORDER) md.push(`- ${id} (${byId[id].owner}): ${oneLine(changes[id].summary, 300)}`)
 md.push('', '## Evidence per acceptance criterion')
@@ -995,5 +1006,5 @@ return {
   commit: merge.commit,
   report: md.join('\n'),
   pending_approval: pending.map((x) => (x.action === 'deploy' && deployPlan ? Object.assign({}, x, { plan: deployPlan }) : x)),
-  artifacts: { understanding, plan, changes, merge, verification, reviews, campaign: CAMPAIGN, knowledge, cleanup },
+  artifacts: { understanding, plan, changes, merge, verification, reviews, campaign: CAMPAIGN, evidence_outside_guard: OG, knowledge, cleanup },
 }
