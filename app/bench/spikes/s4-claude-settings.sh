@@ -22,6 +22,14 @@
 # exactly the --tools set; permissionMode is dontAsk; the prompt after `--` reaches the model; the worktree's
 # project-settings hook never runs (`--setting-sources user`: a worker can write that file, and its hook would run
 # outside the guard). A run cut short after any probe fails. The user-hook line is recorded for the PR, not part of PASS.
+#
+# A second run (the owner's condition for the flip) is a writer worker against the Vajra data dir: tools
+# Read,Grep,Glob,Bash,Edit,Write; the flag file `claude_worker_flag` itself builds (cargo run --example s4_flag, so the
+# real Read and Edit deny rules and the real hooks/hooks.json); the repo's real guard hooks installed in the temp HOME;
+# a temp data dir at the guard's own place, <temp HOME>/Library/Application Support/VajraDesktop. The stub asks for: an
+# allowed Write in the worktree, a Bash write into the data dir, a Write into it, a Read then an Edit of a file there.
+# PASS also needs: the worktree Write ran; the Bash, Write and Edit calls into the data dir each came back refused; the
+# data dir afterwards holds only its seed file, unchanged. Needs cargo on PATH.
 # On PASS, set `CLAUDE_WORKER_S4_PASSED = true` in app/core/src/adapter/profiles.rs and update its pinning test.
 set -u
 
@@ -37,7 +45,7 @@ SP=$(cd "$SP" && pwd -P)
 H=$SP/home; CC=$H/.claude; WT=$SP/work/proj/run/t1-r1; M=$SP/m
 mkdir -p "$CC" "$WT/.claude" "$M" "$SP/stub"
 STUB=""
-cleanup() { if [ -n "$STUB" ]; then kill "$STUB" 2>/dev/null; fi; }
+cleanup() { for p in $STUB; do kill "$p" 2>/dev/null; done; }
 trap cleanup EXIT
 echo "spike dir: $SP"
 
@@ -123,11 +131,15 @@ print(json.dumps([
 ]))
 PY
 
-/usr/bin/python3 -I "$SP/stub/stub.py" "$SP/stub/plan.json" "$SP/stub/log" "$SP/stub/port" > "$SP/stub/out" 2>&1 &
-STUB=$!
-for _ in $(seq 1 50); do [ -s "$SP/stub/port" ] && break; sleep 0.1; done
-PORT=$(cat "$SP/stub/port" 2>/dev/null)
-if [ -z "$PORT" ]; then echo "FAIL: the stub did not start"; exit 2; fi
+# start_stub <plan> <log> <portfile>: serve the plan on a free loopback port; sets PORT.
+start_stub() {
+    /usr/bin/python3 -I "$SP/stub/stub.py" "$1" "$2" "$3" > "$2.out" 2>&1 &
+    STUB="$STUB $!"
+    for _ in $(seq 1 50); do [ -s "$3" ] && break; sleep 0.1; done
+    PORT=$(cat "$3" 2>/dev/null)
+    if [ -z "$PORT" ]; then echo "FAIL: the stub did not start"; exit 2; fi
+}
+start_stub "$SP/stub/plan.json" "$SP/stub/log" "$SP/stub/port"
 
 TOOLS=Read,Grep,Glob,Bash
 ( cd "$WT" && env -i PATH="/usr/bin:/bin:$(dirname "$CLAUDE")" HOME="$H" CLAUDE_CONFIG_DIR="$CC" TERM=dumb \
@@ -137,5 +149,35 @@ TOOLS=Read,Grep,Glob,Bash
     < /dev/null > "$SP/events.jsonl" 2> "$SP/stderr" )
 STATUS=$?
 echo "claude exit: $STATUS"
-/usr/bin/python3 -I "$HERE/s4_check.py" "$SP" "$M" "$TOOLS" "$STATUS"
+
+# Run 2: a writer worker against the Vajra data dir, with the real flag file and the real guard.
+SP2=$SP/data-run; WT2=$SP/work/proj/run/t2-r1; DATA="$H/Library/Application Support/VajraDesktop"
+mkdir -p "$SP2" "$WT2" "$DATA" "$CC/skills/vajra/hooks"
+printf 'seed\n' > "$DATA/seed.json"
+cp "$HERE/../../../hooks/"*.sh "$CC/skills/vajra/hooks/" || { echo "FAIL: could not install the repo's guard hooks"; exit 2; }
+command -v cargo >/dev/null || { echo "FAIL: cargo is not on PATH (the data-dir run builds the real flag file)"; exit 2; }
+cargo run -q --manifest-path "$HERE/../../core/Cargo.toml" --example s4_flag -- "$H" "$WT2" "$DATA" > "$SP2/flag.json" \
+    || { echo "FAIL: claude_worker_flag did not build the flag file"; exit 2; }
+/usr/bin/python3 -I - "$WT2" "$DATA" > "$SP2/plan.json" <<'PY'
+import json, sys
+wt, data = sys.argv[1], sys.argv[2]
+print(json.dumps([
+    {"tool": "Write", "input": {"file_path": wt + "/ok-written", "content": "x"}},
+    {"tool": "Bash", "input": {"command": "echo x > \"" + data + "/bash-ran\"", "description": "a Bash write into the data dir"}},
+    {"tool": "Write", "input": {"file_path": data + "/write-ran", "content": "x"}},
+    {"tool": "Read", "input": {"file_path": data + "/seed.json"}},
+    {"tool": "Edit", "input": {"file_path": data + "/seed.json", "old_string": "seed", "new_string": "edited"}},
+    {"say": "done"},
+]))
+PY
+start_stub "$SP2/plan.json" "$SP2/log" "$SP2/port"
+TOOLS2=Read,Grep,Glob,Bash,Edit,Write
+( cd "$WT2" && env -i PATH="/usr/bin:/bin:$(dirname "$CLAUDE")" HOME="$H" CLAUDE_CONFIG_DIR="$CC" TERM=dumb \
+    ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY=s4-placeholder-not-a-key DISABLE_AUTOUPDATER=1 \
+    perl -e 'alarm 180; exec @ARGV' "$CLAUDE" -p --output-format stream-json --verbose --session-id 4a2e8f9b-2c3d-4e5f-9a01-b2c3d4e5f6a7 \
+    --setting-sources user --settings "$SP2/flag.json" --permission-mode dontAsk --tools "$TOOLS2" --allowedTools "$TOOLS2" -- "Run the S4 plan" \
+    < /dev/null > "$SP2/events.jsonl" 2> "$SP2/stderr" )
+STATUS2=$?
+echo "claude exit (data-dir run): $STATUS2"
+/usr/bin/python3 -I "$HERE/s4_check.py" "$SP" "$M" "$TOOLS" "$STATUS" "$SP2" "$WT2" "$DATA" "$TOOLS2" "$STATUS2"
 
