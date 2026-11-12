@@ -62,14 +62,15 @@ fn wait_prop() -> Value {
 /// The `vajra-run` tools, exactly: what `tools/list` returns.
 pub fn tools() -> Value {
     let id = json!({"type": "string", "pattern": "^t[0-9]{1,2}$"});
+    let ac = json!({"type": "string", "pattern": "^ac-[0-9]{1,2}$"});
     let short = |n: u32| json!({"type": "string", "maxLength": n});
     let criterion = json!({"type": "object", "additionalProperties": false, "required": ["id", "criterion", "check"],
-        "properties": {"id": short(32), "criterion": short(1000), "check": short(2000)}});
+        "properties": {"id": ac.clone(), "criterion": short(1000), "check": short(2000)}});
     let task = json!({"type": "object", "additionalProperties": false, "required": ["id", "title", "owner_role", "files", "brief"],
         "properties": {"id": id, "title": short(300), "owner_role": short(32),
             "files": {"type": "array", "maxItems": runproto::MAX_TASK_FILES, "items": short(300)},
             "deps": {"type": "array", "maxItems": runproto::MAX_TASK_DEPS, "items": id},
-            "criteria": {"type": "array", "maxItems": runproto::MAX_CRITERIA, "items": short(32)},
+            "criteria": {"type": "array", "maxItems": runproto::MAX_CRITERIA, "items": ac},
             "brief": short(20_000), "touches_security": {"type": "boolean"}}});
     let pair = |a: &str, b: &str| json!({"type": "object", "additionalProperties": false, "required": [a, b],
         "properties": {a: short(300), b: short(1000)}});

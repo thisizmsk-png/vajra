@@ -266,7 +266,8 @@ fn profiles_refuse_what_is_not_proven() {
     assert!(profile(Engine::Codex, RoleKind::Worker).supported.is_ok(), "S1 and S3 passed for Codex");
     assert!(profile(Engine::Codex, RoleKind::Verifier).supported.is_ok());
     for e in [Engine::Codex, Engine::Claude] {
-        assert!(profile(e, RoleKind::Lead).supported.is_ok(), "S2 and S5 passed for both harnesses");
+        let want = if e == Engine::Claude { Err(LEAD_UNVERIFIED) } else { Ok(()) };
+        assert_eq!(profile(e, RoleKind::Lead).supported, want, "S2 and S5 passed for Codex; the Claude lead waits for its own spike");
         assert_eq!(profile(e, RoleKind::Lead).user, &["login"], "a lead keeps only the user's login (N3)");
         assert!(profile(e, RoleKind::DirectorGeneral).supported.is_err());
     }
@@ -481,13 +482,18 @@ fn controls_follow_the_harness_profile() {
 // ------------------------------------------------------------ run leads (6d2)
 
 const RUN: &str = "20261112-0930";
+const GW_HOME: &str = "/d/codex-home/gw";
+
+fn codex_lead_argv_of(l: &LeadLaunch<'_>, r: CodexRoute<'_>) -> Result<Vec<String>, InvalidInput> {
+    codex_lead_launch(l, r).map(|c| c.argv)
+}
 
 fn server() -> RunServer<'static> {
     RunServer { exe: Path::new("/opt/Vajra/vajra-desktop"), run: RUN, token_file: Path::new("/d/runs/20261112-0930/vajra-run.token"), socket: Path::new("/d/app.sock") }
 }
 
 fn lead(model: Option<&'static str>, effort: Option<&'static str>) -> LeadLaunch<'static> {
-    LeadLaunch { prompt: "the charter", model, effort, lead_dir: Path::new("/d/runs/20261112-0930/lead"), server: server() }
+    LeadLaunch { prompt: "the charter", model, effort, lead_dir: Path::new("/d/runs/20261112-0930/lead"), project: Path::new("/p/repo"), server: server() }
 }
 
 fn run_server_kv() -> String {
@@ -501,10 +507,10 @@ fn run_server_kv() -> String {
 
 #[test]
 fn codex_login_lead_argv_snapshot() {
-    let a = codex_lead_argv(&lead(Some("model-a"), Some("high")), CodexRoute::Login).unwrap();
+    let a = codex_lead_argv_of(&lead(Some("model-a"), Some("high")), CodexRoute::Login).unwrap();
     let want: Vec<String> = [
         "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
-        "-C", "/d/runs/20261112-0930/lead", "--ignore-user-config", "-m", "model-a",
+        "-C", "/d/runs/20261112-0930/lead", "--ignore-rules", "--ignore-user-config", "-m", "model-a",
         "-c", "approval_policy=\"never\"", "-c", "notify=[]", "-c", "web_search=\"disabled\"",
         "-c", "features.multi_agent=false", "-c", "features.goals=false", "-c", "model_reasoning_effort=\"high\"",
         "-c", &run_server_kv(), "--", "the charter",
@@ -517,7 +523,7 @@ fn codex_login_lead_argv_snapshot() {
 
 #[test]
 fn codex_gateway_lead_argv_keeps_vajras_home_and_retries_nothing() {
-    let a = codex_lead_argv(&lead(Some("vendor/model-a"), None), CodexRoute::Gateway).unwrap();
+    let a = codex_lead_argv_of(&lead(Some("vendor/model-a"), None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap();
     let id = crate::providers::codex_home::PROVIDER_ID;
     assert!(!a.iter().any(|x| x == "--ignore-user-config"), "the gateway home is Vajra's own config");
     let kv = pairs(&a);
@@ -525,14 +531,19 @@ fn codex_gateway_lead_argv_keeps_vajras_home_and_retries_nothing() {
     assert!(kv.contains(&format!("model_providers.{id}.stream_max_retries=0").as_str()));
     assert!(kv.contains(&run_server_kv().as_str()));
     assert_eq!(&a[a.len() - 2..], ["--", "the charter"]);
-    assert_eq!(lead_env(Engine::Codex, Some(Path::new("/d/codex-home/gw"))), vec![("CODEX_HOME", OsString::from("/d/codex-home/gw"))]);
-    assert!(lead_env(Engine::Codex, None).is_empty(), "the login route keeps the user's own CODEX_HOME");
+    assert!(a.iter().any(|x| x == "--ignore-rules"), "no execpolicy rules on either route");
+    let gw = codex_lead_launch(&lead(Some("m"), None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap();
+    assert_eq!(gw.env, vec![("CODEX_HOME", OsString::from(GW_HOME))], "the gateway argv and its home come together");
+    assert!(codex_lead_launch(&lead(Some("m"), None), CodexRoute::Login).unwrap().env.is_empty(), "the login route keeps the user's own CODEX_HOME");
+    for bad in ["/home/u/.codex", "relative/codex-home/gw", "/d/codex-home/a\"x"] {
+        assert_eq!(codex_lead_launch(&lead(Some("m"), None), CodexRoute::Gateway { home: Path::new(bad) }).unwrap_err().field, "home", "{bad}");
+    }
 }
 
 #[test]
 fn the_lead_argv_never_holds_the_token_and_the_server_env_is_only_paths() {
     let token = "a".repeat(64);
-    for a in [codex_lead_argv(&lead(Some("m"), None), CodexRoute::Login).unwrap(), codex_lead_argv(&lead(Some("m"), None), CodexRoute::Gateway).unwrap()] {
+    for a in [codex_lead_argv_of(&lead(Some("m"), None), CodexRoute::Login).unwrap(), codex_lead_argv_of(&lead(Some("m"), None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap()] {
         assert!(!a.iter().any(|x| x.contains(&token) || x.contains(SENTINEL)));
     }
     let cfg: Value = serde_json::from_str(&claude_lead_mcp_config(&server()).unwrap()).unwrap();
@@ -546,22 +557,36 @@ fn the_lead_argv_never_holds_the_token_and_the_server_env_is_only_paths() {
 #[test]
 fn lead_builders_refuse_bad_inputs() {
     let mut l = lead(Some("m"), None);
-    assert_eq!(codex_lead_argv(&lead(None, None), CodexRoute::Gateway).unwrap_err().field, "model");
-    assert!(codex_lead_argv(&lead(None, None), CodexRoute::Login).is_ok(), "the login route may leave the model to Codex's default");
-    assert_eq!(codex_lead_argv(&lead(Some("--yolo"), None), CodexRoute::Login).unwrap_err().field, "model");
-    assert_eq!(codex_lead_argv(&lead(Some("m"), Some("high\",x=\"")), CodexRoute::Login).unwrap_err().field, "effort");
+    assert_eq!(codex_lead_argv_of(&lead(None, None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap_err().field, "model");
+    assert!(codex_lead_argv_of(&lead(None, None), CodexRoute::Login).is_ok(), "the login route may leave the model to Codex's default");
+    assert_eq!(codex_lead_argv_of(&lead(Some("--yolo"), None), CodexRoute::Login).unwrap_err().field, "model");
+    assert_eq!(codex_lead_argv_of(&lead(Some("m"), Some("high\",x=\"")), CodexRoute::Login).unwrap_err().field, "effort");
     l.lead_dir = Path::new("relative/lead");
-    assert_eq!(codex_lead_argv(&l, CodexRoute::Login).unwrap_err().field, "lead_dir");
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "lead_dir");
     let mut l = lead(Some("m"), None);
     l.server.run = "not a run";
-    assert_eq!(codex_lead_argv(&l, CodexRoute::Login).unwrap_err().field, "run");
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "run");
     let mut l = lead(Some("m"), None);
     l.server.token_file = Path::new("/d/x\"},y={\"");
-    assert_eq!(codex_lead_argv(&l, CodexRoute::Login).unwrap_err().field, "token_file");
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "token_file");
     assert_eq!(claude_lead_mcp_config(&l.server).unwrap_err().field, "token_file");
     let mut l = lead(Some("m"), None);
     l.prompt = " ";
-    assert_eq!(codex_lead_argv(&l, CodexRoute::Login).unwrap_err().field, "ask");
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "prompt");
+    let big = "x".repeat(MAX_LEAD_PROMPT + 1);
+    l.prompt = &big;
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "prompt");
+    // A full 32 KiB ask in the charter, escaped as JSON, still builds: the lead prompt has its own cap.
+    let ask = "\"".repeat(32 * 1024);
+    let roles = vec!["backend".to_string()];
+    let p = crate::desktop::charter::charter(&crate::desktop::charter::Brief { ask: &ask, max_rounds: 3, project_root: "/p/repo", roles: &roles });
+    assert!(p.len() > 64 * 1024);
+    l.prompt = &p;
+    assert!(codex_lead_argv_of(&l, CodexRoute::Login).is_ok());
+    assert!(claude_lead_argv(&l, &claude_lead()).is_ok());
+    let mut l = lead(None, None);
+    l.project = Path::new("rel");
+    assert_eq!(claude_lead_argv(&l, &claude_lead()).unwrap_err().field, "project");
     assert_eq!(claude_lead_argv(&lead(Some("m"), Some("high")), &claude_lead()).unwrap_err().field, "effort");
     let mut c = claude_lead();
     c.session_id = "nope";
@@ -583,12 +608,14 @@ fn claude_lead_argv_snapshot() {
         "/opt/bin/claude", "-p", "--output-format", "stream-json", "--verbose", "--session-id", "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6",
         "--setting-sources", "", "--settings", "/d/runs/20261112-0930/lead/claude-lead.json", "--permission-mode", "dontAsk",
         "--tools", &tools, "--allowedTools", &tools,
-        "--mcp-config", "/d/runs/20261112-0930/lead/vajra-run.json", "--strict-mcp-config", "--model", "model-b", "--", "the charter",
+        "--mcp-config", "/d/runs/20261112-0930/lead/vajra-run.json", "--strict-mcp-config", "--add-dir", "/p/repo",
+        "--model", "model-b", "--", "the charter",
     ].map(String::from).into();
     assert_eq!(a, want);
     assert!(!a.iter().any(|x| x.contains("bypass")));
-    assert_eq!(lead_env(Engine::Claude, None), vec![("MCP_TOOL_TIMEOUT", OsString::from("130000"))]);
-    for (k, _) in lead_env(Engine::Claude, None).into_iter().chain(lead_env(Engine::Codex, Some(Path::new("/h")))) {
+    assert_eq!(claude_lead_env(), vec![("MCP_TOOL_TIMEOUT", OsString::from("130000"))]);
+    let gw = codex_lead_launch(&lead(Some("m"), None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap().env;
+    for (k, _) in claude_lead_env().into_iter().chain(gw) {
         assert!(crate::sessions::EXTRA_ENV_ALLOW.contains(&k), "{k}");
     }
 }
@@ -641,7 +668,11 @@ fn the_codex_lead_read_back_wants_read_only_no_network_and_the_lead_dir() {
 }
 
 fn lead_init(tools: &[String], servers: &[&str], mode: &str) -> String {
-    let servers: Vec<Value> = servers.iter().map(|s| json!({"name": s, "status": "connected"})).collect();
+    lead_init_status(tools, servers, mode, "connected")
+}
+
+fn lead_init_status(tools: &[String], servers: &[&str], mode: &str, status: &str) -> String {
+    let servers: Vec<Value> = servers.iter().map(|s| json!({"name": s, "status": status})).collect();
     format!("{}\n", json!({"type": "system", "subtype": "init", "permissionMode": mode, "tools": tools, "mcp_servers": servers}))
 }
 
@@ -659,4 +690,8 @@ fn the_claude_lead_read_back_wants_only_the_lead_tools_and_only_vajra_run() {
     assert!(check_claude_lead_applied(&lead_init(&ok, &[], "dontAsk")).is_err(), "the vajra_run server must be up");
     assert!(check_claude_lead_applied(&lead_init(&ok, &["vajra_run"], "bypassPermissions")).is_err());
     assert!(check_claude_lead_applied("").is_err());
+    assert!(check_claude_lead_applied(&lead_init_status(&ok, &["vajra_run"], "dontAsk", "failed")).is_err(), "the server must be connected");
+    let no_run: Vec<String> = ["Read", "Grep", "Glob"].map(String::from).into();
+    let e = check_claude_lead_applied(&lead_init(&no_run, &["vajra_run"], "dontAsk")).unwrap_err();
+    assert!(e.0.contains("mcp__vajra_run__plan_tasks"), "a lead without the run tools can only exit: {e:?}");
 }
