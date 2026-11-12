@@ -36,6 +36,9 @@
     ],
     "icon": [
       "icons/icon.png"
-    ]
+    ],
+    "resources": {
+      "gen/engine/engine.tgz": "engine/engine.tgz"
+    }
   }
 }
