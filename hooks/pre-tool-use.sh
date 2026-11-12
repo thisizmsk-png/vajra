@@ -1163,6 +1163,9 @@ core_campaign_guard() {
   shopt -s nocasematch
   # Wide on purpose (#194 H1): a name built by a glob or variable may not spell the script out.
   [[ "$N" == *vajra* || "$N" == *campaign* || "$N" == *task* || "$N" == *scripts* || "$N" == *.claude* ]] && hit=1
+  # H1-b, by position: an interpreter whose script operand expands, whatever its letters.
+  local RE_IOP='(^|[ ;|&(])(python[0-9.]*|perl|ruby|node|bash|sh|zsh|dash|ksh)( +[-+][^ ]*)* +([^ ;|&-][^ ;|&]*)?[][$*?{}]'
+  [[ "$N" =~ $RE_IOP ]] && hit=1
   [ "$was" = 1 ] || shopt -u nocasematch
   [ "$hit" = 1 ] || return 0
   lc="$(printf '%s' "$N" | tr '[:upper:]' '[:lower:]')"
@@ -1177,8 +1180,11 @@ core_campaign_guard() {
   nw=${#W[@]}
   for ((i = 0; i < nw; i++)); do
     name="${W[$i]##*/}"
-    # H1: a word that may expand to either script's name is refused before any write is looked for.
-    case "$name" in
+    # H1: a command word that may expand to either script's name is refused before any write is looked for. Only in
+    # command position (#194 LOW: a for-list of test files isn't run by its name; an interpreter operand is H1-b's).
+    local prev="${W[$((i - 1))]:-;}"
+    case "$prev" in ";"|exec|command|env|nohup|time|nice|sudo|then|do|else) ;; *) prev="" ;; esac
+    [ -n "$prev" ] && case "$name" in
       *[\$\{\}\*\?\[\]]*)
         lit="${name//[\$\{\}\*\?\[\]]/}"
         # As a pattern it matches a script's name; or its fixed letters hint at one and it looks like a script path or
@@ -1189,11 +1195,43 @@ core_campaign_guard() {
           block "while Vajra Desktop runs a campaign, name vajra-campaign.sh and vajra_tasks.py literally (no globs, variables or \$'...'): ${W[$i]}"
         fi ;;
     esac
-    # H2: a nested shell or eval runs its quoted body as code. H3: xargs, parallel and find -exec add arguments the
-    # command text never shows.
+    # H1-b: an interpreter's script operand (the first word after its options) is judged by position: while the app
+    # runs a campaign, it may hold no expansion or glob at all, whatever its letters (cd scripts; python3 $v).
     case "$name" in
-      sh|bash|zsh|dash|ksh) case "${W[$((i + 1))]:-}" in -*c*|"<") nested=1 ;; esac ;;
-      eval|source) nested=1 ;;
+      sh|bash|zsh|dash|ksh|python|python2|python3|python3.[0-9]|python3.[0-9][0-9]|perl|ruby|node)
+        local shell=0; case "$name" in sh|bash|zsh|dash|ksh) shell=1 ;; esac
+        for ((j = i + 1; j < nw; j++)); do
+          t="${W[$j]}"
+          case "$t" in ">"|"<") j=$((j + 1)); continue ;; esac
+          # Inline code, a module or stdin: no script operand (H2-b judges a shell's body).
+          if [ "$shell" = 1 ]; then
+            case "$t" in -*c*|-*s*) break ;; -o|+o|-O|+O) j=$((j + 1)); continue ;; -*|+*) continue ;; esac
+          else
+            case "$t" in -c|-m|-e|-E|-p|-*c|-*e) break ;; -W|-X) j=$((j + 1)); continue ;; -*) continue ;; esac
+          fi
+          case "$t" in *[\$\{\}\*\?\[\]]*)
+            block "while Vajra Desktop runs a campaign, an interpreter's script must be named literally (no globs or variables): $t" ;;
+          esac
+          break
+        done ;;
+    esac
+    # H2: a nested shell or eval runs its quoted body as code. H2-b: -c, -s or a stdin redirect anywhere among the
+    # shell's options, and the dot builtin and trap, are the same. H3: xargs, parallel and find -exec add arguments
+    # the command text never shows.
+    case "$name" in
+      sh|bash|zsh|dash|ksh)
+        for ((j = i + 1; j < nw; j++)); do
+          t="${W[$j]}"
+          case "$t" in
+            -*c*|-*s*|"<") nested=1; break ;;
+            -o|+o) j=$((j + 1)) ;;
+            -*|+*) ;;
+            ";") nested=1; break ;;               # a shell with no script reads its commands from stdin
+            *) break ;;
+          esac
+        done
+        [ "$j" -ge "$nw" ] && nested=1 ;;           # a bare shell reads its commands from stdin
+      eval|source|.|trap) nested=1 ;;
       xargs|parallel) feeder=1 ;;
       -exec|-execdir|-ok|-okdir) feeder=1 ;;
     esac

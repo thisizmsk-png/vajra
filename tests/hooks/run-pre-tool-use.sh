@@ -1029,6 +1029,24 @@ bash_case BLOCK "H3 copy: parallel"                         "parallel $RC close 
 bash_case BLOCK "H3 copy: find -exec"                       "find /tmp/s -type f -exec $RC close +"
 # (A repo copy: the installed path inside bash -c or xargs is already refused by the protected-path rule.)
 bash_case ALLOW "H2: a plain bash -c CLI write is allowed"  "bash -c 'bash scripts/vajra-campaign.sh pass ac-1 --campaign deliver-20261112-0930'"
+# bhishma vajra-75 on 75cdccd. H1-b: an interpreter's script operand is judged by position, not by its letters.
+bash_case BLOCK "H1-b: a variable holding a path, plus .py"   "s=scripts/vajra_tasks; python3 \$s.py report t1 done --campaign deliver-20261112-0930"
+bash_case BLOCK "H1-b: cd scripts, then a variable name"      "cd scripts && python3 \$f report t1 done"
+bash_case BLOCK "H1-b: a variable operand with no letters"    "python3 \$X report t1 done"
+bash_case BLOCK "H1-b: bash with options, then a variable"    "bash -e -x \$S close deliver-20261112-0930"
+bash_case BLOCK "H1-b: a glob operand"                        "cd scripts; python3 v*.py report t1 done"
+bash_case ALLOW "H1-b: a literal operand is fine"             "python3 tests/check.py --x \$HOME"
+bash_case ALLOW "H1-b: python -c inline code is not an operand" "python3 -c 'print(1)'"
+bash_case ALLOW "LOW: a for-list of test files is not a script name" "for f in tests/*_task*.py; do echo \$f; done"
+# H2-b: -c, -s or stdin anywhere among the shell's options; the dot builtin and trap.
+bash_case BLOCK "H2-b: bash -x -c"                            "bash -x -c '$RC close \$S'"
+bash_case BLOCK "H2-b: bash -e -c"                            "bash -e -c '$RC close \$S'"
+bash_case BLOCK "H2-b: bash -o errexit -c"                    "bash -o errexit -c '$RC close \$S'"
+bash_case BLOCK "H2-b: bash -s with a here-string"            "bash -s <<< '$RC close \$S'"
+bash_case BLOCK "H2-b: bash -ex with a here-string"           "bash -ex <<< '$RC close \$S'"
+bash_case BLOCK "H2-b: the dot builtin on stdin"              ". /dev/stdin <<< '$RC close \$S'"
+bash_case BLOCK "H2-b: trap with a quoted body"               "trap '$RC close \$S' EXIT"
+bash_case ALLOW "H2-b: a plain bash -x -c CLI write"          "bash -x -c '$RC pass ac-1 --campaign deliver-20261112-0930'"
 # H3: arguments fed by xargs, parallel or find -exec never show in the command text.
 bash_case BLOCK "H3: xargs reading slugs from a file"       "xargs -a /tmp/slugs $CS close"
 bash_case BLOCK "H3: stdin from a file through xargs"       "cat /tmp/s | xargs $TP report t1 done --campaign"
