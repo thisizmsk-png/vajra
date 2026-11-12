@@ -2375,6 +2375,7 @@ mod worker_diff;
 pub mod workers;
 pub mod plan;
 pub mod runproto;
+pub mod verify;
 pub mod worker_host;
 mod arrivals;
 mod caps;
