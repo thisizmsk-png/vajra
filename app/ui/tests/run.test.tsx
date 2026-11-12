@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
+import { ProjectsProvider } from "../src/projects/store";
 import { Run } from "../src/screens/run/Run";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -27,6 +28,28 @@ const open = async (rows: unknown[], extra: Record<string, unknown> = {}) => {
 const order = () => screen.getAllByRole("listitem").map((e) => e.textContent ?? "");
 
 describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
+  it("says the project list could not be read, not to choose one in History, and retries the list", async () => {
+    const ipc = fakeIpc({});
+    setTransport(ipc.transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    expect(await screen.findByText(S.frame.loadFailed)).toBeTruthy();
+    expect(screen.queryByText(S.run.pick)).toBeNull();
+    const before = ipc.calls.filter((c) => c.cmd === "list_campaigns").length;
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: S.states.retry }));
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
+  });
+
+  it("still asks for a choice in History when the project list was read", async () => {
+    const ipc = fakeIpc({ list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } });
+    setTransport(ipc.transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    expect(await screen.findByText(S.run.pick)).toBeTruthy();
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "resume_targets")).toBe(true));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.getByText(S.run.pick)).toBeTruthy();
+    expect(screen.queryByText(S.frame.loadFailed)).toBeNull();
+  });
+
   it("drops a response for the previous campaign that resolves after the route changed", async () => {
     let release: (v: unknown) => void = () => {};
     const slowA = new Promise((r) => { release = r; });
