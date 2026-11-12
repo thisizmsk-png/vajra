@@ -194,7 +194,7 @@ function Frame() {
             </div>
           </div>
           <StatusBar runs={P.runs} usage={projectState.usage} compact={project ? compact : null} onColumn={() => setCompact((c) => !c)}
-            onPhone={() => openSettings({ section: "mobile" })} onSettings={() => openSettings()} />
+            onSettings={() => openSettings()} />
         </div>
       </CurrentProject.Provider>
     </PaletteHost>
