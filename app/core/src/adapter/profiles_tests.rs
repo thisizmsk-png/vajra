@@ -228,6 +228,15 @@ fn the_flag_file_turns_the_os_sandbox_on_around_the_key_folder_and_data_dir() {
     for bad in [PathBuf::from("rel/tmp"), data.join("t"), home.join(".claude/vajra/t"), home.clone(), d.clone()] {
         assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &bad).is_err(), "{}", bad.display());
     }
+    // #212 bhishma Low: a ticket tmp that is a link into a locked folder, or passes through one, is caught by realpath.
+    std::fs::create_dir_all(data.join("inner")).unwrap();
+    std::os::unix::fs::symlink(&data, d.join("tmp-link")).unwrap();
+    std::fs::create_dir_all(d.join("via")).unwrap();
+    std::os::unix::fs::symlink(&data, d.join("via/up")).unwrap();
+    for bad in [d.join("tmp-link"), d.join("via/up/inner")] {
+        assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &bad).is_err(), "{}", bad.display());
+    }
+    assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).is_ok(), "a plain ticket tmp still works");
 }
 
 /// A Claude worker's build caches live in its ticket tmp: the sandbox leaves HOME read-only and rewrites TMPDIR.
@@ -327,6 +336,12 @@ fn profiles_refuse_what_is_not_proven() {
     assert_eq!(disclosures(&p, false), vec![crate::desktop::seat_start::CODEX_WARNING]);
     assert_eq!(disclosures(&p, true).len(), 2);
     assert_eq!(disclosures(&profile(Engine::Claude, RoleKind::Worker), false), vec![crate::desktop::seat_start::CLAUDE_NOTE]);
+    // #212 review: a Claude worker's sandbox is loopback only, so network on never says "Internet on".
+    use crate::desktop::seat_start::{CLAUDE_NOTE, CLAUDE_NO_NETWORK_NOTE, NETWORK_NOTE};
+    for kind in [RoleKind::Worker, RoleKind::Verifier] {
+        assert_eq!(disclosures(&profile(Engine::Claude, kind), true), vec![CLAUDE_NOTE, CLAUDE_NO_NETWORK_NOTE]);
+    }
+    assert_eq!(disclosures(&p, true)[1], NETWORK_NOTE, "Codex keeps its internet note");
 }
 
 /// The `turn_context` shape codex 0.166 wrote in spike S3 (paths shortened).

@@ -356,5 +356,17 @@ fn a_network_seat_says_so_on_the_card() {
     let items = app.inbox().unwrap();
     let it = items["items"].as_array().unwrap().iter().find(|i| i["kind"] == "run_proposal").unwrap();
     let w1 = it["seats_card"]["seats"].as_array().unwrap().iter().find(|s| s["seat"] == "w1").unwrap().clone();
-    assert!(w1["disclosures"].as_array().unwrap().iter().any(|d| d == NETWORK_NOTE), "{w1}");
+    // A Claude seat's sandbox allows loopback only, so its card says there's no internet, never "Internet on" (#212).
+    let d = w1["disclosures"].as_array().unwrap();
+    assert!(d.iter().any(|d| d == CLAUDE_NO_NETWORK_NOTE), "{w1}");
+    assert!(!d.iter().any(|d| d == NETWORK_NOTE), "{w1}");
+}
+
+#[test]
+fn only_a_codex_network_seat_says_internet_on() {
+    assert_eq!(network_note(Some(Engine::Codex), true), Some(NETWORK_NOTE));
+    assert_eq!(network_note(Some(Engine::Claude), true), Some(CLAUDE_NO_NETWORK_NOTE));
+    for h in [Some(Engine::Codex), Some(Engine::Claude), None] {
+        assert_eq!(network_note(h, false), None);
+    }
 }
