@@ -24,7 +24,9 @@ import { useCurrentProject } from "../../projects/current";
 import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
 import { preferenceScope, usePreferences } from "../../preferences";
 
-export const SECTIONS = ["providers", "general", "models", "mobile", "notifications", "appearance", "keyboard", "diagnostics"] as const;
+// Only sections that do something are listed. Mobile, Notifications and Diagnostics come back when they are built;
+// an old link to one of them lands on Providers.
+export const SECTIONS = ["providers", "general", "models", "appearance", "keyboard"] as const;
 type Section = (typeof SECTIONS)[number];
 const isSection = (s: string | undefined): s is Section => !!s && (SECTIONS as readonly string[]).includes(s);
 
@@ -119,9 +121,6 @@ export function Settings() {
                   {SHORTCUTS.map((k) => <li key={k.label}><span>{k.label}</span><Kbd keys={k.label === S.settings.keys.palette ? shortcutKeys(prefs.view?.effective.shortcuts.palette ?? DEFAULT_PREFERENCES.shortcuts.palette) : k.label === S.settings.keys.settings ? shortcutKeys(prefs.view?.effective.shortcuts.settings ?? DEFAULT_PREFERENCES.shortcuts.settings) : k.keys} /></li>)}
                 </ul>
               </section>
-            )}
-            {(section === "notifications" || section === "mobile" || section === "diagnostics") && (
-              <p className="v-settings__later">{S.settings.later}</p>
             )}
           </div>
         </div>
