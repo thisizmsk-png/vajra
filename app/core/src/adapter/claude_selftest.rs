@@ -225,7 +225,7 @@ fn verdict(status: i32, events: &Path, seen: &Seen, l: &Layout) -> Result<(), St
         ("init lists exactly the worker's tools", tools == want),
         ("permissionMode is dontAsk", init["permissionMode"] == "dontAsk"),
         // An MCP server runs outside the OS sandbox: a build that loads one under empty setting sources isn't proven.
-        ("no MCP server loaded", super::profiles::claude_mcp_loaded(&text).is_empty()),
+        ("no MCP server loaded", super::profiles::claude_mcp_loaded(&text).is_some_and(|v| v.is_empty())),
         ("a Write into the worktree ran", ok_file.is_file() && seen.results.get("tu_0").is_some_and(|(err, _)| !*err)),
         ("the Vajra guard refused a Bash write into the data dir", refused_by("tu_1", GUARD_REFUSAL)),
         ("the deny rules refused a Write into the data dir", refused_by("tu_2", DENY_REFUSAL)),

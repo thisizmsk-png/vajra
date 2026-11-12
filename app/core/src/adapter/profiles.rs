@@ -794,22 +794,50 @@ pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied>
 /// tool names. Sorted, deduplicated; empty when the event lists none or there is no init event. Judged from what
 /// loaded, never from the config files: under `--setting-sources ""` Claude Code 2.1.296 loads none of the user,
 /// local or project servers (vajra-51 probe, 2026-11-12), and a build that does is caught here.
-pub fn claude_mcp_loaded(events: &str) -> Vec<String> {
-    let init = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "system" && e["subtype"] == "init");
-    let Some(init) = init else { return Vec::new() };
-    let listed = init["mcp_servers"].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str().or(s.as_str()).map(String::from));
-    let tooled = init["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()?.strip_prefix("mcp__")?.split("__").next().map(String::from));
-    let mut out: Vec<String> = listed.chain(tooled).filter(|s| !s.is_empty()).collect();
+///
+/// Fails closed (#215 bhishma): every init event counts, not only the first; `None` when there is none; and a format
+/// it can't read (an `mcp_servers` or `tools` that isn't a list, an entry with no name) is `UNNAMED_MCP_SERVER`, so a
+/// server with no tools yet never reads as "none loaded".
+pub fn claude_mcp_loaded(events: &str) -> Option<Vec<String>> {
+    let inits: Vec<Value> = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).filter(|e| e["type"] == "system" && e["subtype"] == "init").collect();
+    if inits.is_empty() {
+        return None;
+    }
+    let unnamed = || UNNAMED_MCP_SERVER.to_string();
+    let mut out: Vec<String> = Vec::new();
+    for init in &inits {
+        match &init["mcp_servers"] {
+            Value::Null => {}
+            Value::Array(list) => out.extend(list.iter().map(|s| {
+                let name = s.as_str().or_else(|| s["name"].as_str()).unwrap_or("");
+                if name.is_empty() { unnamed() } else { name.to_string() }
+            })),
+            _ => out.push(unnamed()),
+        }
+        match &init["tools"] {
+            Value::Null => {}
+            Value::Array(list) => out.extend(list.iter().filter_map(|t| match t.as_str() {
+                Some(t) => t.strip_prefix("mcp__").map(|rest| rest.split("__").next().filter(|s| !s.is_empty()).map_or_else(unnamed, String::from)),
+                None => Some(unnamed()),
+            })),
+            _ => out.push(unnamed()),
+        }
+    }
     out.sort();
     out.dedup();
-    out
+    Some(out)
 }
+
+/// How a key guard names an MCP server the init event lists in a form Vajra can't read.
+pub const UNNAMED_MCP_SERVER: &str = "(unnamed)";
 
 /// Whether a Claude worker counts as guarded (it can't read the signing key): only when it loaded no MCP server,
 /// since an MCP server runs outside the OS sandbox. `{"guarded": true}`, or `{"guarded": false, "mcp_servers": [...],
 /// "reason": ...}` with a plain reason naming them. A worker that is not guarded still runs; the card says why.
 pub fn claude_key_guard(events: &str) -> Value {
-    let names = claude_mcp_loaded(events);
+    let Some(names) = claude_mcp_loaded(events) else {
+        return json!({"guarded": false, "mcp_servers": [], "reason": "Vajra couldn't read which MCP servers loaded for this worker, so it can't say the worker can't read Vajra's signing key."});
+    };
     if names.is_empty() {
         return json!({"guarded": true});
     }

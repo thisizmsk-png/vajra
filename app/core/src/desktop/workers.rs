@@ -202,8 +202,9 @@ pub struct TicketView {
     /// has one, or its harness never steers (see `message_off`).
     pub steer_off: Option<&'static str>,
     /// A Claude worker's key guard, once its read-back passed (`profiles::claude_key_guard`): `{"guarded": true}`
-    /// only when no MCP server loaded, else not guarded with the reason naming the server. `None` before that, and
-    /// for Codex workers (their rule is the Codex stack's).
+    /// only when no MCP server loaded, else not guarded with the reason naming the server. `None` before that (the
+    /// node then says "guard unknown" once the worker has started), and for Codex workers (their rule is the Codex
+    /// stack's).
     pub key_guard: Option<Value>,
     pub commit: Option<String>,
     pub task_ref: Option<String>,
@@ -1050,7 +1051,14 @@ impl TicketView {
             (State::Ended, _) => (Status::Failed, None),
         };
         // An MCP server ran with it, outside the sandbox: the card says so (the reason is in `key_guard`).
-        let unguarded = self.key_guard.as_ref().is_some_and(|g| g["guarded"] == false).then_some("not guarded");
+        // A Claude worker that started but has no key guard yet (or never reported one) is unknown, never shown as
+        // guarded (#215 bhishma).
+        let unguarded = match &self.key_guard {
+            Some(g) if g["guarded"] == true => None,
+            Some(_) => Some("not guarded"),
+            None if self.attempt > 0 && launch::harness_of(&self.account) == Some(Engine::Claude) => Some("guard unknown"),
+            None => None,
+        };
         let controls = match launch::harness_of(&self.account) {
             // An ended ticket offers nothing: the control service refuses it as `worker_finished` (#151 review).
             Some(e) => {

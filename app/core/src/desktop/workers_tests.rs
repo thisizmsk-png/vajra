@@ -101,12 +101,7 @@ WT=$(pwd -P)
 # Run as canary A's self-test (it talks to the loopback stub): this stand-in is no real Claude Code, so it fails.
 [ -n "$ANTHROPIC_BASE_URL" ] && {{ echo selftest >> '{log}.selftest'; exit 1; }}
 case "$1" in
-  -p) printf '%s\n' "$@" > '{log}.argv'
-    if [ "$MODE" = mcp ]; then
-      echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob","mcp__files__read"],"mcp_servers":[{{"name":"files","status":"connected","source":"user"}}]}}'
-    else
-      echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}'
-    fi ;;
+  -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
@@ -121,7 +116,7 @@ edit() {{ echo "worker line" >> src/lib.rs; }}
 [ -n "$SLOW" ] || SLOW=0
 echo "start $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
 case "$MODE" in
-  edit|wide|mcp) edit ;;
+  edit|wide) edit ;;
   flood) perl -e 'print "x" x 1000, "\n" for 1..400'; edit ;;
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
@@ -705,19 +700,43 @@ fn a_claude_worker_runs_through_its_profile_now_that_s4_passed() {
 }
 
 /// An MCP server runs outside the OS sandbox and can read the signing key. A Claude worker whose init event shows one
-/// loaded still runs and ends Done, but is not guarded, and the reason names the server.
+/// loaded still runs and ends Done, but is not guarded, and the reason names the server. Its build is proven here by
+/// construction (the canary stand-in passes its self-test; only its worker run loads the server), so this test never
+/// waits on the S4 pair (#215 bhishma).
 #[test]
 fn a_claude_worker_with_a_loaded_mcp_server_runs_but_is_not_guarded() {
-    let r = rig("claude-mcp", Opts { mode: "mcp", ..Opts::default() });
+    let r = canary_rig("claude-mcp", false);
+    std::fs::write(r.d.join("selftests.mcp"), "").unwrap();
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1, "proven by its self-test here");
     let g = v.key_guard.clone().unwrap();
     assert_eq!((g["guarded"].as_bool(), g["mcp_servers"].clone()), (Some(false), json!(["files"])), "{g}");
     assert!(g["reason"].as_str().unwrap().contains("MCP server files runs outside the sandbox"), "{g}");
     assert!(v.core_worker().overlays.contains(&"not guarded"), "the card says so");
+    // Without the server, the same proven build's worker is guarded.
+    std::fs::remove_file(r.d.join("selftests.mcp")).unwrap();
+    let g = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(g.key_guard, Some(json!({"guarded": true})), "{g:?}");
+    assert!(!g.core_worker().overlays.iter().any(|o| o.contains("guard")), "{:?}", g.core_worker().overlays);
     // A Codex worker has no Claude key guard: its rule lives with the Codex sandbox.
     let c = r.done(&r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(c.key_guard, None, "{c:?}");
+    assert!(!c.core_worker().overlays.iter().any(|o| o.contains("guard")), "{:?}", c.core_worker().overlays);
+}
+
+/// #215 bhishma: a Claude ticket that started but has no key guard shows as unknown, never as guarded; one refused
+/// before it ran shows neither.
+#[test]
+fn a_started_claude_ticket_with_no_key_guard_reads_as_unknown() {
+    // Proven by construction (canary), so it doesn't wait on the S4 pair.
+    let r = canary_rig("guard-unknown", false);
+    let mut v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.attempt > 0), (Some(Outcome::Done), true), "{v:?}");
+    v.key_guard = None;
+    assert!(v.core_worker().overlays.contains(&"guard unknown"), "{:?}", v.core_worker().overlays);
+    v.attempt = 0;
+    assert!(!v.core_worker().overlays.iter().any(|o| o.contains("guard")), "not started: nothing to say");
 }
 
 /// #180 bhishma: S4 proved one Claude Code build, but users auto-update. A build no S4 run proved (with today's flag
@@ -756,8 +775,13 @@ args = sys.argv[1:]
 if args[:1] == ["--version"]:
     print("9.9.10 (Claude Code)" if os.path.exists("{count}.swapped") else "9.9.9 (Claude Code)"); sys.exit(0)
 tools = args[args.index("--tools") + 1].split(",")
-print(json.dumps({{"type": "system", "subtype": "init", "model": "claude-fake-1", "tools": tools, "permissionMode": "dontAsk"}}), flush=True)
 base = os.environ.get("ANTHROPIC_BASE_URL")
+init = {{"type": "system", "subtype": "init", "model": "claude-fake-1", "tools": tools, "permissionMode": "dontAsk"}}
+if not base and os.path.exists("{count}.mcp"):
+    # Its worker run loads a user MCP server (its self-test, which passed, didn't).
+    init["mcp_servers"] = [{{"name": "files", "status": "connected", "source": "user"}}]
+    init["tools"] = tools + ["mcp__files__read"]
+print(json.dumps(init), flush=True)
 if not base:
     open("src/lib.rs", "a").write("worker line\n"); sys.exit(0)
 open("{count}", "a").write("selftest\n")

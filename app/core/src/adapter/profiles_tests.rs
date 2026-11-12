@@ -446,8 +446,22 @@ fn a_claude_worker_is_guarded_only_when_no_mcp_server_loaded() {
     let two = claude_key_guard(&ev(json!({"mcp_servers": [{"name": "shell"}], "tools": ["Read", "mcp__files__read", "mcp__shell__run"]})));
     assert_eq!(two["mcp_servers"], json!(["files", "shell"]), "{two}");
     assert!(two["reason"].as_str().unwrap().starts_with("Your MCP servers files, shell run outside"), "{two}");
-    // No init event: nothing loaded that the core can see (the read-back fails such a run anyway).
-    assert_eq!(claude_mcp_loaded("{}\n"), Vec::<String>::new());
+    // #215 bhishma: a format the parser can't read fails closed, as an unnamed server, never as "none loaded".
+    for odd in [json!({"mcp_servers": {"files": {}}}), json!({"mcp_servers": "files"}), json!({"mcp_servers": [{"status": "connected"}]}),
+        json!({"mcp_servers": [{"name": ""}]}), json!({"mcp_servers": [7]}), json!({"tools": "Read,mcp__x__y"}), json!({"tools": ["Read", {"name": "mcp__x__y"}]}),
+        json!({"tools": ["Read", "mcp____y"]})]
+    {
+        let g = claude_key_guard(&ev(odd.clone()));
+        assert_eq!((g["guarded"].as_bool(), g["mcp_servers"].clone()), (Some(false), json!([UNNAMED_MCP_SERVER])), "{odd}: {g}");
+    }
+    // Every init event counts, not only the first.
+    let two_inits = format!("{}{}", ev(json!({"mcp_servers": []})), ev(json!({"mcp_servers": [{"name": "late"}]})));
+    assert_eq!(claude_key_guard(&two_inits)["mcp_servers"], json!(["late"]));
+    // No init event: unknown, so not guarded.
+    assert_eq!(claude_mcp_loaded("{}\n"), None);
+    let none = claude_key_guard("{}\n");
+    assert_eq!(none["guarded"], false, "{none}");
+    assert!(none["reason"].as_str().unwrap().contains("couldn't read which MCP servers loaded"), "{none}");
 }
 
 #[test]
