@@ -430,8 +430,9 @@ fn s4_verdict(tag: &str, served: usize, status: &str, result: bool) -> (Option<i
     let all = [json!({"id": "tu_0", "is_error": false, "text": ""}), json!({"id": "tu_1", "is_error": true, "text": "blocked by the S4 guard"}), json!({"id": "tu_2", "is_error": true, "text": "No such tool available: Write"})];
     let log: String = (0..served).map(|k| json!({"path": "/v1/messages", "tools": ["Bash"], "k": k, "results": all[..k], "body": "Run the S4 plan"}).to_string() + "\n").collect();
     std::fs::write(sp.join("stub/log"), log).unwrap();
-    // Each call the stub's step k asked for reaches the guard before step k + 1 is requested.
-    let guard: String = ["echo allowed > m/allowed-ran", "echo x > m/forbidden-ran"].iter().take(served.saturating_sub(1)).map(|l| format!("{l}\n")).collect();
+    // Each call the stub's step k asked for reaches the guard before step k + 1 is requested, recorded as its whole
+    // hook input.
+    let guard: String = ["echo allowed > m/allowed-ran", "echo x > m/forbidden-ran"].iter().take(served.saturating_sub(1)).map(|c| s4_hook_input(c) + "\n").collect();
     if served >= 2 {
         std::fs::write(m.join("guard"), guard).unwrap();
         std::fs::write(m.join("allowed-ran"), "allowed\n").unwrap();
@@ -439,6 +440,53 @@ fn s4_verdict(tag: &str, served: usize, status: &str, result: bool) -> (Option<i
     let o = std::process::Command::new("/usr/bin/python3").arg("-I").arg("-c").arg(S4_CHECK.replace("if __name__ == \"__main__\":\n    main()", "main()"))
         .args([sp.to_str().unwrap(), m.to_str().unwrap(), "Read,Grep,Glob,Bash", status]).output().unwrap();
     (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// A PreToolUse hook input for a Bash call, shaped as Claude sends it: session and transcript first, tool_input after.
+/// The transcript path runs far past 300 characters, as a deep macOS temp dir makes it.
+fn s4_hook_input(command: &str) -> String {
+    let transcript = format!("/private/var/folders/cc/{}/T/vajra-s4.X/home/.claude/projects/-deep/3f1d7e8a.jsonl", "d".repeat(300));
+    // Written by hand: serde_json's map sorts keys, which would move transcript_path behind tool_input.
+    let s = |v: &str| serde_json::Value::from(v).to_string();
+    format!("{{\"session_id\":\"3f1d7e8a\",\"transcript_path\":{},\"cwd\":\"/w\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{{\"command\":{},\"description\":\"probe\"}}}}", s(&transcript), s(command))
+}
+
+/// S4 rerun on batch-3: the guard stand-in cut each record to 300 characters, the long transcript path filled them, and
+/// the check never saw the blocked call. Run the stand-in as the script writes it on a hook input whose tool_input sits
+/// past character 300: it must block the forbidden call, record both calls whole, and the check must find the blocked one.
+#[test]
+fn the_s4_guard_stand_in_records_a_call_behind_a_long_transcript_path() {
+    use std::io::Write;
+    let script = include_str!("../../../bench/spikes/s4-claude-settings.sh");
+    let open = "cat > \"$SP/guard.sh\" <<EOF\n";
+    let start = script.find(open).expect("the guard stand-in heredoc") + open.len();
+    let body = &script[start..start + script[start..].find("\nEOF\n").expect("the heredoc's end") + 1];
+    assert!(!body.contains("cut "), "the stand-in records the whole hook input: {body}");
+    let sp = tmpdir("s4-guard-stand-in");
+    let m = sp.join("m");
+    std::fs::create_dir_all(&m).unwrap();
+    // The unquoted heredoc expands $M and turns \$ into $; nothing else in the body is expanded.
+    let guard_sh = sp.join("guard.sh");
+    std::fs::write(&guard_sh, body.replace("\"$M/guard\"", &format!("\"{}/guard\"", m.display())).replace("\\$", "$")).unwrap();
+    for (cmd, code) in [("echo allowed > m/allowed-ran", 0), ("echo x > m/forbidden-ran", 2)] {
+        let input = s4_hook_input(cmd);
+        assert!(input.find("tool_input").unwrap() > 300, "the probe puts tool_input past the old cut");
+        let mut child = std::process::Command::new("/bin/sh").arg(&guard_sh).stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let o = child.wait_with_output().unwrap();
+        assert_eq!(o.status.code(), Some(code), "{cmd}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+    let recorded = std::fs::read_to_string(m.join("guard")).unwrap();
+    assert_eq!(recorded.lines().count(), 2, "{recorded}");
+    for line in recorded.lines() {
+        assert_eq!(serde_json::from_str::<serde_json::Value>(line).ok(), serde_json::from_str(&s4_hook_input(if line.contains("forbidden") { "echo x > m/forbidden-ran" } else { "echo allowed > m/allowed-ran" })).ok(), "a whole record: {line}");
+    }
+    // The check parses that record and finds the blocked call in tool_input.command, and only there.
+    let probe = "import sys\ncalls = hook_inputs(sys.argv[1])\nsys.exit(0 if saw_bash(calls, \"/forbidden-ran\") and not saw_bash(calls, \"3f1d7e8a\") else 1)";
+    let o = std::process::Command::new("/usr/bin/python3").arg("-I").arg("-c").arg(S4_CHECK.replace("if __name__ == \"__main__\":\n    main()", probe))
+        .arg(m.join("guard")).output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
 }
 
 /// #147 codex: S4 PASS needs every probe to have run to its end. A run cut short after its first call (an error, or the

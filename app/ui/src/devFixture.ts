@@ -239,9 +239,13 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   diff: () => ({ code: 0, diff, truncated: false, timed_out: false, untracked: ["test/rateLimit.redis.test.ts"] }),
 };
 
-/** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "down" is a core that does not answer. */
+/** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "blocked" is a first run whose checks stop a start; "down" is a core that does not answer. */
 export function installFixture(mode = "") {
   const empty: typeof replies = { list_campaigns: () => ({ campaigns: [] }), resume_targets: () => ({ targets: {} }), active_runs: () => ({ count: 0, runs: [] }), inbox: () => ({ count: 0, items: [] }) };
+  const blocked: typeof replies = { ...empty, preflight: () => ({ rows: [
+    { name: "Git", ok: true, detail: "2.46.0", fix: "" },
+    { name: "Vajra engine", ok: false, detail: "not installed", fix: "bash scripts/install.sh" },
+  ], start_enabled: false }) };
   let revision = 0;
   let global = { ...DEFAULT_PREFERENCES };
   const projects = new Map<string, Record<string, unknown>>();
@@ -283,7 +287,7 @@ export function installFixture(mode = "") {
       if (cmd === "provider_base_url_save") { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === args?.accountId ? { ...a, base_url: String(args?.baseUrl) } : a) }; return null; }
       if (cmd === "provider_agents") return agents;
       if (cmd === "provider_agents_save") { agents = { schema: AGENTS.schema, ...(args?.agents as object) }; return agents; }
-      const r = (mode === "empty" ? empty[cmd] : undefined) ?? replies[cmd] ?? setupReplies[cmd];
+      const r = (mode === "empty" ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd] ?? setupReplies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },

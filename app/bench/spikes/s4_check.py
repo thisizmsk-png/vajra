@@ -5,7 +5,8 @@
 PASS means every probe in the plan ran to its end. It is never the absence of a bad outcome alone (#147 codex). Claude
 has to exit 0 with a successful result event. The stub has to have served the plan's last turn. The allowed Bash call
 must come back as a success, and the guard-blocked Bash call and the Write call (not in --tools) must each have been
-issued and come back as an error. The guard must have seen the blocked call. A run that stops after its first call
+issued and come back as an error. The guard must have seen the blocked call: a Bash hook input whose
+tool_input.command names it, parsed from the guard's record, not a text search of it. A run that stops after its first call
 (an error, or the 180 s alarm) fails.
 """
 import json
@@ -28,6 +29,32 @@ def lines(p):
     return out
 
 
+def hook_inputs(p):
+    """The hook inputs the guard stand-in recorded: a stream of whole JSON objects, one per call, however long."""
+    if not os.path.exists(p):
+        return []
+    text, dec, out, i = open(p).read(), json.JSONDecoder(), [], 0
+    while True:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            return out
+        try:
+            obj, i = dec.raw_decode(text, i)
+        except ValueError:
+            return out  # a torn record ends the stream; what came before still counts
+        if isinstance(obj, dict):
+            out.append(obj)
+
+
+def saw_bash(calls, needle):
+    for c in calls:
+        cmd = c.get("tool_input", {}).get("command") if isinstance(c.get("tool_input"), dict) else None
+        if c.get("tool_name") == "Bash" and isinstance(cmd, str) and needle in cmd:
+            return True
+    return False
+
+
 def verdict(sp, m, tools, status):
     events = [e for e in lines(sp + "/events.jsonl") if isinstance(e, dict)]
     init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
@@ -38,7 +65,7 @@ def verdict(sp, m, tools, status):
     for r in log:
         for t in r.get("results", []):
             results[t.get("id")] = t
-    guard = open(m + "/guard").read() if os.path.exists(m + "/guard") else ""
+    guard = hook_inputs(m + "/guard")
     err = lambda i: i in results and results[i].get("is_error") is True
     checks = [
         ("claude exited 0", status == 0),
@@ -49,7 +76,7 @@ def verdict(sp, m, tools, status):
         ("permissionMode is dontAsk", init.get("permissionMode") == "dontAsk"),
         ("the flag file's hook ran despite the user's disableAllHooks", os.path.exists(m + "/guard")),
         ("an allowed Bash call ran", os.path.exists(m + "/allowed-ran") and ALLOWED in results and not err(ALLOWED)),
-        ("the guard saw the blocked Bash call", "forbidden-ran" in guard),
+        ("the guard saw the blocked Bash call", saw_bash(guard, "/forbidden-ran")),
         ("the blocked Bash call came back refused", err(BLOCKED)),
         ("the guard's block held", not os.path.exists(m + "/forbidden-ran")),
         ("the Write call came back refused", err(WRITE)),
