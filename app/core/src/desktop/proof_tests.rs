@@ -140,6 +140,12 @@ fn the_page_is_self_contained_and_escapes_every_value() {
     let mut pipes = proof(Label::Verified, vec![("a | b\nc", "pass")]);
     pipes.goal = "x".into();
     assert!(markdown(&pipes).contains("a \\| b c"));
+    // A posted comment pings no one and links nowhere.
+    let mut ping = proof(Label::Verified, vec![("ask @octocat, see [here](https://evil.example)", "pass")]);
+    ping.goal = "@team ship it".into();
+    let md = markdown(&ping);
+    assert!(!md.contains("@octocat") && !md.contains("@team") && !md.replace("\\]", "").contains("]("), "{md}");
+    assert!(md.contains("\\[here\\]"));
 }
 
 #[test]

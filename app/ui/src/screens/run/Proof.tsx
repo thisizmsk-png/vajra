@@ -95,7 +95,8 @@ export function Proof({ slug }: { slug: string }) {
     if (!target) return;
     setBusy(true);
     const env = { action_id: newActionId(), project_id: project?.id ?? "global", expect_generation: null };
-    api.actPostProofComment(env, slug, pr.trim()).then(
+    // The canonical link of the target the dialog named, not the field's text.
+    api.actPostProofComment(env, slug, `https://github.com/${target.repo}/pull/${target.pr}`).then(
       (r) => setNote(r.result ? L.posted(target.repo, target.pr) : L.postFailed(r.error?.detail ?? r.receipt?.detail ?? S.run.failed)),
       (e) => setNote(L.postFailed(errorText(e))),
     ).finally(() => setBusy(false));

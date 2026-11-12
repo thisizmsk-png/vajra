@@ -177,13 +177,13 @@ impl App {
         let gh = self.find_gh().ok_or_else(|| fail("gh_missing", "GitHub CLI (gh) was not found. Install it and sign in, then try again."))?;
         let argv: Vec<String> = ["pr", "comment", &pr.number.to_string(), "-R", &pr.repo, "--body-file", "-"].map(String::from).to_vec();
         let o = crate::vajra::bridge::run_process_full(&gh, &argv, None, POST_TIMEOUT, Some(&self.home), Some(body.as_bytes())).map_err(|e| fail("post_failed", e))?;
+        let home = self.home.to_string_lossy();
         if o.exit() != Some(0) {
-            let home = self.home.to_string_lossy();
             let why = o.stderr.lines().find(|l| !l.trim().is_empty()).map(|l| crate::diagnostics::redact(&redact_provider_text(l.trim()), &home))
                 .unwrap_or_else(|| "gh exited with an error".into());
             return Err(fail("post_failed", why));
         }
-        Ok(json!({"slug": slug, "repo": pr.repo, "pr": pr.number, "label": p.label.id(), "url": o.stdout.trim().lines().last().map(redact_provider_text)}))
+        Ok(json!({"slug": slug, "repo": pr.repo, "pr": pr.number, "label": p.label.id(), "url": o.stdout.trim().lines().last().map(|l| crate::diagnostics::redact(&redact_provider_text(l), &home))}))
     }
 
     fn find_gh(&self) -> Option<PathBuf> {

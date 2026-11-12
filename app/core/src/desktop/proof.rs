@@ -245,9 +245,16 @@ fn record_line(p: &Proof) -> String {
     }
 }
 
-/// Markdown table cell: one line, no pipes, no HTML.
+/// Markdown table cell: one line, no pipes, no HTML, no `@mention` (a zero-width space after `@`) and no `[text](url)`
+/// link, so a posted comment never pings anyone or links anywhere.
 fn cell(s: &str) -> String {
-    s.replace(['\n', '\r'], " ").replace('|', "\\|").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace(['\n', '\r'], " ")
+        .replace('|', "\\|")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('@', "@\u{200B}")
 }
 
 /// The PR comment. Every value in it has passed `redact` first (see `App::run_proof`).
