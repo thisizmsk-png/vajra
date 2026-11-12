@@ -72,7 +72,7 @@ pub(super) fn proven_here(claude: &Path, home: &Path, data: &Path, version: &str
     if failed.get(&key).is_some_and(|at| at.elapsed() < RETRY_AFTER) {
         return Err(refused);
     }
-    match claude_selftest::run(claude, home, claude_selftest::TIMEOUT) {
+    match claude_selftest::run(claude, home, shape, claude_selftest::TIMEOUT) {
         Ok(()) if probe().as_deref() != Some(version) => {
             // The binary changed under the test: record nothing, remember nothing; the next dispatch tests it afresh.
             eprintln!("vajra: Claude Code changed during its worker self-test; Claude workers stay off for now");

@@ -1,13 +1,15 @@
 use super::*;
 
 /// A stand-in Claude Code that talks to the stub the way `claude -p` does, and executes each tool call it is given.
-/// `good` refuses what the real guard and deny rules refuse; `leaky` lets an Edit into the data dir through;
-/// `wrong_reason` refuses the Edit for another reason; `hang` never answers.
+/// `good` refuses what the real guard, deny rules and OS sandbox refuse (a python Bash call answers with the sandbox's
+/// EPERM, as its own output); `leaky` lets an Edit into the data dir through; `wrong_reason` refuses the Edit for
+/// another reason; `unsandboxed` runs every Bash call that names no data-dir path, as a build without the sandbox
+/// would; `hang` never answers.
 fn fake_claude(dir: &Path, mode: &str) -> PathBuf {
     let p = dir.join(format!("fake-claude-{mode}"));
     let script = format!(
         r#"#!/usr/bin/python3 -I
-import json, os, sys, urllib.request, time
+import json, os, subprocess, sys, urllib.request, time
 MODE = "{mode}"
 if MODE == "hang":
     time.sleep(600)
@@ -42,6 +44,11 @@ while True:
             err, text = True, DENY
     elif name == "Write":
         open(inp["file_path"], "w").write(inp["content"])
+    elif name == "Bash" and "python3 -c" in target and MODE != "unsandboxed":
+        text = "Traceback (most recent call last):\n  File \"<string>\", line 1\nPermissionError: [Errno 1] Operation not permitted: <locked>"
+    elif name == "Bash":
+        r = subprocess.run(["/bin/sh", "-c", target], capture_output=True, text=True)
+        err, text = r.returncode != 0, r.stdout + r.stderr
     msgs.append({{"role": "assistant", "content": [{{"type": "tool_use", "id": start["id"], "name": name, "input": inp}}]}})
     msgs.append({{"role": "user", "content": [{{"type": "tool_result", "tool_use_id": start["id"], "is_error": err, "content": text}}]}})
 "#
@@ -63,6 +70,11 @@ fn home_with_hooks(dir: &Path) -> PathBuf {
         }
     }
     home
+}
+
+/// The flag shape the dispatch checks for the hooks installed under `home`.
+fn shape(home: &Path) -> String {
+    claude_worker_flag_shape(&crate::adapter::profiles::claude_worker_hooks_dir(home)).unwrap()
 }
 
 fn tmp(tag: &str) -> PathBuf {
@@ -93,15 +105,44 @@ fn a_build_that_refuses_every_data_dir_write_by_the_right_layer_passes_and_leave
     let d = tmp("good");
     let home = home_with_hooks(&d);
     let before = snapshot(&home);
-    assert_eq!(run(&fake_claude(&d, "good"), &home, Duration::from_secs(30)), Ok(()));
+    assert_eq!(run(&fake_claude(&d, "good"), &home, &shape(&home), Duration::from_secs(30)), Ok(()));
     assert_eq!(snapshot(&home), before, "the user's home is read, never changed");
+}
+
+/// A build whose Bash calls run outside the OS sandbox: the guard and deny rules still refuse every call that names
+/// the data dir, but a command that reads its target from elsewhere gets the key folder.
+#[test]
+fn a_build_without_the_os_sandbox_fails_on_the_name_free_key_read() {
+    let d = tmp("unsandboxed");
+    let home = home_with_hooks(&d);
+    let r = run(&fake_claude(&d, "unsandboxed"), &home, &shape(&home), Duration::from_secs(30));
+    assert_eq!(r, Err("failed: the OS sandbox refused a key read that names no locked path".into()));
+}
+
+/// #195 bhishma: the PASS proves the hook bytes the test copied, so they must be the bytes the dispatch hashed.
+#[test]
+fn a_guard_that_no_longer_matches_the_dispatch_shape_is_refused_before_claude_runs() {
+    let d = tmp("guard-moved");
+    let home = home_with_hooks(&d);
+    let marker = d.join("ran");
+    let bin = d.join("claude");
+    std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let before = shape(&home);
+    let guard = crate::adapter::profiles::claude_worker_hooks_dir(&home).join("pre-tool-use.sh");
+    let mut b = std::fs::read(&guard).unwrap();
+    b.push(b'\n');
+    std::fs::write(&guard, b).unwrap();
+    assert_eq!(run(&bin, &home, &before, Duration::from_secs(5)), Err("the Vajra guard changed while it was copied".into()));
+    assert!(!marker.exists(), "claude never ran");
 }
 
 #[test]
 fn a_build_that_lets_an_edit_into_the_data_dir_fails() {
     let d = tmp("leaky");
     let home = home_with_hooks(&d);
-    let r = run(&fake_claude(&d, "leaky"), &home, Duration::from_secs(30));
+    let r = run(&fake_claude(&d, "leaky"), &home, &shape(&home), Duration::from_secs(30));
     assert_eq!(r, Err("failed: the deny rules refused an Edit in the data dir".into()));
 }
 
@@ -111,7 +152,7 @@ fn a_build_that_lets_an_edit_into_the_data_dir_fails() {
 fn a_build_that_lets_a_read_of_the_data_dir_through_fails() {
     let d = tmp("leaky-read");
     let home = home_with_hooks(&d);
-    let r = run(&fake_claude(&d, "leaky_read"), &home, Duration::from_secs(30));
+    let r = run(&fake_claude(&d, "leaky_read"), &home, &shape(&home), Duration::from_secs(30));
     assert_eq!(r, Err("failed: the deny rules refused a Read in the data dir".into()));
 }
 
@@ -119,7 +160,7 @@ fn a_build_that_lets_a_read_of_the_data_dir_through_fails() {
 fn an_edit_refused_for_another_reason_is_not_proof() {
     let d = tmp("wrong");
     let home = home_with_hooks(&d);
-    let r = run(&fake_claude(&d, "wrong_reason"), &home, Duration::from_secs(30));
+    let r = run(&fake_claude(&d, "wrong_reason"), &home, &shape(&home), Duration::from_secs(30));
     assert_eq!(r, Err("failed: the deny rules refused an Edit in the data dir".into()));
 }
 
@@ -128,7 +169,7 @@ fn a_build_that_hangs_is_cut_off_at_the_timeout() {
     let d = tmp("hang");
     let home = home_with_hooks(&d);
     let start = Instant::now();
-    assert_eq!(run(&fake_claude(&d, "hang"), &home, Duration::from_secs(2)), Err("timeout".into()));
+    assert_eq!(run(&fake_claude(&d, "hang"), &home, &shape(&home), Duration::from_secs(2)), Err("timeout".into()));
     assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
 }
 
@@ -142,7 +183,7 @@ fn no_installed_guard_means_no_self_test() {
     std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(run(&bin, &home, Duration::from_secs(5)), Err("the Vajra guard is not installed".into()));
+    assert_eq!(run(&bin, &home, "no-shape", Duration::from_secs(5)), Err("the Vajra guard is not installed".into()));
     assert!(!marker.exists(), "claude never ran");
 }
 
@@ -155,5 +196,5 @@ fn a_build_that_skips_a_probe_fails() {
     std::fs::write(&bin, "#!/bin/sh\necho '{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"Read\",\"Grep\",\"Glob\",\"Bash\",\"Edit\",\"Write\"],\"permissionMode\":\"dontAsk\"}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}'\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(run(&bin, &home, Duration::from_secs(10)), Err("failed: the plan reached its last turn".into()));
+    assert_eq!(run(&bin, &home, &shape(&home), Duration::from_secs(10)), Err("failed: the plan reached its last turn".into()));
 }

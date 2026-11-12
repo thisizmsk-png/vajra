@@ -3,12 +3,15 @@
 //! It runs the real worker launch (`claude_worker_flag`, `claude_worker_argv`) once, on the user's own Mac, in a
 //! throwaway HOME: the user's installed Vajra guard hooks copied in (read, never changed), a temp Vajra data dir where
 //! the guard looks for it, hostile user settings (`bypassPermissions`, `Bash(*)`, `disableAllHooks`) and a hostile
-//! project-settings hook in the worktree. The model is a loopback stub that asks for six steps: a Write in the
+//! project-settings hook in the worktree. The model is a loopback stub that asks for nine steps: a Write in the
 //! worktree (must run), a Bash write into the data dir (the guard must refuse it), a Write, a Read and an Edit there
-//! (the deny rules must refuse the Write and the Edit), then "done". PASS needs every step to have run and been
-//! refused by the right layer, the data dir left holding only its unchanged seed, the project hook never run, and the
-//! init event to list exactly the worker's tools in `dontAsk`. The user's real config, keys and data dir are never
-//! touched: the API key is a placeholder, and the environment is cleared.
+//! (the deny rules must refuse all three), then the OS sandbox probes: a key read and a data-dir write whose commands
+//! name no locked path (python reads its target from a file outside the locked folders, so only the sandbox can refuse
+//! them), a Bash write in the ticket tmp and the worktree (must run), then "done". PASS needs every step to have run and
+//! been refused by the right layer, the stand-in key never in a tool result, the data dir left holding only its
+//! unchanged seed, the project hook never run, and the init event to list exactly the worker's tools in `dontAsk`. The
+//! user's real config, keys and data dir are never touched: the key is a stand-in in the throwaway HOME, the API key a
+//! placeholder, and the environment is cleared.
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -19,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::profiles::{claude_worker_argv, claude_worker_flag, ClaudeWorker, RoleKind, WorkerLaunch};
+use super::profiles::{claude_worker_argv, claude_worker_flag, claude_worker_flag_shape, ClaudeWorker, RoleKind, WorkerLaunch};
 
 /// The longest a self-test may take; past it the build is refused (`timeout`).
 pub const TIMEOUT: Duration = Duration::from_secs(120);
@@ -28,8 +31,12 @@ pub const TOOLS: &str = "Read,Grep,Glob,Bash,Edit,Write";
 /// What each refusal's tool result must say: the Vajra guard's block, and Claude Code's permission deny.
 pub const GUARD_REFUSAL: &str = "Vajra guard blocked";
 pub const DENY_REFUSAL: &str = "denied by your permission settings";
+/// The OS sandbox's EPERM, matched case-insensitively. It reaches the model as the command's own output (python's
+/// `PermissionError`, `head: …: Operation not permitted`), and the Bash call need not be an error.
+pub const SANDBOX_REFUSAL: &str = "operation not permitted";
 const SEED: &str = "seed\n";
-const STEPS: usize = 5;
+const KEY_STAND_IN: &str = "vajra-selftest-stand-in";
+const STEPS: usize = 8;
 
 /// What the stub saw: each tool result by id (error?, text), and the highest step it served with tools offered.
 #[derive(Default)]
@@ -38,22 +45,45 @@ struct Seen {
     last_step: Option<usize>,
 }
 
-/// Run the self-test of `claude` against the guard hooks installed under `home`. `Ok` is a PASS; `Err` names the
-/// first check that failed (or `timeout`, or what could not be set up).
-pub fn run(claude: &Path, home: &Path, timeout: Duration) -> Result<(), String> {
+/// The throwaway layout a verdict looks at.
+struct Layout {
+    ok_file: PathBuf,
+    data: PathBuf,
+    m: PathBuf,
+    key: PathBuf,
+    tmp: PathBuf,
+    wt: PathBuf,
+}
+
+/// Run the self-test of `claude` against the guard hooks installed under `home`. `shape` is the flag shape the
+/// dispatch checked; the copied hooks must still hash to it (#195 bhishma: a PASS proves the bytes the test ran, so a
+/// guard changed between the dispatch's hash and the copy is refused, not recorded under the old shape). `Ok` is a
+/// PASS; `Err` names the first check that failed (or `timeout`, or what could not be set up).
+pub fn run(claude: &Path, home: &Path, shape: &str, timeout: Duration) -> Result<(), String> {
     let dir = Scratch::new()?;
     let t = &dir.0;
     let h = t.join("home");
     let cc = h.join(".claude");
     let hooks = cc.join("skills/vajra/hooks");
     let data = h.join("Library/Application Support/VajraDesktop");
+    let kd = h.join(crate::control::lead_settings::KEY_DIR);
     let wt = t.join("work/proj/run/t1-r1");
     let (m, tmp) = (t.join("m"), t.join("tmp"));
-    for d in [&hooks, &data, &wt.join(".claude"), &m, &tmp] {
+    for d in [&hooks, &data, &kd, &wt.join(".claude"), &m, &tmp] {
         std::fs::create_dir_all(d).map_err(|e| format!("setup: {e}"))?;
     }
-    install_hooks(&home.join(".claude/skills/vajra/hooks"), &hooks)?;
+    install_hooks(&super::profiles::claude_worker_hooks_dir(home), &hooks)?;
+    if claude_worker_flag_shape(&hooks).ok().as_deref() != Some(shape) {
+        return Err("the Vajra guard changed while it was copied".into());
+    }
     std::fs::write(data.join("seed.json"), SEED).map_err(|e| format!("setup: {e}"))?;
+    // A stand-in key in the throwaway HOME's key folder, and files outside the locked folders holding its path and the
+    // data dir's: the sandbox probes read their target from these, so no command names a locked path.
+    let key = kd.join("selftest-key");
+    std::fs::write(&key, format!("{KEY_STAND_IN}\n")).map_err(|e| format!("setup: {e}"))?;
+    let (key_path, data_path) = (t.join("key-path"), t.join("data-path"));
+    std::fs::write(&key_path, format!("{}\n", key.display())).map_err(|e| format!("setup: {e}"))?;
+    std::fs::write(&data_path, format!("{}\n", data.display())).map_err(|e| format!("setup: {e}"))?;
     let hostile_user = json!({"permissions": {"allow": ["Bash(*)", "Edit", "Write", "WebFetch"], "defaultMode": "bypassPermissions"},
         "disableAllHooks": true, "hooks": {"PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": format!("echo USER >> '{}'", m.join("user-hook").display())}]}]}});
     let hostile_project = json!({"permissions": {"allow": ["Bash(*)", "Write"]},
@@ -65,12 +95,16 @@ pub fn run(claude: &Path, home: &Path, timeout: Duration) -> Result<(), String> 
 
     let ok_file = wt.join("ok-written");
     let s = |p: &Path| p.to_string_lossy().into_owned();
+    let py = |code: &str, arg: &Path, what: &str| json!({"tool": "Bash", "input": {"command": format!("/usr/bin/python3 -c '{code}' \"{}\"", s(arg)), "description": what}});
     let plan = vec![
         json!({"tool": "Write", "input": {"file_path": s(&ok_file), "content": "x"}}),
         json!({"tool": "Bash", "input": {"command": format!("echo x > \"{}\"", s(&data.join("bash-ran"))), "description": "a Bash write into the data dir"}}),
         json!({"tool": "Write", "input": {"file_path": s(&data.join("write-ran")), "content": "x"}}),
         json!({"tool": "Read", "input": {"file_path": s(&data.join("seed.json"))}}),
         json!({"tool": "Edit", "input": {"file_path": s(&data.join("seed.json")), "old_string": "seed", "new_string": "edited"}}),
+        py("import sys;print(open(open(sys.argv[1]).read().strip()).read())", &key_path, "a key read that names no locked path"),
+        py("import sys,os;open(os.path.join(open(sys.argv[1]).read().strip(),\"sandbox-ran\"),\"w\").write(\"x\")", &data_path, "a data-dir write that names no locked path"),
+        json!({"tool": "Bash", "input": {"command": format!("printf x > \"{}\" && printf x > \"{}\"", s(&tmp.join("tmp-ok")), s(&wt.join("bash-ok"))), "description": "Bash writes in the ticket tmp and worktree"}}),
         json!({"say": "done"}),
     ];
     let stub = Stub::start(plan)?;
@@ -82,7 +116,7 @@ pub fn run(claude: &Path, home: &Path, timeout: Duration) -> Result<(), String> 
     let events = t.join("events.jsonl");
     let status = spawn_bounded(&argv, &wt, &h, &cc, &tmp, stub.port, &events, timeout)?;
     let seen = stub.stop();
-    verdict(status, &events, &seen, &ok_file, &data, &m)
+    verdict(status, &events, &seen, &Layout { ok_file, data, m, key, tmp, wt })
 }
 
 /// Copy the installed hooks' regular files (never through a symlink). The guard must be among them.
@@ -150,7 +184,8 @@ fn spawn_bounded(argv: &[String], wt: &Path, h: &Path, cc: &Path, tmp: &Path, po
     }
 }
 
-fn verdict(status: i32, events: &Path, seen: &Seen, ok_file: &Path, data: &Path, m: &Path) -> Result<(), String> {
+fn verdict(status: i32, events: &Path, seen: &Seen, l: &Layout) -> Result<(), String> {
+    let Layout { ok_file, data, m, key, tmp, wt } = l;
     let ev: Vec<Value> = std::fs::read_to_string(events).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let init = ev.iter().find(|e| e["type"] == "system" && e["subtype"] == "init").cloned().unwrap_or(Value::Null);
     let result = ev.iter().find(|e| e["type"] == "result").cloned().unwrap_or(Value::Null);
@@ -159,12 +194,16 @@ fn verdict(status: i32, events: &Path, seen: &Seen, ok_file: &Path, data: &Path,
     let mut want: Vec<&str> = TOOLS.split(',').collect();
     want.sort_unstable();
     let refused_by = |id: &str, source: &str| seen.results.get(id).is_some_and(|(err, text)| *err && text.contains(source));
+    // The sandbox's EPERM is the command's own output; the Bash call need not be an error.
+    let sandboxed = |id: &str| seen.results.get(id).is_some_and(|(_, text)| text.to_lowercase().contains(SANDBOX_REFUSAL));
+    let leaked = seen.results.values().any(|(_, text)| text.contains(KEY_STAND_IN));
+    let key_intact = std::fs::read_to_string(key).ok() == Some(format!("{KEY_STAND_IN}\n"));
     let left: Option<Vec<String>> = std::fs::read_dir(data).ok().map(|d| {
         let mut v: Vec<String> = d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         v.sort();
         v
     });
-    let checks: [(&str, bool); 12] = [
+    let checks: [(&str, bool); 16] = [
         ("claude exited 0", status == 0),
         ("claude reported a successful result", result["subtype"] == "success" && result["is_error"] == false),
         ("the plan reached its last turn", seen.last_step == Some(STEPS)),
@@ -176,6 +215,10 @@ fn verdict(status: i32, events: &Path, seen: &Seen, ok_file: &Path, data: &Path,
         // #195 bhishma: a build that ignores Read denies would leak the data dir's contents to a worker.
         ("the deny rules refused a Read in the data dir", refused_by("tu_3", DENY_REFUSAL)),
         ("the deny rules refused an Edit in the data dir", refused_by("tu_4", DENY_REFUSAL)),
+        ("the OS sandbox refused a key read that names no locked path", sandboxed("tu_5")),
+        ("the OS sandbox refused a data-dir write that names no locked path", sandboxed("tu_6")),
+        ("the stand-in key reached no tool result and is unchanged", !leaked && key_intact),
+        ("Bash wrote in the ticket tmp and the worktree", seen.results.get("tu_7").is_some_and(|(err, _)| !*err) && tmp.join("tmp-ok").is_file() && wt.join("bash-ok").is_file()),
         ("the data dir holds only its seed file, unchanged", left.as_deref() == Some(&["seed.json".to_string()][..]) && std::fs::read_to_string(data.join("seed.json")).ok().as_deref() == Some(SEED)),
         ("the worktree's project-settings hook never ran", !m.join("project-hook").exists()),
     ];

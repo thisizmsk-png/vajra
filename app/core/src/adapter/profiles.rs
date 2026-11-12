@@ -173,6 +173,9 @@ pub fn claude_worker_hook_scripts() -> Result<Vec<String>, String> {
 /// codex: the flag file names the guard but S4 proved its behavior, so a changed guard needs a new proof). At dispatch
 /// `hooks` is the user's installed `~/.claude/skills/vajra/hooks`; the built-in pair is computed over the repo's
 /// `hooks/`. A missing or non-regular (symlinked) script is an error, and so the build is unproven (fail closed).
+/// Only the scripts `hooks/hooks.json` runs are hashed: a helper one of them sources or executes from elsewhere (the
+/// non-guard hooks call `vajra` skill scripts) is not in the shape, so a changed helper needs no new proof. The guard
+/// itself (`pre-tool-use.sh`) is one self-contained file and is always hashed.
 pub fn claude_worker_flag_shape(hooks: &Path) -> Result<String, String> {
     let mut input = claude_worker_shape_input()?.into_bytes();
     for name in claude_worker_hook_scripts()? {

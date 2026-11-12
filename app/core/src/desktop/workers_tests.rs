@@ -728,7 +728,7 @@ fn canary_claude(dir: &Path, leaky: bool) -> PathBuf {
     let p = dir.join("canary-claude");
     let script = format!(
         r#"#!/usr/bin/python3 -I
-import json, os, sys, urllib.request
+import json, os, subprocess, sys, urllib.request
 args = sys.argv[1:]
 if args[:1] == ["--version"]:
     print("9.9.10 (Claude Code)" if os.path.exists("{count}.swapped") else "9.9.9 (Claude Code)"); sys.exit(0)
@@ -758,6 +758,11 @@ while True:
             err, text = True, "File is in a directory that is denied by your permission settings."
     elif name == "Write":
         open(inp["file_path"], "w").write(inp["content"])
+    elif name == "Bash" and "python3 -c" in inp["command"]:
+        text = "PermissionError: [Errno 1] Operation not permitted: <locked>"  # the OS sandbox, as the command's output
+    elif name == "Bash":
+        r = subprocess.run(["/bin/sh", "-c", inp["command"]], capture_output=True, text=True)
+        err, text = r.returncode != 0, r.stdout + r.stderr
     msgs += [{{"role": "assistant", "content": [{{"type": "tool_use", "id": start["id"], "name": name, "input": inp}}]}},
              {{"role": "user", "content": [{{"type": "tool_result", "tool_use_id": start["id"], "is_error": err, "content": text}}]}}]
 "#,
