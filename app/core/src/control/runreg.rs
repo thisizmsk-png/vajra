@@ -269,6 +269,9 @@ impl Drop for CallSlot {
 /// The live runs the socket serves `vajra-run` calls for.
 pub struct RunRegistry {
     runs: Mutex<HashMap<String, Entry>>,
+    /// Leads no longer current (cleared, replaced or their run removed) whose process may still run: their trees stay
+    /// held to vajra-run tools until the process is gone. Pruned as each one goes.
+    fenced: Mutex<Vec<LeadProc>>,
     /// The peer check; `procid::descends_from` outside tests.
     descends: Box<dyn Fn(u32, LeadProc) -> bool + Send + Sync>,
 }
@@ -285,7 +288,7 @@ impl RunRegistry {
     }
 
     pub fn with_peer_check(descends: Box<dyn Fn(u32, LeadProc) -> bool + Send + Sync>) -> Self {
-        RunRegistry { runs: Mutex::new(HashMap::new()), descends }
+        RunRegistry { runs: Mutex::new(HashMap::new()), fenced: Mutex::new(Vec::new()), descends }
     }
 
     /// Serve `run` with `proto` behind the token whose hash is `token`. No call passes until `set_lead`.
@@ -302,7 +305,9 @@ impl RunRegistry {
         }
         let mut runs = crate::lock(&self.runs);
         let e = runs.get_mut(run).ok_or(LeadRefused::UnknownRun)?;
-        e.lead = Some(lead);
+        if let Some(old) = e.lead.replace(lead) {
+            self.fence(old);
+        }
         e.calls = Default::default();
         Ok(())
     }
@@ -311,7 +316,8 @@ impl RunRegistry {
     /// `vajra-run` tools, and only it may send a request past `socket::MAX_REQUEST`.
     pub fn in_lead_tree(&self, peer: Option<Peer>) -> bool {
         let Some(p) = peer else { return false };
-        let leads: Vec<LeadProc> = crate::lock(&self.runs).values().filter_map(|e| e.lead).collect();
+        let mut leads: Vec<LeadProc> = crate::lock(&self.runs).values().filter_map(|e| e.lead).collect();
+        leads.extend(crate::lock(&self.fenced).iter().copied().filter(|l| crate::procid::same_process(l.pid, l.stamp)));
         !leads.is_empty() && crate::procid::same_process(p.pid, p.stamp) && leads.into_iter().any(|l| (self.descends)(p.pid, l))
     }
 
@@ -321,10 +327,31 @@ impl RunRegistry {
         match crate::lock(&self.runs).get_mut(run) {
             Some(e) if e.lead == Some(lead) => {
                 e.lead = None;
+                self.fence(lead);
                 true
             }
             _ => false,
         }
+    }
+
+    /// Keep `lead`'s tree held to vajra-run tools while its process still runs.
+    fn fence(&self, lead: LeadProc) {
+        let mut f = crate::lock(&self.fenced);
+        f.retain(|l| crate::procid::same_process(l.pid, l.stamp));
+        if !f.contains(&lead) {
+            f.push(lead);
+        }
+    }
+
+    /// May `peer` use the Service route? Only by positive proof: it is still the process that connected, it descends
+    /// from this app (every Service client does: the Director-General's and a classic run's `--mcp` server are the
+    /// app's grandchildren), and it is in no lead's tree, current or fenced. A lead's descendant that outlived its
+    /// parent is reparented away from the app, so it can never prove it, on any connection.
+    pub fn service_allowed(&self, peer: Option<Peer>) -> bool {
+        let Some(p) = peer else { return false };
+        let me = std::process::id();
+        let Some(stamp) = crate::procid::start_stamp(me) else { return false };
+        crate::procid::same_process(p.pid, p.stamp) && crate::procid::descends_from(p.pid, me, stamp) && !self.in_lead_tree(peer)
     }
 
     /// Resume: only the new token's hash is kept.
@@ -333,7 +360,9 @@ impl RunRegistry {
     }
 
     pub fn remove(&self, run: &str) {
-        crate::lock(&self.runs).remove(run);
+        if let Some(l) = crate::lock(&self.runs).remove(run).and_then(|e| e.lead) {
+            self.fence(l);
+        }
     }
 
     /// Gate one request and find its protocol. The registry lock is released before the call runs.
