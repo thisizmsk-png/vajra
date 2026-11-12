@@ -5544,6 +5544,28 @@ fn app_start_keeps_a_guarded_runs_session_dir_whatever_the_index_says() {
     assert!(control.join(stale).is_dir(), "an unreadable guarded record prunes nothing");
 }
 
+/// #179 review: a guarded record whose bytes are not a canonical session id (invalid UTF-8, which a lossy decode would
+/// turn into a name matching no dir, or any other text) can't say which dir it keeps, so the start prunes nothing.
+#[test]
+fn app_start_prunes_nothing_when_a_guarded_record_is_not_a_session_id() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let stale = "66666666-6666-4666-8666-666666666666";
+    let _ = fs::remove_file(t.0.join("data/runs.jsonl"));
+    fs::create_dir_all(control.join("lead/r2")).unwrap();
+    for bad in [b"5555\xff5555-5555-4555-8555-555555555555".as_slice(), b"not-a-session".as_slice(), b"".as_slice()] {
+        fs::create_dir_all(control.join(stale).join("queue")).unwrap();
+        fs::write(control.join(stale).join("nonce"), "n").unwrap();
+        fs::write(control.join("lead/r2/session"), bad).unwrap();
+        drop(t.app());
+        assert!(control.join(stale).join("nonce").is_file(), "record {bad:?} prunes nothing");
+    }
+    // A canonical id (with the trailing newline a hand edit leaves) is trusted again, and the dir it doesn't name goes.
+    fs::write(control.join("lead/r2/session"), "55555555-5555-4555-8555-555555555555\n").unwrap();
+    drop(t.app());
+    assert!(!control.join(stale).exists(), "a valid record restores pruning");
+}
+
 /// 6c-3 pruning with the instance lock: a second app on the same data folder prunes nothing, since the dir it can't
 /// place may be the first app's live session's. The first app's next start, alone, does prune it.
 #[test]

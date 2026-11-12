@@ -2404,7 +2404,9 @@ fn control_keep(data: &Path) -> Option<std::collections::HashSet<String>> {
     // The guarded run records keep their sessions whatever the index says (#179 codex P1): a worker that drops a run
     // from `runs.jsonl` must not get its control dir, nonce and acknowledged stops deleted. Each run's own session
     // (`session`, written by `record_run_pinned`) and its Lead's (`lead_session`) are kept. A record that exists but
-    // can't be read whole (a link, an oversized file, an unreadable entry) prunes nothing at all.
+    // can't be read whole (a link, an oversized file, an unreadable entry) prunes nothing at all, and neither does one
+    // that isn't exactly a canonical session id once trimmed (#179 review): a lossy decode of invalid UTF-8, or any
+    // other text, would keep a name that matches no dir while the real session's dir was deleted.
     let lead = data.join("control").join("lead");
     match std::fs::read_dir(&lead) {
         Ok(rd) => {
@@ -2413,7 +2415,12 @@ fn control_keep(data: &Path) -> Option<std::collections::HashSet<String>> {
                 for name in ["session", "lead_session"] {
                     match crate::control::fsx::read_nofollow_capped(&d.path().join(name), 256) {
                         Ok(b) => {
-                            keep.insert(String::from_utf8_lossy(&b).trim().to_string());
+                            let id = String::from_utf8(b).ok()?;
+                            let id = id.trim();
+                            if !ids::valid_session_id(id) {
+                                return None;
+                            }
+                            keep.insert(id.to_string());
                         }
                         // No such record, or the entry is no run dir: nothing to keep from it.
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {}
