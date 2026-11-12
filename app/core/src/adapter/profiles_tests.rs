@@ -427,6 +427,29 @@ fn the_claude_read_back_checks_the_mode_and_the_tool_set() {
     }
 }
 
+/// A Claude worker is guarded only when its init event shows no MCP server loaded and no `mcp__` tool; otherwise the
+/// reason names every server, from either place.
+#[test]
+fn a_claude_worker_is_guarded_only_when_no_mcp_server_loaded() {
+    let ev = |extra: Value| {
+        let mut init = json!({"type": "system", "subtype": "init", "tools": ["Read"]});
+        for (k, v) in extra.as_object().unwrap() {
+            init[k] = v.clone();
+        }
+        format!("{{\"type\":\"assistant\"}}\n{init}\n")
+    };
+    assert_eq!(claude_key_guard(&ev(json!({"mcp_servers": []}))), json!({"guarded": true}));
+    assert_eq!(claude_key_guard(&ev(json!({}))), json!({"guarded": true}));
+    let one = claude_key_guard(&ev(json!({"mcp_servers": [{"name": "files", "status": "failed"}]})));
+    assert_eq!((one["guarded"].as_bool(), one["mcp_servers"].clone()), (Some(false), json!(["files"])), "a failed server may have started");
+    assert_eq!(one["reason"], "Your MCP server files runs outside the sandbox and can read your files, including Vajra's signing key.");
+    let two = claude_key_guard(&ev(json!({"mcp_servers": [{"name": "shell"}], "tools": ["Read", "mcp__files__read", "mcp__shell__run"]})));
+    assert_eq!(two["mcp_servers"], json!(["files", "shell"]), "{two}");
+    assert!(two["reason"].as_str().unwrap().starts_with("Your MCP servers files, shell run outside"), "{two}");
+    // No init event: nothing loaded that the core can see (the read-back fails such a run anyway).
+    assert_eq!(claude_mcp_loaded("{}\n"), Vec::<String>::new());
+}
+
 #[test]
 fn a_read_back_mismatch_kills_the_session() {
     use crate::bus::{Bus, Config};

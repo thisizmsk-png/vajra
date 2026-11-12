@@ -101,7 +101,12 @@ WT=$(pwd -P)
 # Run as canary A's self-test (it talks to the loopback stub): this stand-in is no real Claude Code, so it fails.
 [ -n "$ANTHROPIC_BASE_URL" ] && {{ echo selftest >> '{log}.selftest'; exit 1; }}
 case "$1" in
-  -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
+  -p) printf '%s\n' "$@" > '{log}.argv'
+    if [ "$MODE" = mcp ]; then
+      echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob","mcp__files__read"],"mcp_servers":[{{"name":"files","status":"connected","source":"user"}}]}}'
+    else
+      echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}'
+    fi ;;
   *)
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
@@ -116,7 +121,7 @@ edit() {{ echo "worker line" >> src/lib.rs; }}
 [ -n "$SLOW" ] || SLOW=0
 echo "start $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
 case "$MODE" in
-  edit|wide) edit ;;
+  edit|wide|mcp) edit ;;
   flood) perl -e 'print "x" x 1000, "\n" for 1..400'; edit ;;
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
@@ -691,10 +696,28 @@ fn a_claude_worker_runs_through_its_profile_now_that_s4_passed() {
     let r = rig("claude", Opts::default());
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
-    assert_eq!(v.receipt.unwrap()["effective"]["model"], "claude-fake-1");
+    assert_eq!(v.receipt.as_ref().unwrap()["effective"]["model"], "claude-fake-1");
     assert!(v.harness_session.as_deref().is_some_and(crate::ids::valid_session_id), "its own session id, for its message queue");
     let flags: Vec<_> = std::fs::read_dir(r.gw.data.join("profiles")).unwrap().collect();
     assert!(flags.is_empty(), "the flag file is removed when the ticket ends");
+    assert_eq!(v.key_guard, Some(json!({"guarded": true})), "no MCP server loaded");
+    assert!(!v.core_worker().overlays.contains(&"not guarded"));
+}
+
+/// An MCP server runs outside the OS sandbox and can read the signing key. A Claude worker whose init event shows one
+/// loaded still runs and ends Done, but is not guarded, and the reason names the server.
+#[test]
+fn a_claude_worker_with_a_loaded_mcp_server_runs_but_is_not_guarded() {
+    let r = rig("claude-mcp", Opts { mode: "mcp", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let g = v.key_guard.clone().unwrap();
+    assert_eq!((g["guarded"].as_bool(), g["mcp_servers"].clone()), (Some(false), json!(["files"])), "{g}");
+    assert!(g["reason"].as_str().unwrap().contains("MCP server files runs outside the sandbox"), "{g}");
+    assert!(v.core_worker().overlays.contains(&"not guarded"), "the card says so");
+    // A Codex worker has no Claude key guard: its rule lives with the Codex sandbox.
+    let c = r.done(&r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(c.key_guard, None, "{c:?}");
 }
 
 /// #180 bhishma: S4 proved one Claude Code build, but users auto-update. A build no S4 run proved (with today's flag

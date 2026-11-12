@@ -766,8 +766,9 @@ fn check_fs_entries(p: &Value, allowed: &[PathBuf]) -> Result<(), NotApplied> {
 }
 
 /// Check a Claude worker's `system`/`init` event: permission mode `dontAsk`, and no built-in tool outside the role's
-/// list. The user's own MCP tools, `mcp__*`, are kept for workers under Q4, except Vajra's own namespaces: a worker has
-/// no Vajra tools (16.4), so an `mcp__vajra*` tool from a server named like Vajra's fails.
+/// list. An MCP tool, `mcp__*`, doesn't fail the read-back (Q4), except Vajra's own namespaces: a worker has no Vajra
+/// tools (16.4), so an `mcp__vajra*` tool from a server named like Vajra's fails. Any MCP server that loaded marks the
+/// worker not guarded instead (`claude_key_guard`).
 pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied> {
     let init = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "system" && e["subtype"] == "init");
     let Some(init) = init else { return Err(NotApplied("no init event".into())) };
@@ -786,6 +787,37 @@ pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied>
         }
     }
     Ok(())
+}
+
+/// The MCP servers a Claude worker actually loaded, from its `system`/`init` event: every server `mcp_servers` lists
+/// (whatever its status: a failed one may still have started its process) and every server an `mcp__<server>__<tool>`
+/// tool names. Sorted, deduplicated; empty when the event lists none or there is no init event. Judged from what
+/// loaded, never from the config files: under `--setting-sources ""` Claude Code 2.1.296 loads none of the user,
+/// local or project servers (vajra-51 probe, 2026-11-12), and a build that does is caught here.
+pub fn claude_mcp_loaded(events: &str) -> Vec<String> {
+    let init = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "system" && e["subtype"] == "init");
+    let Some(init) = init else { return Vec::new() };
+    let listed = init["mcp_servers"].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str().or(s.as_str()).map(String::from));
+    let tooled = init["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()?.strip_prefix("mcp__")?.split("__").next().map(String::from));
+    let mut out: Vec<String> = listed.chain(tooled).filter(|s| !s.is_empty()).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether a Claude worker counts as guarded (it can't read the signing key): only when it loaded no MCP server,
+/// since an MCP server runs outside the OS sandbox. `{"guarded": true}`, or `{"guarded": false, "mcp_servers": [...],
+/// "reason": ...}` with a plain reason naming them. A worker that is not guarded still runs; the card says why.
+pub fn claude_key_guard(events: &str) -> Value {
+    let names = claude_mcp_loaded(events);
+    if names.is_empty() {
+        return json!({"guarded": true});
+    }
+    let reason = match names.as_slice() {
+        [one] => format!("Your MCP server {one} runs outside the sandbox and can read your files, including Vajra's signing key."),
+        many => format!("Your MCP servers {} run outside the sandbox and can read your files, including Vajra's signing key.", many.join(", ")),
+    };
+    json!({"guarded": false, "mcp_servers": names, "reason": reason})
 }
 
 /// End a session whose read-back failed. The process group is killed; the caller records `profile_not_applied`.

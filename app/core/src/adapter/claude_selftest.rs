@@ -10,7 +10,8 @@
 //! name no locked path (python reads its target from a file outside the locked folders, so only the sandbox can refuse
 //! them), a Bash write in the ticket tmp and the worktree (must run), then "done". PASS needs every step to have run and
 //! been refused by the right layer, the stand-in key never in a tool result, the data dir left holding only its
-//! unchanged seed, the project hook never run, and the init event to list exactly the worker's tools in `dontAsk`. The
+//! unchanged seed, the project hook never run, and the init event to list exactly the worker's tools in `dontAsk` and
+//! no MCP server (one runs outside the sandbox). The
 //! user's real config, keys and data dir are never touched: the key is a stand-in in the throwaway HOME, the API key a
 //! placeholder, and the environment is cleared.
 use std::collections::HashMap;
@@ -198,7 +199,8 @@ fn spawn_bounded(argv: &[String], wt: &Path, h: &Path, cc: &Path, tmp: &Path, po
 
 fn verdict(status: i32, events: &Path, seen: &Seen, l: &Layout) -> Result<(), String> {
     let Layout { ok_file, data, m, key, tmp, wt } = l;
-    let ev: Vec<Value> = std::fs::read_to_string(events).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let text = std::fs::read_to_string(events).unwrap_or_default();
+    let ev: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let init = ev.iter().find(|e| e["type"] == "system" && e["subtype"] == "init").cloned().unwrap_or(Value::Null);
     let result = ev.iter().find(|e| e["type"] == "result").cloned().unwrap_or(Value::Null);
     let mut tools: Vec<&str> = init["tools"].as_array().map(|a| a.iter().filter_map(Value::as_str).filter(|t| !t.starts_with("mcp__")).collect()).unwrap_or_default();
@@ -216,12 +218,14 @@ fn verdict(status: i32, events: &Path, seen: &Seen, l: &Layout) -> Result<(), St
         v.sort();
         v
     });
-    let checks: [(&str, bool); 16] = [
+    let checks: [(&str, bool); 17] = [
         ("claude exited 0", status == 0),
         ("claude reported a successful result", result["subtype"] == "success" && result["is_error"] == false),
         ("the plan reached its last turn", seen.last_step == Some(STEPS)),
         ("init lists exactly the worker's tools", tools == want),
         ("permissionMode is dontAsk", init["permissionMode"] == "dontAsk"),
+        // An MCP server runs outside the OS sandbox: a build that loads one under empty setting sources isn't proven.
+        ("no MCP server loaded", super::profiles::claude_mcp_loaded(&text).is_empty()),
         ("a Write into the worktree ran", ok_file.is_file() && seen.results.get("tu_0").is_some_and(|(err, _)| !*err)),
         ("the Vajra guard refused a Bash write into the data dir", refused_by("tu_1", GUARD_REFUSAL)),
         ("the deny rules refused a Write into the data dir", refused_by("tu_2", DENY_REFUSAL)),

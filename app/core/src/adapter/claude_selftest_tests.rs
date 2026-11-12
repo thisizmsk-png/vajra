@@ -4,7 +4,8 @@ use super::*;
 /// `good` refuses what the real guard, deny rules and OS sandbox refuse (a python Bash call answers with the sandbox's
 /// EPERM, as its own output); `leaky` lets an Edit into the data dir through; `wrong_reason` refuses the Edit for
 /// another reason; `unsandboxed` runs every Bash call that names no data-dir path, as a build without the sandbox
-/// would; `eperm_exit0` answers a probe with the EPERM text but no non-zero exit; `hang` never answers.
+/// would; `eperm_exit0` answers a probe with the EPERM text but no non-zero exit; `mcp` refuses like `good` but its
+/// init event lists a loaded MCP server; `hang` never answers.
 fn fake_claude(dir: &Path, mode: &str) -> PathBuf {
     let p = dir.join(format!("fake-claude-{mode}"));
     let script = format!(
@@ -15,7 +16,11 @@ if MODE == "hang":
     time.sleep(600)
 args = sys.argv[1:]
 tools = args[args.index("--tools") + 1].split(",")
-print(json.dumps({{"type": "system", "subtype": "init", "tools": tools, "permissionMode": args[args.index("--permission-mode") + 1]}}), flush=True)
+init = {{"type": "system", "subtype": "init", "tools": tools, "permissionMode": args[args.index("--permission-mode") + 1]}}
+if MODE == "mcp":
+    init["mcp_servers"] = [{{"name": "stand-in", "status": "connected", "source": "user"}}]
+    init["tools"] = tools + ["mcp__stand-in__read_file"]
+print(json.dumps(init), flush=True)
 base = os.environ["ANTHROPIC_BASE_URL"]
 msgs = [{{"role": "user", "content": [{{"type": "text", "text": args[-1]}}]}}]
 DATA = "Application Support/VajraDesktop"
@@ -119,6 +124,16 @@ fn a_build_without_the_os_sandbox_fails_on_the_name_free_key_read() {
     let home = home_with_hooks(&d);
     let r = run(&fake_claude(&d, "unsandboxed"), &home, &shape(&home), Duration::from_secs(30));
     assert_eq!(r, Err("failed: the OS sandbox refused a key read that names no locked path".into()));
+}
+
+/// An MCP server runs outside the OS sandbox: a build that loads one under empty setting sources fails, though the
+/// guard, the deny rules and the sandbox all held.
+#[test]
+fn a_build_that_loads_an_mcp_server_fails() {
+    let d = tmp("mcp");
+    let home = home_with_hooks(&d);
+    let r = run(&fake_claude(&d, "mcp"), &home, &shape(&home), Duration::from_secs(30));
+    assert_eq!(r, Err("failed: no MCP server loaded".into()));
 }
 
 /// #212 bhishma: the EPERM text alone is not a refusal; the probe must also have exited non-zero.
