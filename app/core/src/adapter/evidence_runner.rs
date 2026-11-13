@@ -296,6 +296,13 @@ impl StartupDir {
         use std::os::unix::fs::PermissionsExt;
         let name = profile.tmp.file_name().and_then(|n| n.to_str()).ok_or("the run's temp folder has no name")?;
         let dir = profile.tmp.with_file_name(format!("{name}.bash-env"));
+        // The containment check below compares paths as written, while the profile also allows each writable root's
+        // resolved form (`/tmp` is `/private/tmp`): so every path in it must already be resolved (codex P1 on
+        // d660bb62). The worktree must be canonical, and so must the tmp's parent (the tmp itself doesn't exist yet).
+        let resolved = |p: &Path| p.canonicalize().ok().as_deref() == Some(p);
+        if !resolved(&profile.worktree) || !profile.tmp.parent().is_some_and(resolved) {
+            return Err("the run's folders aren't plain, resolved paths");
+        }
         let writable = [&profile.worktree, &profile.tmp];
         if writable.iter().any(|w| dir.starts_with(w) || w.starts_with(&dir)) {
             return Err("the run's startup file would be writable by its checks");

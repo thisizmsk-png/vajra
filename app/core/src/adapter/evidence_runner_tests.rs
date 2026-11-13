@@ -817,6 +817,38 @@ fn a_check_cannot_rewrite_the_startup_file_so_a_later_failing_check_still_fails(
     assert!(matches!(run(&p, &evidence_run(&script, &base, &cmds, &common, &home)), RunOutcome::Failed(why) if why.contains("fresh")));
 }
 
+/// The startup folder's overlap check is exact only on resolved paths (codex P1 on d660bb62): a tmp named through an
+/// alias (`/var` for `/private/var`) inside the worktree would put the startup folder in a writable root the check
+/// can't see. Such a profile is refused before any command runs; so is a resolved tmp whose startup folder would sit
+/// in the worktree.
+#[test]
+fn a_profile_whose_startup_folder_would_be_writable_through_an_alias_is_refused() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("alias");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let Ok(alias) = t.0.strip_prefix("/private").map(|p| Path::new("/").join(p)) else { return eprintln!("skipped: temp dir has no /private alias") };
+    assert_ne!(alias, t.0);
+    assert_eq!(alias.canonicalize().unwrap(), t.0, "the alias names the same folder");
+    fs::create_dir_all(t.0.join("work/node_modules")).unwrap();
+    let ran = t.0.join("work/later-ran");
+    let cmds = vec!["printf 'exit 0\\n' > \"$BASH_ENV\"; true".to_string(), format!("touch '{}'; exit 1", ran.display())];
+    // The worktree resolved, the tmp under it through the alias.
+    let p = Profile { worktree: t.0.join("work"), tmp: alias.join("work/node_modules/run"), deny: deny_dirs(&home, &t.0.join("data")), network: false };
+    let out = run(&p, &evidence_run(&script, &base, &cmds, &common, &home));
+    assert!(matches!(&out, RunOutcome::Failed(why) if why.contains("resolved")), "{out:?}");
+    assert!(!ran.exists(), "no command ran");
+    assert!(!t.0.join("work/node_modules/run.bash-env").exists());
+    // The worktree through the alias: refused too.
+    let p = Profile { worktree: alias.join("work"), tmp: t.0.join("run-a"), deny: deny_dirs(&home, &t.0.join("data")), network: false };
+    assert!(matches!(run(&p, &evidence_run(&script, &base, &cmds, &common, &home)), RunOutcome::Failed(why) if why.contains("resolved")));
+    // Both resolved, the tmp inside the worktree: the startup folder would be writable, so refused.
+    let p = Profile { worktree: t.0.join("work"), tmp: t.0.join("work/node_modules/run-b"), deny: deny_dirs(&home, &t.0.join("data")), network: false };
+    assert!(matches!(run(&p, &evidence_run(&script, &base, &cmds, &common, &home)), RunOutcome::Failed(why) if why.contains("writable")));
+    assert!(!ran.exists() && !t.0.join("work/node_modules/run-b.bash-env").exists());
+}
+
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
 #[test]
 fn a_run_refuses_a_tmp_that_already_exists() {
