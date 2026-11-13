@@ -3,7 +3,7 @@ import { Badge, Button, Input, Kbd, SegmentedControl, StatusDot, Text, ariaShort
 import { ActionBar } from "../../../components/ui/desktop";
 import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
-import { api, newActionId, onChanged } from "../../ipc";
+import { api, isIpcError, newActionId, onChanged } from "../../ipc";
 import { UNSORTED_ID, normRoot } from "../../projects/adapter";
 import { useProjects } from "../../projects/store";
 import { validId } from "../../projectContract";
@@ -18,14 +18,15 @@ import { ProviderControls, limitText, useProviders } from "../ProviderControls";
 import { toInput, validate } from "./validate";
 import type { Draft } from "./validate";
 
-type Load<T> = { state: "loading" } | { state: "ok"; data: T } | { state: "error"; text: string };
+/** `down` is a call the core never answered, as opposed to one it answered with an error. */
+type Load<T> = { state: "loading" } | { state: "ok"; data: T } | { state: "error"; text: string; down: boolean };
 
 function useLoad<T>(fetch: () => Promise<T>, refreshOnChange = false): [Load<T>, () => void, Date | null] {
   const [v, setV] = useState<Load<T>>({ state: "loading" });
   const [at, setAt] = useState<Date | null>(null);
   const run = useCallback(() => {
     setAt(null);
-    fetch().then((data) => setV({ state: "ok", data }), (e) => setV({ state: "error", text: problemDetail(e) }))
+    fetch().then((data) => setV({ state: "ok", data }), (e) => setV({ state: "error", text: problemDetail(e), down: !isIpcError(e) }))
       .finally(() => setAt(new Date()));
   }, [fetch]);
   useEffect(run, [run]);
@@ -157,6 +158,11 @@ export function Home() {
   useCommands([{ id: "recheck", label: S.home.preflightRetry, run: recheck }]);
 
   const failing = pre.state === "ok" ? pre.data.rows.filter((r) => !r.ok).length : 0;
+  const checksBlock = pre.state === "ok" && !pre.data.start_enabled;
+  // A core that does not answer fails every read on this screen for one reason. The checks panel says it once, with
+  // the retry; the preferences line would say it again in other words.
+  const coreDown = pre.state === "error" && pre.down;
+  const why = checksBlock ? S.home.startNeedsChecks(failing) : pre.state === "error" ? S.home.startNeedsAnswer : "";
   const repoName = basename(d.repo);
 
   return (
@@ -166,7 +172,7 @@ export function Home() {
           <Text as="h1" variant="headline-lg">{S.home.start}</Text>
           <Text variant="body" muted className="v-home__lede">{S.home.lede}</Text>
 
-          {prefs.error && <p role="alert">{prefs.error}</p>}
+          {prefs.error && !coreDown && <p role="alert">{prefs.error}</p>}
           {unsupported && <p role="alert">{S.preferences.unsupportedLaunch}</p>}
           {blocked && <p role="alert">{blocked}</p>}
           {chosen && !blocked && (
@@ -196,7 +202,10 @@ export function Home() {
                 <summary>{S.home.advanced}</summary>
                 <Input type="number" label={S.home.maxInFlight} value={d.maxInFlight} onChange={set("maxInFlight")} error={err("maxInFlight")} />
               </details>
-              <Button variant="primary" onClick={start} disabled={!ready} busy={busy === "start"} aria-keyshortcuts={ariaShortcut(START_KEYS)}>
+              {/* A disabled button with no reason is a dead end: the checks that block it are further down the page. */}
+              {why && <p id="v-launch-why" className="v-launch__why">{why}</p>}
+              <Button variant="primary" onClick={start} disabled={!ready} busy={busy === "start"} aria-keyshortcuts={ariaShortcut(START_KEYS)}
+                aria-describedby={why ? "v-launch-why" : undefined}>
                 {busy === "start" ? S.home.starting : S.home.startButton}
                 <Kbd keys={START_KEYS} decorative />
               </Button>

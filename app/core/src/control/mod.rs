@@ -18,6 +18,7 @@ pub mod service;
 pub mod sha256;
 pub mod socket;
 pub mod time;
+pub mod token_receipt;
 
 use std::path::{Path, PathBuf};
 

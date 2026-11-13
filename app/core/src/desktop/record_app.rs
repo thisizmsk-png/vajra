@@ -125,6 +125,14 @@ impl record::LedgerStore for AppLedgerStore {
         if campaign.get("featuresDefSha256").and_then(Value::as_str) != Some(hex_digest(def.as_bytes()).as_str()) {
             return Err("the campaign's criteria aren't the signed ones".into());
         }
+        // The signature covers reportSha256, not report.md: a recorded report must exist and hash to it (codex on
+        // #190), as the engine's verify and the app's report reader require. No recorded report: no report bytes count.
+        match (campaign.get("reportSha256").and_then(Value::as_str).filter(|s| !s.is_empty()), &h.report) {
+            (Some(want), Some(bytes)) if hex_digest(bytes) == want => {}
+            (Some(_), Some(_)) => return Err("the campaign's report isn't the signed one".into()),
+            (Some(_), None) => return Err("the campaign's signed report is missing".into()),
+            (None, _) => {}
+        }
         let tasks = match self.bridge.run(&Request::TasksList { slug: slug.into() }) {
             Ok(o) if o.exit() == Some(0) && !o.truncated => serde_json::from_str(&o.stdout).map_err(|_| unread("the task graph"))?,
             Ok(_) | Err(_) => return Err(unread("the task graph")),

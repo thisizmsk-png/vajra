@@ -16,6 +16,23 @@ function Probe() {
 }
 
 describe("ProjectsProvider", () => {
+  it("Given a load whose reads are still pending, When the core says changed, Then the next load asks the core again and its newer answer is what shows", async () => {
+    let n = 0;
+    let finishOld: (v: unknown) => void = () => {};
+    const f = fakeIpc({
+      list_campaigns: () => (++n === 1 ? new Promise((r) => { finishOld = r; }) : { campaigns: [{ slug: "new", goal: "g", status: "done" }] }),
+      resume_targets: { targets: {} }, active_runs: { runs: [] }, inbox: { count: 0, items: [] },
+    });
+    setTransport(f.transport);
+    render(<ProjectsProvider><Probe /></ProjectsProvider>);
+    await act(async () => { await Promise.resolve(); });
+    act(() => f.emit("changed", {}));
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "list_campaigns").length).toBe(2), { timeout: 2000 });
+    expect(await screen.findByText("ok:new:none")).toBeTruthy();
+    await act(async () => { finishOld({ campaigns: [{ slug: "old", goal: "g", status: "done" }] }); });
+    expect(screen.getByText("ok:new:none")).toBeTruthy();
+  });
+
   it("Given an old load still waiting on its crew, When a newer load finishes and the old crew lookup then fails, Then the newer load stays", async () => {
     let n = 0;
     let failOld: (e: unknown) => void = () => {};
@@ -33,6 +50,23 @@ describe("ProjectsProvider", () => {
     expect(await screen.findByText("ok:new:none")).toBeTruthy();
     await act(async () => { failOld(new Error("socket closed")); });
     expect(screen.getByText("ok:new:none")).toBeTruthy();
+  });
+
+  it("Given a loaded store, When the inbox changes while resume_targets fails, Then the shared inbox still updates", async () => {
+    const item = (id: string) => ({ id, kind: "task", campaign: "c", title: id, detail: "", status: "blocked", since: "2026-11-01T00:00:00Z" });
+    let n = 0;
+    const f = fakeIpc({
+      list_campaigns: { campaigns: [{ slug: "c", goal: "g", status: "done" }] },
+      resume_targets: () => { if (++n > 1) throw new Error("resume failed"); return { targets: {} }; },
+      active_runs: { runs: [] },
+      inbox: () => (n > 1 ? { count: 1, items: [item("task:c.new")] } : { count: 1, items: [item("task:c.old")] }),
+    });
+    setTransport(f.transport);
+    render(<ProjectsProvider><Probe /></ProjectsProvider>);
+    await waitFor(() => expect(view?.inbox.map((i) => i.id)).toEqual(["task:c.old"]));
+    await act(async () => { view!.reload(); });
+    await waitFor(() => expect(view?.state).toBe("error"));
+    expect(view!.inbox.map((i) => i.id)).toEqual(["task:c.new"]);
   });
 
   it("Given the core's project store, Then a registered folder's project carries its T1 id and name; without the store everything still shows", async () => {

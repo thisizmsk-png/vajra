@@ -2,7 +2,7 @@
 // and only a human starts them (D4). Start and Dismiss show what happened: pending, done, refused with the reason, or
 // "check before retrying" when the answer was lost (§3.2). Never "done" before the core says so.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import type { InboxItem } from "../src/ipc";
 import { CurrentProject } from "../src/projects/current";
@@ -43,6 +43,30 @@ describe("transcript lines", () => {
     ]);
   });
 });
+
+/** The transcript follows its end by writing `scrollTop` once in the next animation frame. This holds the frames until
+ *  `flush()` and counts the writes, so a test can see how many scrolls a burst of growth really caused. */
+function frameRig() {
+  const queue: FrameRequestCallback[] = [];
+  let scrolls = 0;
+  let top = 0;
+  const raf = vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => { queue.push(cb); return queue.length; });
+  const caf = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+  return {
+    get scrolls() { return scrolls; },
+    get queued() { return queue.length; },
+    flush() { queue.splice(0).forEach((cb) => cb(0)); },
+    watch(pane: HTMLElement) { Object.defineProperty(pane, "scrollTop", { get: () => top, set: () => { scrolls++; }, configurable: true }); },
+    /** Put the pane at `t` of a `height` tall column and let the view hear the scroll. */
+    at(pane: HTMLElement, t: number, height = 1000) {
+      top = t;
+      Object.defineProperty(pane, "scrollHeight", { value: height, configurable: true });
+      Object.defineProperty(pane, "clientHeight", { value: 400, configurable: true });
+      fireEvent.scroll(pane);
+    },
+    restore() { raf.mockRestore(); caf.mockRestore(); },
+  };
+}
 
 describe("Director-General conversation", () => {
   it("Given a conversation, When the view opens, Then it shows your turns, its answers, the generation and its state in words", async () => {
@@ -273,6 +297,147 @@ describe("Director-General conversation", () => {
     expect(screen.queryByText("An old answer.")).toBeNull();
   });
 
+  it("Given the reader is at the end, When the conversation grows, Then the newest turn stays in view; after they scroll up, nothing moves them", async () => {
+    const g = globalThis as { ResizeObserver?: unknown };
+    const was = g.ResizeObserver;
+    const rig = frameRig();
+    let grew: () => void = () => {};
+    g.ResizeObserver = class { constructor(cb: () => void) { grew = cb; } observe() {} disconnect() {} };
+    try {
+      const { container } = mount({});
+      await screen.findByText("What is left?");
+      const pane = container.querySelector(".v-dgv__scroll") as HTMLElement;
+      rig.watch(pane);
+      rig.flush();
+
+      rig.at(pane, 600);
+      let before = rig.scrolls;
+      grew();
+      rig.flush();
+      expect(rig.scrolls).toBe(before + 1);
+
+      // A burst of growth before the next frame is one scroll, not one each.
+      before = rig.scrolls;
+      grew(); grew(); grew();
+      expect(rig.queued).toBe(1);
+      rig.flush();
+      expect(rig.scrolls).toBe(before + 1);
+
+      // Our own scroll's event lands after more content arrived: far from the end, but not a scroll up. Still pinned.
+      rig.at(pane, 600, 1500);
+      before = rig.scrolls;
+      grew();
+      rig.flush();
+      expect(rig.scrolls).toBe(before + 1);
+
+      rig.at(pane, 200, 1500);
+      before = rig.scrolls;
+      grew();
+      rig.flush();
+      expect(rig.scrolls).toBe(before);
+
+      rig.at(pane, 1090, 1500);
+      grew();
+      rig.flush();
+      expect(rig.scrolls).toBe(before + 1);
+    } finally {
+      rig.restore();
+      g.ResizeObserver = was;
+    }
+  });
+
+  it("Given the reader scrolled up, When a new line arrives, Then nothing moves them; their own question, or scrolling back to the end, follows again", async () => {
+    const rig = frameRig();
+    try {
+      let texts = ["you\tWhat is left?", "lead\tTwo tasks: the limiter and the docs."];
+      const { container, f } = mount({
+        stream_window: () => win(texts),
+        ask_lead: { ask_id: "k1", state: "running", stream: STREAM, lead_session_id: "s", project_id: "p_X", generation: 3, name: "Director-General" },
+      });
+      await screen.findByText("What is left?");
+      const pane = container.querySelector(".v-dgv__scroll") as HTMLElement;
+      rig.watch(pane);
+      // Opening the conversation shows its end.
+      rig.flush();
+      expect(rig.scrolls).toBeGreaterThan(0);
+      const at = (top: number, height = 1000) => rig.at(pane, top, height);
+      const arrives = async (line: string, shown: string) => {
+        texts = [...texts, line];
+        act(() => { f.emit("changed", { streams: [STREAM] }); });
+        // A turn's lines are joined, so the new line is part of a longer text.
+        await screen.findByText((text) => text.includes(shown));
+        rig.flush();
+      };
+
+      // At the end: a new line is followed.
+      at(600);
+      let before = rig.scrolls;
+      await arrives("lead\tThe limiter is merged.", "The limiter is merged.");
+      expect(rig.scrolls).toBe(before + 1);
+
+      // Scrolled up to read: a new line arrives and the view stays put.
+      at(200);
+      before = rig.scrolls;
+      await arrives("lead\tThe docs are next.", "The docs are next.");
+      expect(rig.scrolls).toBe(before);
+
+      // Their own question pins them to the end again, still scrolled up.
+      fireEvent.change(composer(), { target: { value: "And the tests?" } });
+      fireEvent.click(screen.getByRole("button", { name: S.dg.send }));
+      await screen.findByText("And the tests?");
+      rig.flush();
+      expect(rig.scrolls).toBeGreaterThan(before);
+
+      // Scrolled up once more, then back down to the end: the next line is followed.
+      at(100);
+      before = rig.scrolls;
+      await arrives("lead\tOne is failing.", "One is failing.");
+      expect(rig.scrolls).toBe(before);
+      at(600);
+      await arrives("lead\tIt is fixed.", "It is fixed.");
+      expect(rig.scrolls).toBe(before + 1);
+    } finally {
+      rig.restore();
+    }
+  });
+
+  it("Given the view opened before the project had a run, When a run starts and its conversation grows, Then the newest turn is brought into view", async () => {
+    const g = globalThis as { ResizeObserver?: unknown };
+    const was = g.ResizeObserver;
+    const rig = frameRig();
+    const made: { grew: () => void; on: Element[]; off: boolean }[] = [];
+    g.ResizeObserver = class {
+      me: (typeof made)[number];
+      constructor(cb: () => void) { this.me = { grew: cb, on: [], off: false }; made.push(this.me); }
+      observe(el: Element) { this.me.on.push(el); }
+      disconnect() { this.me.off = true; }
+    };
+    try {
+      const r = mount({}, cur({ dgRun: null }));
+      expect(screen.getByText(S.dg.noRun)).toBeTruthy();
+      expect(made).toEqual([]);
+
+      r.rerender(<CurrentProject.Provider value={cur()}><DirectorGeneral /></CurrentProject.Provider>);
+      await screen.findByText("What is left?");
+      expect(made.length).toBe(1);
+      expect(made[0].on).toEqual([r.container.querySelector(".v-dgv__col")]);
+      rig.watch(r.container.querySelector(".v-dgv__scroll") as HTMLElement);
+      rig.flush();
+      const before = rig.scrolls;
+      made[0].grew();
+      rig.flush();
+      expect(rig.scrolls).toBe(before + 1);
+
+      // The run goes away: the column is gone, and so is its observer.
+      r.rerender(<CurrentProject.Provider value={cur({ dgRun: null })}><DirectorGeneral /></CurrentProject.Provider>);
+      expect(made[0].off).toBe(true);
+      expect(made.length).toBe(1);
+    } finally {
+      rig.restore();
+      g.ResizeObserver = was;
+    }
+  });
+
   it("Given it cannot be asked, Then the reason shows and the composer is off", async () => {
     mount({ lead_status: { available: false, busy: false, name: "Director-General", read_only_reason: "Asking the Director-General needs the Claude Code sandbox." } });
     expect(await screen.findByText(/needs the Claude Code sandbox/)).toBeTruthy();
@@ -328,5 +493,26 @@ describe("run proposals (D4: only a human starts a run)", () => {
     await act(async () => { release({ action_id: "a2", state: "dismissed" }); });
     expect(within(card()).getByRole("status").textContent).toBe(S.dg.receipt.dismissed);
     expect(f.calls.find((c) => c.cmd === "dismiss_proposal")?.args).toEqual({ id: "proposal:a1" });
+  });
+
+  // The plan card: the goal, then its threads by owner, before anything starts. Nothing is sent until Start.
+  it("Given a plan with threads, Then it shows the goal and the threads by owner, and nothing starts until Start", async () => {
+    const workers = [
+      { slot: "w1", role: "backend", task: "Token bucket", account: "claude", model: null, effort: "high", source: "role_default", why: "auth" },
+      { slot: "w2", role: "backend", task: "429 body", account: "claude", model: null, effort: "high", source: "role_default", why: "same path" },
+      { slot: "w3", role: "docs", task: "Document it", account: "claude", model: null, effort: null, source: "dg", why: "plain writing" },
+    ];
+    const { f } = mount({ provider_accounts: { schema: "vajra.provider_accounts/1", accounts: [] }, provider_usage: { usage: [] }, provider_agents: {} },
+      cur({ proposals: [proposal({ workers } as Partial<InboxItem>)] }));
+    await screen.findByRole("log", { name: S.dg.transcript });
+    expect(within(card()).getByText(S.dg.exactAsk)).toBeTruthy();
+    expect(within(card()).getByText(S.dg.threadCount(3, "2 Backend, 1 Docs"))).toBeTruthy();
+    expect(f.calls.some((c) => c.cmd === "start_proposal")).toBe(false);
+  });
+
+  it("Given a plan with no threads listed, Then no thread line is invented", async () => {
+    mount({}, cur({ proposals: [proposal()] }));
+    await screen.findByRole("log", { name: S.dg.transcript });
+    expect(within(card()).queryByText(S.dg.threads)).toBeNull();
   });
 });
