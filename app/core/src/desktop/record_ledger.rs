@@ -27,6 +27,12 @@ pub struct LedgerTask {
     pub def: Value,
     /// What the core's own close stored (bhishma N2): set only when the script answered `closed`.
     pub closed: Option<Closed>,
+    /// The branch the task graph names: `add`'s, then the close's when it gave one (codex on #190).
+    #[serde(default)]
+    pub branch: String,
+    /// The worktree the last claim (or `add`) recorded, if any.
+    #[serde(default)]
+    pub worktree: Option<String>,
 }
 
 /// A task close as the script stores it: the sha256 of the evidence bytes, and `commit`, `branch`, `base_commit`
@@ -37,6 +43,9 @@ pub struct Closed {
     pub commit: String,
     pub branch: String,
     pub base_commit: String,
+    /// The changed paths the close stored (the script keeps at most 200).
+    #[serde(default)]
+    pub changed: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,16 +156,25 @@ impl Ledger {
                 // The bridge refused anything but base64 before the script ran, so this decodes; if not, never matches.
                 self.report = Some(unbase64(base64).map_or_else(|| "undecodable".into(), |b| crate::control::sha256::hex_digest(&b)));
             }
-            Request::TasksAdd { id, title, owner, deps, files, acceptance, .. } => {
+            Request::TasksAdd { id, title, owner, deps, files, acceptance, branch, .. } => {
                 // The bridge refused anything but non-blank idents and one-line text within the script's caps, so the
                 // script stores these as sent. A done task keeps its definition ("exists").
                 if self.tasks.get(id).is_some_and(|t| t.status == "done") {
                     return;
                 }
-                self.task(id).def = serde_json::json!({"title": title, "owner_agent": owner, "deps": deps, "files": files, "acceptance": acceptance});
-            }
-            Request::TasksClaim { id, worker, .. } => {
                 let t = self.task(id);
+                t.def = serde_json::json!({"title": title, "owner_agent": owner, "deps": deps, "files": files, "acceptance": acceptance});
+                // A new task stores the branch (or ""); an existing one takes it only when one is given.
+                if !branch.is_empty() {
+                    t.branch = branch.clone();
+                }
+            }
+            Request::TasksClaim { id, worker, worktree, .. } => {
+                let t = self.task(id);
+                // Both of the script's claim paths ("claimed" and "already claimed") record a given worktree.
+                if let Some(w) = worktree {
+                    t.worktree = Some(w.to_string_lossy().into_owned());
+                }
                 // The script's "already claimed": the same worker on a claimed or in-progress task changes nothing.
                 if !(matches!(t.status.as_str(), "claimed" | "in_progress") && t.claimed_by.as_deref() == Some(worker)) {
                     t.status = "claimed".into();
@@ -175,14 +193,19 @@ impl Ledger {
                 t.status = new.into();
                 t.report = Some((s.into(), summary.clone().unwrap_or_default()));
             }
-            Request::TasksClose { id, commit, branch, base_commit, .. } => {
+            Request::TasksClose { id, commit, branch, base_commit, changed, .. } => {
                 // `already done` (exit 0 too) means someone else closed it, with evidence the core never handed over.
                 let result = serde_json::from_str::<Value>(stdout).ok().and_then(|v| v["result"].as_str().map(str::to_string));
                 match (result.as_deref(), evidence_sha256) {
                     (Some("closed"), Some(sha)) => {
                         let t = self.task(id);
                         t.status = "done".into();
-                        t.closed = Some(Closed { evidence_sha256: sha.into(), commit: commit.clone(), branch: branch.clone(), base_commit: base_commit.clone() });
+                        if !branch.is_empty() {
+                            t.branch = branch.clone();
+                        }
+                        // The bridge sent one-line paths within the script's cap; it keeps the first 200, blanks dropped.
+                        let changed: Vec<String> = changed.iter().filter(|c| !c.trim().is_empty()).take(200).cloned().collect();
+                        t.closed = Some(Closed { evidence_sha256: sha.into(), commit: commit.clone(), branch: branch.clone(), base_commit: base_commit.clone(), changed });
                     }
                     (r, _) => self.foreign = Some(format!("task {id} close answered {}", r.unwrap_or("nothing"))),
                 }
@@ -246,18 +269,22 @@ impl Ledger {
             let by_ok = want.claimed_by.as_ref().is_none_or(|w| t["claimed_by"] == w.as_str()) && (want.claimed_by.is_some() || t.get("claimed_by").is_none_or(Value::is_null));
             // Done: exactly the core's close (evidence hash, commit, branch, base). Not done: no close at all.
             let stored = |k: &str, want: &str| if want.is_empty() { t.get(k).is_none_or(Value::is_null) } else { t[k] == want };
+            let none = |k: &str| t.get(k).is_none_or(Value::is_null);
             let evidence_ok = match &want.closed {
                 Some(c) => {
                     want.status == "done"
                         && t["evidence"]["sha256"] == c.evidence_sha256.as_str()
                         && stored("commit", &c.commit)
-                        && stored("branch", &c.branch)
                         && stored("base_commit", &c.base_commit)
+                        && if c.changed.is_empty() { none("changed") } else { t["changed"] == serde_json::json!(c.changed) }
                 }
-                None => want.status != "done" && t.get("evidence").is_none_or(Value::is_null),
+                None => want.status != "done" && none("evidence") && none("commit") && none("base_commit") && none("changed"),
             };
+            // The branch and worktree the core's add, claims and close left (codex on #190); the script keeps "" for none.
+            let text = |k: &str| t.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let place_ok = text("branch") == want.branch && text("worktree") == want.worktree.clone().unwrap_or_default();
             let def_ok = ["title", "owner_agent", "deps", "files", "acceptance"].iter().all(|k| t[*k] == want.def[*k]);
-            if !status_ok || t["attempts"] != want.attempts || report != want.report || !by_ok || !evidence_ok || !def_ok {
+            if !status_ok || t["attempts"] != want.attempts || report != want.report || !by_ok || !evidence_ok || !def_ok || !place_ok {
                 return Err(format!("task {id} isn't in the state the core's writes left it"));
             }
         }

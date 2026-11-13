@@ -1067,7 +1067,7 @@ fn ledger_and_back() -> (Ledger, ReadBack) {
     l.apply(&Request::TasksReport { slug: SLUG.into(), id: "t1".into(), status: TaskStatus::InProgress, summary: None });
     l.apply(&Request::CampaignProgress { slug: SLUG.into(), text: "round 1".into() });
     let task = serde_json::json!({"id": "t1", "status": "in_progress", "attempts": 1, "claimed_by": "bhima", "report": {"status": "in_progress", "summary": ""},
-        "title": "do", "owner_agent": "bhima", "deps": [], "files": ["src/"], "acceptance": ["ac-1"]});
+        "title": "do", "owner_agent": "bhima", "deps": [], "files": ["src/"], "acceptance": ["ac-1"], "branch": "b", "worktree": ""});
     let back = ReadBack {
         campaign: serde_json::json!({"slug": SLUG, "goal": "g", "status": "active"}),
         features: serde_json::json!({"features": [{"id": "ac-1", "description": "export has --json", "passes": false}, {"id": "ac-2", "description": "docs say so", "passes": false}]}),
@@ -1085,7 +1085,7 @@ fn a_task_replaced_by_a_duplicate_of_another_is_not_the_cores() {
     for id in ["t1", "t2"] {
         l.apply(&Request::TasksAdd { slug: SLUG.into(), id: id.into(), title: "do".into(), owner: "bhima".into(), deps: vec![], files: v(&["src/"]), acceptance: vec![], branch: "b".into() });
     }
-    let task = |id: &str| serde_json::json!({"id": id, "status": "ready", "attempts": 0, "title": "do", "owner_agent": "bhima", "deps": [], "files": ["src/"], "acceptance": []});
+    let task = |id: &str| serde_json::json!({"id": id, "status": "ready", "attempts": 0, "title": "do", "owner_agent": "bhima", "deps": [], "files": ["src/"], "acceptance": [], "branch": "b", "worktree": ""});
     let base = ReadBack { campaign: serde_json::json!({"slug": SLUG, "status": "active"}), features: serde_json::json!({"features": []}), progress: String::new(), tasks: serde_json::json!({"tasks": [task("t1"), task("t2")]}) };
     // The ledger has no create here: give it the goal the read-back has, so only the task graph is under test.
     l.goal = Some("g".into());
@@ -1095,6 +1095,46 @@ fn a_task_replaced_by_a_duplicate_of_another_is_not_the_cores() {
     let mut dup = ok.clone();
     dup.tasks = serde_json::json!({"tasks": [task("t1"), task("t1")]});
     assert!(l.check(&dup).unwrap_err().contains("more than once"), "{:?}", l.check(&dup));
+}
+
+/// codex on #190: the branch `add` wrote, the worktree a claim wrote and the changed paths a close wrote are the core's;
+/// any of them altered by another writer is a mismatch.
+#[test]
+fn a_tasks_branch_worktree_or_changed_paths_altered_outside_the_core_is_not_the_cores() {
+    let (mut l, back) = ledger_and_back();
+    l.apply(&Request::TasksClaim { slug: SLUG.into(), id: "t1".into(), worker: "bhima".into(), worktree: Some(PathBuf::from("/wt/one")) });
+    let mut ok = back.clone();
+    ok.tasks["tasks"][0]["worktree"] = "/wt/one".into();
+    l.check(&ok).unwrap();
+    for (k, v) in [("branch", "agent/own"), ("worktree", "/elsewhere")] {
+        let mut b = ok.clone();
+        b.tasks["tasks"][0][k] = v.into();
+        assert!(l.check(&b).is_err(), "{k} altered");
+    }
+    let close = Request::TasksClose {
+        slug: SLUG.into(),
+        id: "t1".into(),
+        evidence: PathBuf::from("/wt/one/evidence.json"),
+        head: "a".repeat(40),
+        commit: "b".repeat(40),
+        branch: "b".into(),
+        base_commit: "c".repeat(40),
+        changed: v(&["src/a.rs", "src/b.rs"]),
+        repo: PathBuf::from("/wt"),
+    };
+    let sha = crate::control::sha256::hex_digest(b"e");
+    l.applied(&close, r#"{"ok": true, "result": "closed"}"#, Some(&sha));
+    let mut done = ok.clone();
+    let t = &mut done.tasks["tasks"][0];
+    t["status"] = "done".into();
+    t["evidence"] = serde_json::json!({"sha256": sha});
+    t["commit"] = "b".repeat(40).into();
+    t["base_commit"] = "c".repeat(40).into();
+    t["changed"] = serde_json::json!(["src/a.rs", "src/b.rs"]);
+    l.check(&done).unwrap();
+    let mut b = done.clone();
+    b.tasks["tasks"][0]["changed"] = serde_json::json!(["src/a.rs"]);
+    assert!(l.check(&b).is_err(), "changed altered");
 }
 
 #[test]
