@@ -26,6 +26,10 @@ use serde_json::{json, Value};
 
 use super::profiles::{claude_worker_argv, claude_worker_flag, claude_worker_flag_shape, ClaudeWorker, RoleKind, WorkerLaunch};
 
+/// Which self-test this is. A pass recorded on this Mac counts only if this same test proved it, so a stronger test
+/// re-proves every build a weaker one let through (#215 codex: version 1 had no OS sandbox probes, and a build with no
+/// sandbox could pass it). Raise this whenever the test gains a check; the flag shape alone wouldn't change.
+pub const VERSION: u32 = 2;
 /// The longest a self-test may take; past it the build is refused (`timeout`).
 pub const TIMEOUT: Duration = Duration::from_secs(120);
 /// The tools the self-test's worker gets: a writer's full set.

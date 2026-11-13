@@ -28,23 +28,27 @@ fn list_path(data: &Path) -> PathBuf {
     data.join("control").join("claude-proven.json")
 }
 
-/// The pairs this Mac's self-tests proved. A missing, odd or non-regular file is an empty list (fail closed).
+/// The pairs this Mac's self-tests proved, the current self-test only (`claude_selftest::VERSION`). A pair an older,
+/// weaker test recorded, or one with no test number at all, isn't proof: that build is self-tested again. A missing,
+/// odd or non-regular file is an empty list (fail closed).
 fn local_pairs(data: &Path) -> Vec<(String, String)> {
     let p = list_path(data);
     if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
         return Vec::new();
     }
     let v: Value = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-    v["pairs"].as_array().into_iter().flatten().filter_map(|p| Some((p["version"].as_str()?.to_string(), p["shape"].as_str()?.to_string()))).collect()
+    let current = |p: &Value| p["test"].as_u64() == Some(u64::from(claude_selftest::VERSION));
+    v["pairs"].as_array().into_iter().flatten().filter(|p| current(p)).filter_map(|p| Some((p["version"].as_str()?.to_string(), p["shape"].as_str()?.to_string()))).collect()
 }
 
+/// Records a pass of the current self-test. Pairs an older test recorded are dropped as the list is rewritten.
 fn add_pair(data: &Path, version: &str, shape: &str) -> std::io::Result<()> {
     use std::io::Write;
     let dir = data.join("control");
     crate::control::fsx::private_dir(&dir)?;
     let mut pairs = local_pairs(data);
     pairs.push((version.to_string(), shape.to_string()));
-    let body = json!({"pairs": pairs.iter().map(|(v, s)| json!({"version": v, "shape": s})).collect::<Vec<_>>()});
+    let body = json!({"pairs": pairs.iter().map(|(v, s)| json!({"version": v, "shape": s, "test": claude_selftest::VERSION})).collect::<Vec<_>>()});
     let tmp = dir.join(format!("claude-proven.json.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let mut f = crate::control::fsx::create_new(&tmp)?;

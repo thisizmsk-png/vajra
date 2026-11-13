@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::adapter::claude_selftest;
 use crate::providers::errors::{FakeClock, ProviderError};
 use crate::vajra::gitw::{GlobalBaseline, Pause, Quiesce};
 
@@ -873,10 +874,51 @@ fn an_unproven_build_that_passes_its_self_test_here_runs_and_is_not_tested_again
     assert_eq!(selftests(&r), 1);
     let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
     let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&r.home)).unwrap();
-    assert_eq!(list["pairs"], json!([{"version": "9.9.9 (Claude Code)", "shape": shape}]));
+    assert_eq!(list["pairs"], json!([{"version": "9.9.9 (Claude Code)", "shape": shape, "test": claude_selftest::VERSION}]));
     let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
     assert_eq!(selftests(&r), 1, "a proven pair is not tested again");
+}
+
+/// Seeds this Mac's list with one pair for the rig's own build and flag shape, `test` as an older self-test wrote it
+/// (`None`: before pairs carried a test number).
+fn seed_pair(r: &Rig, test: Option<u32>) {
+    let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&r.home)).unwrap();
+    let mut pair = json!({"version": "9.9.9 (Claude Code)", "shape": shape});
+    if let Some(t) = test {
+        pair["test"] = json!(t);
+    }
+    crate::control::fsx::private_dir(&r.gw.data.join("control")).unwrap();
+    std::fs::write(r.gw.data.join("control/claude-proven.json"), json!({"pairs": [pair]}).to_string()).unwrap();
+}
+
+/// #215 codex P1: this Mac's list holds a pair an older, weaker self-test recorded (no OS sandbox probes), and the
+/// build has no OS sandbox: an Edit writes the data folder. Same version, same flag shape, so a list keyed on those
+/// alone would run it untested. The old pair isn't proof of the current test: the build is tested again and refused.
+#[test]
+fn a_pair_an_older_self_test_recorded_is_tested_again_and_a_build_with_no_sandbox_is_refused() {
+    for (tag, test) in [("canary-legacy-none", None), ("canary-legacy-1", Some(1))] {
+        let r = canary_rig(tag, true);
+        seed_pair(&r, test);
+        let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+        assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{tag} {v:?}");
+        assert!(v.worktree.is_none() && !r.d.join("log").exists(), "{tag}: the harness never ran: {v:?}");
+        assert_eq!(selftests(&r), 1, "{tag}: the old pair was self-tested, not trusted");
+    }
+}
+
+/// The same old pair for a build that does pass the current test: it is tested once more, then recorded with this
+/// test's number in place of the old entry.
+#[test]
+fn a_pair_an_older_self_test_recorded_is_replaced_once_the_current_test_passes() {
+    let r = canary_rig("canary-legacy-pass", false);
+    seed_pair(&r, Some(1));
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1);
+    let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
+    let tests: Vec<_> = list["pairs"].as_array().unwrap().iter().map(|p| p["test"].clone()).collect();
+    assert_eq!(tests, [json!(claude_selftest::VERSION)], "only the current test's pass is kept");
 }
 
 /// #195 bhishma: the CLI updates in place (9.9.9 to 9.9.10) while 9.9.9's self-test runs. The PASS can't be told
