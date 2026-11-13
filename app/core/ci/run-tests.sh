@@ -2,7 +2,8 @@
 # The core Rust tests, as CI runs them: every test, in two passes.
 #   1. Everything except the tests in ci/serial-tests.txt, in parallel (cargo test's default).
 #   2. The tests in ci/serial-tests.txt, one at a time (--test-threads=1), with their assertions and limits unchanged.
-# Nothing is retried. A listed name that matches no test fails the run.
+# Nothing is retried. A listed name that matches no test fails the run. Both passes always run; the run fails if
+# either one did.
 #
 #   bash app/core/ci/run-tests.sh
 set -euo pipefail
@@ -30,12 +31,17 @@ done < ci/serial-tests.txt
 skips=()
 for t in ${serial[@]+"${serial[@]}"}; do skips+=(--skip "$t"); done
 
+# Both passes always run, so a failure in pass 1 doesn't hide pass 2's results; the run fails if either failed.
 echo "run-tests: pass 1, every test but ${#serial[@]} serial ones, in parallel"
-cargo test -- --exact ${skips[@]+"${skips[@]}"}
+p1=0
+cargo test -- --exact ${skips[@]+"${skips[@]}"} || p1=$?
 # With no serial tests there is no pass 2: an unfiltered --test-threads=1 run would run the whole suite again.
+p2=0
 if [ "${#serial[@]}" -eq 0 ]; then
     echo "run-tests: pass 2 skipped, ci/serial-tests.txt lists no tests"
-    exit 0
+else
+    echo "run-tests: pass 2, ${#serial[@]} tests one at a time"
+    cargo test --lib -- --exact --test-threads=1 "${serial[@]}" || p2=$?
 fi
-echo "run-tests: pass 2, ${#serial[@]} tests one at a time"
-cargo test --lib -- --exact --test-threads=1 "${serial[@]}"
+echo "run-tests: pass 1 $([ "$p1" -eq 0 ] && echo passed || echo "FAILED ($p1)"), pass 2 $([ "$p2" -eq 0 ] && echo passed || echo "FAILED ($p2)")"
+[ "$p1" -eq 0 ] && [ "$p2" -eq 0 ]
