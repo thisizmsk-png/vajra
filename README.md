@@ -128,9 +128,11 @@ is not guarded: [docs/desktop/DATA.md](docs/desktop/DATA.md). In short:
 - The app's own code makes one outbound call, and only if you saved an OpenRouter key: a usage read, at most once a
   minute. It has no telemetry, analytics, crash upload or updater code. Claude Code, Codex and `gh` send what they always
   send, under your sign-ins.
-- Claude workers run under the Vajra guard, and the OS sandbox (opt-in) is the real boundary.
-- **Codex workers run outside the Vajra guard today** and can read the signing key; their cards say so. Until the per-launch
-  Codex profile (#216) merges, do not treat a Codex seat as guarded.
+- Claude workers that Claude Code's own campaign starts run under the Vajra guard, and the OS sandbox (opt-in) is the real
+  boundary. The app's own Claude worker dispatch is off at this base, until the S4 spike passes and #224 lands.
+- **Codex workers run outside the Vajra guard today** and can read the signing key; their cards say so. They write only in
+  their worktree, but their network follows the seat setting and your own Codex MCP servers and `notify` hook run outside
+  that sandbox. Until the per-launch Codex profile (#216) merges, do not treat a Codex seat as guarded.
 
 ## Using it
 

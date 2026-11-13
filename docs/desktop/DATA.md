@@ -11,8 +11,11 @@ is not true yet, it says so. This describes the macOS app in `app/`; the Claude 
   else that leaves your Mac is done by the tools it launches (Claude Code, Codex, `gh`) under your own sign-ins.
 - There is no telemetry, analytics, crash upload or auto-update code in the app. See "Nothing else leaves" for what that
   rests on, and what it cannot cover.
-- The guard and the Claude Code sandbox protect the Claude side. **Codex seats run outside the Vajra guard today**, and the
-  app says so on the card.
+- The guard and the Claude Code sandbox protect Claude workers that Claude Code's own campaign starts; the app's own Claude
+  worker dispatch is off at this base. **Codex seats run outside the Vajra guard today**, and the app says so on the card.
+
+**Keep this page in step with the code.** It cites batch-3. Re-check it when #216 (the Codex profile) or #224 (in-app Claude
+workers, and the S4 proof) lands, because both change claims here.
 
 ## What it reads
 
@@ -22,13 +25,17 @@ is not true yet, it says so. This describes the macOS app in `app/`; the Claude 
 | `~/.claude/projects/<folder>/<session>/subagents` | Claude Code's worker transcripts, read-only, size-capped, so the app can list workers | `app/core/src/desktop/mod.rs` (`discover_workers`) |
 | `~/.claude/vajra/campaigns` and `~/.claude/workflows/vajra-deliver.js` | run progress and a check that the workflow is installed | `app/core/src/vajra/allowlist.rs` |
 | A Codex worker's session file under its `CODEX_HOME` | to show which model it really used (the harness's own report, not what was asked for) | `app/core/src/providers/effective.rs` |
-| Your login-shell `PATH` | to find `claude`, `codex`, `gh` and `git` (runs your login shell with a deadline, at most once per refresh gap) | `app/core/src/userpath.rs` |
+| Your login-shell `PATH` | to find `claude`, `codex`, `gh` and `git`. **This runs your login shell, so your shell startup files run and can do whatever they already do.** It has a deadline and runs at most once per refresh gap | `app/core/src/userpath.rs` |
 | The results of `claude --version`, the install doctor, the hooks and sandbox status | the first-run checks | `app/core/src/vajra/preflight.rs` |
 
 **What it never reads:** the signing key `~/.claude/vajra/.hmac-key`. The app's file allowlist refuses that name before and
 after resolving symlinks, and only stats it to check who owns it (`app/core/src/vajra/allowlist.rs`, `key_path`).
-It also never opens a CLI's own sign-in token: pasted API keys go to the macOS Keychain, write-once with no read-back
-(`app/core/src/providers/keychain.rs`).
+It also never opens a CLI's own sign-in token. A pasted API key goes into the macOS Keychain through the system `security`
+tool on stdin, and the app can afterwards only check that an item exists, add one or delete one (`app/core/src/providers/keychain.rs`).
+**The key is read back, but not by the app's own process:** when it is used, the system `security` tool reads it
+(`find-generic-password ... -w`) and pipes it straight into `curl` for the usage read (`app/core/src/providers/usage.rs`), or
+into Codex through the generated auth command for a gateway seat (`app/core/src/providers/codex_home.rs`). So the app's own
+process never holds the key, but those two tools do, for the length of the call.
 
 ## What it writes
 
@@ -41,7 +48,7 @@ It also never opens a CLI's own sign-in token: pasted API keys go to the macOS K
 | A `CODEX_HOME` per gateway account | under the data folder | `app/core/src/providers/codex_home.rs` |
 | Agent worktrees | `~/Library/Application Support/VajraWorktrees/` (0700, a sibling that agents may write) | `app/core/src/vajra/gitw.rs` (`work_root`) |
 | A git worktree entry in your repo | `<repo>/.git/worktrees/...`, made with `git worktree add --detach` | removed again on rollback (`gitw.rs`) |
-| A pasted provider key | the macOS Keychain, service `vajra.provider.openrouter` | `app/core/src/providers/keychain.rs` |
+| A pasted provider key | the macOS Keychain, service `vajra.provider.openrouter` (see "What it never reads" for who reads it back) | `app/core/src/providers/keychain.rs` |
 
 The Vajra skill's own state under `~/.claude/vajra/` (the key, the knowledge ledger, campaigns) is written by the skill's
 scripts, not by the app.
@@ -50,14 +57,23 @@ scripts, not by the app.
 
 **1. The app's one direct call.** If you saved an OpenRouter key, the app asks `https://openrouter.ai/api/v1/key` how much
 that key has used. It runs only while Settings > Providers is open or a run is active, at most once a minute per account,
-through `/usr/bin/curl` with the key piped on stdin so it is never in argv, a log or this process's memory; only four usage
-numbers are kept. No key saved means no call. (`app/core/src/providers/usage.rs`)
+through `/usr/bin/curl` with the key piped on stdin (read by the system `security` tool, not by the app) so it is never in argv,
+a log or this process's memory; only four usage numbers are kept. No key saved means no call. (`app/core/src/providers/usage.rs`)
 
 **2. What the tools it launches send, under your sign-ins.** Claude Code and Codex talk to their providers as they always
-do; that is the point of the app. Vajra does not add a proxy or forward your keys: sessions see only
-`PATH, HOME, LANG, TERM, USER, SHELL` (`app/core/src/sessions/mod.rs`, `ENV_ALLOW`). A Codex worker's network follows its seat's
-setting (`sandbox_workspace_write.network_access`), and the card says "Internet on for this worker" when it is on
-(`app/core/src/adapter/profiles.rs`, `app/core/src/desktop/seat_start.rs`).
+do; that is the point of the app. Vajra does not add a proxy or forward your keys. Sessions see `PATH, HOME, LANG, TERM, USER,
+SHELL` (`app/core/src/sessions/mod.rs`, `ENV_ALLOW`), and a launch may add three more, from a fixed list
+(`EXTRA_ENV_ALLOW` in the same file): `CODEX_HOME` (a Vajra-owned one for a gateway seat), `CLAUDE_CONFIG_DIR`, and a
+per-ticket `TMPDIR`. None of them is a key. A Codex worker's network follows its seat's setting
+(`sandbox_workspace_write.network_access`), and the card says "Internet on for this worker" when it is on
+(`app/core/src/adapter/profiles.rs`, `app/core/src/desktop/seat_start.rs`). Three more things leave your Mac that are easy to miss:
+
+- **A Codex gateway seat sends its prompts and code to OpenRouter**, under the key you saved (`app/core/src/providers/codex_home.rs`,
+  `DEFAULT_BASE_URL`).
+- **The provider checks run each CLI's own login-status command, and that command may contact the provider**
+  (`app/core/src/providers/detect.rs`). What it sends is the CLI's business, not the app's.
+- **Reading your login-shell `PATH` runs your shell startup files** (`app/core/src/userpath.rs`), which can do anything they
+  already do.
 
 **3. A PR comment, only when you click.** "Post proof" runs your own `gh pr comment` for the repo and PR you confirmed. The
 text is rebuilt from the record, not taken from the screen. (`app/core/src/desktop/proof_app.rs`, `act_post_proof_comment`)
@@ -86,14 +102,24 @@ doctor passes and reports Claude Code's OS sandbox as active with its write-deny
 says "Asking the Director-General needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry."
 (`app/core/src/desktop/lead.rs`, `doctor_ok`, `SANDBOX_NEEDED`).
 
-**Claude workers.** They run with the Vajra guard, which blocks dangerous or self-modifying commands, writes to the
+**Claude workers.** Two cases, and only the first is true at this base:
+
+- Workers that Claude Code's own campaign starts (the Vajra skill's workflow) run with the Vajra guard.
+- **The app's own Claude worker dispatch is off at this base.** It stays off until the flag for Claude Code spike S4 passes
+  (`CLAUDE_WORKER_S4_PASSED` is `false` in `app/core/src/adapter/profiles.rs`) and #224 lands, which also changes how those
+  workers load settings and use the sandbox. This page needs updating when they do.
+
+Under the guard, a worker is blocked from dangerous or self-modifying commands, writes to the
 skill's files and settings, and the ways it knows of to read the signing key. The list is in
 [SECURITY.md](../../SECURITY.md) ("The guard"). The guard is defense in depth: a pattern check over free-form shell cannot
 be complete, and **the OS sandbox is the enforced boundary, which is opt-in** (`/sandbox` in Claude Code, or
 `scripts/enable-sandbox.sh`). The first-run checks show whether it is on (`preflight.rs`).
 
 **Codex workers.** Codex's own `workspace-write` sandbox applies, so a worker can write in its worktree only
-(`app/core/src/sessions/argv.rs`, `app/core/src/adapter/profiles.rs`). The Vajra guard does not run on them.
+(`app/core/src/sessions/argv.rs`, `app/core/src/adapter/profiles.rs`). **That is the whole of it, with two caveats:** the
+worker's network follows its seat's setting (`sandbox_workspace_write.network_access`), so it may have internet; and your own
+Codex MCP servers and `notify` hook run outside that sandbox, with the worker (`CODEX_WARNING` in
+`app/core/src/desktop/seat_start.rs`). The Vajra guard does not run on Codex workers.
 
 ## What is not guarded, and why
 
