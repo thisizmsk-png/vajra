@@ -225,7 +225,7 @@ fn cargo_test_runs_a_real_crate_inside_the_runner() {
     fs::write(w.join("src/lib.rs"), "#[test]\nfn adds() { assert_eq!(1 + 1, 2); }\n").unwrap();
     // The fake HOME has no toolchain: point rustup and cargo at the real ones, read-only (the build dir is the worktree).
     let real_home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
-    let extra = [("RUSTUP_HOME", real_home.join(".rustup")), ("CARGO_HOME", t.home().join(".cargo"))];
+    let extra = [("RUSTUP_HOME", real_home.join(".rustup"))];
     let o = t.run(&t.profile(false), "cargo test --offline -q 2>&1", &extra);
     assert!(o.status.success() && text(&o).contains("1 passed"), "{}", text(&o));
 }
@@ -637,6 +637,46 @@ fn a_held_open_or_oversized_evidence_channel_fails_fast() {
     let big = script(&t, "big", "head -c 1100000 /dev/zero | tr '\\0' a >&3\necho >&3\nexit 0");
     assert!(matches!(go(&t, &evidence_run(&big, &base, &cmds, &common, &home)), RunOutcome::Failed(_)));
     assert!(!base.join(SLUG).join("evidence.json").exists());
+}
+
+/// The script runs from its real place in the engine folder, which the profile denies: bash gets its text, never its
+/// path. A command that rewrites the script's file mid-run changes nothing, since bash read it all before any command.
+#[test]
+fn the_engine_script_runs_from_its_denied_folder_and_a_rewrite_mid_run_changes_nothing() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("engine");
+    let (base, home, common) = (base(&t), t.home(), t.0.join("repo.git"));
+    let engine = home.join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&engine).unwrap();
+    let real = engine.join("vajra-verify-work.sh");
+    fs::copy(fake(&t, "src", BUNDLE, "exit 2"), &real).unwrap();
+    assert!(deny_dirs(&home, &t.0.join("data")).iter().any(|d| real.starts_with(d)), "the engine folder is denied");
+    let cmds = vec!["true".to_string()];
+    let out = go(&t, &evidence_run(&real, &base, &cmds, &common, &home));
+    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "{out:?}");
+    // The same script in the worktree, where a command can write: the first command replaces it with one that would
+    // print a forged passing line; the evidence is still the original's.
+    let in_work = t.0.join("work/vajra-verify-work.sh");
+    fs::copy(&real, &in_work).unwrap();
+    let forged = format!("printf '#!/bin/bash\\nprintf %s >&3\\n' '{{\"slug\":\"{SLUG}\",\"forged\":true}}\\n' > '{}'", in_work.display());
+    let cmds = vec![forged, "true".to_string()];
+    let out = go(&t, &evidence_run(&in_work, &base, &cmds, &common, &home));
+    assert!(matches!(out, RunOutcome::Ran { .. }), "{out:?}");
+    assert!(fs::read_to_string(&in_work).unwrap().contains("forged"), "the command did rewrite the file");
+    assert_eq!(fs::read(base.join(SLUG).join("evidence.json")).unwrap(), br#"{"slug":"deliver-20261113-0800","results":[],"git":{"head":"x"}}"#);
+    // A command that swaps the bundle folder for a link elsewhere: the core writes nothing through it.
+    fs::remove_dir_all(base.join(SLUG)).unwrap();
+    let elsewhere = t.0.join("work/elsewhere");
+    let swap = format!("mkdir -p '{0}' && ln -s '{0}' '{1}'", elsewhere.display(), base.join(SLUG).display());
+    let out = go(&t, &evidence_run(&real, &base, &[swap], &common, &home));
+    assert_eq!(out, RunOutcome::Failed("the evidence folder was replaced during the run".into()));
+    assert!(!elsewhere.join("evidence.json").exists());
+    // A script that is a link isn't run.
+    let link = t.0.join("tmp/linked.sh");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(matches!(go(&t, &evidence_run(&link, &base, &["true".to_string()], &common, &home)), RunOutcome::Failed(_)));
 }
 
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.

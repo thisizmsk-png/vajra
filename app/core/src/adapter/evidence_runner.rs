@@ -155,14 +155,17 @@ pub fn deny_dirs(home: &Path, data: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Every build cache a toolchain writes, pointed into the run's tmp through the toolchain's own variable (M3): a check
-/// can't plant code in a shared cache that a later build outside the sandbox would compile or run. The shared caches
-/// in the home folder (cargo's registry, Go's module cache) stay readable, never writable: an offline build reuses what
-/// is already downloaded, and a build that needs a new download needs the network seat.
+/// Every cache and package home a toolchain writes, pointed into the run's tmp through the toolchain's own variable
+/// (M3): a check can't plant code in a shared cache that a later build outside the sandbox would compile or run. The
+/// user's own caches in the home folder are never writable. Cargo's home and Go's module cache are the run's too, so no
+/// build reads sources from a cache the user shares. A dependency then comes from the network seat, or from what the
+/// worktree already holds (vendored crates, the N7 `node_modules` clone).
 pub fn cache_env(tmp: &Path) -> Vec<(&'static str, PathBuf)> {
     let c = tmp.join("cache");
     vec![
+        ("CARGO_HOME", c.join("cargo-home")),
         ("CARGO_TARGET_DIR", c.join("cargo-target")),
+        ("GOMODCACHE", c.join("go-mod")),
         ("GOCACHE", c.join("go-build")),
         ("GOTMPDIR", tmp.join("go-tmp")),
         ("npm_config_cache", c.join("npm")),
@@ -213,7 +216,7 @@ pub fn key_probe(profile: &Profile, state_dir: &Path) -> bool {
         crate::vajra::bridge::run_process_full(Path::new(SANDBOX_EXEC), &argv, Some(&profile.worktree), PROBE_MAX, None, None).ok().filter(|o| !o.timed_out)
     };
     // The state dir: the OS refuses the read.
-    let dir_refused = under("/bin/ls", &[target.to_string()]).is_some_and(|o| o.code.is_some_and(|c| c != 0) && o.stdout.trim().is_empty() && o.stderr.contains("Operation not permitted"));
+    let dir_refused = under("/bin/ls", &[target.to_string()]).is_some_and(|o| o.code == Some(1) && o.stdout.trim().is_empty() && o.stderr.contains("Operation not permitted"));
     // LaunchServices, the way out to an unsandboxed process (M1): asking it for the front app gets no answer.
     let launch_refused = under("/usr/bin/lsappinfo", &["front".to_string()]).is_some_and(|o| !o.stdout.contains("ASN:"));
     dir_refused && launch_refused
@@ -267,6 +270,20 @@ pub enum SignOutcome {
     Unknown(String),
 }
 
+/// The evidence script's text: a plain file (no link), at most 256 KiB, UTF-8 with no NUL (it travels in argv).
+fn script_text(script: &Path) -> Result<String, &'static str> {
+    let bad = "the evidence script isn't a plain, readable script";
+    let m = std::fs::symlink_metadata(script).map_err(|_| bad)?;
+    if !m.file_type().is_file() || m.len() > 256 * 1024 {
+        return Err(bad);
+    }
+    let text = String::from_utf8(std::fs::read(script).map_err(|_| bad)?).map_err(|_| bad)?;
+    if text.contains('\0') {
+        return Err(bad);
+    }
+    Ok(text)
+}
+
 /// 6i-e's refusal reasons. A first line outside this list is `Unknown` (fail closed).
 fn known_refusal(reason: &str, slug: &str) -> bool {
     matches!(reason, "sha256 mismatch" | "head mismatch" | "already signed" | "no evidence.json" | "not JSON" | "a symlinked path") || reason == format!("not a bundle for {slug}")
@@ -295,10 +312,16 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     if let Err(e) = profile.prepare() {
         return RunOutcome::Failed(format!("couldn't prepare the run's folders: {e}"));
     }
-    let Some(script) = r.script.to_str() else { return RunOutcome::Failed("the evidence script's path isn't text".into()) };
-    let mut args = vec!["--run-only".to_string(), r.slug.to_string()];
+    // bash gets the script's text, read here once, never its path: the engine folder is denied inside the profile,
+    // and a copy anywhere a command can write could be rewritten while bash reads it, so a command could print a
+    // passing line of its own on fd 3. With `-c` bash holds the whole script before any command runs.
+    let text = match script_text(r.script) {
+        Ok(t) => t,
+        Err(why) => return RunOutcome::Failed(why.into()),
+    };
+    let mut args = vec!["-c".to_string(), text, "vajra-verify-work.sh".into(), "--run-only".into(), r.slug.to_string()];
     args.extend(r.commands.iter().cloned());
-    let argv = match profile.argv("/bin/bash", &[vec![script.to_string()], args].concat()) {
+    let argv = match profile.argv("/bin/bash", &args) {
         Ok(a) => a,
         Err(e) => return RunOutcome::Failed(e),
     };
@@ -399,7 +422,14 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     if v.get("hmac").is_some() || v["slug"].as_str() != Some(r.slug) {
         return RunOutcome::Failed("the evidence isn't an unsigned bundle for this check".into());
     }
+    // The bundle folder is under the worktree, which the commands could write: it must be a plain folder at exactly
+    // this path, never a link a command left to send the core's write somewhere else.
     let dir = r.base.join(r.slug);
+    let _ = std::fs::create_dir(&dir);
+    let plain = std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_dir()) && canonical_base(&dir).as_deref() == Some(dir.as_path());
+    if !plain {
+        return RunOutcome::Failed("the evidence folder was replaced during the run".into());
+    }
     if let Err(e) = crate::control::fsx::write_atomic(&dir, "evidence.json", json) {
         return RunOutcome::Failed(format!("couldn't save the evidence: {e}"));
     }
