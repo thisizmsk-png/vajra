@@ -258,6 +258,9 @@ struct Book {
     /// The runs folder itself could not be listed whole at start (#178 codex): which runs have history is unknown, so
     /// no run takes a dispatch this life.
     unlisted: bool,
+    /// A run's `max_in_flight`: at most this many of its writer tickets run at once; the rest wait queued (#153 codex
+    /// P2). Check tickets don't count and aren't held.
+    run_caps: BTreeMap<String, u32>,
 }
 
 impl Book {
@@ -623,6 +626,20 @@ impl WorkerRuntime {
         &self.0.gw
     }
 
+    /// The run's `max_in_flight` (#153 codex P2): at most `n` of its writer tickets run at once; the rest stay queued
+    /// with a `run_limit` wait until one ends. 0 means no limit. Check tickets are exempt.
+    pub fn limit_writers(&self, run: &str, n: u32) {
+        {
+            let mut b = crate::lock(&self.0.book);
+            if n == 0 {
+                b.run_caps.remove(run);
+            } else {
+                b.run_caps.insert(run.to_string(), n);
+            }
+        }
+        self.pump();
+    }
+
     pub fn view(&self, id: &str) -> Option<TicketView> {
         let b = crate::lock(&self.0.book);
         b.tickets.get(id).map(live_view).or_else(|| b.past.get(id).cloned())
@@ -880,6 +897,11 @@ impl WorkerRuntime {
             let mut busy: Vec<(String, String)> = b.tickets.values().filter(|e| e.view.state == State::Running).map(|e| (e.view.run.clone(), e.seat.slot.clone())).collect();
             let mut order: Vec<(u64, String)> = b.tickets.values().filter(|e| e.view.state == State::Queued).map(|e| (e.seq, e.view.id.clone())).collect();
             order.sort();
+            let caps = b.run_caps.clone();
+            let mut writers: BTreeMap<String, u32> = BTreeMap::new();
+            for e in b.tickets.values().filter(|e| e.view.state == State::Running && matches!(e.job, Job::Task(_))) {
+                *writers.entry(e.view.run.clone()).or_default() += 1;
+            }
             let mut pos: BTreeMap<(String, String), u32> = BTreeMap::new();
             for (_, id) in order {
                 let Some(e) = b.tickets.get_mut(&id) else { continue };
@@ -892,6 +914,14 @@ impl WorkerRuntime {
                     e.view.wait = None;
                     continue;
                 }
+                let writer = matches!(e.job, Job::Task(_));
+                if let Some(cap) = caps.get(&e.view.run).filter(|_| writer) {
+                    if writers.get(&e.view.run).copied().unwrap_or(0) >= *cap {
+                        let detail = format!("Waiting for one of this run's {cap} writer slot(s) to free");
+                        e.view.wait = Some(json!({"code": "run_limit", "detail": detail}));
+                        continue;
+                    }
+                }
                 let accounts: Vec<&str> = live.iter().map(String::as_str).collect();
                 match caps::dispatch_check(&accounts, &e.seat.account, &self.0.cfg.account_caps) {
                     Err(w) => e.view.wait = Some(wait_json(&w)),
@@ -901,6 +931,9 @@ impl WorkerRuntime {
                         e.view.wait = None;
                         e.view.started = Some(Instant::now());
                         live.push(e.seat.account.clone());
+                        if writer {
+                            *writers.entry(e.view.run.clone()).or_default() += 1;
+                        }
                         busy.push(key.clone());
                         pos.remove(&key);
                         start.push(id);

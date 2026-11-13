@@ -13,13 +13,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::Instant;
 
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
 use vajra_desktop::control::{self, mcp};
 use serde_json::Value;
-use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
+use vajra_desktop::desktop::{App, Envelope, Pace, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
@@ -342,6 +342,16 @@ fn export_proof_page(app: State<'_, App>, slug: String) -> Res {
 #[tauri::command(async)]
 fn act_post_proof_comment(app: State<'_, App>, envelope: Envelope, slug: String, pr_url: String) -> Value {
     app.act_post_proof_comment(&envelope, &slug, &pr_url)
+}
+
+#[tauri::command(async)]
+fn evidence_approval(app: State<'_, App>, run_id: String) -> Res {
+    app.evidence_approval(&run_id)
+}
+
+#[tauri::command(async)]
+fn act_answer_evidence_approval(app: State<'_, App>, envelope: Envelope, run_id: String, sha256: String, approve: bool) -> Value {
+    app.act_answer_evidence_approval(&envelope, &run_id, &sha256, approve)
 }
 
 #[tauri::command(async)]
@@ -765,12 +775,21 @@ fn main() {
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
+                // Nothing runs at rest: with no live run (and past `AFTER_RUN`), the loop waits on the bus. A line, the
+                // wake a new run sends, or the `IDLE_WAIT` housekeeping tick brings it back. Launch starts busy.
+                let mut pace = Pace::new(Instant::now());
+                let mut wait = vajra_desktop::desktop::LIVE_WAIT;
                 loop {
-                    let changed = collect_changes(&sub, Duration::from_secs(1));
+                    let changed = collect_changes(&sub, wait);
+                    let (busy, next) = pace.next(handle.state::<App>().active_run_count() > 0, Instant::now());
+                    wait = next;
                     // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
-                    handle.state::<App>().refresh_workers();
+                    if busy {
+                        handle.state::<App>().refresh_workers();
+                    }
                     // Finished workers that lose nothing are closed on their own (setting `auto_close_finished`). Git is
-                    // asked off this loop, so a slow repo never delays worker refreshes.
+                    // asked off this loop, so a slow repo never delays worker refreshes. Not gated on `busy`: at rest a
+                    // turn is an event or the `IDLE_WAIT` tick, so a worker that became safe later is still closed.
                     if handle.state::<App>().closeout_due() {
                         let h = handle.clone();
                         std::thread::spawn(move || {
@@ -789,7 +808,9 @@ fn main() {
                     #[cfg(target_os = "macos")]
                     {
                         let app = handle.state::<App>();
-                        app.reap_runs();
+                        if busy {
+                            app.reap_runs();
+                        }
                         nap.update(app.active_run_count());
                     }
                 }
@@ -825,6 +846,8 @@ fn main() {
             run_proof,
             export_proof_page,
             act_post_proof_comment,
+            evidence_approval,
+            act_answer_evidence_approval,
             resume_targets,
             crew,
             tail,

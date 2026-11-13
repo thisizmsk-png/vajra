@@ -309,6 +309,27 @@ fn two_default_seat_runs_start_side_by_side() {
     assert_eq!((r.rt.view(&a).unwrap().state, r.rt.view(&b).unwrap().state), (State::Running, State::Running));
 }
 
+/// #153 codex P2: a run's max_in_flight holds its excess writers in the queue until a slot frees, even on different
+/// seats; another run, and the run's own check tickets, are not held by it.
+#[test]
+fn a_runs_writer_limit_queues_its_excess_writers_but_not_its_checks_or_other_runs() {
+    let r = rig("runcap", Opts { mode: "slow", ..Opts::default() });
+    r.rt.limit_writers("r1", 1);
+    let a = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let b = r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap();
+    let other = r.rt.dispatch(r.task("r2", "t1"), seat("w2", "codex")).unwrap();
+    let check = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "v"), seat("v1", "codex"), &r.base).unwrap();
+    let vb = r.rt.view(&b).unwrap();
+    assert_eq!(vb.state, State::Queued, "the second independent writer waits for the run's one slot");
+    assert_eq!(vb.wait.as_ref().unwrap()["code"], "run_limit", "{vb:?}");
+    assert_ne!(r.rt.view(&other).unwrap().state, State::Queued, "another run isn't held");
+    assert_ne!(r.rt.view(&check).unwrap().state, State::Queued, "check tickets are exempt");
+    r.done(&a);
+    assert_eq!(r.done(&b).outcome, Some(Outcome::Done), "the slot freed, so it ran");
+    r.done(&other);
+    r.done(&check);
+}
+
 #[test]
 fn an_account_cap_queues_across_runs_and_mixed_providers_and_releases() {
     let caps: BTreeMap<String, u32> = [("codex".to_string(), 1)].into();
