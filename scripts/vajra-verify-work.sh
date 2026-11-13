@@ -161,7 +161,14 @@ fi
 if [ "$MODE" = run_only ]; then
   { : >&3; } 2>/dev/null || { echo "vajra-verify-work: --run-only needs fd 3 open for the evidence" >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || { echo "vajra-verify-work: --run-only needs jq" >&2; exit 2; }
+  # Claude review #214 (MUST): the evidence moves to a private fd 9 and fd 3 is closed now, so nothing this script
+  # starts (git's repo-configured filters, fsmonitor, diff and textconv drivers, jq, the commands) ever sees fd 3.
+  exec 9>&3 3>&-
 fi
+# Every child runs with fd 9 closed too (git and jq through these wrappers, the commands by their own redirect), so
+# only this script writes the evidence. Harmless when fd 9 isn't open.
+git() { command git "$@" 9>&-; }
+jq() { command jq "$@" 9>&-; }
 
 RAW_SLUG="${1:-}"
 [ -z "$RAW_SLUG" ] && usage
@@ -211,13 +218,14 @@ tree_of_worktree() {
 : > "${DIR}/diff.patch"; : > "${DIR}/diff.stat"; : > "${DIR}/untracked.txt"
 if [ "$IN_GIT" -eq 1 ]; then
   if [ -n "$HEAD_SHA" ]; then DBASE="$HEAD_SHA"; else DBASE="$(git hash-object -t tree /dev/null)"; fi
-  g diff --binary "$DBASE" > "${DIR}/diff.patch" 2>/dev/null || true
-  g diff --stat "$DBASE" > "${DIR}/diff.stat" 2>/dev/null || true
+  # No repo-configured external diff or textconv program runs (Claude review #214).
+  g diff --binary --no-ext-diff --no-textconv "$DBASE" > "${DIR}/diff.patch" 2>/dev/null || true
+  g diff --stat --no-ext-diff --no-textconv "$DBASE" > "${DIR}/diff.stat" 2>/dev/null || true
   g ls-files --others --exclude-standard > "${DIR}/untracked.txt.tmp" 2>/dev/null || true
   mv "${DIR}/untracked.txt.tmp" "${DIR}/untracked.txt"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    ( cd "$TOP" && git diff --binary --no-index -- /dev/null "$f" ) >> "${DIR}/diff.patch" 2>/dev/null
+    ( cd "$TOP" && git diff --binary --no-ext-diff --no-textconv --no-index -- /dev/null "$f" ) >> "${DIR}/diff.patch" 2>/dev/null
     printf ' %s (untracked)\n' "$f" >> "${DIR}/diff.stat"
   done < "${DIR}/untracked.txt"
   TREE="$(tree_of_worktree)"
@@ -229,8 +237,8 @@ for cmd in "$@"; do
   n=$((n+1))
   log="${DIR}/cmd-${n}.log"
   echo "\$ ${cmd}" > "$log"
-  # fd 3 is closed for every command: in --run-only it carries the evidence, which no command may write.
-  bash -c "$cmd" >> "$log" 2>&1 3>&-
+  # fd 3 and fd 9 are closed for every command: in --run-only fd 9 carries the evidence, which no command may write.
+  bash -c "$cmd" >> "$log" 2>&1 3>&- 9>&-
   ec=$?
   [ "$ec" -ne 0 ] && failed=$((failed+1))
   printf '  [%s] cmd %d (exit %d): %s\n' "$([ "$ec" -eq 0 ] && echo PASS || echo FAIL)" "$n" "$ec" "$cmd"
@@ -261,12 +269,12 @@ ev_json() {
           commands:$cmds}'
 }
 if [ "$MODE" = run_only ]; then
-  # fd 3 gets exactly one line, the compact JSON plus a newline, written once from this script's own memory (no file
-  # a leftover command could rewrite); then fd 3 is closed, so no later write can reach it. A result that isn't one
-  # non-empty line writes nothing: the core reads zero lines and fails closed.
-  EVJ="$(ev_json 3>&-)" || EVJ=""
-  case "$EVJ" in ""|*$'\n'*) ;; *) printf '%s\n' "$EVJ" >&3 ;; esac
-  exec 3>&-
+  # The core's fd 3 (held here as fd 9) gets exactly one line, the compact JSON plus a newline, written once from this
+  # script's own memory (no file a leftover command could rewrite); then it is closed, so no later write can reach it.
+  # A result that isn't one non-empty line writes nothing: the core reads zero lines and fails closed.
+  EVJ="$(ev_json)" || EVJ=""
+  case "$EVJ" in ""|*$'\n'*) ;; *) printf '%s\n' "$EVJ" >&9 ;; esac
+  exec 9>&-
 elif [ "$have_jq" -eq 1 ]; then
   ev_json > "${DIR}/evidence.json"
 fi

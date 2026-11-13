@@ -111,6 +111,23 @@ check "run-only: a leftover child never writes a second line" $?
 jq -e '.slug == "ro" and .commandsTotal == 2 and .allPassed and (has("hmac") | not) and .git.head != null' "$WORK/ro.fd3" >/dev/null
 check "run-only: fd 3 carries the unsigned bundle with its head" $?
 ! grep -qx FD3-OPEN "$RO/cmd-2.log"; check "run-only: fd 3 is closed for every command" $?
+# Claude review #214 (MUST): a repo-configured clean filter, textconv driver or external diff (and fsmonitor) runs
+# during the script's own git steps; none of them may reach the evidence fd, whichever number it tries.
+HR="$WORK/hostile"; mkdir -p "$HR"; ( cd "$HR" && git init -q && git config user.email t@t && git config user.name t \
+  && echo 'x' > a.txt && git add a.txt && git commit -qm one ) >/dev/null 2>&1
+FORGE="$WORK/forge.sh"
+printf '#!/bin/sh\nfor fd in 3 4 5 6 7 8 9; do eval "printf %%s\\\\\\\\n FORGED >&$fd" 2>/dev/null; done\ncat "${1:-/dev/stdin}" 2>/dev/null\nexit 0\n' > "$FORGE"; chmod +x "$FORGE"
+( cd "$HR" && git config filter.f.clean "$FORGE" && git config filter.f.smudge cat && git config diff.t.textconv "$FORGE" \
+  && git config diff.external "$FORGE" && git config core.fsmonitor "$FORGE" \
+  && printf '*.txt filter=f diff=t\n' > .gitattributes && echo 'y' >> a.txt && echo 'z' > b.txt )
+( cd "$HR" && VAJRA_WALKTHROUGH_DIR="$HR/data/walkthroughs" bash "$SCRIPT" --run-only hostile "true" 3> "$WORK/hostile.fd3" >/dev/null 2>&1 ); ec=$?
+[ "$ec" -eq 0 ] && [ "$(wc -l < "$WORK/hostile.fd3" | tr -d ' ')" = "1" ] && ! grep -q FORGED "$WORK/hostile.fd3" \
+  && jq -e '.slug == "hostile" and .commandsTotal == 1' "$WORK/hostile.fd3" >/dev/null
+check "run-only: git's repo-configured filters and diff drivers can't write the evidence line" $?
+# The forge script really runs under git (else the case above proves nothing): it writes to an fd git gave it.
+( cd "$HR" && git add -A ) 3> "$WORK/hostile.probe" >/dev/null 2>&1
+grep -q FORGED "$WORK/hostile.probe"; check "run-only: the hostile filter does run and write fd 3 when it is open" $?
+( cd "$HR" && git reset -q ) >/dev/null 2>&1
 grep -q hi "$RO/cmd-1.log" && [ -f "$RO/WALKTHROUGH.md" ]; check "run-only: logs and walkthrough still written" $?
 bash "$SCRIPT" --run-only ro2 "true" >/dev/null 2>&1 3>&-; [ $? -eq 2 ] && [ ! -e "$VAJRA_WALKTHROUGH_DIR/ro2/cmd-1.log" ]
 check "run-only: no fd 3 -> exit 2, nothing runs" $?
