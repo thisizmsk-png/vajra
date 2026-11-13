@@ -25,7 +25,7 @@ export function Board() {
   const { rev, failed: noRevision } = useProjectState(project?.id ?? null);
   const P = useProjects();
   const [, go] = useRoute();
-  const [cards, setCards] = useState<BoardCard[] | null>(null);
+  const [rows, setRows] = useState<Parameters<typeof boardCards>[1] | null>(null);
   const [run, setRun] = useState<RunOverview | null>(null);
   const [err, setErr] = useState("");
   const [onlyYou, setOnlyYou] = useState(false);
@@ -42,19 +42,23 @@ export function Board() {
     const mine = ++seq.current;
     last.current = Date.now();
     const slug = focus;
-    void Promise.allSettled([api.runOverview(slug), api.evidenceList(slug), api.inbox()]).then(([o, e, i]) => {
+    void Promise.allSettled([api.runOverview(slug), api.evidenceList(slug)]).then(([o, e]) => {
       if (mine !== seq.current) return;
       if (o.status === "rejected") { setErr(problemDetail(o.reason)); return; }
-      const rows = e.status === "fulfilled" && Array.isArray(e.value?.rows) ? e.value.rows : [];
-      const items = i.status === "fulfilled" && Array.isArray(i.value?.items) ? i.value.items : [];
       setRun(o.value);
-      setCards(boardCards(o.value, rows, items));
+      setRows(e.status === "fulfilled" && Array.isArray(e.value?.rows) ? e.value.rows : []);
       setErr("");
     });
   }, [focus]);
+  // The inbox is the store's copy: the store reads it on every change, so a second scan here bought nothing. Until the
+  // store's first read lands the board waits, so the needs-you cards never appear late. A failed read is an empty list.
+  const cards = useMemo<BoardCard[] | null>(
+    () => (run && rows && P.state !== "loading" ? boardCards(run, rows, P.inbox) : null),
+    [run, rows, P.state, P.inbox],
+  );
 
   // A new campaign, or leaving the board, retires whatever is still out.
-  useEffect(() => { setCards(null); setRun(null); setErr(""); return () => { seq.current++; }; }, [focus]);
+  useEffect(() => { setRows(null); setRun(null); setErr(""); return () => { seq.current++; }; }, [focus]);
   useEffect(load, [load]);
   // The project's revision is the one authority: heavy reads happen only when it moves (ADR-15 §4). Without a
   // revision (an older core) the raw change events drive the reload, as before.

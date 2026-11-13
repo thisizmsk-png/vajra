@@ -52,6 +52,23 @@ describe("ProjectsProvider", () => {
     expect(screen.getByText("ok:new:none")).toBeTruthy();
   });
 
+  it("Given a loaded store, When the inbox changes while resume_targets fails, Then the shared inbox still updates", async () => {
+    const item = (id: string) => ({ id, kind: "task", campaign: "c", title: id, detail: "", status: "blocked", since: "2026-11-01T00:00:00Z" });
+    let n = 0;
+    const f = fakeIpc({
+      list_campaigns: { campaigns: [{ slug: "c", goal: "g", status: "done" }] },
+      resume_targets: () => { if (++n > 1) throw new Error("resume failed"); return { targets: {} }; },
+      active_runs: { runs: [] },
+      inbox: () => (n > 1 ? { count: 1, items: [item("task:c.new")] } : { count: 1, items: [item("task:c.old")] }),
+    });
+    setTransport(f.transport);
+    render(<ProjectsProvider><Probe /></ProjectsProvider>);
+    await waitFor(() => expect(view?.inbox.map((i) => i.id)).toEqual(["task:c.old"]));
+    await act(async () => { view!.reload(); });
+    await waitFor(() => expect(view?.state).toBe("error"));
+    expect(view!.inbox.map((i) => i.id)).toEqual(["task:c.new"]);
+  });
+
   it("Given the core's project store, Then a registered folder's project carries its T1 id and name; without the store everything still shows", async () => {
     const T = "p_01JC3H0000000000000000000A";
     const base = {

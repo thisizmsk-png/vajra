@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Board } from "../src/screens/board/Board";
 import { CurrentProject } from "../src/projects/current";
+import { ProjectsProvider } from "../src/projects/store";
 import type { Current } from "../src/projects/current";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -19,6 +20,8 @@ const current: Current = { project: { schema: "vajra.project/1", id: "p_1", name
 const state = (rev: number) => ({ schema: "vajra.project_state/1", project_id: "p_1", rev, unchanged: false, active_runs: 1, generations: { project: 0 }, workers: [], receipts: [] });
 const changed = (rev: number, id = "p_1") => ({ streams: ["workers"], snapshot_needed: false, projects: [{ project_id: id, rev }] });
 const inboxOf = (items: unknown[]) => ({ count: items.length, items });
+// The board takes the inbox from the projects store, so it is mounted under it, as in the app.
+const STORE = { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } };
 const question = { id: "i1", kind: "plan", campaign: "c1", origin: "app", created: "", age_s: 3, title: "Deploy to staging", body: "", actions: [] };
 
 let tasks = [task("t1", "in_progress", "Token bucket"), task("t2", "pending", "Docs"), task("t3", "pending", "Metrics")];
@@ -30,9 +33,10 @@ const mount = () => {
     run_overview: () => overviewOf(tasks),
     evidence_list: { slug: "c1", stale: false, rows: [] },
     inbox: inboxOf([question]),
+    ...STORE,
   });
   setTransport(ipc.transport);
-  return render(<CurrentProject.Provider value={current}><Board /></CurrentProject.Provider>);
+  return render(<ProjectsProvider><CurrentProject.Provider value={current}><Board /></CurrentProject.Provider></ProjectsProvider>);
 };
 const n = (cmd: string) => ipc.calls.filter((c) => c.cmd === cmd).length;
 const settle = () => act(async () => { await vi.advanceTimersByTimeAsync(0); });
@@ -66,10 +70,26 @@ describe("Board follows the project revision", () => {
     expect(within(lane(S.board.lanes.running)).queryByText("Token bucket")).toBeNull();
   });
 
+  // Perf guard: the store already reads the inbox on every change. The board must reuse that copy, so one change costs
+  // one inbox scan from the UI, not two (each scan reads every campaign: about 1.6 ms at 20 campaigns, 15 ms at 200).
+  it("asks for the inbox no more often than the store does, and still shows what the store learned", async () => {
+    mount();
+    await settle(); await tick(600);
+    expect(within(lane(S.board.lanes.review)).getByText("Deploy to staging")).toBeTruthy();
+    expect(n("inbox")).toBe(n("list_campaigns"));
+    const before = { inbox: n("inbox"), board: n("run_overview"), store: n("list_campaigns") };
+    rev = 11;
+    act(() => ipc.emit("changed", changed(11)));
+    await settle(); await tick(50);
+    expect(n("run_overview")).toBe(before.board + 1);
+    expect(n("list_campaigns")).toBe(before.store + 1);
+    expect(n("inbox")).toBe(before.inbox + 1);
+  });
+
   it("falls back to raw change events when the core cannot give a revision", async () => {
-    ipc = fakeIpc({ run_overview: () => overviewOf(tasks), evidence_list: { slug: "c1", stale: false, rows: [] }, inbox: inboxOf([]) });
+    ipc = fakeIpc({ run_overview: () => overviewOf(tasks), evidence_list: { slug: "c1", stale: false, rows: [] }, inbox: inboxOf([]), ...STORE });
     setTransport(ipc.transport);
-    render(<CurrentProject.Provider value={current}><Board /></CurrentProject.Provider>);
+    render(<ProjectsProvider><CurrentProject.Provider value={current}><Board /></CurrentProject.Provider></ProjectsProvider>);
     await settle(); await tick(600);
     act(() => ipc.emit("changed", { streams: ["workers"], snapshot_needed: false }));
     await settle(); await tick(50);
