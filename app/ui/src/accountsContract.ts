@@ -3,6 +3,7 @@
 // carries a credential: an api_key account holds `saved: true|false` and nothing else, and every parser keeps only the
 // fields named below, so a stray secret in an answer cannot reach a component.
 import { CONTROL, INVISIBLE, schemaMajor } from "./projectContract";
+import { S } from "../strings";
 import type { ParseResult } from "./projectContract";
 
 export const ACCOUNTS_SCHEMA = "vajra.provider_accounts/1";
@@ -183,7 +184,7 @@ export const modelName = (m: AccountModel): string => m.name ?? m.id;
 /** H6: a model row always names its provider. `model: null` is the CLI's own default model for that login. A bare model id is a bug. */
 export function modelLine(a: Account, modelId: string | null, defaultWord: string): string {
   const m = modelId ? a.models.find((x) => x.id === modelId) : undefined;
-  return `${modelId ? (m ? modelName(m) : modelId) : defaultWord} · ${a.label}`;
+  return S.accounts.modelVia(modelId ? (m ? modelName(m) : modelId) : defaultWord, a.label);
 }
 
 export const isNewModel = (a: Account): boolean => a.provider === "openrouter" && !GATEWAY_SOAK_PASSED;

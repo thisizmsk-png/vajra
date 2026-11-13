@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <title>Vajra app icon, 16 px drawing</title>
+  <defs>
+    <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="1.56" x2="0.00" y2="14.44">
+      <stop offset="0" stop-color="#2e5fe8"/>
+      <stop offset="1" stop-color="#16308f"/>
+    </linearGradient>
+  </defs>
+  <rect fill="url(#tile)" x="1" y="1" width="14" height="14" rx="3.25"/>
+  <g fill="#ffffff">
+    <rect x="7" y="3" width="2" height="4"/>
+    <rect x="7" y="9" width="2" height="4"/>
+    <rect x="5" y="4" width="1" height="2"/>
+    <rect x="10" y="4" width="1" height="2"/>
+    <rect x="5" y="10" width="1" height="2"/>
+    <rect x="10" y="10" width="1" height="2"/>
+  </g>
+  <g fill="#f4c552">
+    <rect x="5" y="6" width="6" height="1"/>
+    <rect x="5" y="9" width="6" height="1"/>
+  </g>
+  <rect fill="#f4c552" x="7" y="7" width="2" height="2"/>
+</svg>

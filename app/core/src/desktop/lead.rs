@@ -1260,16 +1260,16 @@ impl App {
         let ledger = {
             let (svc, run_id, session_id, lead_sid, ask_id) = (svc.clone(), t.run_id.clone(), t.session_id.clone(), lead_sid.clone(), ask_id.to_string());
             let (project, generation) = (orch.id.clone(), orch.generation);
-            move |state: AskState, text: Option<&str>, reason: Option<&str>| {
+            move |state: AskState, text: Option<&str>, reason: Option<&str>, tokens: Option<&serde_json::Value>| {
                 lock(&svc)
-                    .record_ask(&AskRecord { ask_id: &ask_id, run_id: &run_id, session_id: &session_id, lead_session_id: &lead_sid, state, text, reason, project: Some((&project, generation)) })
+                    .record_ask(&AskRecord { ask_id: &ask_id, run_id: &run_id, session_id: &session_id, lead_session_id: &lead_sid, state, text, reason, project: Some((&project, generation)), tokens })
                     .map_err(|e| LeadError::Io(e.code().to_string()))
             }
         };
         // The last check before the process: the self-test can take minutes, and the project may be archived meanwhile.
         self.active_project(&orch.id)?;
         // Record first, spawn second: if the ledger cannot take the line, the Lead is never started.
-        ledger(AskState::Queued, Some(framed.text()), None)?;
+        ledger(AskState::Queued, Some(framed.text()), None, None)?;
         let child = match lead_run::spawn(&argv, &orch.root, &env, framed, handle) {
             Ok(c) => {
                 // Its `--mcp` server is a Service client: the harness becomes a recorded root before it can make a tool
@@ -1278,7 +1278,7 @@ impl App {
                 c
             }
             Err(e) => {
-                let _ = ledger(AskState::Failed, None, Some(e.code()));
+                let _ = ledger(AskState::Failed, None, Some(e.code()), None);
                 return Err(e);
             }
         };
@@ -1302,7 +1302,7 @@ impl App {
             let on_init: Box<dyn FnMut(&InitInfo) + Send> = Box::new(move |_| {
                 // The turn passed the tool and mode check: the ask is delivered. A new conversation's session is
                 // remembered only now, so a turn that never started leaves no id behind to `--resume`.
-                let _ = ledger_init(AskState::Delivered, None, None);
+                let _ = ledger_init(AskState::Delivered, None, None, None);
                 if first && fsx::write_atomic(&sid_dir, orchestrator::SESSION_FILE, sid_text.as_bytes()).is_err() {
                     if let Some(l) = &log {
                         let _ = l.log("lead_index_failed", &[]);
@@ -1312,14 +1312,17 @@ impl App {
             let mut sink = StreamSink { bus: bus.clone(), stream: stream.clone(), red, on_init };
             let end = lead_run::drive(child, &handle, limits, &mut sink);
             match &end {
-                Ok(Done { is_error: false, .. }) => {
-                    let _ = ledger(AskState::Done, None, None);
+                Ok(Done { is_error: false, tokens, .. }) => {
+                    let receipt = tokens.map(|t| t.to_json());
+                    let _ = ledger(AskState::Done, None, None, receipt.as_ref());
                 }
-                Ok(_) => {
-                    let _ = ledger(AskState::Failed, None, Some("lead_error"));
+                Ok(Done { tokens, .. }) => {
+                    // An erroring turn still spent tokens (often the most): record them so a goal's sum is the real bill.
+                    let receipt = tokens.map(|t| t.to_json());
+                    let _ = ledger(AskState::Failed, None, Some("lead_error"), receipt.as_ref());
                 }
                 Err(e) => {
-                    let _ = ledger(AskState::Failed, None, Some(e.code()));
+                    let _ = ledger(AskState::Failed, None, Some(e.code()), None);
                     sink.push("error", e.code());
                 }
             }

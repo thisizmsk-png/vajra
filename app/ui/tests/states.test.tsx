@@ -86,6 +86,17 @@ describe("Check again", () => {
   });
 });
 
+describe("Settings way back", () => {
+  it("offers a link out, since Settings shows no view tabs and selects no project tab", async () => {
+    window.location.hash = "#/settings";
+    setTransport(fakeIpc({ preflight: { start_enabled: true, rows: [] }, provider_list: { schema: "vajra.providers/1", providers: [] }, setup_list: { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } } }).transport);
+    render(<Settings />);
+    const back = await screen.findByRole("link", { name: S.settings.back });
+    expect(back.getAttribute("href")).toBe("#/orch");
+    expect(back.closest("nav")).toBeNull();
+  });
+});
+
 describe("Review view", () => {
   it("right after a start opens on that run's evidence", async () => {
     window.location.hash = "#/run?slug=camp&id=r1";

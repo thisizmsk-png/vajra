@@ -527,6 +527,12 @@ impl Supervisor {
         Ok(self.get(id)?.pid)
     }
 
+    /// The session's terminal device (the PTY's slave side). Its name is not reused while the session is known here,
+    /// since the master stays open until the session is replaced: every process still holding it open is the session's.
+    pub fn tty(&self, id: &str) -> Result<Option<std::path::PathBuf>, SessionError> {
+        Ok(lock(&self.get(id)?.master).tty_name())
+    }
+
     pub fn is_running(&self, id: &str) -> Result<bool, SessionError> {
         Ok(lock(&self.get(id)?.exit).is_none())
     }
