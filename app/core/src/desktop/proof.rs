@@ -99,6 +99,9 @@ pub struct Input<'a> {
     pub trust: Option<&'a str>,
     /// A `guarded_by_approval` run's approval was consumed by its evidence ticket (N20).
     pub approval_consumed: bool,
+    /// The run's approval record says it was used, but this app doesn't hold it (a restart came between): only the
+    /// reason under Not verified changes.
+    pub approval_unheld: bool,
     /// A review rejected the approach.
     pub rejected: bool,
     /// The signed campaign's own `slug` field. The signature doesn't bind the folder name, so it must equal `slug`.
@@ -115,7 +118,14 @@ pub enum Ledger {
     /// No ledger: a record the core didn't write (today's workflow), or one from before the ledger existed.
     #[default]
     Missing,
+    /// The ledger file matches, but the app no longer holds the run's record (it restarted, or let the run go). Until
+    /// key A, agents can write the app's data folder and read the signing key, so a matching file alone is never
+    /// enough: only a record this app holds counts (#226's rule).
+    NotHeld,
 }
+
+/// The reason under Not verified when the ledger file matches but the app no longer holds the run's record.
+pub const NOT_HELD_REASON: &str = "Vajra no longer holds this run's record, so it can't confirm it wrote every entry.";
 
 /// The trust the signed record itself carries: the `-og` slug or the goal marker. When unsure, the label.
 pub fn signed_trust(slug: &str, goal: &str) -> Trust {
@@ -163,6 +173,7 @@ pub fn label(i: &Input) -> (Label, String) {
         Ledger::Match => {}
         Ledger::Mismatch => return (Label::NotVerified, "The record has entries Vajra didn't write.".into()),
         Ledger::Missing => return (Label::NotVerified, "Vajra has no write ledger for this record, so it can't confirm it.".into()),
+        Ledger::NotHeld => return (Label::NotVerified, NOT_HELD_REASON.into()),
     }
     let own = match i.trust {
         None => Trust::Guarded,
@@ -174,10 +185,18 @@ pub fn label(i: &Input) -> (Label, String) {
     match own.max(signed_trust(i.slug, i.goal)) {
         Trust::Guarded => (Label::Verified, "Every criterion passed on the delivered commit.".into()),
         Trust::GuardedByApproval if i.approval_consumed => (Label::VerifiedApproved, "Every criterion passed. You approved the check commands for this run.".into()),
+        Trust::GuardedByApproval if i.approval_unheld => (Label::NotVerified, RESTART_REASON.into()),
         Trust::GuardedByApproval => (Label::NotVerified, "The check commands were not approved for this run.".into()),
         Trust::OutsideGuard => (Label::EvidenceUnguarded, "Every criterion passed, but the evidence ran outside the guard.".into()),
     }
 }
+
+/// The reason under Not verified when an approval was used before Vajra restarted (bhishma on #226).
+pub const RESTART_REASON: &str = "Approved before Vajra restarted, so the approval can't be checked. Run the evidence step again.";
+
+/// What the evidence check needs from the Mac, shown on the card (the runner uses the system jq, which macOS ships from
+/// version 15; on an older Mac the check fails closed).
+pub const MACOS_NEED: &str = "The evidence check needs macOS 15 or later.";
 
 /// The one capability check for the export (D4: the signed shareable record is the planned paid feature). Proof on
 /// screen stays free and never calls this.
@@ -192,13 +211,18 @@ pub fn export_allowed() -> bool {
 pub const TAMPER_EVIDENT: bool = false;
 
 /// What the record note says, for this label. An outside-the-guard record is never called tamper-evident.
-pub fn record_note(label: Label) -> &'static str {
-    match (label, TAMPER_EVIDENT) {
-        (Label::EvidenceUnguarded, _) => "Checked by Vajra on this Mac. The evidence ran outside the guard, so this record isn't tamper-evident.",
-        (_, true) => "Tamper-evident on your Mac: only the Mac that signed this record can check it.",
-        (_, false) => "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
+/// `key_readable`: a worker in this run could read the signing key (a Codex seat, by the owner's choice, or any seat
+/// that isn't a Claude one), so the note never says the key was guarded, nor tamper-evident (bhishma M1 on #237).
+pub fn record_note(label: Label, key_readable: bool) -> &'static str {
+    match (label, key_readable, TAMPER_EVIDENT) {
+        (Label::EvidenceUnguarded, _, _) => "Checked by Vajra on this Mac. The evidence ran outside the guard, so this record isn't tamper-evident.",
+        (_, true, _) => KEY_READABLE_NOTE,
+        (_, false, true) => "Tamper-evident on your Mac: only the Mac that signed this record can check it.",
+        (_, false, false) => "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
     }
 }
+
+pub const KEY_READABLE_NOTE: &str = "Checked by Vajra on this Mac. A worker in this run could read the signing key (Codex workers can), so the key wasn't guarded.";
 pub const WHY_OUTSIDE: &str = crate::desktop::seat_start::OUTSIDE_GUARD_WHY;
 pub const PLAIN_HINT: &str = "To get plain Verified, pick a Claude helper as the checker.";
 
@@ -220,6 +244,8 @@ pub struct Proof {
     pub record_sha256: Option<String>,
     pub rows: Vec<Row>,
     pub report: Option<String>,
+    /// A worker in this run could read the signing key; see `record_note`.
+    pub key_readable: bool,
 }
 
 fn row_word(label: Label, status: &str) -> String {
@@ -274,7 +300,7 @@ pub fn markdown(p: &Proof) -> String {
             cell(r.ran_by.as_deref().unwrap_or("")),
         ));
     }
-    out.push_str(&format!("\nCampaign `{}`. {}\n\n{}\n", cell(&p.slug), record_line(p), record_note(p.label)));
+    out.push_str(&format!("\nCampaign `{}`. {}\n\n{}\n", cell(&p.slug), record_line(p), record_note(p.label, p.key_readable)));
     out
 }
 
@@ -313,7 +339,7 @@ pre{{white-space:pre-wrap}}.why{{border-left:3px solid currentColor;padding-left
         reason = esc(&p.reason),
         slug = esc(&p.slug),
         record = esc(&record_line(p)),
-        note = esc(record_note(p.label)),
+        note = esc(record_note(p.label, p.key_readable)),
     )
 }
 
@@ -348,7 +374,8 @@ pub fn proof_json(p: &Proof, markdown_text: &str) -> Value {
         "hint": (p.label == Label::EvidenceUnguarded).then_some(PLAIN_HINT),
         "integrity": p.integrity,
         "record_sha256": p.record_sha256,
-        "record_note": record_note(p.label),
+        "record_note": record_note(p.label, p.key_readable),
+        "requires": MACOS_NEED,
         "export": export_allowed(),
         "markdown": markdown_text,
         // A row whose check hasn't finished: the UI asks again (bounded), since a finished sweep sends no event.

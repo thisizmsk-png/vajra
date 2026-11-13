@@ -231,6 +231,8 @@ export type RunProof = {
   integrity: ReportIntegrity;
   record_sha256: string | null;
   record_note: string;
+  /** What the evidence check needs from the Mac (macOS 15 or later, for the system jq). */
+  requires: string;
   /** The one capability check for exporting (proof on screen is always shown). */
   export: boolean;
   /** The PR comment, exactly as it would be posted. */

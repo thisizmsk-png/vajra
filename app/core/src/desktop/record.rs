@@ -466,6 +466,12 @@ impl CoreRecord {
         self.w.verify_record()
     }
 
+    /// The in-memory ledger against a snapshot the caller already read, with no second read: the proof checks the
+    /// exact campaign, features and progress its label used, so a swap between two reads can't pass (#237 review).
+    pub fn check_snapshot(&self, rb: &ReadBack) -> Result<(), String> {
+        crate::lock(&self.w.ledger).check(rb)
+    }
+
     /// A task's close or the run's report now, through the ledger (6i calls these when a task's evidence is green and
     /// when the run's report is written). Call after `flush`, so the queued events ran first. Anything else, or
     /// another campaign, is refused.
