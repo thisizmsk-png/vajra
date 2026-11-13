@@ -2519,18 +2519,24 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 /// How often the app's loop looks at live runs (worker refresh, run reaping, App Nap).
 pub const LIVE_WAIT: Duration = Duration::from_secs(1);
-/// With nothing running the loop only waits on the bus: no timer fires at rest. This is a backstop, not a cadence.
-pub const IDLE_WAIT: Duration = Duration::from_secs(60 * 60);
+/// With nothing running the loop waits on the bus, waking on its own only this often: one housekeeping turn (a finished
+/// worker that became safe to close, say its branch was pushed, is closed then), never a per-second timer.
+pub const IDLE_WAIT: Duration = Duration::from_secs(5 * 60);
 /// After the last run ends, housekeeping (automatic close of finished workers, reaping) goes on this long.
 pub const AFTER_RUN: Duration = Duration::from_secs(120);
 
 /// The app loop's pace: busy while a run is live and for `AFTER_RUN` after the last one ended, else at rest.
-#[derive(Default)]
 pub struct Pace {
     last_live: Option<Instant>,
 }
 
 impl Pace {
+    /// A fresh pace starts busy: launch gets one `AFTER_RUN` window of housekeeping, so finished workers left from the
+    /// last session are closed without waiting for a run.
+    pub fn new(now: Instant) -> Self {
+        Pace { last_live: Some(now) }
+    }
+
     /// Whether this turn does housekeeping, and how long the next wait is.
     pub fn next(&mut self, live: bool, now: Instant) -> (bool, Duration) {
         if live {

@@ -714,9 +714,9 @@ fn main() {
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
-                // Nothing runs at rest: with no live run (and past `AFTER_RUN`), the loop only waits on the bus. A line,
-                // or the wake a new run sends, brings it back.
-                let mut pace = Pace::default();
+                // Nothing runs at rest: with no live run (and past `AFTER_RUN`), the loop waits on the bus. A line, the
+                // wake a new run sends, or the `IDLE_WAIT` housekeeping tick brings it back. Launch starts busy.
+                let mut pace = Pace::new(Instant::now());
                 let mut wait = vajra_desktop::desktop::LIVE_WAIT;
                 loop {
                     let changed = collect_changes(&sub, wait);
@@ -727,8 +727,9 @@ fn main() {
                         handle.state::<App>().refresh_workers();
                     }
                     // Finished workers that lose nothing are closed on their own (setting `auto_close_finished`). Git is
-                    // asked off this loop, so a slow repo never delays worker refreshes.
-                    if busy && handle.state::<App>().closeout_due() {
+                    // asked off this loop, so a slow repo never delays worker refreshes. Not gated on `busy`: at rest a
+                    // turn is an event or the `IDLE_WAIT` tick, so a worker that became safe later is still closed.
+                    if handle.state::<App>().closeout_due() {
                         let h = handle.clone();
                         std::thread::spawn(move || {
                             let n = h.state::<App>().closeout_auto(&WorktreeTerms(&h.state::<Terminals>(), &h.state::<Ownership>()));

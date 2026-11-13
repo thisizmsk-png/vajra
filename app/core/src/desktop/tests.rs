@@ -144,12 +144,24 @@ fn a_bare_wake_returns_at_once_with_nothing_to_tell() {
 #[test]
 fn the_loop_is_at_rest_with_no_live_run_and_busy_while_and_just_after_one() {
     let t0 = std::time::Instant::now();
-    let mut p = Pace::default();
-    assert_eq!(p.next(false, t0), (false, IDLE_WAIT));
-    assert_eq!(p.next(true, t0 + Duration::from_secs(5)), (true, LIVE_WAIT));
-    assert_eq!(p.next(false, t0 + Duration::from_secs(6)), (true, LIVE_WAIT), "a run that just ended is still reaped");
-    assert_eq!(p.next(false, t0 + Duration::from_secs(5) + AFTER_RUN), (false, IDLE_WAIT));
-    assert!(IDLE_WAIT >= Duration::from_secs(3600));
+    let mut p = Pace::new(t0);
+    let rest = t0 + AFTER_RUN;
+    assert_eq!(p.next(false, rest), (false, IDLE_WAIT));
+    assert_eq!(p.next(true, rest + Duration::from_secs(5)), (true, LIVE_WAIT));
+    assert_eq!(p.next(false, rest + Duration::from_secs(6)), (true, LIVE_WAIT), "a run that just ended is still reaped");
+    assert_eq!(p.next(false, rest + Duration::from_secs(5) + AFTER_RUN), (false, IDLE_WAIT));
+    // At rest the loop wakes on its own only for a housekeeping tick, minutes apart, never on a per-second timer.
+    assert!(IDLE_WAIT >= Duration::from_secs(60) && IDLE_WAIT <= Duration::from_secs(10 * 60));
+}
+
+#[test]
+fn a_fresh_pace_does_housekeeping_on_its_first_turn_with_no_run_live() {
+    // Launch: finished workers left from the last session are closed without waiting for a run to start.
+    let t0 = std::time::Instant::now();
+    let mut p = Pace::new(t0);
+    assert_eq!(p.next(false, t0), (true, LIVE_WAIT));
+    assert_eq!(p.next(false, t0 + AFTER_RUN - Duration::from_secs(1)), (true, LIVE_WAIT));
+    assert_eq!(p.next(false, t0 + AFTER_RUN), (false, IDLE_WAIT), "then it rests");
 }
 
 #[test]
@@ -381,7 +393,7 @@ fn a_spawn_failure_rolls_the_control_session_back() {
     assert_eq!(app.active_run_count(), 0);
 }
 
-// Given the loop at rest (waiting on the bus with the hour-long backstop), When a run starts that prints nothing, Then
+// Given the loop at rest (waiting on the bus with the minutes-long housekeeping backstop), When a run starts that prints nothing, Then
 // the loop wakes at once and sees it live.
 #[test]
 fn a_run_start_wakes_a_loop_at_rest() {
@@ -394,7 +406,10 @@ fn a_run_start_wakes_a_loop_at_rest() {
     let t0 = std::time::Instant::now();
     let _ = collect_changes(&sub, IDLE_WAIT);
     assert!(t0.elapsed() < Duration::from_secs(1), "the run's wake reaches the loop without waiting out the backstop");
-    assert_eq!(Pace::default().next(app.active_run_count() > 0, std::time::Instant::now()), (true, LIVE_WAIT));
+    // A pace long past launch (at rest) turns busy as soon as the run is live.
+    let mut pace = Pace::new(t0 - AFTER_RUN);
+    assert_eq!(pace.next(false, t0), (false, IDLE_WAIT));
+    assert_eq!(pace.next(app.active_run_count() > 0, std::time::Instant::now()), (true, LIVE_WAIT));
     app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
 }
 
