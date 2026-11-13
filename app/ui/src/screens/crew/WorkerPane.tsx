@@ -3,7 +3,7 @@ import { AlertDialog, Button, Section, StatusDot, Text } from "../../../componen
 import type { StatusKey } from "../../../strings";
 import { DiffView, Tabs } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
-import { api, errorText, newActionId } from "../../ipc";
+import { api, errorText, newActionId, onChanged } from "../../ipc";
 import { unsavedText, useCloseout } from "../../projects/closeout";
 import { useCurrentProject } from "../../projects/current";
 import { usePoll } from "../../projects/poll";
@@ -93,6 +93,8 @@ const STATUS_KEYS = ["pending", "ready", "claimed", "in_progress", "done", "bloc
 const WORKTREE_RETRY_MS = 3000;
 /** Same cadence as the Crew screen's own refresh. */
 const TASK_POLL_MS = 2000;
+/** Changed events arrive in bursts; one task read per gap is enough. */
+const TASK_EVENT_GAP_MS = 500;
 
 /** One worker: header (task, worktree, branch) and the Stream / Diff / Task / Worktree tabs. */
 export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string }) {
@@ -133,6 +135,27 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
   }, [slug, taskId]);
   // Re-read on the crew's cadence only while this run is live and the window shows (nothing runs at rest).
   usePoll(() => taskRead.current(), TASK_POLL_MS, runLive && !!taskId);
+  // The poll stops when the run does, so a report written after its last tick would never be read: read once more when
+  // the run ends, and whenever the worker's status moves (the crew re-reads the tree on every event and on its poll).
+  const seenTask = useRef({ runLive, status });
+  useEffect(() => {
+    const was = seenTask.current;
+    seenTask.current = { runLive, status };
+    if ((was.runLive && !runLive) || was.status !== status) taskRead.current();
+  }, [runLive, status]);
+  // A `changed` event at rest can carry the task's last write: read it, at most once per gap, trailing included.
+  useEffect(() => {
+    if (!taskId) return;
+    let last = 0;
+    let later: ReturnType<typeof setTimeout> | undefined;
+    const off = onChanged(() => {
+      const wait = TASK_EVENT_GAP_MS - (Date.now() - last);
+      const go = () => { last = Date.now(); taskRead.current(); };
+      if (wait <= 0) go();
+      else if (later === undefined) later = setTimeout(() => { later = undefined; go(); }, wait);
+    });
+    return () => { clearTimeout(later); off(); };
+  }, [taskId]);
   // A finished worker with work that exists only in its worktree: shown with the exact counts, and the one way to close it.
   const closeout = useCloseout(slug, runId);
   const { project } = useCurrentProject();
