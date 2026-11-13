@@ -168,7 +168,9 @@ fn pytest_runs_a_real_suite_inside_the_runner() {
     }
     let ok = Command::new("python3").args(["-I", "-c", "import pytest"]).output().is_ok_and(|o| o.status.success());
     if !ok {
-        return eprintln!("skipped: pytest");
+        // pytest isn't a dependency of this repo, and no CI job installs it. Run locally with a throwaway venv's bin
+        // first on PATH to cover it.
+        return eprintln!("skipped: pytest is not installed for the python3 on PATH (not a repo dependency; no CI job installs it)");
     }
     let t = Tmp::new("pytest");
     fs::write(t.0.join("work/test_fixture.py"), "def test_adds():\n    assert 1 + 1 == 2\n\ndef test_writes(tmp_path):\n    (tmp_path / 'x').write_text('y')\n").unwrap();
@@ -286,6 +288,168 @@ fn a_nested_sandbox_fails_the_probe_closed() {
     let out = text(&o);
     assert!(!o.status.success(), "{out}");
     assert!(!out.contains(".hmac-key"), "{out}");
+}
+
+const SLUG: &str = "deliver-20261113-0800";
+const BUNDLE: &str = r#"{"slug":"deliver-20261113-0800","results":[],"git":{"head":"x"}}\n"#;
+
+/// A fake `vajra-verify-work.sh` acting out 6i-e's contract. `--run-only` checks it was handed fd 3, runs each command
+/// with fd 3 closed, then `printf`s `line` (a printf format: `\n` is the newline) to fd 3; `--sign` runs `sign_tail`.
+/// The behaviour is baked into the file: the runner clears the env, so a test can't steer the fake through it.
+fn fake(t: &Tmp, name: &str, line: &str, sign_tail: &str) -> PathBuf {
+    let p = t.0.join(format!("tmp/{name}.sh"));
+    let body = format!(
+        r#"#!/bin/bash
+mode="$1"; shift
+if [ "$mode" = "--run-only" ]; then
+  slug="$1"; shift
+  {{ : >&3; }} 2>/dev/null || {{ echo "no fd 3" >&2; exit 2; }}
+  rc=0
+  for c in "$@"; do ( exec 3>&-; /bin/sh -c "$c" ) || rc=1; done
+  printf '{line}' >&3
+  exec 3>&-
+  exit $rc
+fi
+if [ "$mode" = "--sign" ]; then
+  {sign_tail}
+fi
+exit 2
+"#
+    );
+    fs::write(&p, body).unwrap();
+    p
+}
+
+fn fake_sign(t: &Tmp, n: usize, code: u8, first_line: &str) -> PathBuf {
+    let tail = if first_line.is_empty() { format!("exit {code}") } else { format!("echo '{first_line}' >&2; echo 'more detail' >&2; exit {code}") };
+    fake(t, &format!("sign-{n}"), BUNDLE, &tail)
+}
+
+fn base(t: &Tmp) -> PathBuf {
+    let b = t.0.join("work/walkthroughs");
+    fs::create_dir_all(&b).unwrap();
+    canonical_base(&b).unwrap()
+}
+
+fn evidence_run<'a>(script: &'a Path, base: &'a Path, cmds: &'a [String], common: &'a Path, home: &'a Path) -> EvidenceRun<'a> {
+    EvidenceRun { script, slug: SLUG, commands: cmds, base, git_common: common, home, limit: Duration::from_secs(20) }
+}
+
+#[test]
+fn a_run_saves_exactly_the_fd_3_line_whatever_a_command_wrote_to_the_bundle_folder() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("run");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    // A command plants its own evidence.json in the bundle folder: the core's write replaces it with the fd-3 line.
+    let plant = format!("mkdir -p '{0}/{SLUG}' && echo '{{\"slug\":\"{SLUG}\",\"forged\":true}}' > '{0}/{SLUG}/evidence.json'", base.display());
+    let cmds = vec![plant, "echo ok".to_string()];
+    let out = run(&t.profile(false), &evidence_run(&script, &base, &cmds, &common, &home));
+    let RunOutcome::Ran { passed, sha256 } = out else { panic!("{out:?}") };
+    assert!(passed);
+    let saved = fs::read(base.join(SLUG).join("evidence.json")).unwrap();
+    assert_eq!(saved, br#"{"slug":"deliver-20261113-0800","results":[],"git":{"head":"x"}}"#);
+    assert_eq!(crate::control::sha256::hex_digest(&saved), sha256);
+    // A failing command: still a bundle, not passed.
+    let cmds = vec!["exit 1".to_string()];
+    let out = run(&t.profile(false), &evidence_run(&script, &base, &cmds, &common, &home));
+    assert!(matches!(out, RunOutcome::Ran { passed: false, .. }), "{out:?}");
+}
+
+#[test]
+fn a_run_with_a_bad_evidence_line_fails_and_saves_nothing() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("badline");
+    let (base, home, common) = (base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["true".to_string()];
+    for (n, (line, why)) in [
+        ("", "no line"),
+        (r#"{"slug":"deliver-20261113-0800"}"#, "no newline"),
+        (r#"{"slug":"deliver-20261113-0800"}\n{"slug":"deliver-20261113-0800"}\n"#, "two lines"),
+        (r#"{"slug":"deliver-20261113-0800"}\n\n"#, "a trailing empty line"),
+        ("not json\\n", "not JSON"),
+        (r#"{"slug":"deliver-other"}\n"#, "another slug"),
+        (r#"{"slug":"deliver-20261113-0800","hmac":"ab"}\n"#, "already signed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let script = fake(&t, &format!("bad-{n}"), line, "exit 2");
+        let out = run(&t.profile(false), &evidence_run(&script, &base, &cmds, &common, &home));
+        assert!(matches!(out, RunOutcome::Failed(_)), "{why}: {out:?}");
+        assert!(!base.join(SLUG).join("evidence.json").exists(), "{why}");
+    }
+    // A slug that isn't a stream id, or no commands: refused before anything starts.
+    let script = fake(&t, "ok", BUNDLE, "exit 2");
+    let mut r = evidence_run(&script, &base, &cmds, &common, &home);
+    r.slug = "../escape";
+    assert!(matches!(run(&t.profile(false), &r), RunOutcome::Failed(_)));
+    assert!(matches!(run(&t.profile(false), &evidence_run(&script, &base, &[], &common, &home)), RunOutcome::Failed(_)));
+}
+
+#[test]
+fn a_run_past_its_limit_is_killed_and_fails() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("limit");
+    let (script, base, home, common) = (fake(&t, "slow", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["sleep 30".to_string()];
+    let mut r = evidence_run(&script, &base, &cmds, &common, &home);
+    r.limit = Duration::from_millis(500);
+    let start = std::time::Instant::now();
+    assert_eq!(run(&t.profile(false), &r), RunOutcome::Failed("the evidence check ran past its time limit".into()));
+    assert!(start.elapsed() < Duration::from_secs(10), "the whole group is killed, not waited on");
+    assert!(!base.join(SLUG).join("evidence.json").exists());
+}
+
+#[test]
+fn a_run_and_a_sign_refuse_a_walkthrough_base_through_a_link() {
+    let t = Tmp::new("link");
+    let (script, home, common) = (fake_sign(&t, 0, 0, ""), t.home(), t.0.join("repo.git"));
+    let real = base(&t);
+    let link = t.0.join("tmp/base-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let cmds = vec!["true".to_string()];
+    assert!(matches!(run(&t.profile(false), &evidence_run(&script, &link, &cmds, &common, &home)), RunOutcome::Failed(_)));
+    assert!(matches!(sign(&script, SLUG, &"a".repeat(64), &link, &t.0.join("work"), &home), SignOutcome::Unknown(_)));
+}
+
+#[test]
+fn sign_maps_each_contract_answer_and_fails_closed_on_anything_else() {
+    let t = Tmp::new("sign");
+    let (base, home, work) = (base(&t), t.home(), t.0.join("work"));
+    let sha = "a".repeat(64);
+    let known: Vec<(u8, String, SignOutcome)> = vec![
+        (0, String::new(), SignOutcome::Signed),
+        (4, "sign refused: no usable key".into(), SignOutcome::NoKey),
+        (3, "sign refused: sha256 mismatch".into(), SignOutcome::Refused("sha256 mismatch".into())),
+        (3, "sign refused: head mismatch".into(), SignOutcome::Refused("head mismatch".into())),
+        (3, "sign refused: already signed".into(), SignOutcome::Refused("already signed".into())),
+        (3, format!("sign refused: not a bundle for {SLUG}"), SignOutcome::Refused(format!("not a bundle for {SLUG}"))),
+        (3, "sign refused: no evidence.json".into(), SignOutcome::Refused("no evidence.json".into())),
+        (3, "sign refused: not JSON".into(), SignOutcome::Refused("not JSON".into())),
+        (3, "sign refused: a symlinked path".into(), SignOutcome::Refused("a symlinked path".into())),
+    ];
+    for (n, (code, first, want)) in known.into_iter().enumerate() {
+        let script = fake_sign(&t, n, code, &first);
+        assert_eq!(sign(&script, SLUG, &sha, &base, &work, &home), want, "{code} {first}");
+    }
+    let unknown: [(u8, &str); 6] = [
+        (3, "sign refused: some path leaked here"),
+        (3, "sign refused: not a bundle for deliver-other"),
+        (3, "something else"),
+        (3, ""),
+        (1, "sign refused: sha256 mismatch"),
+        (9, ""),
+    ];
+    for (n, (code, first)) in unknown.into_iter().enumerate() {
+        let script = fake_sign(&t, 100 + n, code, first);
+        assert!(matches!(sign(&script, SLUG, &sha, &base, &work, &home), SignOutcome::Unknown(_)), "{code} {first}");
+    }
 }
 
 #[test]

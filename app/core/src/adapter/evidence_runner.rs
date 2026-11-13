@@ -165,6 +165,178 @@ pub fn key_probe(profile: &Profile, state_dir: &Path) -> bool {
     }
 }
 
+/// The fd the unsigned evidence comes back on (6i-e's `--run-only` contract).
+const EVIDENCE_FD: i32 = 3;
+/// The evidence line is one compact JSON object; anything longer isn't a bundle.
+const EVIDENCE_MAX: usize = 1 << 20;
+
+/// One evidence run's inputs.
+#[derive(Clone, Debug)]
+pub struct EvidenceRun<'a> {
+    /// `vajra-verify-work.sh` (the engine's own copy).
+    pub script: &'a Path,
+    pub slug: &'a str,
+    /// The setup, check and suite commands, in order (exactly the approved list, for an approval run).
+    pub commands: &'a [String],
+    /// Canonical walkthrough base (`canonical_base`): the bundle lands in `<base>/<slug>/`.
+    pub base: &'a Path,
+    /// The repo's common git dir, for `git_env`.
+    pub git_common: &'a Path,
+    pub home: &'a Path,
+    pub limit: Duration,
+}
+
+/// What a run gave back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The commands ran; `passed` is the script's exit 0. `sha256` is of the evidence.json bytes the core wrote.
+    Ran { passed: bool, sha256: String },
+    /// No usable evidence: why, in plain words.
+    Failed(String),
+}
+
+/// Why signing didn't happen.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SignOutcome {
+    Signed,
+    /// Exit 3: one of 6i-e's fixed reasons (the first stderr line, `sign refused: <reason>`).
+    Refused(String),
+    /// Exit 4: no usable key.
+    NoKey,
+    /// Anything else (a different exit, a timeout, a first line outside the contract): treated as refused.
+    Unknown(String),
+}
+
+/// 6i-e's refusal reasons. A first line outside this list is `Unknown` (fail closed).
+fn known_refusal(reason: &str, slug: &str) -> bool {
+    matches!(reason, "sha256 mismatch" | "head mismatch" | "already signed" | "no evidence.json" | "not JSON" | "a symlinked path") || reason == format!("not a bundle for {slug}")
+}
+
+/// `<script> --run-only <slug> <cmd>...` under `profile`, the evidence read from fd 3. The core writes the line it got
+/// to `<base>/<slug>/evidence.json` itself (no command can then change it: fd 3 is closed for every command, and the
+/// core never re-reads a file a command could rewrite) and returns its sha256 for `sign`.
+pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    if !crate::bus::valid_stream_id(r.slug) || r.commands.is_empty() {
+        return RunOutcome::Failed("not a runnable evidence check".into());
+    }
+    if canonical_base(r.base).as_deref() != Some(r.base) {
+        return RunOutcome::Failed("the walkthrough folder isn't a plain, resolved path".into());
+    }
+    if let Err(e) = profile.prepare() {
+        return RunOutcome::Failed(format!("couldn't prepare the run's folders: {e}"));
+    }
+    let Some(script) = r.script.to_str() else { return RunOutcome::Failed("the evidence script's path isn't text".into()) };
+    let mut args = vec!["--run-only".to_string(), r.slug.to_string()];
+    args.extend(r.commands.iter().cloned());
+    let argv = match profile.argv("/bin/bash", &[vec![script.to_string()], args].concat()) {
+        Ok(a) => a,
+        Err(e) => return RunOutcome::Failed(e),
+    };
+    let mut fds = [0i32; 2];
+    // SAFETY: a fresh pipe; both ends are owned below.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return RunOutcome::Failed("couldn't open the evidence pipe".into());
+    }
+    // SAFETY: the pipe just made; each fd is owned once.
+    let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    // Close-on-exec on both ends, so no other child the app spawns meanwhile inherits the write end (which would hold
+    // the read open past this run). The child gets only fd 3, made inheritable below.
+    for fd in fds {
+        // SAFETY: fcntl on an fd this function owns.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            return RunOutcome::Failed("couldn't open the evidence pipe".into());
+        }
+    }
+    let wfd = wr.as_raw_fd();
+    let mut cmd = std::process::Command::new(SANDBOX_EXEC);
+    cmd.args(&argv).current_dir(&profile.worktree).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    cmd.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin").env("HOME", r.home).env("TMPDIR", &profile.tmp).env("LC_ALL", "C.UTF-8");
+    cmd.env("VAJRA_WALKTHROUGH_DIR", r.base).env("GIT_TERMINAL_PROMPT", "0").env("GIT_CONFIG_NOSYSTEM", "1");
+    for (k, v) in git_env(&profile.tmp, r.git_common) {
+        cmd.env(k, v);
+    }
+    cmd.process_group(0);
+    // SAFETY: async-signal-safe calls only (dup2, fcntl) between fork and exec. The write end becomes an inheritable fd
+    // 3 (dup2 clears close-on-exec on the copy; if the write end already is fd 3, dup2 would be a no-op, so its flag is
+    // cleared instead). The read end, close-on-exec, is gone at exec, or was replaced by the dup2 if it sat on fd 3.
+    unsafe {
+        cmd.pre_exec(move || {
+            let r = if wfd == EVIDENCE_FD { libc::fcntl(wfd, libc::F_SETFD, 0) } else { libc::dup2(wfd, EVIDENCE_FD) };
+            if r < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return RunOutcome::Failed(format!("the evidence runner didn't start: {e}")),
+    };
+    drop(wr); // only the child holds the write end now: EOF comes when it's done with fd 3
+    let pid = child.id();
+    let reader = std::thread::spawn(move || {
+        let mut f = std::fs::File::from(rd);
+        let mut buf = Vec::new();
+        let _ = (&mut f).take(EVIDENCE_MAX as u64 + 1).read_to_end(&mut buf);
+        buf
+    });
+    let start = std::time::Instant::now();
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s.code(),
+            Ok(None) if start.elapsed() >= r.limit => break None,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break None,
+        }
+    };
+    // SAFETY: the group this child leads (`process_group(0)`); ESRCH is fine.
+    unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+    let _ = child.wait();
+    let line = reader.join().unwrap_or_default();
+    let Some(code) = code else { return RunOutcome::Failed("the evidence check ran past its time limit".into()) };
+    if code == 2 {
+        return RunOutcome::Failed("the evidence script refused the run (usage)".into());
+    }
+    // Exactly one line: compact JSON, a newline, nothing after it.
+    let ok_line = line.len() <= EVIDENCE_MAX && line.last() == Some(&b'\n') && !line[..line.len() - 1].contains(&b'\n');
+    let Some(json) = ok_line.then(|| &line[..line.len() - 1]) else { return RunOutcome::Failed("the evidence script returned no single evidence line".into()) };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(json) else { return RunOutcome::Failed("the evidence isn't JSON".into()) };
+    if v.get("hmac").is_some() || v["slug"].as_str() != Some(r.slug) {
+        return RunOutcome::Failed("the evidence isn't an unsigned bundle for this check".into());
+    }
+    let dir = r.base.join(r.slug);
+    if let Err(e) = crate::control::fsx::write_atomic(&dir, "evidence.json", json) {
+        return RunOutcome::Failed(format!("couldn't save the evidence: {e}"));
+    }
+    RunOutcome::Ran { passed: code == 0, sha256: crate::control::sha256::hex_digest(json) }
+}
+
+/// `<script> --sign <slug> --expect-sha256 <sha>`, outside the sandbox (it holds the key), in the evidence worktree
+/// (sign checks git.head against this checkout's HEAD).
+pub fn sign(script: &Path, slug: &str, sha256: &str, base: &Path, worktree: &Path, home: &Path) -> SignOutcome {
+    if canonical_base(base).as_deref() != Some(base) {
+        return SignOutcome::Unknown("the walkthrough folder isn't a plain, resolved path".into());
+    }
+    let argv = vec![script.to_string_lossy().into_owned(), "--sign".into(), slug.into(), "--expect-sha256".into(), sha256.into()];
+    let o = match crate::vajra::bridge::run_process_env(Path::new("/bin/bash"), &argv, Some(worktree), PROBE_MAX * 6, Some(home), None, &[("VAJRA_WALKTHROUGH_DIR", base)]) {
+        Ok(o) => o,
+        Err(e) => return SignOutcome::Unknown(format!("signing didn't start: {e}")),
+    };
+    let first = o.stderr.lines().next().unwrap_or("").trim();
+    match (o.timed_out, o.code) {
+        (false, Some(0)) => SignOutcome::Signed,
+        (false, Some(4)) => SignOutcome::NoKey,
+        (false, Some(3)) => match first.strip_prefix("sign refused: ") {
+            Some(why) if known_refusal(why, slug) => SignOutcome::Refused(why.to_string()),
+            _ => SignOutcome::Unknown("signing refused for a reason Vajra doesn't know".into()),
+        },
+        _ => SignOutcome::Unknown("signing ended unexpectedly".into()),
+    }
+}
+
 #[cfg(test)]
 #[path = "evidence_runner_tests.rs"]
 mod tests;
