@@ -101,6 +101,37 @@ differ from the skill's `workflows/`.
 installer needs jq and openssl, not Node.js; Node.js is only needed to run the
 TypeScript tests.
 
+## Vajra Desktop (macOS app) quickstart
+
+Vajra Desktop is a local window onto Vajra runs: a Director-General per project, your runs and workers, a terminal, and a
+proof record per run. It sits on top of the install above, so do that first. There is no packaged download yet; you build
+it from this repository.
+
+```bash
+# needs: macOS, Rust 1.85+, Node.js 20, and the Vajra install above (Claude Code, git, jq, python3, openssl)
+cd app/ui && npm ci
+cd ../core && ../ui/node_modules/.bin/tauri build --bundles app
+open "target/release/bundle/macos/Vajra Desktop.app"
+```
+
+On first launch the app checks Claude Code, git, python3, jq, openssl and the Vajra install (doctor, hooks, workflow), shows
+whether Claude Code's sandbox is on, and for anything missing gives the command that fixes it
+(`app/core/src/vajra/preflight.rs`). Then
+add a git project, and ask its Director-General a question or propose a run. Asking the Director-General needs Claude Code's
+sandbox on (`/sandbox`); the app refuses until it is.
+
+**What it reads, writes and sends** is on one page, checked against the code with a file named for each claim, including what
+is not guarded: [docs/desktop/DATA.md](docs/desktop/DATA.md). In short:
+
+- Its own files live in `~/Library/Application Support/VajraDesktop/` (0700), and agent worktrees in
+  `~/Library/Application Support/VajraWorktrees/`.
+- The app's own code makes one outbound call, and only if you saved an OpenRouter key: a usage read, at most once a
+  minute. It has no telemetry, analytics, crash upload or updater code. Claude Code, Codex and `gh` send what they always
+  send, under your sign-ins.
+- Claude workers run under the Vajra guard, and the OS sandbox (opt-in) is the real boundary.
+- **Codex workers run outside the Vajra guard today** and can read the signing key; their cards say so. Until the per-launch
+  Codex profile (#216) merges, do not treat a Codex seat as guarded.
+
 ## Using it
 
 | You want to | Type |
