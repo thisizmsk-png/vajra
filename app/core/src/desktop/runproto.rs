@@ -138,6 +138,9 @@ pub trait Workers: Send + Sync {
     fn kill_run(&self, run: &str, reason: KillReason);
     /// Merge `commits` in order into the round's integration branch; returns its head.
     fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError>;
+    /// The run's `max_in_flight`: at most `n` of its writers run at once and the rest wait queued (#153 codex P2).
+    /// Check tickets are exempt.
+    fn limit_writers(&self, run: &str, n: u32);
 }
 
 /// The 6c runtime and the core's git writer.
@@ -162,6 +165,9 @@ impl Workers for CoreWorkers {
     fn kill_run(&self, run: &str, reason: KillReason) {
         self.rt.kill_run_workers(run, reason);
     }
+    fn limit_writers(&self, run: &str, n: u32) {
+        self.rt.limit_writers(run, n);
+    }
     fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
         let it = self.gw.integration_tree(at.repo, at.project, at.run, at.round, at.base)?;
         let head = self.gw.integrate(&it, at.base, commits)?;
@@ -181,14 +187,23 @@ pub enum RoundVerdict {
 
 /// The round's checks, run by the core on a clean integration (16.5a). 6g brings the real phases.
 pub trait RoundGate: Send + Sync {
-    fn check(&self, run: &str, round: u32, head: &str, tasks: &[String]) -> RoundVerdict;
+    /// Every check ticket the gate launches is started through `life.start`; one it refuses must not be launched.
+    fn check(&self, run: &str, round: u32, head: &str, tasks: &[String], life: &dyn RunLife) -> RoundVerdict;
+}
+
+/// The run's lifetime, as the gate sees it (#153 review). The round's checks run on their own thread with no lock held,
+/// so a Stop, a timeout or the lead's loss can end the run (and make its one kill) at any point between them.
+pub trait RunLife: Send + Sync {
+    /// Runs `launch` (one check ticket's dispatch) under the run's lock, so it is atomic with the run's end: `false`,
+    /// and `launch` not run, when the run has ended. A ticket launched here is the run's, so the run's kill takes it.
+    fn start(&self, launch: &mut dyn FnMut()) -> bool;
 }
 
 /// Until 6g: every round answers "not verified", with feedback to every task.
 pub struct StubGate;
 
 impl RoundGate for StubGate {
-    fn check(&self, _: &str, _: u32, _: &str, tasks: &[String]) -> RoundVerdict {
+    fn check(&self, _: &str, _: u32, _: &str, tasks: &[String], _: &dyn RunLife) -> RoundVerdict {
         let note = json!({"not_verified": "this version of Vajra can't check a round yet"});
         RoundVerdict::Failed { feedback: tasks.iter().map(|t| (t.clone(), note.clone())).collect() }
     }
@@ -486,10 +501,26 @@ fn neutralise_tags(s: &str) -> String {
     out
 }
 
+impl RunLife for RunProtocol {
+    fn start(&self, launch: &mut dyn FnMut()) -> bool {
+        // The run's end (finalize) takes this same lock and its kill runs after it, so a launch here either happens
+        // before the end, and the kill takes its ticket, or is refused.
+        let st = self.lock();
+        let open = st.status.is_none();
+        if open {
+            launch();
+        }
+        drop(st);
+        open
+    }
+}
+
 impl RunProtocol {
     pub fn new(cfg: RunConfig, workers: Arc<dyn Workers>, gate: Arc<dyn RoundGate>, clock: Arc<dyn RunClock>) -> Self {
         let now = clock.now();
         let st = St { last_call: now, started: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
+        // The waves the lead is given are only advice; the runtime holds the limit however dispatch is called.
+        workers.limit_writers(&cfg.run, cfg.max_in_flight);
         RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new(), record: None }))
     }
 
@@ -701,9 +732,29 @@ impl RunProtocol {
         });
     }
 
-    /// The status the core computes when the run ends with no passed round.
-    fn computed(st: &St) -> RunStatus {
-        if st.questions.iter().any(|q| matches!(q, Question::PickSeat { .. })) { RunStatus::NeedsUser } else { RunStatus::NotVerified }
+    /// The status the core computes when the run ends with no passed round: `needs_user` while the human is waited
+    /// on (a seat pick, or a task whose latest worker the runtime ended `needs_user`), else `not_verified`.
+    fn computed(&self, st: &St) -> RunStatus {
+        let pick = st.questions.iter().any(|q| matches!(q, Question::PickSeat { .. }));
+        if pick || self.human_hold(st).is_some() { RunStatus::NeedsUser } else { RunStatus::NotVerified }
+    }
+
+    /// The first task whose latest ticket ended `needs_user` (a typed auth, quota or other provider error the human must
+    /// fix), with why: a human hold, not a generic failure (#153 review P2). A later ticket for the task clears it.
+    fn human_hold(&self, st: &St) -> Option<String> {
+        st.tasks.iter().find_map(|t| {
+            let (_, tk, _) = t.tickets.last()?;
+            let v = self.0.workers.view(tk).filter(|v| v.outcome == Some(Outcome::NeedsUser))?;
+            Some(format!("task {} needs you: {}", t.spec.id, v.reason.unwrap_or_else(|| "a worker needs the human".into())))
+        })
+    }
+
+    /// Ends the run with the computed status; a human hold's own reason replaces `why`, so the human sees what to do.
+    fn finalize_computed(&self, st: &mut St, why: impl Into<String>) -> RunStatus {
+        let s = self.computed(st);
+        let why = if s == RunStatus::NeedsUser { self.human_hold(st).unwrap_or_else(|| why.into()) } else { why.into() };
+        Self::finalize(st, s, why);
+        st.status.as_ref().map_or(s, |(s, _)| *s)
     }
 
     /// The run time that counts: paused while a task waits on the human's seat pick.
@@ -1018,7 +1069,10 @@ impl RunProtocol {
             self.ask(st, q);
             return Ok(Dispatched::Held { task: id.to_string() });
         };
-        let from = t.tickets.iter().rev().find_map(|(_, tk, _)| self.0.workers.view(tk).and_then(|v| v.commit)).unwrap_or_else(|| self.0.cfg.base.clone());
+        // Only a done or progress commit carries on: a stopped ticket can keep its snapshot commit (a cancel can turn
+        // the outcome after the snapshot), and a stopped worker is held back, never built on or integrated.
+        let eligible = |v: Tick| v.commit.filter(|_| matches!(v.outcome, Some(Outcome::Done | Outcome::Progress)));
+        let from = t.tickets.iter().rev().find_map(|(_, tk, _)| self.0.workers.view(tk).and_then(eligible)).unwrap_or_else(|| self.0.cfg.base.clone());
         let mut brief = t.spec.brief.clone();
         if let Some(f) = feedback {
             brief.push_str("\n\n");
@@ -1041,9 +1095,19 @@ impl RunProtocol {
             Ok(tk) => tk,
             Err(DispatchError::Exists) => return refuse(NOT_READY, format!("task {id} already ran in round {r}")),
             Err(DispatchError::Invalid(w)) => return refuse(INVALID, format!("the core can't dispatch this {w}")),
-            // Local compile shim only (batch-3's #178 added these; the run-protocol stack's own fix replaces this).
-            Err(DispatchError::Closed) => return refuse(NOT_READY, "the app is quitting; nothing new is dispatched".to_string()),
-            Err(DispatchError::HistoryIncomplete) => return refuse(NOT_READY, "this run's history wasn't read whole; nothing new is dispatched".to_string()),
+            // The app is quitting: nothing new is queued, so the run stops as a human Stop would.
+            Err(DispatchError::Closed) => {
+                let why = "Vajra is quitting, so no new worker can start";
+                Self::finalize(st, RunStatus::Stopped, why);
+                return refuse(RUN_ENDED, format!("the run has ended (stopped): {why}"));
+            }
+            // The run's recorded history wasn't read whole, so the ticket ids it used are unknown and nothing new can
+            // go into it. No retry or later round fixes that: the run ends unverified, saying why.
+            Err(DispatchError::HistoryIncomplete) => {
+                let why = "this run's recorded history couldn't be read whole, so no new worker can be added to it; start a new run";
+                Self::finalize(st, RunStatus::NotVerified, why);
+                return refuse(RUN_ENDED, format!("the run has ended (not_verified): {why}"));
+            }
         };
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));
@@ -1192,12 +1256,15 @@ impl RunProtocol {
         let merged = self.0.workers.integrate(&at, &commits);
         let mut st = self.lock();
         match merged {
+            // The run ended while the merge ran (a Stop, a timeout tick, or the lead lost) and made its one kill: the
+            // round's checks never start, so nothing they launch escapes that kill (#153 review P2).
+            Ok(_) if st.status.is_some() => self.release(st),
             Ok(head) => {
                 st.last_good = Some((r, head.clone()));
                 drop(st);
                 let (p, tasks) = (self.clone(), order.clone());
                 let spawned = std::thread::Builder::new().name(format!("vajra-round-{r}")).spawn(move || {
-                    let v = p.0.gate.check(&p.0.cfg.run, r, &head, &tasks);
+                    let v = p.0.gate.check(&p.0.cfg.run, r, &head, &tasks, &p);
                     p.round_checked(r, v);
                 });
                 if spawned.is_err() {
@@ -1278,7 +1345,7 @@ impl RunProtocol {
         round.rework = order.into_iter().filter(|t| feedback.contains_key(t)).collect();
         round.feedback = feedback;
         if r >= self.0.cfg.limits.rounds {
-            Self::finalize(st, RunStatus::NotVerified, format!("no round passed in {r} round(s)"));
+            self.finalize_computed(st, format!("no round passed in {r} round(s)"));
             let n = self.0.cfg.limits.rounds;
             self.send(Event::Progress(format!("run {}: no verified delivery after {n} round(s); {}", self.0.cfg.run, self.integration_note(st))));
             self.send(Event::Checkpoint(format!("stuck after {n} rounds")));
@@ -1321,9 +1388,7 @@ impl RunProtocol {
         }
         st.notes = Some(self.text(report));
         st.finish_called = true;
-        let s = Self::computed(st);
-        Self::finalize(st, s, "the lead finished the run with no passed round");
-        Ok(st.status.as_ref().map_or(s, |(s, _)| *s))
+        Ok(self.finalize_computed(st, "the lead finished the run with no passed round"))
     }
 
     // ------------------------------------------------------------ the lead's lifetime and the run limits
@@ -1334,10 +1399,21 @@ impl RunProtocol {
         self.enforce(&mut st);
         let action = match (&st.status, st.finish_called) {
             (Some((s, _)), _) => LeadAction::Ended(*s),
-            (None, true) => LeadAction::Ended(Self::computed(&st)),
+            (None, true) => LeadAction::Ended(self.computed(&st)),
             _ if exit == LeadExit::Retryable && st.retries < self.0.cfg.limits.lead_retries => {
                 st.retries += 1;
                 LeadAction::Restart { backoff: LEAD_BACKOFF * 2u32.pow(st.retries - 1) }
+            }
+            // The provider-retry budget is spent: the run ends here and never falls through to N9's restart, which is a
+            // separate budget for a plain exit (#153 codex P2).
+            _ if exit == LeadExit::Retryable => {
+                let n = self.0.cfg.limits.lead_retries;
+                if self.any_live(&st) || st.checks_running() {
+                    Self::finalize(&mut st, RunStatus::LeadLost, format!("the lead's provider kept failing after {n} retries while workers ran"));
+                    LeadAction::Ended(RunStatus::LeadLost)
+                } else {
+                    LeadAction::Ended(self.finalize_computed(&mut st, format!("the lead's provider kept failing after {n} retries")))
+                }
             }
             _ if self.any_live(&st) || st.checks_running() => {
                 if st.n9_restarted {
@@ -1349,9 +1425,7 @@ impl RunProtocol {
                 }
             }
             _ => {
-                let s = Self::computed(&st);
-                Self::finalize(&mut st, s, "the lead exited with no live workers and no passed round");
-                LeadAction::Ended(s)
+                LeadAction::Ended(self.finalize_computed(&mut st, "the lead exited with no live workers and no passed round"))
             }
         };
         self.release(st);
