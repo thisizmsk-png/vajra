@@ -18,6 +18,9 @@ use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
 use crate::sessions::argv::RunInput;
 
+/// The end reason of a core run recorded started whose lead never launched.
+pub(super) const START_FAILED: &str = "start_failed";
+
 /// The live run leads, by run id. `closing` is set, under the map's lock, when the app starts to quit: from then on
 /// no lead is added.
 #[derive(Default)]
@@ -179,6 +182,20 @@ impl App {
         let gw = rt.gitw().clone();
         // Before the lead exists: what it was started on, so a crash reconcile and the resume check can read it back.
         super::recover::record_started(&self.data, run, project, &repo, &lead_seat.account).map_err(|e| fail("io", e))?;
+        let launched = self.launch_recorded(project, input, run, repo, base, lead_seat, seats, rt, gw);
+        if launched.is_err() {
+            // Recorded started, never launched: closed here, so the next start does not take it for a crash.
+            let _ = super::recover::record_ended(&self.data, run, "lead_lost", START_FAILED);
+        }
+        launched
+    }
+
+    /// `start_lead_run` after the start is recorded. Every error return leaves nothing running.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_recorded(
+        &self, project: &str, input: RunInput, run: &str, repo: PathBuf, base: String, lead_seat: LeadSeat, seats: Vec<WorkerSeat>,
+        rt: workers::WorkerRuntime, gw: Arc<crate::vajra::gitw::Gitw>,
+    ) -> Result<Value, Value> {
         let roles = writer_roles(&seats);
         let cfg = RunConfig {
             project: project.into(), run: run.into(), repo: repo.clone(), base, ask: input.ask.clone(), seats, max_in_flight: input.max_in_flight,

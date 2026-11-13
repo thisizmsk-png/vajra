@@ -367,3 +367,4 @@ that shows them lands in its own PR, which runs the anti-slop gate. Proposed wor
 | This run's seats can't be read, so it can't continue. | run card, `seats_unreadable` | |
 | This run's plan can't be read, so it can't continue. | run card, `plan_unreadable` | |
 | The app closed while this run was going. | run card, ended `lead_lost` with reason `app_restarted` | |
+| This run's lead couldn't start. | run card, ended `lead_lost` with reason `start_failed` | the start was recorded, then the lead never launched |
