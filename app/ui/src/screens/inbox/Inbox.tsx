@@ -2,6 +2,10 @@
 // place. It reads the shell's one project view (`useProjects`, which already reloads on the store's change events with
 // the 500 ms gap), so it adds no polling and no subscription. Opening an item only moves focus to its project and
 // campaign; approving takes an explicit click on the exact plan hash shown, returns a receipt, and a stale plan fails.
+//
+// It is also the Needs-you queue: only decisions (plans, and runs the Director-General proposes), questions and blocked
+// tasks land here, and the ping rule that decides when they ping you sits at the top, with the recent pings and why.
+// A proposal is listed so nothing waiting is missed, but it is started or dismissed only on the Director-General view.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button } from "../../../components/ui/base";
 import { S } from "../../../strings";
@@ -14,6 +18,8 @@ import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
 import { Empty, Problem } from "../states";
 import { escapeControls } from "../history/History";
+import { proposalsFor } from "../orch/dgApi";
+import { PingRule } from "./PingRule";
 
 const SNOOZE_MS = 15 * 60_000;
 /** One blocker as the human saw it: a changed plan, or a different item, is a different key and cannot stay snoozed. */
@@ -109,12 +115,31 @@ export function Inbox() {
     );
   };
 
-  const groups = P.projects.map((p) => ({ p, items: live.filter((i) => itemProject(index, i) === p.id) })).filter((g) => g.items.length > 0);
+  // Run proposals, placed by the same rule the Director-General view uses (the core's id, else the recorded root).
+  const proposals = P.inbox.filter((i) => i.kind === "run_proposal");
+  const proposalsOf = (p: { id: string; root?: string | null; bucket?: string }) => (p.bucket ? [] : proposalsFor(proposals, p.id, p.root ?? null));
+  const groups = P.projects.map((p) => ({ p, items: live.filter((i) => itemProject(index, i) === p.id), props: proposalsOf(p) }))
+    .filter((g) => g.items.length > 0 || g.props.length > 0);
   // An item whose campaign no project owns yet (a run that just started, or a list that lagged the inbox) still shows:
   // under Unsorted, never dropped. Nothing waiting on you can be hidden by a missing project.
-  const placed = new Set(groups.flatMap((g) => g.items));
+  const placed = new Set<InboxItem>(groups.flatMap((g) => [...g.items, ...g.props]));
   const loose = live.filter((i) => !placed.has(i));
+  const looseProps = proposals.filter((i) => !placed.has(i));
   const unsortedGroup = groups.find((g) => g.p.bucket === "unsorted");
+
+  // A proposal opens the Director-General of its project: that is where its threads are shown and where it starts.
+  const proposalCard = (i: InboxItem, project: string | null) => (
+    <article key={i.id} className="v-ibx" aria-label={i.title}>
+      <div className="v-ibx__top">
+        <Badge status="warning">{S.inbox.proposalKind}</Badge>
+        <h3 className="v-ibx__t">{i.title}</h3>
+      </div>
+      {i.ask && <p className="v-ibx__body v-ibx__ask">{i.ask}</p>}
+      <div className="v-ibx__acts">
+        <Button size="sm" variant="ghost" onClick={() => go("orch", {}, project)}>{S.inbox.openProposal}</Button>
+      </div>
+    </article>
+  );
 
   const card = (i: CampaignItem, isSnoozed: boolean) => {
     const k = keyOf(i);
@@ -174,19 +199,22 @@ export function Inbox() {
         <Button size="sm" variant="ghost" onClick={P.reload}>{S.inbox.refresh}</Button>
       </div>
       <p role="status" className="v-sr">{said}</p>
-      {P.state === "ok" && !P.inboxFailed && live.length === 0 && later.length === 0 && <div className="v-board__state"><Empty title={S.inbox.empty}>{S.inbox.emptyHint}</Empty></div>}
+      <PingRule />
+      {P.state === "ok" && !P.inboxFailed && live.length === 0 && later.length === 0 && proposals.length === 0 && <div className="v-board__state"><Empty title={S.inbox.empty}>{S.inbox.emptyHint}</Empty></div>}
       {(P.state === "error" || P.inboxFailed) && <div className="v-board__state"><Problem title={S.inbox.failed} detail={P.error} retry={P.reload} /></div>}
-      {groups.map(({ p, items }) => (
+      {groups.map(({ p, items, props }) => (
         <section key={p.id} className="v-inbox__group" aria-label={p.name}>
           <h2 className="v-inbox__h">{p.name}</h2>
+          {props.map((i) => proposalCard(i, p.id))}
           {items.map((i) => card(i, false))}
           {p === unsortedGroup?.p && loose.map((i) => card(i, false))}
         </section>
       ))}
-      {loose.length > 0 && !unsortedGroup && (
+      {(loose.length > 0 && !unsortedGroup || looseProps.length > 0) && (
         <section className="v-inbox__group" aria-label={S.projects.unsorted}>
           <h2 className="v-inbox__h">{S.projects.unsorted}</h2>
-          {loose.map((i) => card(i, false))}
+          {looseProps.map((i) => proposalCard(i, null))}
+          {!unsortedGroup && loose.map((i) => card(i, false))}
         </section>
       )}
       {later.length > 0 && (
