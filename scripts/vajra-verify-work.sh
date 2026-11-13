@@ -90,12 +90,10 @@ def walk(fd, rel):
         os.close(fd); fd = nfd
     return fd
 def open_folder(base, slug):
-    # An absolute walkthrough dir is a setting of the core, outside the worktree of the agent: its system prefix
-    # (/var is /private/var) is resolved once. A relative one sits in the checkout and is walked strictly, like the slug.
-    if base.startswith("/"):
-        fd = walk(os.open("/", D), os.path.realpath(base))
-    else:
-        fd = walk(os.open(".", D), base)
+    # Walked strictly from / or from the current folder, like the slug: no link in any part, nothing resolved
+    # (bhishma #214: resolving an absolute base followed a link an agent planted in its checkout). The core passes an
+    # absolute base that is already canonical (/private/var, never /var).
+    fd = walk(os.open("/" if base.startswith("/") else ".", D), base)
     return walk(fd, slug)
 dfd = open_folder(evbase, slug)
 try:

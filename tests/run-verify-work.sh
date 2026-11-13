@@ -6,7 +6,8 @@ command -v jq >/dev/null || { echo "SKIP: jq required"; exit 0; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO/scripts/vajra-verify-work.sh"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/vajra-vw-XXXXXX")"
+# Canonical (no /var or /tmp link above it), as the core passes an absolute walkthrough dir to --sign.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/vajra-vw-XXXXXX")"; WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 export VAJRA_WALKTHROUGH_DIR="$WORK/wt"
@@ -183,10 +184,19 @@ sign_as linked "$ESH" 3 "sign refused: a symlinked path" && [ "$(sha_of "$WORK/e
 check "sign: a symlinked bundle folder is refused, its target untouched" $?
 mkdir -p "$VAJRA_WALKTHROUGH_DIR/up"; jq -c '.slug="up"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/up/evidence.json"
 ln -s "$VAJRA_WALKTHROUGH_DIR" "$REPO_T/wlink"
-# A relative walkthrough dir sits in the checkout: a link in it is refused. (An absolute one is the core setting, and
-# only its system prefix is resolved.)
+# A link in the walkthrough dir is refused, relative or absolute: nothing is resolved.
 ( cd "$REPO_T" && export VAJRA_WALKTHROUGH_DIR="wlink"; sign_as up "$(sha_of "$REPO_T/wlink/up/evidence.json")" 3 "sign refused: a symlinked path" )
 check "sign: a symlinked folder above the bundle is refused" $?
+( export VAJRA_WALKTHROUGH_DIR="$REPO_T/wlink"; sign_as up "$(sha_of "$REPO_T/wlink/up/evidence.json")" 3 "sign refused: a symlinked path" )
+check "sign: an absolute walkthrough dir through a link is refused" $?
+# bhishma #214 (40ee44a): an absolute base inside the agent's checkout whose data folder the agent swapped for a link to
+# another folder must not sign in that other folder. Stand-in folders only.
+SW="$WORK/swap"; mkdir -p "$SW/repo" "$WORK/swapped/walkthroughs/sw"
+jq -c '.slug="sw"' "$WORK/ro.fd3" > "$WORK/swapped/walkthroughs/sw/evidence.json"; SWH="$(sha_of "$WORK/swapped/walkthroughs/sw/evidence.json")"
+ln -s "$WORK/swapped" "$SW/repo/data"
+( cd "$REPO_T" && export VAJRA_WALKTHROUGH_DIR="$SW/repo/data/walkthroughs"; sign_as sw "$SWH" 3 "sign refused: a symlinked path" ) \
+  && [ "$(sha_of "$WORK/swapped/walkthroughs/sw/evidence.json")" = "$SWH" ]
+check "sign: an absolute base whose data folder is a planted link is refused, the other folder untouched" $?
 # bhishma #214 M1-b: a hard link of a real root-owned relative link (a framework's Versions/Current) as the slug
 # folder, its target name an agent symlink to another folder's evidence: refused, nothing signed. Stand-in folders.
 RL="$(find /Library/Frameworks /Applications -maxdepth 6 -type l -user root -name Current 2>/dev/null | head -n 1)"
