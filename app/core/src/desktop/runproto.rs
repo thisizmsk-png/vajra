@@ -856,6 +856,9 @@ impl RunProtocol {
             Err(DispatchError::Invalid(w)) => return refuse(INVALID, format!("the core can't dispatch this {w}")),
             // The app is quitting: the run is ending, so nothing new starts.
             Err(DispatchError::Closed) => return refuse(RUN_ENDED, "the app is quitting; nothing new starts"),
+            Err(DispatchError::Unreplayable) => {
+                return refuse(INVALID, "this run's ticket record is too large to read back, so nothing more is dispatched in it; call finish_run")
+            }
         };
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));

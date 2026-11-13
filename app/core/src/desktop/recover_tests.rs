@@ -176,6 +176,31 @@ fn env_with<'a>(seats: &'a dyn Fn(&str) -> std::io::Result<Option<Value>>, insta
     ResumeEnv { seats, installed, lead_ok }
 }
 
+/// #176 review: the list's cap is not the reconcile's. An unfinished core run older than 250 other run folders (most of
+/// them not core runs) is still written ended, and the list caps only the ended core runs it shows, newest first.
+#[test]
+fn an_unfinished_core_run_beyond_the_listed_cap_is_still_reconciled() {
+    let t = Tmp::new("beyond-cap");
+    let data = t.data();
+    let old = "20250101-0000";
+    record_started(&data, old, "p", Path::new("/tmp"), "codex").unwrap();
+    for i in 0..250 {
+        std::fs::create_dir_all(data.join("runs").join(format!("20261112-{i:04}"))).unwrap();
+    }
+    for i in 0..(MAX_LISTED + 5) {
+        let run = format!("20260601-{i:04}");
+        record_started(&data, &run, "p", Path::new("/tmp"), "codex").unwrap();
+        record_ended(&data, &run, "done", "finished").unwrap();
+    }
+    let r = reconcile(&data, &Ledger::new(crate::owned::ledger_path(&data)));
+    assert_eq!(r.runs, vec![old.to_string()], "the old unfinished run is reconciled");
+    assert!(data.join("runs").join(old).join(ENDED_FILE).is_file());
+    let (no_seats, yes) = (|_: &str| Ok(None), |_: &str| true);
+    let listed = core_runs(&data, &env_with(&no_seats, &yes, &yes));
+    assert_eq!(listed.len(), MAX_LISTED, "the cap counts ended core runs only, not the empty folders");
+    assert_eq!(listed[0]["run"], format!("20260601-{:04}", MAX_LISTED + 4), "newest first");
+}
+
 #[test]
 fn an_ended_run_says_why_it_cannot_be_resumed() {
     let t = Tmp::new("list");

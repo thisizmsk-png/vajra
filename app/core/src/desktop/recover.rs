@@ -20,7 +20,7 @@ pub const PLAN_FILE: &str = "plan.json";
 pub const ENDED_FILE: &str = "ended.json";
 /// The most of any record read back.
 const RECORD_CAP: u64 = 256 * 1024;
-/// The most runs listed.
+/// The most ended core runs `core_runs` lists (the reconcile is not capped by it).
 const MAX_LISTED: usize = 200;
 
 /// Why an ended run cannot be resumed. The reason codes are API; the card's words are in `docs/design/changed-strings.md`.
@@ -135,12 +135,13 @@ pub fn reconcile(data: &Path, ledger: &Ledger) -> Reconciled {
     out
 }
 
+/// Every run folder's name, newest first (run ids sort by time). Not capped: the reconcile must see every unfinished
+/// core run, however many folders come after it; `core_runs` caps what it lists after filtering.
 fn list_runs(data: &Path) -> Vec<String> {
     let Ok(runs) = Pinned::open(data, false).and_then(|d| d.child("runs", false)) else { return Vec::new() };
     let mut v = runs.names().unwrap_or_default();
     v.sort();
-    v.reverse(); // newest first: run ids sort by time
-    v.truncate(MAX_LISTED);
+    v.reverse();
     v
 }
 
@@ -159,6 +160,9 @@ pub struct ResumeEnv<'a> {
 pub fn core_runs(data: &Path, env: &ResumeEnv) -> Vec<Value> {
     let mut out = Vec::new();
     for run in list_runs(data) {
+        if out.len() >= MAX_LISTED {
+            break;
+        }
         let Ok(d) = run_dir(data, &run, false) else { continue };
         let Ok(ended) = read(&d, ENDED_FILE) else { continue };
         let core = read(&d, CORE_FILE).ok();

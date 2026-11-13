@@ -252,6 +252,9 @@ struct Book {
     closed: bool,
     /// Earlier app lives' tickets, read back at start (`replay`): ended, shown, never acted on.
     past: BTreeMap<String, TicketView>,
+    /// Runs whose `tickets.jsonl` was over the replay cap: none of their tickets is recovered from a prefix, and none
+    /// is dispatched in them.
+    unreplayable: std::collections::BTreeSet<String>,
 }
 
 impl Book {
@@ -389,6 +392,9 @@ pub enum DispatchError {
     Exists,
     /// The app is quitting: nothing new is queued.
     Closed,
+    /// The run's `tickets.jsonl` was too large to read back whole at start, so which ids it used is not known: nothing
+    /// more is dispatched in that run (a new run starts clean).
+    Unreplayable,
 }
 
 impl WorkerRuntime {
@@ -430,10 +436,16 @@ impl WorkerRuntime {
         runs.truncate(REPLAY_MAX_RUNS);
         let mut gaps = 0;
         let mut past = BTreeMap::new();
+        let mut unreplayable = std::collections::BTreeSet::new();
         for run in &runs {
             let (views, g) = replay_run(data, run);
             gaps += g;
-            past.extend(views);
+            match views {
+                Some(v) => past.extend(v),
+                None => {
+                    unreplayable.insert(run.clone());
+                }
+            }
         }
         let mut ended = Vec::new();
         for v in past.values_mut().filter(|v| v.state != State::Ended) {
@@ -448,6 +460,7 @@ impl WorkerRuntime {
         self.0.replay_gaps.store(gaps, AtomicOrdering::Relaxed);
         let mut b = crate::lock(&self.0.book);
         b.past = past;
+        b.unreplayable = unreplayable;
         // A ticket's `seq` names its supervisor session (`core-<seq>-a<n>`), and the bus keeps a session's output on
         // disk (`<data>/spill`) across app lives: each life numbers from its start time in milliseconds, so no later
         // life's worker reads an earlier one's output under the same name.
@@ -518,6 +531,9 @@ impl WorkerRuntime {
         let mut b = crate::lock(&self.0.book);
         if b.closed {
             return Err(DispatchError::Closed);
+        }
+        if b.unreplayable.contains(&s.run) {
+            return Err(DispatchError::Unreplayable);
         }
         let id = match &mut job {
             Job::Task(s) if b.taken(&id_of(s, &s.task)) => return Err(DispatchError::Exists),
@@ -1305,7 +1321,8 @@ impl StoredTicket {
 /// `failed`/`abandoned` with detail `app_crashed`, in the run's own `tickets.jsonl`, before this life's replay reads it.
 /// A ticket the file has no line for, or one already ended, is left alone. Returns whether a line was written.
 pub(crate) fn record_crashed(data: &std::path::Path, run: &str, ticket: &str) -> bool {
-    let (mut views, _) = replay_run(data, run);
+    // A file over the replay cap is not recovered from, so nothing is appended to it either.
+    let (Some(mut views), _) = replay_run(data, run) else { return false };
     let Some(v) = views.get_mut(ticket).filter(|v| v.state != State::Ended) else { return false };
     finish_view(v, Outcome::Failed, "abandoned");
     v.detail = Some("app_crashed".into());
@@ -1318,18 +1335,20 @@ pub(crate) fn record_crashed(data: &std::path::Path, run: &str, ticket: &str) ->
 }
 
 /// What replay read back from one run's file: the last view of each ticket, and how many lines it could not use.
-fn replay_run(data: &std::path::Path, run: &str) -> (BTreeMap<String, TicketView>, u64) {
+/// `None` when the file is over `REPLAY_MAX_FILE`: then nothing of it is taken as the run's state.
+fn replay_run(data: &std::path::Path, run: &str) -> (Option<BTreeMap<String, TicketView>>, u64) {
     use std::io::Read;
     let mut out = BTreeMap::new();
-    let Ok(f) = open_record_read(data, run) else { return (out, 0) };
+    let Ok(f) = open_record_read(data, run) else { return (Some(out), 0) };
     let mut raw = Vec::new();
     if f.take(REPLAY_MAX_FILE + 1).read_to_end(&mut raw).is_err() {
-        return (out, 1);
+        return (Some(out), 1);
     }
     let mut gaps = 0;
+    // Past the cap the later lines (a ticket's outcome, or a ticket first seen there) are unread: a prefix is not the
+    // run's latest state, so none of it is recovered (`None`).
     if raw.len() as u64 > REPLAY_MAX_FILE {
-        raw.truncate(REPLAY_MAX_FILE as usize);
-        gaps += 1;
+        return (None, 1);
     }
     // Only newline-terminated lines are whole: a crash mid-write leaves a partial last line, which is dropped.
     let whole = raw.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
@@ -1349,7 +1368,7 @@ fn replay_run(data: &std::path::Path, run: &str) -> (BTreeMap<String, TicketView
             None => gaps += 1,
         }
     }
-    (out, gaps)
+    (Some(out), gaps)
 }
 
 /// The retry policy's waits for one ticket: the configured clock, or a real wait that ends early when the ticket is

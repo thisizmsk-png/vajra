@@ -988,6 +988,32 @@ fn a_restart_replays_every_ticket_and_a_crashed_running_one_ends_abandoned() {
     r.rt.quit(WAIT);
 }
 
+/// #176 review: a tickets.jsonl over the replay cap is not recovered from its prefix. Its ticket's running line comes
+/// first and its done outcome only past 16 MiB: the next life neither ends it `app_restarted` nor writes anything to the
+/// file, the crash reconcile writes nothing either, and the run takes no new dispatch. Another run still replays.
+#[test]
+fn a_tickets_file_over_the_replay_cap_is_not_recovered_from_its_prefix_and_its_run_takes_no_dispatch() {
+    let r = rig("replay-cap", Opts::default());
+    let ok = r.done(&r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
+    let path = tickets_file(&r, "r1");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let ticket = |state: &str, outcome: Value| json!({"id": "r1.t1.r1", "run": "r1", "task": "t1", "round": 1, "kind": "writer", "slot": "w1", "account": "codex", "state": state, "outcome": outcome});
+    let filler = format!("{}\n", json!({"v": 1, "event": "x", "ticket": {"pad": "x".repeat(200 << 10)}}));
+    let mut text = format!("{}\n", json!({"v": 1, "event": "dispatch", "ticket": ticket("running", Value::Null)}));
+    while text.len() <= (16 << 20) {
+        text.push_str(&filler);
+    }
+    text.push_str(&format!("{}\n", json!({"v": 1, "event": "outcome", "ticket": ticket("ended", json!("done"))})));
+    std::fs::write(&path, &text).unwrap();
+    assert!(!super::record_crashed(&r.gw.data, "r1", "r1.t1.r1"), "the reconcile writes nothing to it");
+    let life2 = next_life(&r);
+    assert!(life2.view("r1.t1.r1").is_none(), "no ticket of it is taken from the prefix");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "no app_restarted line is appended");
+    assert!(life2.replay_gaps() >= 1, "the unread file is counted");
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w1", "codex")), Err(DispatchError::Unreplayable)));
+    assert_eq!(life2.view(&ok.id).unwrap().outcome, Some(Outcome::Done), "another run still replays");
+}
+
 /// #176 review: a ticket still waiting for a seat (account cap 1, the seat held by a hanging worker) when the app
 /// crashes has its line from dispatch, so the next life replays it ended `abandoned`/`app_restarted`, lists it and
 /// keeps its id taken, instead of losing it.
