@@ -983,9 +983,15 @@ inj_run "$INJ_BASH"; judge ALLOW "the error file is deleted by name before any c
 inject late 'inj() { local v; v="$(echo "${#PAYLOAD//x/y}")"; return 0; }; inj; : > "$GERR"'
 inj_run "$INJ_BASH"; judge BLOCK "an error is still seen after its old file name is truncated" $?
 # bhishma #218 L: a signal or a timeout kill blocks.
+# A signal ignored when bash starts can neither be trapped nor kill it (CI runners start jobs with SIGPIPE ignored), so
+# the hook then reaches its normal decision; the case is judged only where the signal is live.
 for s in TERM HUP INT PIPE; do
   inject late "kill -$s \$\$"
-  inj_run "$INJ_BASH"; judge BLOCK "inject[late] SIG$s blocks" $?
+  if [ "$(bash -c "kill -$s \$\$; echo alive" 2>/dev/null)" = alive ]; then
+    inj_run "$INJ_BASH"; judge ALLOW "inject[late] SIG$s is ignored by this environment, so the hook decides normally" $?
+  else
+    inj_run "$INJ_BASH"; judge BLOCK "inject[late] SIG$s blocks" $?
+  fi
 done
 # An unwritable temp folder blocks every call, and says why.
 UT_ERR="$(printf '%s' "$INJ_BASH" | TMPDIR="$H/no-such-tmp" bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
