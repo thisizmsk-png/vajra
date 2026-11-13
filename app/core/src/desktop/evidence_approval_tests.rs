@@ -358,9 +358,33 @@ fn a_failed_write_of_the_consume_can_be_retried() {
     fail_next_write();
     assert!(app.consume_evidence_approval(&ask(), at(T0 + 2)).is_err());
     assert!(app.evidence_approval_consumed(RUN).is_none());
+    // The log tells the truth (codex on #226): an attempt and a failure, no consume.
+    let log = t.audit();
+    assert!(log.contains(&format!("evidence-approval consumed-attempt run={RUN} sha={sha}")), "{log}");
+    assert!(log.contains(&format!("DENY desktop-control reason=\"evidence-approval consumed-failed run={RUN} sha={sha}")), "{log}");
+    assert!(!log.contains(&format!("evidence-approval consumed run={RUN}")), "{log}");
     assert_eq!(app.evidence_approval_read_at(RUN, at(T0 + 3)).unwrap()["state"], "approved", "still usable");
     assert_eq!(app.consume_evidence_approval(&ask(), at(T0 + 4)).unwrap(), sha);
     assert_eq!(app.evidence_approval_consumed(RUN).as_deref(), Some(sha.as_str()));
+    // Exactly one consume is logged: the retry's.
+    assert_eq!(t.audit().matches(&format!("evidence-approval consumed run={RUN}")).count(), 1);
+}
+
+#[test]
+fn a_failed_answer_or_ask_write_is_logged_as_failed_not_done() {
+    let t = Tmp::new();
+    let app = t.app();
+    fail_next_write();
+    assert!(app.request_evidence_approval(&ask(), at(T0)).is_err());
+    assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "none", "nothing held or written");
+    let sha = app.request_evidence_approval(&ask(), at(T0 + 1)).unwrap();
+    fail_next_write();
+    assert!(app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 2)).is_err());
+    let log = t.audit();
+    assert!(log.contains(&format!("evidence-approval asked-failed run={RUN}")), "{log}");
+    assert_eq!(log.matches(&format!("evidence-approval asked run={RUN}")).count(), 1, "{log}");
+    assert!(log.contains(&format!("evidence-approval approved-failed run={RUN}")), "{log}");
+    assert!(!log.contains(&format!("evidence-approval approved run={RUN}")), "{log}");
 }
 
 #[test]

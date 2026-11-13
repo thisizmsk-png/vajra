@@ -152,6 +152,20 @@ fn file_matches(rec: &Value, held: &Held) -> bool {
     rec["ask"] == held.ask.to_json() && rec["sha256"].as_str() == Some(held.sha.as_str()) && held.ask.sha256() == held.sha
 }
 
+/// Why an audited change didn't happen: the opening audit line couldn't be written, or the change itself failed.
+enum AuditedErr {
+    Audit(String),
+    Change(String),
+}
+
+impl AuditedErr {
+    fn text(self) -> String {
+        match self {
+            AuditedErr::Audit(e) | AuditedErr::Change(e) => e,
+        }
+    }
+}
+
 fn expired(asked_at: u64, now: SystemTime) -> bool {
     secs(now).saturating_sub(asked_at) > HOLD_MAX.as_secs()
 }
@@ -185,6 +199,23 @@ impl App {
         audit::append_line(&self.home.join(".claude/vajra/audit.log"), verdict, &line, now).map_err(|_| "Vajra couldn't write this to its audit log, so nothing was changed. Check that the Vajra folder is writable, then try again.".to_string())
     }
 
+    /// One state change, logged truthfully (codex on #226): an `<what>-attempt` line first (no line, no change), then
+    /// the change, then `<what>` once it is durable, or `<what>-failed` when it isn't. The log never says a change
+    /// happened that didn't. If the closing line can't be written, the attempt line still stands for it.
+    fn audited<T>(&self, verdict: &str, what: &str, run_id: &str, sha: &str, now: SystemTime, change: impl FnOnce() -> Result<T, String>) -> Result<T, AuditedErr> {
+        self.audit_approval(verdict, &format!("{what}-attempt"), run_id, sha, now).map_err(AuditedErr::Audit)?;
+        match change() {
+            Ok(v) => {
+                let _ = self.audit_approval(verdict, what, run_id, sha, now);
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.audit_approval("DENY", &format!("{what}-failed"), run_id, sha, now);
+                Err(AuditedErr::Change(e))
+            }
+        }
+    }
+
     /// The core asks (after the gate passes). Any earlier ask of this run, answered or not, is void: a redo or a new
     /// round asks again, and only the newest list can be approved. Returns the list's sha256.
     #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
@@ -192,9 +223,11 @@ impl App {
         ask.check()?;
         let _g = crate::lock(&LOCK);
         let sha = ask.sha256();
-        self.audit_approval("ALLOW", "asked", &ask.run_id, &sha, now)?;
-        crate::lock(&self.approvals).insert(ask.run_id.clone(), Held { ask: ask.clone(), sha: sha.clone(), asked_at: secs(now), answer: None, consumed: false });
-        self.write_approval(&ask.run_id, &json!({"state": "pending", "ask": ask.to_json(), "sha256": sha, "asked_at": secs(now)}))?;
+        let held = Held { ask: ask.clone(), sha: sha.clone(), asked_at: secs(now), answer: None, consumed: false };
+        let rec = json!({"state": "pending", "ask": ask.to_json(), "sha256": sha, "asked_at": secs(now)});
+        // The file first, then memory: a failed write leaves the earlier ask (if any) as it was.
+        self.audited("ALLOW", "asked", &ask.run_id, &sha, now, || self.write_approval(&ask.run_id, &rec)).map_err(AuditedErr::text)?;
+        crate::lock(&self.approvals).insert(ask.run_id.clone(), held);
         Ok(sha)
     }
 
@@ -247,11 +280,13 @@ impl App {
             return Err(fail("expired", "the approval wait ran out; the run ends not verified"));
         }
         let what = if approve { "approved" } else { "declined" };
-        self.audit_approval(if approve { "ALLOW" } else { "DENY" }, what, run_id, sha, now).map_err(|e| fail("audit_failed", e))?;
         rec["state"] = json!(what);
         rec["answered_at"] = json!(secs(now));
         // The file first, memory only once it's written: a failed write leaves both pending, so the person can retry.
-        self.write_approval(run_id, &rec).map_err(|e| fail("io_error", e))?;
+        self.audited(if approve { "ALLOW" } else { "DENY" }, what, run_id, sha, now, || self.write_approval(run_id, &rec)).map_err(|e| match e {
+            AuditedErr::Audit(e) => fail("audit_failed", e),
+            AuditedErr::Change(e) => fail("io_error", e),
+        })?;
         if let Some(h) = crate::lock(&self.approvals).get_mut(run_id) {
             h.answer = Some(approve);
         }
@@ -294,11 +329,11 @@ impl App {
         let Some(mut rec) = rec.filter(|r| r["state"] == "approved" && file_matches(r, &held)) else {
             return refuse("the approval record doesn't match the answer given");
         };
-        self.audit_approval("ALLOW", "consumed", &ask.run_id, &sha, now)?;
         rec["state"] = json!("consumed");
         rec["consumed_at"] = json!(secs(now));
-        // The file first, memory only once it's written: a failed write leaves both approved, so the ticket can retry.
-        self.write_approval(&ask.run_id, &rec)?;
+        // The file first, memory only once it's written: a failed write leaves both approved, so the ticket can retry;
+        // the log then reads consumed-attempt, consumed-failed, never consumed.
+        self.audited("ALLOW", "consumed", &ask.run_id, &sha, now, || self.write_approval(&ask.run_id, &rec)).map_err(AuditedErr::text)?;
         if let Some(h) = crate::lock(&self.approvals).get_mut(&ask.run_id) {
             h.consumed = true;
         }
