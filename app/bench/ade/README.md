@@ -40,7 +40,9 @@ transcript on a scripted core with 5 agents streaming 20 lines/s each) in the in
 Per key it records the time from the key's own timestamp to the first frame after the update. A second pass with nothing
 streaming is the control, and long animation frames over 50 ms are counted. **The gate checks what streaming adds at p95 over
 that control (20 ms), not an absolute figure**: the CI runner's own rendering costs about 69 ms at p95 with nothing streaming
-(13 Nov), so a flat 50 ms measures the VM. `--absolute` also checks the old 50 ms budget, for a fast machine.
+(13 Nov), so a flat 50 ms measures the VM. `--absolute` also checks the old 50 ms budget, for a fast machine. Two ceilings are
+always on, because the delta cannot see a cost in the composer's own keystroke path (it lands in the streaming pass and the idle
+control alike): the idle control's p95 must be at most 150 ms (about 2x the runner's 69) and streaming's at most 250 ms.
 
 ```
 cd app/ui && npx vite build -c vite.lag.config.ts && node scripts/typing-lag.mjs --gate
