@@ -2,15 +2,19 @@ name: ci
 
 # TEMPORARY (owner, 13 Nov): restore perf jobs on every PR once batch-3 is on main. (The perf jobs are in perf.yml; this
 # file keeps the test jobs on every pull request and every push to a PR branch, cancels an older run when a newer push
-# arrives on the same ref, and skips a pull request that changes only markdown or the docs folder. A push to main always
+# arrives on the same ref, and skips a pull request that changes only the three notes folders below. A push to main always
 # runs in full, so a docs-only change cannot leave main's manifest stale unseen.)
 on:
   push:
     branches: [main]
   pull_request:
+    # Skipped: docs/design, docs/assets and docs/reference, which no test reads. NOT skipped, because tests or shipped
+    # behaviour read them: any other markdown (agent definitions, skills, engine prompts, steering rules, SKILL.md,
+    # README), docs/commands (tests/docs/run-docs.sh), docs/architecture, docs/desktop and docs/roadmap.
     paths-ignore:
-      - "**.md"
-      - "docs/**"
+      - "docs/design/**"
+      - "docs/assets/**"
+      - "docs/reference/**"
 
 permissions:
   contents: read
