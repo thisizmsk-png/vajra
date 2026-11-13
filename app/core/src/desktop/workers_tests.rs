@@ -122,6 +122,7 @@ case "$MODE" in
   scratch_file) edit; echo scratch > other/scratch.txt ;;
   nonce) echo x > "src/NONCE-abcdef0123456789.rs" ;;
   setsid_child) edit; perl -MPOSIX=setsid -e 'if (fork() == 0) {{ setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 600; }}' '{pids}/setsid.pid' ;;
+  setsid_child_slow) edit; /usr/bin/perl -MPOSIX=setsid -e 'if (fork() == 0) {{ setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; exec "/bin/sleep", "600"; }}' '{pids}/setsid.pid'; sleep 1.2 ;;
   nothing) : ;;
 esac
 echo "end $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
@@ -533,6 +534,154 @@ fn a_setsid_grandchild_does_not_hold_the_ticket() {
     let r = rig("setsid", Opts { mode: "setsid_child", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+/// 6c-3 (a): a grandchild that left the worker's group with `setsid` (a platform binary, so its environment is hidden
+/// on macOS; it still holds the worker's terminal) does not outlive its ticket: the attempt's sweep kills it.
+#[test]
+fn a_setsid_grandchild_is_swept_when_its_ticket_ends() {
+    let r = rig("sweep", Opts { mode: "setsid_child_slow", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let pid: i32 = std::fs::read_to_string(r.d.join("pids/setsid.pid")).unwrap().trim().parse().unwrap();
+    let gone = (0..100).any(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        (unsafe { libc::kill(pid, 0) }) != 0
+    });
+    assert!(gone, "the setsid grandchild {pid} outlived its ticket");
+    assert_eq!(r.rt.swept(), (1, 0));
+}
+
+/// 6c-3 (c): quit ends every live ticket, running or queued, `failed`/`abandoned` with detail `app_quit`, each with its
+/// outcome line; nothing new is queued after it, and a second quit is a no-op.
+#[test]
+fn quit_ends_every_live_ticket_with_its_line_and_refuses_new_ones() {
+    let r = rig("quit", Opts { mode: "hang", ..Opts::default() });
+    let a = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let b = r.rt.dispatch(r.task("r1", "t2"), seat("w1", "codex")).unwrap();
+    let c = r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap();
+    let t0 = Instant::now();
+    while [&a, &c].iter().any(|id| r.rt.view(id).unwrap().attempt == 0) {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.rt.view(&b).unwrap().state, State::Queued);
+    let left = r.rt.quit(WAIT);
+    assert!(left.is_empty(), "every ticket ended within the wait: {left:?}");
+    for id in [&a, &b, &c] {
+        let v = r.rt.view(id).unwrap();
+        assert_eq!((v.state, v.outcome, v.reason.as_deref(), v.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_quit")), "{v:?}");
+    }
+    for run in ["r1", "r2"] {
+        let lines = std::fs::read_to_string(r.gw.data.join(format!("runs/{run}/tickets.jsonl"))).unwrap();
+        let outcomes = lines.lines().filter(|l| l.contains(r#""event":"outcome""#) && l.contains("app_quit")).count();
+        assert_eq!(outcomes, if run == "r1" { 2 } else { 1 }, "{run}: {lines}");
+    }
+    assert!(matches!(r.rt.dispatch(r.task("r1", "t3"), seat("w2", "codex")), Err(DispatchError::Closed)));
+    assert!(r.rt.quit(Duration::from_millis(50)).is_empty(), "a second quit is a no-op");
+}
+
+/// 6c-1 follow-up: a stopped worker that never exits (its kill does not land) no longer holds its attempt until the
+/// 30-minute worker timeout. The attempt ends `stopped` after the bounded wait, and its process group is killed.
+/// #177 codex P1: a ticket held inside its snapshot (no harness a stop could reach) past the quit budget is ended by
+/// `quit` itself, with its `app_quit` outcome line written before `quit` returns. When the snapshot later finishes,
+/// the ticket thread changes nothing and writes no second outcome.
+#[test]
+fn quit_past_its_budget_ends_and_records_a_ticket_held_in_its_snapshot() {
+    let gate = Arc::new(Gate::default());
+    let r = rig("quit-held", Opts { gate: Some(gate.clone()), ..Opts::default() });
+    let id = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    gate.wait_entered();
+    let left = r.rt.quit(Duration::from_millis(100));
+    assert_eq!(left, vec![id.clone()], "held past the budget");
+    let v = r.rt.view(&id).unwrap();
+    assert_eq!((v.state, v.outcome, v.reason.as_deref(), v.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_quit")), "{v:?}");
+    let outcome_lines = || std::fs::read_to_string(r.gw.data.join("runs/r1/tickets.jsonl")).unwrap().lines().filter(|l| l.contains(r#""event":"outcome""#)).count();
+    assert_eq!(outcome_lines(), 1, "the outcome is on disk before quit returns");
+    gate.open();
+    std::thread::sleep(Duration::from_millis(500));
+    let after = r.rt.view(&id).unwrap();
+    assert_eq!((after.outcome, after.detail.as_deref(), after.commit.as_deref()), (Some(Outcome::Failed), Some("app_quit"), None), "{after:?}");
+    assert_eq!(outcome_lines(), 1, "the late finish writes nothing more");
+}
+
+/// #177 codex P2: the quit budget includes stop delivery. Each stop here blocks for 1.5 s, as the supervisor's kill does
+/// while a worker that ignores SIGHUP waits out its grace. Two running workers, and `quit(50ms)` still returns within
+/// about its budget: the stops are delivered off its thread, and the tickets are ended and recorded at the deadline.
+#[test]
+fn a_short_quit_returns_on_time_when_stop_delivery_blocks() {
+    let r = rig("quit-slowstop", Opts { mode: "hang", ..Opts::default() });
+    *crate::lock(&r.rt.0.kill_delay) = Some(Duration::from_millis(1500));
+    let ids = [r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap(), r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap()];
+    let t0 = Instant::now();
+    while ids.iter().any(|id| r.rt.view(id).unwrap().attempt == 0) {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let t0 = Instant::now();
+    r.rt.quit(Duration::from_millis(50));
+    let took = t0.elapsed();
+    assert!(took < Duration::from_millis(700), "quit(50ms) took {took:?}");
+    for id in &ids {
+        assert_eq!(r.rt.view(id).unwrap().detail.as_deref(), Some("app_quit"));
+    }
+    *crate::lock(&r.rt.0.kill_delay) = None;
+}
+
+#[test]
+fn a_stopped_worker_that_never_exits_ends_after_a_bounded_wait() {
+    let r = rig("killwait", Opts { mode: "hang", ..Opts::default() });
+    r.rt.set_kill_test(Duration::from_millis(200), true);
+    let id = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let t0 = Instant::now();
+    while r.rt.view(&id).unwrap().attempt == 0 {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = r.sup.pid("core-1-a1").unwrap();
+    assert!(r.rt.cancel(&id));
+    let v = r.done(&id);
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Stopped), Some("stopped")), "{v:?}");
+    // The fallback SIGKILL returns at once; the supervisor's reaper may not have reaped the leader yet (a zombie still
+    // answers `kill(-pid, 0)`), so the group is waited for, boundedly (#160 codex).
+    let t0 = Instant::now();
+    while (unsafe { libc::kill(-(pid as i32), 0) }) == 0 {
+        assert!(t0.elapsed() < WAIT, "the worker's group is still there after {WAIT:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// 6c-1 follow-up: two checks of one kind in one round (a later commit, or a re-check) are two tickets with their own
+/// ids and worktrees; the second is not refused as a duplicate.
+#[test]
+fn two_checks_of_one_kind_in_one_round_get_their_own_tickets() {
+    let r = rig("checkids", Opts::default());
+    let a = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), seat("v1", "codex"), &r.base).unwrap();
+    let b = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), seat("v1", "codex"), &r.base).unwrap();
+    let c = r.rt.dispatch_check(CheckKind::SecurityReview, r.task("r1", "ignored"), seat("v2", "codex"), &r.base).unwrap();
+    assert_eq!((a.as_str(), b.as_str(), c.as_str()), ("r1.verify.r1", "r1.verify-2.r1", "r1.security-review.r1"));
+    let (va, vb) = (r.done(&a), r.done(&b));
+    assert_eq!((va.kind, va.outcome, vb.kind, vb.outcome), ("verify", Some(Outcome::Done), "verify", Some(Outcome::Done)), "{va:?} {vb:?}");
+    assert_ne!(va.worktree, vb.worktree, "each check has its own worktree");
+    r.done(&c);
+    assert!(r.rt.dispatch(r.task("r1", "verify"), seat("w1", "codex")).is_err(), "a writer task still may not reuse a taken id");
+}
+
+/// 6c-1 follow-up: a `tickets.jsonl` line that cannot be written is counted, not dropped unseen, and the ticket still
+/// ends. A planted link at `<data>/runs` makes every write fail (the folders are opened no-follow).
+#[test]
+fn a_tickets_line_that_cannot_be_written_is_counted() {
+    let ok = rig("recordok", Opts::default());
+    ok.done(&ok.rt.dispatch(ok.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(ok.rt.record_failures(), 0, "a writable data dir loses no line");
+    let r = rig("recordfail", Opts::default());
+    let elsewhere = r.d.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, r.gw.data.join("runs")).unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert!(r.rt.record_failures() >= 2, "the dispatch and outcome lines are both counted: {}", r.rt.record_failures());
+    assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none(), "nothing was written through the link");
 }
 
 #[test]

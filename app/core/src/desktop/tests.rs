@@ -5410,6 +5410,35 @@ fn the_app_opens_holding_the_git_baseline_and_builds_no_worker_runtime_until_ask
 }
 
 #[test]
+fn a_second_app_on_the_same_data_folder_refuses_every_launch_and_frees_it_when_the_first_quits() {
+    let t = Tmp::new();
+    let first = t.app();
+    assert!(!first.other_instance());
+    let second = t.app();
+    assert!(second.other_instance());
+    assert_eq!(second.swept_report()["other_instance"], true);
+    let sid = "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0c";
+    let e = second.launch(sid, "20261105-1230", "c", &t.0.join("repo"), |_| Ok(vec!["true".into()]), false).unwrap_err();
+    assert_eq!(code(&e), "agents_off", "{e}");
+    assert!(e["detail"].as_str().unwrap().starts_with("Agents are off: another Vajra Desktop is open"), "{e}");
+    assert_eq!(code(&second.worker_runtime(|| unreachable!("a second instance builds no runtime")).err().unwrap()), "agents_off");
+    assert_eq!(first.workers.agents_allowed(), Ok(()), "the first app keeps its agents");
+    drop(second);
+    // bhishma Low: a worker unlinks and replaces lock files in both folders while the first app runs; a third app is
+    // still refused (the locks are on the folders, which stay).
+    let work = crate::vajra::gitw::work_root(&t.home());
+    for f in [t.0.join("data/instance.lock"), work.join(".instance.lock")] {
+        let _ = fs::remove_file(&f);
+        fs::write(&f, "").unwrap();
+    }
+    assert!(t.app().other_instance(), "an unlinked and replaced lock file frees nothing");
+    drop(first);
+    let next = t.app();
+    assert!(!next.other_instance(), "the locks end with the app that held them");
+    assert_eq!(next.workers.agents_allowed(), Ok(()));
+}
+
+#[test]
 fn a_broken_baseline_still_opens_the_app_but_refuses_every_launch_with_a_plain_line() {
     let t = Tmp::new();
     break_baseline(&t.0.join("data"));
@@ -5437,7 +5466,7 @@ fn with_no_developer_tools_startup_never_runs_git_and_offers_the_installer() {
     fs::write(&git, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", t.0.join("git-ran").display())).unwrap();
     fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
     let none = [t.0.join("no-tools")];
-    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &none);
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &none, true);
     assert!(!t.0.join("git-ran").exists(), "git was never run");
     assert!(host.agents_allowed().unwrap_err().starts_with("Agents are off: git isn't installed."));
     assert_eq!(host.install_action(), Some(worker_host::INSTALL_DEV_TOOLS));
@@ -5446,7 +5475,7 @@ fn with_no_developer_tools_startup_never_runs_git_and_offers_the_installer() {
     // With the tools there, the same git is run for the take (so the check is what kept it from running above).
     fs::create_dir_all(t.0.join("tools/usr/bin")).unwrap();
     fs::write(t.0.join("tools/usr/bin/git"), "").unwrap();
-    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &[t.0.join("tools")]);
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &[t.0.join("tools")], true);
     assert!(t.0.join("git-ran").exists());
     assert_eq!(host.install_action(), None, "a failed take is not a missing install");
 }

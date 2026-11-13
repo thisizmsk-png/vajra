@@ -147,6 +147,13 @@
 .v-history__meter > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--c-text-secondary); }
 /* With the report open, Status and Updated give their room to the campaign (the report names its status). */
 .v-history__body--open .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
+/* With a report open the list has about 560 px at 1280. The run name gets what is left, so the count loses its
+   meter and its column shrinks to the count. 64 px holds the sortable "Passing" header and a three-digit count beside
+   16 px of cell padding. Integrity (168) and Actions (140) keep their full widths: they hold "Integrity check failed"
+   and the Report and Verify buttons. */
+.v-history__body--open .v-history__main { padding-inline: var(--space-lg); }
+.v-history__body--open .v-history__meter { display: none; }
+.v-history__body--open .v-table th:nth-child(3) { width: 64px; }
 .v-history__main { padding: var(--space-xl); display: flex; flex-direction: column; gap: var(--space-xl); }
 .v-history__muted { color: var(--c-text-secondary); font-size: 12px; }
 .v-history__acts { display: inline-flex; gap: var(--space-xs); }
@@ -181,13 +188,21 @@
 .v-loading { display: flex; flex-direction: column; gap: 10px; padding: var(--space-xs) 0; }
 .v-loading .v-skeleton { height: 12px; max-width: 420px; }
 .v-loading .v-skeleton:nth-child(2n) { max-width: 300px; }
+/* Loading rows wait 100 ms before they show, so a load that finishes sooner (a view's first open) never flashes them. */
+.v-loading { visibility: hidden; animation: v-loading-show 0s linear 100ms forwards; }
+@keyframes v-loading-show { to { visibility: visible; } }
 .v-crew__state { padding: 48px var(--space-xl); }
 .v-crew__tree--loading { border: 0; padding: 0; max-width: 320px; }
 
 /* Under 1200 px (UX.md section 3): Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */
 @media (max-width: 1199px) {
-  .v-crew__body { grid-template-columns: 240px minmax(0, 1fr) 220px; }
-  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 240px minmax(0, 1fr); }
+  /* 260 leaves the middle its 480 px minimum at 960 with the details column open. Every row keeps its chevron slot,
+     shrunk to 16 px, which is the indent step, so a leaf's icon stays in the same column as its siblings' and under
+     its parent's label. Dropping the slot only on leaf rows would pull a leaf left of its own parent. A longer
+     status still clips, and the tree gives it a tooltip. */
+  .v-crew__body { grid-template-columns: 260px minmax(0, 1fr) 220px; }
+  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 260px minmax(0, 1fr); }
+  .v-crew__tree .v-tree__twisty { min-width: 16px; }
   .v-crew__head { padding: 0 var(--space-md); }
   .v-history .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
   .v-history__body--open { grid-template-columns: minmax(0, 1fr); }

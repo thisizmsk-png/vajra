@@ -217,7 +217,7 @@ pub fn apply_recovery(ledger: &Ledger, found: &mut Vec<Found>, owner: &Owner, re
 }
 
 /// Is this exact process (pid and start stamp) still running? A zombie is not.
-fn running(pid: u32, stamp: u64) -> bool {
+pub(crate) fn running(pid: u32, stamp: u64) -> bool {
     same_process(pid, stamp) && !crate::procid::is_zombie(pid)
 }
 
@@ -225,13 +225,13 @@ fn running(pid: u32, stamp: u64) -> bool {
 /// registered BEFORE its identity is read: if the stamp then matches, the registered pid is the right process, and its
 /// exit from then on is delivered here (an exited process that is not reaped still holds its pid). macOS only; elsewhere
 /// (or if no kqueue can be made) it reports nothing and the stamp check alone applies.
-struct ExitWatch {
+pub(crate) struct ExitWatch {
     kq: i32,
     gone: std::collections::HashSet<u32>,
 }
 
 impl ExitWatch {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         #[cfg(target_os = "macos")]
         let kq = unsafe { libc::kqueue() };
         #[cfg(not(target_os = "macos"))]
@@ -240,7 +240,7 @@ impl ExitWatch {
     }
 
     /// Watch `pid` for exit. False if it does not exist (already gone). True without a watch if there is no kqueue.
-    fn add(&mut self, pid: u32) -> bool {
+    pub(crate) fn add(&mut self, pid: u32) -> bool {
         #[cfg(target_os = "macos")]
         if self.kq >= 0 {
             let ev = libc::kevent { ident: pid as usize, filter: libc::EVFILT_PROC, flags: libc::EV_ADD | libc::EV_ONESHOT, fflags: libc::NOTE_EXIT, data: 0, udata: std::ptr::null_mut() };
@@ -251,7 +251,7 @@ impl ExitWatch {
     }
 
     /// Has `pid` exited since it was added? Reads the pending events without waiting.
-    fn exited(&mut self, pid: u32) -> bool {
+    pub(crate) fn exited(&mut self, pid: u32) -> bool {
         #[cfg(target_os = "macos")]
         if self.kq >= 0 {
             let none = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -284,7 +284,7 @@ impl Drop for ExitWatch {
 /// immediately before the call. Returns whether a signal was sent. Not atomic (macOS cannot signal by handle): what is
 /// left is the gap between this check and the `kill` syscall for this one pid, microseconds, and harm needs the pid to be
 /// reaped and reallocated to another process inside it, which needs the pid counter to wrap.
-fn signal_verified(w: &mut ExitWatch, pid: u32, stamp: u64, sig: libc::c_int) -> bool {
+pub(crate) fn signal_verified(w: &mut ExitWatch, pid: u32, stamp: u64, sig: libc::c_int) -> bool {
     if w.exited(pid) || !running(pid, stamp) {
         return false;
     }
