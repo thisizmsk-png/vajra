@@ -159,6 +159,43 @@ impl Snapshot {
     }
 }
 
+/// How long `open` waits for an earlier writer of the same file to finish its queue.
+pub const CLAIM_WAIT: Duration = Duration::from_secs(10);
+
+/// The files that have a live writer thread in this process. A writer holds its file's claim from before it reads the
+/// file until after its last queued write, so a log dropped and reopened at once never has two writers (#222 review).
+static WRITERS: Mutex<Option<std::collections::HashSet<PathBuf>>> = Mutex::new(None);
+static RELEASED: std::sync::Condvar = std::sync::Condvar::new();
+
+struct Claim(PathBuf);
+
+impl Claim {
+    fn take(path: &Path) -> Result<Claim, String> {
+        let deadline = Instant::now() + CLAIM_WAIT;
+        let mut w = crate::lock(&WRITERS);
+        loop {
+            let set = w.get_or_insert_with(Default::default);
+            if set.insert(path.to_path_buf()) {
+                return Ok(Claim(path.to_path_buf()));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err("the run log is still being written by an earlier writer".into());
+            }
+            w = RELEASED.wait_timeout(w, left).unwrap_or_else(std::sync::PoisonError::into_inner).0;
+        }
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if let Some(set) = crate::lock(&WRITERS).as_mut() {
+            set.remove(&self.0);
+        }
+        RELEASED.notify_all();
+    }
+}
+
 enum Msg {
     Write { entry: Box<Entry>, critical: bool },
     Anchor,
@@ -204,6 +241,8 @@ impl RunLog {
     pub fn open_requiring(dir: &Path, run_id: &str, required: Option<&runlog::Anchor>) -> Result<Self, String> {
         private_run_dir(dir).map_err(|e| format!("the run log's folder can't be used: {e}"))?;
         let path = dir.join(FILE);
+        // One writer per file: wait for an earlier writer of it to drain its queue and stop before reading it.
+        let claim = Claim::take(&path)?;
         let (log, torn) = load(&path, run_id, required).map_err(|e| format!("the run log can't be read: {e}"))?;
         if log.broken().is_none() {
             // Create it now (0600, no link), so a planted file in its place is refused before any run event.
@@ -224,7 +263,11 @@ impl RunLog {
         let worker = Arc::clone(&s);
         std::thread::Builder::new()
             .name("vajra-runlog".into())
-            .spawn(move || worker.run(rx))
+            .spawn(move || {
+                // The claim is released only after the last queued write: the writer thread owns the file until then.
+                let _claim = claim;
+                worker.run(rx);
+            })
             .map_err(|e| format!("the run log could not start: {e}"))?;
         let me = RunLog { s };
         if torn > 0 {

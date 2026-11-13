@@ -773,3 +773,25 @@ fn a_reopen_below_the_sessions_anchor_leaves_the_file_as_found() {
     assert_eq!(log.card().broken.map(|b| (b.seq, b.why)), Some((anchored_seq, Why::Unanchored)));
     assert_eq!(log.head_seq(), 8);
 }
+
+#[test]
+fn a_log_dropped_with_pending_writes_and_reopened_at_once_has_one_writer() {
+    let d = scratch();
+    let mut expected = 0u64;
+    for round in 0..6u32 {
+        let l = RunLog::open(&d, RUN).unwrap();
+        assert_eq!(l.head_seq(), expected, "round {round}: the reopen saw every earlier write");
+        for i in 1..=20 {
+            // Questions are critical: each is synced, so the writer is still busy when the log is dropped.
+            l.append(Source::Lead, Kind::Question { id: format!("q{round}-{i}"), text: "?".into() }).unwrap();
+        }
+        expected += 20;
+        drop(l); // no flush: the writer still has its queue
+    }
+    // One more reopen waits for the last writer to finish, then the file holds everything.
+    assert_eq!(RunLog::open(&d, RUN).unwrap().head_seq(), expected);
+    let back = runlog_store::parse(&std::fs::read(file(&d)).unwrap());
+    assert_eq!(back.torn, 0);
+    let chain = runlog::verify(RUN, &back.entries);
+    assert_eq!((chain.ok_to, chain.broken), (expected, None));
+}
