@@ -45,7 +45,7 @@ cd app/ui && npx vite build -c vite.lag.config.ts && node scripts/typing-lag.mjs
 ```
 
 Measured on an Apple M-series laptop, Chrome 157: streaming p50 9.6 ms, p95 16 to 22 ms; idle control p95 16 to 17 ms; no
-long frames. The `typing-lag` job in `perf.yml` runs it and **blocks**.
+long frames. The `typing-lag` job in `perf.yml` runs it; it is report-only (`continue-on-error`) until 2026-11-20, then blocks.
 
 Caveat: Chrome's Event Timing API reports a much larger "presentation delay" for the same keys under streaming
 (p95 about 440 ms in headless Chrome) while the main thread shows no long frame. That is compositor or GPU presentation in

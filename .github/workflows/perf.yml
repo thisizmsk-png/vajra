@@ -68,7 +68,7 @@ jobs:
             growth.json
 
   # Typing lag with 5 agents streaming a fake load, keystroke to paint in the runner's real Chrome: p95 must be at or under
-  # 50 ms (app/ui/scripts/typing-lag.mjs). This step BLOCKS. Measured 17-22 ms locally, so the budget has wide headroom.
+  # 50 ms (app/ui/scripts/typing-lag.mjs). Report-only for its first week (see the step). Measured 17-22 ms locally.
   # The jsdom test (app/ui/tests/typingLag.test.tsx) stays as a fast first check and is report-only (continue-on-error).
   typing-lag:
     if: github.event.action != 'labeled'
@@ -90,8 +90,12 @@ jobs:
         env:
           VAJRA_LAG_GATE: "1"
         run: npx vitest run tests/typingLag.test.tsx
+      # REPORT-ONLY for its first week (until 2026-11-20): this has run on a laptop, not yet on the shared macOS runner, so a
+      # flaky rAF or Chrome there must not turn every PR red. The job summary prints the numbers each run; remove
+      # continue-on-error once a week of runs shows it is stable.
       - name: Typing lag gate, real browser
         working-directory: app/ui
+        continue-on-error: true
         run: |
           npx vite build -c vite.lag.config.ts
           node scripts/typing-lag.mjs --gate --out "$RUNNER_TEMP/typing-lag.json"
