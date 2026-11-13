@@ -137,8 +137,11 @@ def parse_anatomy(lines):
     """One `claude -p --output-format stream-json` run -> the first request's anatomy, or None if there is no result.
 
     first_request = fresh + cache write + cache read (everything the model was sent). `tools` and `mcp` come from the init
-    event. `side` = tokens billed to any model other than the one that answered (a title or summary call would show here)."""
+    event. `side` = tokens billed to any model other than the one that answered (a title or summary call would show here).
+    The answering model is the one named on the last streamed assistant message, never the one with the most tokens; if no
+    assistant message names a model, `answered_by` and `side_tokens` are None (unknown), not a guess."""
     init = res = None
+    answered_by = None
     for line in lines:
         try:
             e = json.loads(line)
@@ -146,6 +149,10 @@ def parse_anatomy(lines):
             continue
         if e.get("type") == "system" and e.get("subtype") == "init":
             init = e
+        elif e.get("type") == "assistant":
+            m = (e.get("message") or {}).get("model")
+            if isinstance(m, str) and m and not m.startswith("<"):  # "<synthetic>" is not a model
+                answered_by = m
         elif e.get("type") == "result":
             res = e
     if not res:
@@ -154,11 +161,12 @@ def parse_anatomy(lines):
     n = lambda d, k: d.get(k) if isinstance(d.get(k), int) and d.get(k) >= 0 else 0
     first = n(u, "input_tokens") + n(u, "cache_creation_input_tokens") + n(u, "cache_read_input_tokens")
     models = res.get("modelUsage") or {}
-    main = max(models, key=lambda m: n(models[m], "inputTokens") + n(models[m], "cacheCreationInputTokens") + n(models[m], "cacheReadInputTokens"), default=None)
-    side = sum(n(v, "inputTokens") + n(v, "cacheCreationInputTokens") + n(v, "cacheReadInputTokens") + n(v, "outputTokens") for m, v in models.items() if m != main)
+    side = None if answered_by is None else sum(
+        n(v, "inputTokens") + n(v, "cacheCreationInputTokens") + n(v, "cacheReadInputTokens") + n(v, "outputTokens")
+        for m, v in models.items() if m != answered_by)
     init = init or {}
     return {"first_request_tokens": first, "fresh": n(u, "input_tokens"), "cache_write": n(u, "cache_creation_input_tokens"),
-            "cache_read": n(u, "cache_read_input_tokens"), "output": n(u, "output_tokens"), "side_tokens": side, "models": sorted(models),
+            "cache_read": n(u, "cache_read_input_tokens"), "output": n(u, "output_tokens"), "side_tokens": side, "answered_by": answered_by, "models": sorted(models),
             "tools": len(init.get("tools") or []), "mcp_servers": len(init.get("mcp_servers") or []), "cost_usd": res.get("total_cost_usd")}
 
 
@@ -187,7 +195,7 @@ def render_report(results):
             lines.append(f"| idle CPU (%) | {r['idle_cpu_pct']} | {r['method']} |")
         elif r.get("scenario") == "anatomy":
             for name, a in r["arms"].items():
-                lines.append(f"| first request, {name} (tokens) | {a.get('first_request_tokens', a.get('error'))} | tools {a.get('tools')}, MCP servers {a.get('mcp_servers')}, side tokens {a.get('side_tokens')}; {r['claude']} |")
+                lines.append(f"| first request, {name} (tokens) | {a.get('first_request_tokens', a.get('error'))} | tools {a.get('tools')}, MCP servers {a.get('mcp_servers')}, side tokens {'unknown' if a.get('side_tokens') is None and 'error' not in a else a.get('side_tokens')}; {r['claude']} |")
         elif r.get("scenario") == "tokens":
             for name in ("hello", "real_prompt"):
                 t = r.get(name)
