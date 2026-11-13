@@ -68,7 +68,7 @@ impl App {
         let last = super::lock(&self.log_anchors).get(run_id).and_then(|v| v.last().cloned());
         let log = Arc::new(RunLog::open_requiring(&dir, run_id, last.as_ref())?);
         let events = Arc::clone(&self.events);
-        log.set_notify(Box::new(move |run, seq| events.emit(EVENT, json!({"run_id": run, "seq": seq}))));
+        log.set_notify(Box::new(move |n| events.emit(EVENT, serde_json::to_value(n).unwrap_or(Value::Null))));
         let sent = Arc::clone(&self.log_anchors);
         log.set_on_anchor(Box::new(move |run, a| super::lock(&sent).entry(run.to_string()).or_default().push(a.clone())));
         held.insert(run_id.to_string(), Arc::downgrade(&log));

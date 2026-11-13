@@ -35,8 +35,25 @@ pub const COALESCE: Duration = Duration::from_millis(100);
 /// The most entries one `since` answer carries.
 pub const PAGE_MAX: usize = 500;
 
-/// Tells the UI that the run's log has entries up to `seq`.
-pub type Notify = Box<dyn Fn(&str, u64) + Send + Sync>;
+/// The most entries one notice carries. A notice for more carries the first `NOTICE_MAX`, and the UI, seeing it stop
+/// short of `seq`, asks `since` for the rest: one call for a burst, none for ordinary traffic.
+pub const NOTICE_MAX: usize = 64;
+
+/// What the UI hears: the run's log is written up to `seq`, and `entries` are the written ones after `after` (in order,
+/// at most `NOTICE_MAX`). A view holding exactly `after` applies them with no call; any other view asks `since`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Notice {
+    pub run_id: String,
+    pub seq: u64,
+    pub after: u64,
+    pub entries: Vec<Entry>,
+    /// The log's state as of this notice, so a caught-up view that makes no call still learns the log stopped (#233).
+    pub io_error: Option<String>,
+    pub broken: Option<runlog::Break>,
+}
+
+/// Tells the UI about newly written entries.
+pub type Notify = Box<dyn Fn(&Notice) + Send + Sync>;
 /// Told each anchor right after it is sent to the signed record: `(run id, anchor)`.
 pub type OnAnchor = Box<dyn Fn(&str, &runlog::Anchor) + Send + Sync>;
 
@@ -224,6 +241,8 @@ struct Shared {
     log: Mutex<Log>,
     /// The last seq on disk; `since` answers up to here.
     written: Mutex<u64>,
+    /// The last seq a notice covered; the next notice carries the written entries after it.
+    told: Mutex<u64>,
     io_error: Mutex<Option<String>>,
     notify: Mutex<Option<Notify>>,
     on_anchor: Mutex<Option<OnAnchor>>,
@@ -264,6 +283,7 @@ impl RunLog {
             path,
             log: Mutex::new(log),
             written: Mutex::new(written),
+            told: Mutex::new(written),
             io_error: Mutex::new(None),
             notify: Mutex::new(None),
             on_anchor: Mutex::new(None),
@@ -434,6 +454,7 @@ impl Shared {
     fn handle(&self, file: &mut Option<std::fs::File>, due: &mut Option<Instant>, m: Msg) {
         match m {
             Msg::Write { entry, critical } => {
+                let had_error = crate::lock(&self.io_error).is_some();
                 if self.write(file, &entry, critical) {
                     if critical {
                         *due = None;
@@ -441,6 +462,10 @@ impl Shared {
                     } else {
                         due.get_or_insert_with(|| Instant::now() + COALESCE);
                     }
+                } else if !had_error {
+                    // The log just stopped: tell it now, with whatever was written before, so the UI shows it.
+                    *due = None;
+                    self.tell_state(true);
                 }
             }
             Msg::Anchor => self.anchor(file),
@@ -479,10 +504,29 @@ impl Shared {
     }
 
     fn tell(&self) {
+        self.tell_state(false);
+    }
+
+    /// Tell the UI what is newly written. `state_changed`: also tell when nothing new is written (the log just
+    /// stopped), so a caught-up view hears it even if no later entry is ever written.
+    fn tell_state(&self, state_changed: bool) {
         let seq = *crate::lock(&self.written);
-        let run = crate::lock(&self.log).run_id().to_string();
+        let mut told = crate::lock(&self.told);
+        if seq <= *told && !state_changed {
+            return;
+        }
+        let io_error = crate::lock(&self.io_error).clone();
+        let notice = {
+            let log = crate::lock(&self.log);
+            // Only written entries: the log in memory may already hold later ones the writer hasn't reached.
+            let room = usize::try_from(seq.saturating_sub(*told)).unwrap_or(usize::MAX);
+            let entries = log.since(*told, NOTICE_MAX.min(room)).to_vec();
+            Notice { run_id: log.run_id().to_string(), seq, after: *told, entries, io_error, broken: log.broken().cloned() }
+        };
+        *told = (*told).max(seq);
+        drop(told);
         if let Some(n) = crate::lock(&self.notify).as_ref() {
-            n(&run, seq);
+            n(&notice);
         }
     }
 
@@ -509,6 +553,7 @@ impl Shared {
             let written = *crate::lock(&self.written);
             *crate::lock(&self.io_error) = Some(format!("the run log couldn't be synced to anchor seq {written}: {e}"));
             *crate::lock(&self.skipped_anchors) += 1;
+            self.tell_state(true);
             return;
         }
         let written = *crate::lock(&self.written);
