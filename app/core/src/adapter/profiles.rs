@@ -97,9 +97,10 @@ const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "model", how: "`--model` when the seat names one" },
 ];
 
-/// Login and CLAUDE.md stay the user's: neither is a settings file. MCP servers and the default model don't carry
-/// over under `--setting-sources ""` (the spike: a user MCP server no longer loads); the carry-over allowlist follows.
-const CLAUDE_WORKER_USER: &[&str] = &["login", "CLAUDE.md", "history"];
+/// Login and CLAUDE.md stay the user's: neither is a settings file. The default model and the model-routing env vars
+/// carry over into the flag file (`CLAUDE_CARRY_ENV`); the user's MCP servers and every other setting don't load under
+/// `--setting-sources ""`.
+const CLAUDE_WORKER_USER: &[&str] = &["login", "CLAUDE.md", "history", "default model", "model-routing env"];
 
 /// Spike S4 (does `-p` keep the flag file's hooks, does `--tools` hold against a user `Bash(*)` allow, is
 /// `disableAllHooks:false` honoured, does `--setting-sources user` keep the worktree's project-settings hook from
@@ -510,6 +511,81 @@ const HOOKS_JSON: &str = include_str!("../../../../hooks/hooks.json");
 /// `--setting-sources ""`, so no user or project file can merge an `allowRead`, `allowWrite` or `excludedCommands`
 /// entry into these lists (the spike showed both reopen it); the scalars are pinned as well.
 pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Path, ticket_tmp: &Path) -> Result<String, String> {
+    claude_worker_flag_with(home, work, repos, data, ticket_tmp, &CarryOver::default())
+}
+
+/// The env vars a Claude worker's flag file may carry over from the user's own `settings.json`: model routing only (the
+/// gateway base URL, model names, the cloud-provider switches, region and project). Never a key or token
+/// (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`), never a credential selector
+/// (`AWS_PROFILE`), and never a `CLAUDE_CODE_*` switch outside the provider ones: any of those could change what the
+/// worker can do rather than which model it talks to. Never a proxy variable either (`CLAUDE_CARRY_NEVER`): settings
+/// env also reaches the worker's sandboxed Bash, and a proxy on loopback, which the sandbox allows, would give that
+/// Bash a way off the machine (#224 bhishma). Proxy users need a follow-up.
+pub const CLAUDE_CARRY_ENV: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_FOUNDRY_RESOURCE",
+    "AWS_REGION",
+    "CLOUD_ML_REGION",
+];
+
+/// Proxy variables, in both cases, which never carry over (see `CLAUDE_CARRY_ENV`).
+pub const CLAUDE_CARRY_NEVER: &[&str] =
+    &["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "all_proxy", "no_proxy"];
+
+/// A carried-over value is a short single-line string.
+const CARRY_MAX: usize = 512;
+
+/// What a Claude worker keeps from the user's own `settings.json`: the default model and the `CLAUDE_CARRY_ENV`
+/// entries of its `env` block, nothing else (no permission, sandbox, hook, `apiKeyHelper` or MCP key, no unnamed env
+/// var). Built from the file's text by `claude_carry_over`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CarryOver {
+    pub model: Option<String>,
+    pub env: Vec<(&'static str, String)>,
+}
+
+fn carry_value(v: &Value) -> Option<String> {
+    let s = v.as_str()?;
+    (!s.trim().is_empty() && s.len() <= CARRY_MAX && !s.chars().any(char::is_control)).then(|| s.to_string())
+}
+
+/// The carry-over from the text of the user's `~/.claude/settings.json`. A file that is missing, not JSON or not an
+/// object carries nothing, and a value that is not a short single-line string is dropped: this never refuses a launch.
+pub fn claude_carry_over(settings: Option<&str>) -> CarryOver {
+    let Some(v) = settings.and_then(|t| serde_json::from_str::<Value>(t).ok()) else { return CarryOver::default() };
+    let model = v.get("model").and_then(carry_value);
+    let env = match v.get("env").and_then(Value::as_object) {
+        Some(e) => CLAUDE_CARRY_ENV.iter().filter_map(|k| e.get(*k).and_then(carry_value).map(|s| (*k, s))).collect(),
+        None => Vec::new(),
+    };
+    CarryOver { model, env }
+}
+
+/// The user's `~/.claude/settings.json` read the way the provider check reads it (each step opened without following a
+/// link, a plain file, size-capped), then reduced to its carry-over.
+pub fn read_claude_carry_over(home: &Path) -> CarryOver {
+    use crate::providers::detect::Probe;
+    let text = crate::providers::detect::System::new(Vec::new()).with_home(home.to_path_buf()).read_cli_config(".claude", "settings.json");
+    claude_carry_over(text.as_deref())
+}
+
+/// `claude_worker_flag` plus the user's carry-over, as `model` and `env`. The template (an empty carry-over) is what
+/// `claude_worker_flag_shape` hashes, so the proven shape never depends on a user's settings; the carried keys can't
+/// reach the sandbox, the permissions or the hooks.
+pub fn claude_worker_flag_with(home: &Path, work: &Path, repos: &[PathBuf], data: &Path, ticket_tmp: &Path, carry: &CarryOver) -> Result<String, String> {
     let roots: Vec<PathBuf> = std::iter::once(work.to_path_buf()).chain(repos.iter().cloned()).collect();
     let mut deny = crate::control::lead_settings::deny_rules_for(home, &roots, data, &[]).map_err(|e| e.to_string())?;
     deny.extend(crate::control::lead_settings::worker_edit_rules(home, data).map_err(|e| e.to_string())?);
@@ -561,6 +637,13 @@ pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Pa
         },
         "hooks": hooks,
     });
+    let mut v = v;
+    if let Some(m) = &carry.model {
+        v["model"] = json!(m);
+    }
+    if !carry.env.is_empty() {
+        v["env"] = Value::Object(carry.env.iter().map(|(k, s)| (k.to_string(), json!(s))).collect());
+    }
     let mut s = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
     s.push('\n');
     Ok(s)
