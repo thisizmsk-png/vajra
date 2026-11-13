@@ -50,10 +50,21 @@ fn seats(t: &Tmp, trust: &str, slug: &str, consumed: bool) {
     fs::create_dir_all(&dir).unwrap();
     let doc = json!({
         "schema": "vajra.run_seats/1", "run_id": RUN, "evidence_seat": "verifier", "evidence_trust": trust, "campaign_slug": slug,
-        "evidence_approval": {"consumed": consumed},
+        // A field here is never trusted: the proof reads the core's N20 approval record.
+        "evidence_approval": {"consumed": true},
         "seats": [{"seat": "verifier", "role": "verifier", "account": "openai", "harness": "codex"}],
     });
     fs::write(dir.join("seats.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+    if consumed {
+        // The N20 flow: asked, approved by a person, consumed by the evidence ticket.
+        use crate::desktop::evidence_approval::Ask;
+        let app = t.app();
+        let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()] };
+        let now = std::time::SystemTime::now();
+        let sha = app.request_evidence_approval(&ask, now).unwrap();
+        app.answer_evidence_approval_at(RUN, &sha, true, now).unwrap();
+        app.consume_evidence_approval(&ask, now).unwrap();
+    }
 }
 
 #[test]
