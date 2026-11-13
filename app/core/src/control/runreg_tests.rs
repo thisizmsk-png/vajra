@@ -55,6 +55,8 @@ impl Workers for FakeWorkers {
     fn integrate(&self, _: &Integration<'_>, _: &[String]) -> Result<String, GitwError> {
         Ok("f".repeat(40))
     }
+    // The transport tests run no writers to cap; the cap itself is the run protocol's tests' concern.
+    fn limit_writers(&self, _: &str, _: u32) {}
 }
 
 fn seat(slot: &str, role: &str) -> WorkerSeat {
