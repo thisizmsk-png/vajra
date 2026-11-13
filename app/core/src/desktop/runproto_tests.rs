@@ -571,6 +571,38 @@ fn two_429s_on_the_lead_restart_it_with_backoff_and_dont_use_up_n9() {
     assert_ne!(r.status(), Some(RunStatus::LeadLost));
 }
 
+/// #153 codex P2: the provider-retry budget (3) and N9's one restart are separate. A fourth retryable exit ends the
+/// run, even with live work: it never spends N9's restart.
+#[test]
+fn a_retryable_exit_past_its_budget_ends_the_run_and_never_spends_n9() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.dispatch("t1");
+    for s in [5, 10, 20] {
+        assert_eq!(r.p.lead_exited(LeadExit::Retryable), LeadAction::Restart { backoff: Duration::from_secs(s) });
+    }
+    assert_eq!(r.p.lead_exited(LeadExit::Retryable), LeadAction::Ended(RunStatus::LeadLost), "no fourth restart");
+    let card = r.p.card();
+    assert!(card.reason.as_deref().unwrap().contains("3 retries"), "{card:?}");
+    assert_eq!(*r.w.kills.lock().unwrap(), [KillReason::Abandoned]);
+    // With no live work, an exhausted retry ends the run the computed way.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    for _ in 0..3 {
+        r.p.lead_exited(LeadExit::Retryable);
+    }
+    assert_eq!(r.p.lead_exited(LeadExit::Retryable), LeadAction::Ended(RunStatus::NotVerified));
+    // N9's restart is its own budget: all three retries used, a plain exit with live work still gets it once.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.dispatch("t1");
+    for _ in 0..3 {
+        r.p.lead_exited(LeadExit::Retryable);
+    }
+    assert_eq!(r.p.lead_exited(LeadExit::Exited), LeadAction::Restart { backoff: Duration::ZERO });
+    assert_eq!(r.p.lead_exited(LeadExit::Exited), LeadAction::Ended(RunStatus::LeadLost));
+}
+
 #[test]
 fn a_lead_that_exits_with_no_live_workers_finalizes_with_no_restart() {
     let r = rig();

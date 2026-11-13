@@ -1171,6 +1171,17 @@ impl RunProtocol {
                 st.retries += 1;
                 LeadAction::Restart { backoff: LEAD_BACKOFF * 2u32.pow(st.retries - 1) }
             }
+            // The provider-retry budget is spent: the run ends here and never falls through to N9's restart, which is a
+            // separate budget for a plain exit (#153 codex P2).
+            _ if exit == LeadExit::Retryable => {
+                let n = self.0.cfg.limits.lead_retries;
+                if self.any_live(&st) || st.checks_running() {
+                    Self::finalize(&mut st, RunStatus::LeadLost, format!("the lead's provider kept failing after {n} retries while workers ran"));
+                    LeadAction::Ended(RunStatus::LeadLost)
+                } else {
+                    LeadAction::Ended(self.finalize_computed(&mut st, format!("the lead's provider kept failing after {n} retries")))
+                }
+            }
             _ if self.any_live(&st) || st.checks_running() => {
                 if st.n9_restarted {
                     Self::finalize(&mut st, RunStatus::LeadLost, "the lead exited again while workers ran");
