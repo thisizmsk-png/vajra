@@ -143,7 +143,8 @@ impl App {
         self.undecided(id)?;
         let sha = Some(sha.as_str());
         let action = self.decision_line(Decision::Reject, None, id, &e, sha, DecisionState::Requested, Some(&reason))?;
-        let text = format!("rejected plan {id}: {reason}");
+        // One line the bridge accepts (it refuses control characters, doubled spaces and a leading `-`).
+        let text = crate::vajra::bridge_record::one_line(&format!("rejected plan {id}: {reason}"), crate::vajra::bridge_record::PROGRESS_MAX);
         match self.bridge.run(&Request::CampaignProgress { slug: e.campaign.clone(), text }) {
             Ok(o) if o.exit() == Some(0) => {
                 self.decision_line(Decision::Reject, Some(&action), id, &e, sha, DecisionState::Final, Some(&reason))?;

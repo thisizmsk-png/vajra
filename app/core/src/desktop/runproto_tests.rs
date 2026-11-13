@@ -30,6 +30,7 @@ struct FakeWorkers {
     kills: Mutex<Vec<KillReason>>,
     merges: Mutex<Vec<Vec<String>>>,
     merge_result: Mutex<Option<GitwError>>,
+    fast: std::sync::atomic::AtomicBool,
     /// Every dispatch answers this error while it is set.
     dispatch_error: Mutex<Option<DispatchError>>,
     /// The writer limits the protocol set, in order.
@@ -40,9 +41,17 @@ struct FakeWorkers {
 
 impl FakeWorkers {
     /// The worker ended: `done` gets a commit named after its ticket.
+    /// The runtime made the ticket's worktree (after dispatch, on its own thread).
+    fn start(&self, id: &str) {
+        let mut b = crate::lock(&self.tickets);
+        b.get_mut(id).unwrap_or_else(|| panic!("no ticket {id}")).0.worktree = Some(PathBuf::from(format!("/wt/{id}")));
+        drop(b);
+        self.changed.notify_all();
+    }
     fn end(&self, id: &str, o: Outcome) {
         let mut b = crate::lock(&self.tickets);
         let t = &mut b.get_mut(id).unwrap_or_else(|| panic!("no ticket {id}")).0;
+        t.worktree.get_or_insert_with(|| PathBuf::from(format!("/wt/{id}")));
         t.state = State::Ended;
         t.outcome = Some(o);
         t.reason = Some(if o == Outcome::Done { "changed".into() } else { "no_changes".into() });
@@ -84,7 +93,10 @@ impl Workers for FakeWorkers {
         if b.contains_key(&id) {
             return Err(DispatchError::Exists);
         }
-        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None };
+        // As the real runtime: no worktree at dispatch; `start` (or the end) gives it one. `fast` is a runtime that
+        // made the worktree before dispatch returned.
+        let wt = self.fast.load(Ordering::SeqCst).then(|| PathBuf::from(format!("/wt/{id}")));
+        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, worktree: wt };
         b.insert(id.clone(), (t, spec, seat));
         Ok(id)
     }
@@ -908,6 +920,305 @@ fn a_plan_at_the_advertised_text_limits_is_accepted_and_one_byte_over_is_refused
     assert!(r.p.plan_tasks(at(0)).is_ok(), "the schema's limits are the protocol's");
     let r = rig();
     assert_eq!(code(r.p.plan_tasks(at(1))).0, PLAN_INVALID);
+}
+
+// ---------------------------------------------------------------- the signed run record (6h)
+
+/// Records what the protocol asks of the run record, in order.
+#[derive(Default)]
+struct FakeRecord {
+    plans: Mutex<Vec<PlanRecord>>,
+    events: Mutex<Vec<Event>>,
+    fail_plan: Mutex<Option<String>>,
+    ended: std::sync::atomic::AtomicUsize,
+    panic_on_end: std::sync::atomic::AtomicBool,
+}
+
+impl RunRecord for FakeRecord {
+    fn plan(&self, p: &PlanRecord) -> Result<(), String> {
+        crate::lock(&self.plans).push(p.clone());
+        crate::lock(&self.fail_plan).clone().map_or(Ok(()), Err)
+    }
+    fn send(&self, e: Event) {
+        crate::lock(&self.events).push(e);
+    }
+    fn card(&self) -> RecordCard {
+        RecordCard { campaign: "deliver-r1".into(), ..RecordCard::default() }
+    }
+    fn repair(&self) -> RecordCard {
+        self.card()
+    }
+    fn flush(&self) {}
+    fn end(&self) {
+        self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.panic_on_end.load(std::sync::atomic::Ordering::SeqCst) {
+            panic!("the record's end failed");
+        }
+    }
+}
+
+fn recorded_with(limits: Limits) -> (Rig, Arc<FakeRecord>) {
+    let mut r = rig_with("add a --json flag to the export command", default_seats(), limits, false);
+    let rec = Arc::new(FakeRecord::default());
+    let placeholder = rig().p;
+    r.p = std::mem::replace(&mut r.p, placeholder).with_record(rec.clone());
+    (r, rec)
+}
+
+fn recorded() -> (Rig, Arc<FakeRecord>) {
+    recorded_with(Limits::default())
+}
+
+fn events(rec: &FakeRecord) -> Vec<Event> {
+    crate::lock(&rec.events).clone()
+}
+
+#[test]
+fn round_one_registers_the_campaign_and_the_task_graph_with_run_ids_agents_and_core_branches() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    let plans = crate::lock(&rec.plans).clone();
+    assert_eq!(plans.len(), 1);
+    let p = &plans[0];
+    assert_eq!(p.goal, "add a --json flag to the export command");
+    assert_eq!(p.features, vec![Feature { id: "ac-1".into(), desc: "export has --json".into() }]);
+    let ids: Vec<&str> = p.tasks.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, ["r1.t1", "r1.t2", "r1.t3"], "the workflow's order (topo), ids `<run>.<id>`");
+    assert_eq!(p.tasks[1].agent, "nakula", "the role's agent, never the seat");
+    assert_eq!(p.tasks[1].deps, ["r1.t1"]);
+    assert_eq!(p.tasks[0].branch, "vajra/r1/task-t1-r1");
+    assert_eq!(p.tasks[0].criteria, ["ac-1"]);
+}
+
+/// claude on #190: the record learns the run ended only when the protocol finalizes, never while it plans or waits.
+#[test]
+fn the_record_is_told_the_run_ended_only_once_the_protocol_finalizes() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    let _ = r.p.card();
+    assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 0, "a planned run with no ticket is going on");
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    r.p.flush_record();
+    assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 1, "a finalized run's record is told, once");
+}
+
+/// codex on #190: a later round's changed definitions, and the retry of a task its last report left in progress,
+/// reach the task graph before the round's claims; an unchanged task is not re-sent.
+#[test]
+fn a_replanned_round_redefines_changed_tasks_and_fails_their_last_attempt_before_its_claims() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::from([("t2".to_string(), json!({"x": 1})), ("t3".to_string(), json!({"x": 1}))]) });
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("failed"));
+    let before = events(&rec).len();
+    // t2 moves from frontend to backend; t3 gains a dependency on t1.
+    r.p.plan_tasks(PlanInput { round: 2, tasks: vec![task("t2", "backend", &["web/"], &["t1"], &[]), task("t3", "backend", &["docs/"], &["t1"], &[])], ..PlanInput::default() }).unwrap();
+    let t2 = r.dispatch("t2");
+    r.w.start(&t2);
+    let _ = r.p.await_any(std::slice::from_ref(&t2), Duration::from_millis(10));
+    let ev = events(&rec)[before..].to_vec();
+    let Some(Event::Define(defs)) = ev.first() else { panic!("the definitions come first: {ev:?}") };
+    let ids: Vec<&str> = defs.iter().map(|d| d.id.as_str()).collect();
+    assert_eq!(ids, ["r1.t2", "r1.t3"], "only the changed tasks, in topo order");
+    assert_eq!(defs[0].agent, "bhima", "t2's new role's agent");
+    assert_eq!(defs[0].branch, "vajra/r1/task-t2-r2", "the round's branch");
+    assert_eq!(defs[1].deps, ["r1.t1"]);
+    let fails: Vec<&String> = ev.iter().filter_map(|e| if let Event::Report { task, status: TaskStatus::Failed, .. } = e { Some(task) } else { None }).collect();
+    assert_eq!(fails, ["r1.t2", "r1.t3"], "each reworked task reported done is failed, so the next claim is a retry");
+    let claim = ev.iter().position(|e| matches!(e, Event::Claim { task, .. } if task == "r1.t2")).expect("t2 is claimed");
+    assert!(claim > ev.iter().position(|e| matches!(e, Event::Report { task, status: TaskStatus::Failed, .. } if task == "r1.t2")).unwrap(), "the failure is recorded before the claim: {ev:?}");
+    assert!(matches!(&ev[claim], Event::Claim { agent, .. } if agent == "bhima"));
+}
+
+/// codex on #190: a reworked task whose definition didn't change is still sent again with this round's branch.
+#[test]
+fn a_reworked_task_with_the_same_definition_is_redefined_on_the_rounds_branch() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::from([("t2".to_string(), json!({"x": 1}))]) });
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("failed"));
+    let before = events(&rec).len();
+    let same = plan1().tasks.into_iter().find(|t| t.id == "t2").unwrap();
+    r.p.plan_tasks(PlanInput { round: 2, tasks: vec![same], ..PlanInput::default() }).unwrap();
+    let ev = events(&rec)[before..].to_vec();
+    let Some(Event::Define(defs)) = ev.first() else { panic!("the reworked task is redefined: {ev:?}") };
+    assert_eq!(defs.iter().map(|d| (d.id.as_str(), d.branch.as_str())).collect::<Vec<_>>(), [("r1.t2", "vajra/r1/task-t2-r2")]);
+}
+
+/// codex on #190: a stop or a timeout with tickets still going records each ticket's terminal outcome exactly once,
+/// with no lead call after the end.
+#[test]
+fn a_stop_or_timeout_with_live_tickets_records_one_terminal_report_per_ticket() {
+    for stop in [true, false] {
+        let (r, rec) = recorded();
+        r.p.plan_tasks(plan1()).unwrap();
+        let t1 = r.dispatch("t1");
+        let t3 = r.dispatch("t3");
+        r.w.start(&t1);
+        if stop {
+            assert_eq!(r.p.stop(), RunStatus::Stopped);
+        } else {
+            r.clock.advance(Limits::default().run_timeout.as_secs() + 1);
+            r.p.tick();
+            assert_eq!(r.status(), Some(RunStatus::TimedOut));
+        }
+        r.p.flush_record();
+        let ev = events(&rec);
+        for (tk, task) in [(&t1, "r1.t1"), (&t3, "r1.t3")] {
+            let n = ev.iter().filter(|e| matches!(e, Event::Report { task: t, .. } if t == task)).count();
+            assert_eq!(n, 1, "{tk}: exactly one terminal report ({}): {ev:?}", if stop { "stop" } else { "timeout" });
+            assert!(ev.iter().any(|e| matches!(e, Event::Claim { task: t, .. } if t == task)), "{tk} is claimed before its report: {ev:?}");
+        }
+        assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 1, "the end is recorded once, after the reports");
+        r.p.flush_record();
+        assert_eq!(events(&rec).len(), ev.len(), "a second flush records nothing new");
+    }
+}
+
+/// codex on #190: with the plan listing a dependent before its prerequisite, the prerequisite's done report still
+/// reaches the record before the dependent's claim (the engine's `claim --stacked` needs it).
+#[test]
+fn a_prerequisites_report_is_recorded_before_its_dependents_claim_in_any_plan_order() {
+    let (r, rec) = recorded();
+    let reversed = PlanInput { tasks: vec![task("t2", "frontend", &["web/"], &["t1"], &[]), task("t1", "backend", &["src/a/"], &[], &["ac-1"])], ..plan1() };
+    r.p.plan_tasks(reversed).unwrap();
+    r.w.fast.store(true, Ordering::SeqCst);
+    // t1 ends with no await; t2's worktree exists by the time its dispatch returns.
+    let t1 = r.dispatch("t1");
+    r.w.end(&t1, Outcome::Done);
+    let _t2 = r.dispatch("t2");
+    let ev = events(&rec);
+    let at = |f: &dyn Fn(&Event) -> bool| ev.iter().position(f).unwrap_or_else(|| panic!("missing event: {ev:?}"));
+    let t1_done = at(&|e| matches!(e, Event::Report { task, status: TaskStatus::Done, .. } if task == "r1.t1"));
+    let t2_claim = at(&|e| matches!(e, Event::Claim { task, .. } if task == "r1.t2"));
+    assert!(t1_done < t2_claim, "t1's done report before t2's claim: {ev:?}");
+}
+
+/// bhishma on #190: a panic while the run's end is recorded never leaves `flush_record` waiting.
+#[test]
+fn a_panic_while_the_end_is_recorded_never_hangs_the_flush() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    rec.panic_on_end.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = r.p.clone();
+    std::thread::spawn(move || {
+        p.flush_record();
+        let _ = tx.send(());
+    });
+    assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok(), "flush_record returned after the end panicked");
+}
+
+#[test]
+fn a_failed_record_at_plan_time_ends_the_run_before_dispatch() {
+    let (r, rec) = recorded();
+    *crate::lock(&rec.fail_plan) = Some("vajra_tasks: task r1.t1: unknown agent bhima".into());
+    let (c, why) = code(r.p.plan_tasks(plan1()));
+    assert_eq!(c, RECORD_FAILED, "{why}");
+    assert!(why.contains("unknown agent bhima"), "the first error line is the reason: {why}");
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert_eq!(code(r.p.dispatch_worker("t1")).0, RUN_ENDED);
+    assert_eq!(r.w.running(), 0, "nothing was dispatched");
+}
+
+#[test]
+fn dispatch_claims_with_the_worktree_and_each_outcome_is_reported_once() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    let t3 = r.dispatch("t3");
+    r.w.end(&t1, Outcome::Done);
+    r.w.end(&t3, Outcome::NeedsUser);
+    for _ in 0..2 {
+        let _ = r.p.await_any(&[t1.clone(), t3.clone()], Duration::from_secs(1)).unwrap();
+    }
+    let ev = events(&rec);
+    let claims: Vec<&Event> = ev.iter().filter(|e| matches!(e, Event::Claim { .. })).collect();
+    assert_eq!(claims, [&Event::Claim { task: "r1.t1".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t1}"))) }, &Event::Claim { task: "r1.t3".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t3}"))) }]);
+    for (i, e) in ev.iter().enumerate() {
+        if let Event::Report { task, .. } = e {
+            assert!(ev[..i].iter().any(|c| matches!(c, Event::Claim { task: ct, .. } if ct == task)), "a report follows its claim: {ev:?}");
+        }
+    }
+    let reports: Vec<(String, TaskStatus)> = ev.iter().filter_map(|e| if let Event::Report { task, status, .. } = e { Some((task.clone(), *status)) } else { None }).collect();
+    assert_eq!(reports, vec![("r1.t1".into(), TaskStatus::Done), ("r1.t3".into(), TaskStatus::Question)], "each once");
+}
+
+#[test]
+fn the_claim_waits_for_the_worktree_the_runtime_makes_after_dispatch() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    assert!(events(&rec).is_empty(), "no claim before the worktree exists: {:?}", events(&rec));
+    let _ = r.p.await_any(std::slice::from_ref(&t1), Duration::from_millis(50)).unwrap();
+    assert!(events(&rec).is_empty(), "still none while the ticket is queued");
+    r.w.start(&t1);
+    let _ = r.p.await_any(std::slice::from_ref(&t1), Duration::from_millis(250)).unwrap();
+    assert_eq!(events(&rec), vec![Event::Claim { task: "r1.t1".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t1}"))) }], "claimed once, with --worktree");
+    r.w.end(&t1, Outcome::Done);
+    let _ = r.p.await_any(std::slice::from_ref(&t1), Duration::from_millis(250)).unwrap();
+    let _ = r.p.await_any(std::slice::from_ref(&t1), Duration::from_millis(50)).unwrap();
+    let ev = events(&rec);
+    assert_eq!(ev.len(), 2, "{ev:?}");
+    assert!(matches!(&ev[1], Event::Report { status: TaskStatus::Done, .. }));
+}
+
+#[test]
+fn the_outcome_map_matches_the_workflow() {
+    for (o, want) in [
+        (Outcome::Done, TaskStatus::Done),
+        (Outcome::Progress, TaskStatus::Progress),
+        (Outcome::Failed, TaskStatus::Failed),
+        (Outcome::NeedsUser, TaskStatus::Question),
+        (Outcome::Stopped, TaskStatus::Blocked),
+    ] {
+        let (r, rec) = recorded();
+        r.p.plan_tasks(plan1()).unwrap();
+        let t = r.dispatch("t1");
+        r.w.end(&t, o);
+        let _ = r.p.await_any(&[t], Duration::from_secs(1)).unwrap();
+        let got = events(&rec).iter().find_map(|e| if let Event::Report { status, .. } = e { Some(*status) } else { None });
+        assert_eq!(got, Some(want), "{o:?}");
+    }
+}
+
+#[test]
+fn a_waiting_round_and_the_last_failed_round_write_the_workflow_texts() {
+    let (r, rec) = recorded_with(Limits { rounds: 1, ..Limits::default() });
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    let t3 = r.dispatch("t3");
+    r.w.end(&t1, Outcome::Done);
+    r.w.end(&t3, Outcome::NeedsUser);
+    r.p.integrate(1).unwrap();
+    let lines: Vec<Event> = events(&rec).into_iter().filter(|e| matches!(e, Event::Progress(_) | Event::Checkpoint(_))).collect();
+    assert_eq!(
+        lines,
+        vec![
+            Event::Progress("run r1 round 1: waiting for the user on t3; no integration yet".into()),
+            Event::Progress("run r1: no verified delivery after 1 round(s); no integration yet".into()),
+            Event::Checkpoint("stuck after 1 rounds".into()),
+        ]
+    );
+    // #153: a task that ended `needs_user` makes the out-of-rounds end a human hold, not a plain failure.
+    assert_eq!(r.status(), Some(RunStatus::NeedsUser));
+}
+
+#[test]
+fn a_clean_integration_is_named_in_later_progress() {
+    let (r, rec) = recorded_with(Limits { rounds: 1, ..Limits::default() });
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t3", "t2"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::from([("t1".to_string(), json!({"x": 1}))]) });
+    let _ = r.await_round(1);
+    let want = format!("run r1: no verified delivery after 1 round(s); integration vajra/r1/integration @ {:f>40} from {BASE}", 1);
+    assert!(events(&rec).contains(&Event::Progress(want.clone())), "{want} in {:?}", events(&rec));
 }
 
 /// batch-3's `Closed`: the app is quitting, so nothing new is queued. The run is stopped (as a human Stop would), and

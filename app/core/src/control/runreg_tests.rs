@@ -27,7 +27,7 @@ struct FakeWorkers {
 impl Workers for FakeWorkers {
     fn dispatch(&self, spec: TaskSpec, _: WorkerSeat) -> Result<String, DispatchError> {
         let id = format!("{}.{}.r{}", spec.run, spec.task, spec.round);
-        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None };
+        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, worktree: None };
         crate::lock(&self.tickets).insert(id.clone(), t);
         Ok(id)
     }
