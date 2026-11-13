@@ -795,6 +795,9 @@ impl WorkerRuntime {
             e.view.attempt = n;
             e.view.harness_session = l.session_id.clone();
             e.view.steer_off = l.steer_off;
+            // #215 codex: the guard is this process's own evidence. A retry starts unknown, never with the last
+            // attempt's `guarded`; only its own read-back (`note_key_guard`) sets it again.
+            e.view.key_guard = None;
         }
         // A kill that landed between the check above and `session` being set.
         if self.killed(id).is_some() {

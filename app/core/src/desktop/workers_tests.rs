@@ -740,6 +740,19 @@ fn a_started_claude_ticket_with_no_key_guard_reads_as_unknown() {
     assert!(!v.core_worker().overlays.iter().any(|o| o.contains("guard")), "not started: nothing to say");
 }
 
+/// #215 codex: attempt 1 starts with no MCP server (guarded), then a retryable error on an unchanged tree; the retries
+/// never print an init event. Their guard is their own: unknown, never attempt 1's `guarded`.
+#[test]
+fn a_retry_whose_process_never_shows_its_init_does_not_inherit_the_last_attempts_guard() {
+    // Proven by construction (canary), so it doesn't wait on the S4 pair.
+    let r = canary_rig("guard-retry", false);
+    std::fs::write(r.d.join("selftests.retry"), "").unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert!(r.d.join("selftests.retried").exists() && v.attempt > 1, "attempt 1 ran and was retried: {v:?}");
+    assert_eq!(v.key_guard, None, "{v:?}");
+    assert!(v.core_worker().overlays.contains(&"guard unknown"), "{:?}", v.core_worker().overlays);
+}
+
 /// #180 bhishma: S4 proved one Claude Code build, but users auto-update. A build no S4 run proved (with today's flag
 /// shape) and no self-test here proved is refused, before any worktree or flag file exists and before it runs as a
 /// worker. Here the self-test runs and the stand-in harness fails it.
@@ -782,6 +795,11 @@ if not base and os.path.exists("{count}.mcp"):
     # Its worker run loads a user MCP server (its self-test, which passed, didn't).
     init["mcp_servers"] = [{{"name": "files", "status": "connected", "source": "user"}}]
     init["tools"] = tools + ["mcp__files__read"]
+if not base and os.path.exists("{count}.retry"):
+    # A retryable error on an unchanged tree: the first worker run starts cleanly, every later one never prints init.
+    if not os.path.exists("{count}.retried"):
+        open("{count}.retried", "w").close(); print(json.dumps(init), flush=True)
+    print("unexpected status 504 Gateway Timeout", flush=True); sys.exit(1)
 print(json.dumps(init), flush=True)
 if not base:
     open("src/lib.rs", "a").write("worker line\n"); sys.exit(0)
