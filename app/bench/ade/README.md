@@ -53,5 +53,9 @@ so it is not comparable to anyone else's bare CLI):
 | plain CLI | 51,660 | 36 | 4 | 0 |
 | Director-General flags | 3,126 | 3 | 0 | 0 |
 
+The Director-General's per-turn header, same flags, one `hello` each (first request, tokens): no header 3,085; the old header
+(with ask and run ids) 3,153, so +68; the fixed header 3,114, so +29. The ids are gone from the header (nothing read them back
+from the model's context), which makes it the same bytes every turn.
+
 Worker sessions run the user's own CLI settings (we add none), so their first request is the plain-CLI figure plus whatever the
 engine hooks inject. The hooks add model-visible text only on demand (a relayed steer, or a warning), never per turn.
