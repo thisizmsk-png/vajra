@@ -389,6 +389,16 @@ impl App {
         (r["state"] == "consumed" && file_matches(&r, &held)).then_some(held.sha)
     }
 
+    /// Whether this run's record says its approval was used, but this app holds no such answer: what a restart leaves
+    /// behind. It only picks the reason shown under a Not verified label (the label is the same either way), so a
+    /// record written by hand can change that sentence and nothing else.
+    pub(crate) fn evidence_approval_unheld(&self, run_id: &str) -> bool {
+        if crate::lock(&self.approvals).get(run_id).is_some_and(|h| h.consumed) {
+            return false;
+        }
+        self.read_approval(run_id).ok().flatten().is_some_and(|r| r["state"] == "consumed")
+    }
+
     /// Approve or decline: a person's click in the app only.
     pub fn act_answer_evidence_approval(&self, env: &super::Envelope, run_id: &str, sha: &str, approve: bool) -> Value {
         let action = if approve { "approve_evidence" } else { "decline_evidence" };

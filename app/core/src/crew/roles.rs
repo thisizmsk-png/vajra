@@ -56,9 +56,34 @@ pub fn role_of(writer_id: &str) -> Option<&'static str> {
     })
 }
 
+/// The agent the task graph names as a writer role's owner (`vajra_tasks.py --owner` and `claim`): the workflow's agent
+/// for the role, never the seat.
+pub fn agent_of(role: &str) -> Option<&'static str> {
+    Some(match role {
+        "backend" => "bhima",
+        "frontend" => "nakula",
+        "tests" => "sepoy-test-1",
+        "docs" => "abhimanyu",
+        "platform" => "hanuman",
+        "numerics" => "karna",
+        "analysis" => "sahadeva",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_writer_role_has_an_agent_with_that_role() {
+        for (r, k) in ROLES {
+            assert_eq!(agent_of(r).is_some(), k == Kind::Writer, "{r}");
+            if let Some(a) = agent_of(r) {
+                assert_eq!(role_of(a), Some(r), "{a} is not a {r} writer");
+            }
+        }
+    }
 
     /// The keys of the `ALL_WRITERS` object literal in the workflow.
     fn workflow_writers() -> Vec<String> {
