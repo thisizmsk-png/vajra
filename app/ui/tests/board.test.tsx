@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Board } from "../src/screens/board/Board";
 import { CurrentProject } from "../src/projects/current";
+import { ProjectsProvider } from "../src/projects/store";
 import type { Current } from "../src/projects/current";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -70,6 +71,17 @@ describe("Board", () => {
   it("says when the project has no campaign yet", () => {
     mount(ok, { ...current, focus: null, runId: null });
     expect(screen.getByText(S.board.noCampaign)).toBeTruthy();
+  });
+
+  it("says the project list could not be read, not that there is no campaign, and retries the list", async () => {
+    const ipc = fakeIpc({});
+    setTransport(ipc.transport);
+    render(<ProjectsProvider><CurrentProject.Provider value={{ project: null, campaigns: [], focus: null, runId: null }}><Board /></CurrentProject.Provider></ProjectsProvider>);
+    expect(await screen.findByText(S.frame.loadFailed)).toBeTruthy();
+    expect(screen.queryByText(S.board.noCampaign)).toBeNull();
+    const before = ipc.calls.filter((c) => c.cmd === "list_campaigns").length;
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: S.states.retry }));
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
   });
 
   it("says when the board cannot be read, with a retry", async () => {

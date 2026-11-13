@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
+import { ProjectsProvider } from "../src/projects/store";
 import { Run } from "../src/screens/run/Run";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -27,6 +30,28 @@ const open = async (rows: unknown[], extra: Record<string, unknown> = {}) => {
 const order = () => screen.getAllByRole("listitem").map((e) => e.textContent ?? "");
 
 describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
+  it("says the project list could not be read, not to choose one in History, and retries the list", async () => {
+    const ipc = fakeIpc({});
+    setTransport(ipc.transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    expect(await screen.findByText(S.frame.loadFailed)).toBeTruthy();
+    expect(screen.queryByText(S.run.pick)).toBeNull();
+    const before = ipc.calls.filter((c) => c.cmd === "list_campaigns").length;
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: S.states.retry }));
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
+  });
+
+  it("still asks for a choice in History when the project list was read", async () => {
+    const ipc = fakeIpc({ list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } });
+    setTransport(ipc.transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    expect(await screen.findByText(S.run.pick)).toBeTruthy();
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "resume_targets")).toBe(true));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.getByText(S.run.pick)).toBeTruthy();
+    expect(screen.queryByText(S.frame.loadFailed)).toBeNull();
+  });
+
   it("drops a response for the previous campaign that resolves after the route changed", async () => {
     let release: (v: unknown) => void = () => {};
     const slowA = new Promise((r) => { release = r; });
@@ -258,6 +283,43 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(rows[1].textContent).toContain("Backend");
     expect(rows[1].textContent).toContain(S.run.taskStatus.in_progress);
     expect(rows[1].textContent).toContain(`${S.run.waitsFor} t1`);
+  });
+
+  it("words every task status in one casing, and keeps a cell for 'waits for' on every row so columns line up", async () => {
+    await openOverview(overview({ graph: { tasks: [gtask("t1", 0, "ready"), gtask("t2", 1, "question", ["r1.t1"]), gtask("t3", 1, "pending"), gtask("t4", 1, "odd_new_state")], waves: 2 } }));
+    const rows = within(screen.getByRole("list", { name: S.run.graph })).getAllByRole("listitem");
+    expect(rows.map((r) => r.querySelector(".v-badge")?.textContent)).toEqual([S.status.ready, S.status.question, S.run.taskStatus.pending, "odd_new_state"]);
+    // Wave, task, who, status, waits for, Open: the same six cells whether or not the task waits for anything.
+    expect(rows.map((r) => r.children.length)).toEqual([6, 6, 6, 6]);
+    expect(rows[0].children[4].textContent).toBe("");
+    expect(rows[1].children[4].textContent).toBe(`${S.run.waitsFor} t1`);
+  });
+
+  it("cuts a long 'waits for' list inside its own cell and keeps the whole list in the tooltip", async () => {
+    const deps = ["r1.t1", "r1.t2", "r1.t3", "r1.t4", "r1.t5", "r1.t6", "r1.t7"];
+    await openOverview(overview({ graph: { tasks: [gtask("t1", 0, "ready"), gtask("t8", 1, "pending", deps)], waves: 2 } }));
+    const rows = within(screen.getByRole("list", { name: S.run.graph })).getAllByRole("listitem");
+    const cell = rows[1].children[4];
+    // The class carries the ellipsis rule (see the stylesheet check below); without it the text paints over the Open button.
+    expect(cell.className).toBe("v-run__deps");
+    expect(cell.getAttribute("title")).toBe(`${S.run.waitsFor} t1, t2, t3, t4, t5, t6, t7`);
+    expect(rows[0].children[4].className).toBe("v-run__deps");
+    expect(rows[0].children[4].hasAttribute("title")).toBe(false);
+    const css = readFileSync(resolve(__dirname, "../src/shell.css"), "utf8");
+    const rule = css.split("\n").find((l) => l.includes(".v-run__deps")) ?? "";
+    expect(rule).toContain("overflow: hidden");
+    expect(rule).toContain("text-overflow: ellipsis");
+    expect(rule).toContain("white-space: nowrap");
+  });
+
+  it("sets the page title clear of the Progress heading, so the two do not read as one title", async () => {
+    await openOverview(overview());
+    const title = screen.getByRole("heading", { level: 1, name: S.run.title });
+    expect(title.className).toContain("v-run__name");
+    expect(screen.getByRole("heading", { level: 2, name: S.run.timeline })).toBeTruthy();
+    const css = readFileSync(resolve(__dirname, "../src/shell.css"), "utf8");
+    const rule = css.split("\n").find((l) => l.includes(".v-run__name {")) ?? "";
+    expect(rule).toContain("margin-bottom: var(--space-lg)");
   });
 
   it("renders only the rows in view for 200 tasks (AC-4.2.2)", async () => {
