@@ -43,6 +43,15 @@ describe("worker tab layout", () => {
     expect(narrow).toMatch(/\.v-worker\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+220px/);
   });
 
+  it("fills the screen's height with a capped row, so the panes scroll inside it", () => {
+    const rule = /\.v-worker\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(rule).toMatch(/flex:\s*1\b/);
+    expect(rule).toMatch(/min-height:\s*0/);
+    expect(rule).toMatch(/grid-template-rows:\s*minmax\(0,\s*1fr\)/);
+    expect(/\.v-crew__pane\s*\{[^}]*overflow:\s*auto/.test(css)).toBe(true);
+    expect(/\.v-crew__aside\s*\{[^}]*overflow:\s*auto/.test(css)).toBe(true);
+  });
+
   it("stacks each label over its value in the narrow Details column", () => {
     expect(narrow).toMatch(/\.v-crew__aside \.v-crew__facts\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
   });
