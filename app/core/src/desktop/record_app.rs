@@ -172,8 +172,9 @@ impl App {
         // A core run whose protocol hasn't finalized is going on, ticket or not (before dispatch, while the gate
         // runs, while the lead plans the next round). A dropped record (the app restarted) isn't.
         let mut recs = super::lock(&self.live_records);
-        recs.retain(|_, w| w.upgrade().is_some_and(|r| r.live()));
-        live.extend(recs.keys().cloned());
+        // An ended record the app still holds stays registered, so an orphan close goes through its writer.
+        recs.retain(|_, w| w.strong_count() > 0);
+        live.extend(recs.iter().filter(|(_, w)| w.upgrade().is_some_and(|r| r.live())).map(|(k, _)| k.clone()));
         live
     }
 
@@ -202,6 +203,12 @@ impl App {
             return Err(json!({"error": "not_found", "detail": "that run has no abandoned campaign"}));
         };
         let slug = o["campaign"].as_str().unwrap_or_default().to_string();
+        // The app still holds this run's record: close through its own writer and ledger, never a second copy.
+        let held = super::lock(&self.live_records).get(run_id).and_then(std::sync::Weak::upgrade);
+        if let Some(rec) = held {
+            rec.close_abandoned().map_err(|why| json!({"error": "close_failed", "detail": why}))?;
+            return Ok(json!({"run_id": run_id, "campaign": slug, "status": "abandoned"}));
+        }
         let bridge = record_bridge(&self.bridge, &self.data).map_err(|e| json!({"error": "io", "detail": e.to_string()}))?;
         let store = self.ledger_store(&slug, &bridge).map_err(|e| json!({"error": "io", "detail": e}))?;
         record::close_abandoned(&bridge, &slug, &store).map_err(|why| json!({"error": "close_failed", "detail": why}))?;

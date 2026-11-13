@@ -30,6 +30,7 @@ struct FakeWorkers {
     kills: Mutex<Vec<KillReason>>,
     merges: Mutex<Vec<Vec<String>>>,
     merge_result: Mutex<Option<GitwError>>,
+    fast: std::sync::atomic::AtomicBool,
 }
 
 impl FakeWorkers {
@@ -73,8 +74,10 @@ impl Workers for FakeWorkers {
         if b.contains_key(&id) {
             return Err(DispatchError::Exists);
         }
-        // As the real runtime: no worktree at dispatch; `start` (or the end) gives it one.
-        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, worktree: None };
+        // As the real runtime: no worktree at dispatch; `start` (or the end) gives it one. `fast` is a runtime that
+        // made the worktree before dispatch returned.
+        let wt = self.fast.load(Ordering::SeqCst).then(|| PathBuf::from(format!("/wt/{id}")));
+        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, worktree: wt };
         b.insert(id.clone(), (t, spec, seat));
         Ok(id)
     }
@@ -869,6 +872,25 @@ fn a_stop_or_timeout_with_live_tickets_records_one_terminal_report_per_ticket() 
         r.p.flush_record();
         assert_eq!(events(&rec).len(), ev.len(), "a second flush records nothing new");
     }
+}
+
+/// codex on #190: with the plan listing a dependent before its prerequisite, the prerequisite's done report still
+/// reaches the record before the dependent's claim (the engine's `claim --stacked` needs it).
+#[test]
+fn a_prerequisites_report_is_recorded_before_its_dependents_claim_in_any_plan_order() {
+    let (r, rec) = recorded();
+    let reversed = PlanInput { tasks: vec![task("t2", "frontend", &["web/"], &["t1"], &[]), task("t1", "backend", &["src/a/"], &[], &["ac-1"])], ..plan1() };
+    r.p.plan_tasks(reversed).unwrap();
+    r.w.fast.store(true, Ordering::SeqCst);
+    // t1 ends with no await; t2's worktree exists by the time its dispatch returns.
+    let t1 = r.dispatch("t1");
+    r.w.end(&t1, Outcome::Done);
+    let _t2 = r.dispatch("t2");
+    let ev = events(&rec);
+    let at = |f: &dyn Fn(&Event) -> bool| ev.iter().position(f).unwrap_or_else(|| panic!("missing event: {ev:?}"));
+    let t1_done = at(&|e| matches!(e, Event::Report { task, status: TaskStatus::Done, .. } if task == "r1.t1"));
+    let t2_claim = at(&|e| matches!(e, Event::Claim { task, .. } if task == "r1.t2"));
+    assert!(t1_done < t2_claim, "t1's done report before t2's claim: {ev:?}");
 }
 
 /// bhishma on #190: a panic while the run's end is recorded never leaves `flush_record` waiting.

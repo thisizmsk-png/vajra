@@ -590,7 +590,16 @@ impl RunProtocol {
         if self.0.record.is_none() {
             return;
         }
-        let open: Vec<(String, String)> = st.tasks.iter().flat_map(|t| t.tickets.iter().map(move |(_, tk, _)| (t.spec.id.clone(), tk.clone()))).filter(|(_, tk)| !st.reported.contains(tk)).collect();
+        // Dependencies first (codex on #190): a prerequisite's done report reaches the queue before a dependent's
+        // claim, which the engine's `claim --stacked` needs. A dependent is dispatched only after its prerequisite's
+        // ticket ended, so viewing in this order sees that end first.
+        let order = plan::topo(&st.specs());
+        let open: Vec<(String, String)> = order
+            .iter()
+            .filter_map(|id| st.task(id))
+            .flat_map(|t| t.tickets.iter().map(move |(_, tk, _)| (t.spec.id.clone(), tk.clone())))
+            .filter(|(_, tk)| !st.reported.contains(tk))
+            .collect();
         for (task, tk) in open {
             let Some(v) = self.0.workers.view(&tk) else { continue };
             let ended = v.state == State::Ended;

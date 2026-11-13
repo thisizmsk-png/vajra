@@ -676,6 +676,56 @@ fn a_core_run_between_tickets_is_never_an_orphan_until_its_protocol_ends() {
     assert_eq!(app.record_orphans(&[])["orphans"], serde_json::json!([{"run_id": run, "campaign": format!("deliver-{run}")}]));
 }
 
+/// codex on #190: the run ends while its writer is still behind; an orphan close right after must land after every
+/// queued write, through the same ledger, so the saved ledger matches what the engine holds.
+#[test]
+fn an_orphan_close_right_after_the_end_waits_for_the_writer_and_the_ledger_matches_the_engine() {
+    if ["/usr/bin/jq", "/usr/bin/openssl", "/usr/bin/python3"].iter().any(|p| !Path::new(p).is_file()) {
+        eprintln!("skipped: the engine needs /usr/bin/jq, /usr/bin/openssl and /usr/bin/python3");
+        return;
+    }
+    let t = Tmp::new();
+    let home = t.0.join("home");
+    let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts").canonicalize().unwrap();
+    // The engine's scripts, with `progress` slowed: a writer still busy when the run ends.
+    let scripts = home.join(".claude/skills/vajra/scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    for f in std::fs::read_dir(&real).unwrap().flatten() {
+        if f.path().is_file() {
+            std::fs::copy(f.path(), scripts.join(f.file_name())).unwrap();
+        }
+    }
+    std::fs::rename(scripts.join("vajra-campaign.sh"), scripts.join("campaign-real.sh")).unwrap();
+    std::fs::write(scripts.join("vajra-campaign.sh"), "#!/bin/bash\n[ \"$1\" = progress ] && sleep 1\nexec \"$(dirname \"$0\")/campaign-real.sh\" \"$@\"\n").unwrap();
+    std::fs::set_permissions(scripts.join("vajra-campaign.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let key = home.join(".claude/vajra/.hmac-key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&key, "00".repeat(32)).unwrap();
+    std::fs::create_dir_all(home.join(".claude/agents")).unwrap();
+    for a in ["bhima", "abhimanyu"] {
+        std::fs::write(home.join(".claude/agents").join(format!("{a}.md")), "---\nname: x\n---\n").unwrap();
+    }
+    let data = t.0.join("data");
+    crate::desktop::test_project(&data, &home, &t.0.join("repo"));
+    let app = crate::desktop::App::open(&data, &home).unwrap();
+    app.record_run_seats(RUN, &serde_json::json!({"campaign_slug": SLUG, "evidence_trust": "guarded"})).unwrap();
+    let rec = app.run_record(RUN, false).unwrap();
+    rec.plan(&plan()).unwrap();
+    for i in 0..3 {
+        rec.send(Event::Progress(format!("round note {i}")));
+    }
+    // The run ends with those writes still queued; the human closes it as abandoned at once.
+    rec.end();
+    let out = app.record_close_orphan(RUN, &[]).unwrap();
+    assert_eq!(out["status"], "abandoned");
+    let b = super::super::record_app::record_bridge(&app.bridge, &data).unwrap();
+    let store = super::super::record_app::AppLedgerStore::new(&data, SLUG, home.join(".claude/vajra/campaigns"), key.clone(), b.clone()).unwrap();
+    let ledger = store.load().unwrap().unwrap();
+    assert_eq!(ledger.status, "abandoned");
+    assert_eq!(ledger.progress.iter().filter(|l| l.starts_with("round note")).count(), 3, "every queued write landed first: {:?}", ledger.progress);
+    ledger.check(&store.read_back(SLUG).unwrap()).unwrap();
+}
+
 // ---------------------------------------------------------------- the real scripts (S8), when the machine has them
 
 /// The engine's own scripts in a temp HOME, with the scrubbed env and no Claude session. Skipped where the script's
@@ -905,6 +955,26 @@ fn ledger_and_back() -> (Ledger, ReadBack) {
         tasks: serde_json::json!({"tasks": [task]}),
     };
     (l, back)
+}
+
+/// codex on #190: a read-back with one task replaced by a copy of another has the right length and only known ids, but
+/// a task is missing.
+#[test]
+fn a_task_replaced_by_a_duplicate_of_another_is_not_the_cores() {
+    let mut l = Ledger::new(SLUG);
+    for id in ["t1", "t2"] {
+        l.apply(&Request::TasksAdd { slug: SLUG.into(), id: id.into(), title: "do".into(), owner: "bhima".into(), deps: vec![], files: v(&["src/"]), acceptance: vec![], branch: "b".into() });
+    }
+    let task = |id: &str| serde_json::json!({"id": id, "status": "ready", "attempts": 0, "title": "do", "owner_agent": "bhima", "deps": [], "files": ["src/"], "acceptance": []});
+    let base = ReadBack { campaign: serde_json::json!({"slug": SLUG, "status": "active"}), features: serde_json::json!({"features": []}), progress: String::new(), tasks: serde_json::json!({"tasks": [task("t1"), task("t2")]}) };
+    // The ledger has no create here: give it the goal the read-back has, so only the task graph is under test.
+    l.goal = Some("g".into());
+    let mut ok = base.clone();
+    ok.campaign["goal"] = "g".into();
+    l.check(&ok).unwrap();
+    let mut dup = ok.clone();
+    dup.tasks = serde_json::json!({"tasks": [task("t1"), task("t1")]});
+    assert!(l.check(&dup).unwrap_err().contains("more than once"), "{:?}", l.check(&dup));
 }
 
 #[test]

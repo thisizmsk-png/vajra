@@ -483,7 +483,20 @@ impl RunRecord for CoreRecord {
     }
 
     fn end(&self) {
+        // Every queued write lands before the campaign may be listed as an orphan (codex on #190): an orphan close
+        // can then never race this writer's ledger.
+        self.flush();
         self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl CoreRecord {
+    /// Close this run's campaign as abandoned through its own writer and ledger (the orphan close, when the app still
+    /// holds the record), after every queued write.
+    pub fn close_abandoned(&self) -> Result<(), String> {
+        self.flush();
+        let req = Request::CampaignClose { slug: self.w.cfg.slug.clone(), status: CloseStatus::Abandoned };
+        self.w.call(&req).map(|_| ()).map_err(|f| f.why().to_string())
     }
 }
 

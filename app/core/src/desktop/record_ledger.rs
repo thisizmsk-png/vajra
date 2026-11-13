@@ -232,8 +232,13 @@ impl Ledger {
         if tasks.len() != self.tasks.len() {
             return Err(format!("the task graph has {} tasks, the core added {}", tasks.len(), self.tasks.len()));
         }
+        // Each task the core added, exactly once: a duplicate standing in for a missing task never matches.
+        let mut seen = std::collections::BTreeSet::new();
         for t in &tasks {
             let id = t["id"].as_str().unwrap_or_default();
+            if !seen.insert(id) {
+                return Err(format!("task {id} is in the task graph more than once"));
+            }
             let Some(want) = self.tasks.get(id) else { return Err(format!("task {id} isn't one the core added")) };
             let st = t["status"].as_str().unwrap_or_default();
             let status_ok = if want.status == "open" { open(st) } else { st == want.status };
@@ -255,6 +260,9 @@ impl Ledger {
             if !status_ok || t["attempts"] != want.attempts || report != want.report || !by_ok || !evidence_ok || !def_ok {
                 return Err(format!("task {id} isn't in the state the core's writes left it"));
             }
+        }
+        if let Some(id) = self.tasks.keys().find(|k| !seen.contains(k.as_str())) {
+            return Err(format!("task {id} is missing from the task graph"));
         }
         Ok(())
     }
