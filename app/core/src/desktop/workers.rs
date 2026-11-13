@@ -242,6 +242,8 @@ struct Entry {
     tree: Option<gitw::Ticket>,
     /// The integration ref the capture check last ran against (Clean up re-runs it there).
     integration: Option<String>,
+    /// A check's final message, read when it exits (6g parses it); never a writer's.
+    answer: Option<String>,
 }
 
 #[derive(Default)]
@@ -258,6 +260,9 @@ struct Book {
     /// The runs folder itself could not be listed whole at start (#178 codex): which runs have history is unknown, so
     /// no run takes a dispatch this life.
     unlisted: bool,
+    /// A run's `max_in_flight`: at most this many of its writer tickets run at once; the rest wait queued (#153 codex
+    /// P2). Check tickets don't count and aren't held.
+    run_caps: BTreeMap<String, u32>,
 }
 
 impl Book {
@@ -562,10 +567,19 @@ impl WorkerRuntime {
     }
 
     /// A check ticket (6g, 6i): a fresh worktree at `at_commit`, no deps merge; `dispatch_head = at_commit`.
-    pub fn dispatch_check(&self, kind: CheckKind, mut spec: TaskSpec, seat: WorkerSeat, at_commit: &str) -> Result<String, DispatchError> {
+    pub fn dispatch_check(&self, kind: CheckKind, spec: TaskSpec, seat: WorkerSeat, at_commit: &str) -> Result<String, DispatchError> {
+        self.dispatch_check_attempt(kind, 0, spec, seat, at_commit)
+    }
+
+    /// `dispatch_check` for a check's retry or redo in the same round: attempt `n > 0` is its own ticket and worktree
+    /// (`<kind>-a<n>`).
+    pub fn dispatch_check_attempt(&self, kind: CheckKind, n: u32, mut spec: TaskSpec, seat: WorkerSeat, at_commit: &str) -> Result<String, DispatchError> {
         spec.from = at_commit.to_string();
         spec.deps.clear();
         spec.task = kind.as_str().replace('_', "-");
+        if n > 0 {
+            spec.task = format!("{}-a{n}", spec.task);
+        }
         self.add(Job::Check(kind, spec), seat)
     }
 
@@ -611,7 +625,7 @@ impl WorkerRuntime {
         // Recorded on acceptance, under the book lock, before it can wait or start (#178 codex P2): a ticket held behind
         // a busy seat or a cap when the app crashes is replayed and ended, and its id stays taken.
         self.record(&view, "queued");
-        b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None, integration: None });
+        b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None, integration: None, answer: None });
         drop(b);
         self.pump();
         Ok(id)
@@ -621,6 +635,25 @@ impl WorkerRuntime {
     #[cfg(test)]
     pub(crate) fn gitw(&self) -> &Arc<Gitw> {
         &self.0.gw
+    }
+
+    /// An ended check's final message, as its harness printed it (redacted with the app's nonce set).
+    pub fn last_message(&self, id: &str) -> Option<String> {
+        crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.answer.clone())
+    }
+
+    /// The run's `max_in_flight` (#153 codex P2): at most `n` of its writer tickets run at once; the rest stay queued
+    /// with a `run_limit` wait until one ends. 0 means no limit. Check tickets are exempt.
+    pub fn limit_writers(&self, run: &str, n: u32) {
+        {
+            let mut b = crate::lock(&self.0.book);
+            if n == 0 {
+                b.run_caps.remove(run);
+            } else {
+                b.run_caps.insert(run.to_string(), n);
+            }
+        }
+        self.pump();
     }
 
     pub fn view(&self, id: &str) -> Option<TicketView> {
@@ -873,6 +906,11 @@ impl WorkerRuntime {
             let mut busy: Vec<(String, String)> = b.tickets.values().filter(|e| e.view.state == State::Running).map(|e| (e.view.run.clone(), e.seat.slot.clone())).collect();
             let mut order: Vec<(u64, String)> = b.tickets.values().filter(|e| e.view.state == State::Queued).map(|e| (e.seq, e.view.id.clone())).collect();
             order.sort();
+            let caps = b.run_caps.clone();
+            let mut writers: BTreeMap<String, u32> = BTreeMap::new();
+            for e in b.tickets.values().filter(|e| e.view.state == State::Running && matches!(e.job, Job::Task(_))) {
+                *writers.entry(e.view.run.clone()).or_default() += 1;
+            }
             let mut pos: BTreeMap<(String, String), u32> = BTreeMap::new();
             for (_, id) in order {
                 let Some(e) = b.tickets.get_mut(&id) else { continue };
@@ -885,6 +923,14 @@ impl WorkerRuntime {
                     e.view.wait = None;
                     continue;
                 }
+                let writer = matches!(e.job, Job::Task(_));
+                if let Some(cap) = caps.get(&e.view.run).filter(|_| writer) {
+                    if writers.get(&e.view.run).copied().unwrap_or(0) >= *cap {
+                        let detail = format!("Waiting for one of this run's {cap} writer slot(s) to free");
+                        e.view.wait = Some(json!({"code": "run_limit", "detail": detail}));
+                        continue;
+                    }
+                }
                 let accounts: Vec<&str> = live.iter().map(String::as_str).collect();
                 match caps::dispatch_check(&accounts, &e.seat.account, &self.0.cfg.account_caps) {
                     Err(w) => e.view.wait = Some(wait_json(&w)),
@@ -894,6 +940,9 @@ impl WorkerRuntime {
                         e.view.wait = None;
                         e.view.started = Some(Instant::now());
                         live.push(e.seat.account.clone());
+                        if writer {
+                            *writers.entry(e.view.run.clone()).or_default() += 1;
+                        }
                         busy.push(key.clone());
                         pos.remove(&key);
                         start.push(id);
@@ -1185,7 +1234,12 @@ impl WorkerRuntime {
     /// After a clean exit: snapshot, diff, outcome.
     fn finish(&self, id: &str, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket, receipt: Option<LaunchReceipt>) {
         if let Job::Check(..) = job {
-            // A check is judged by its typed result (6g), never by changed files.
+            // A check is judged by its typed result (6g), never by changed files: keep its final message.
+            let sid = crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.session.clone());
+            let answer = sid.and_then(|sid| final_message(&self.events(&sid)));
+            if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
+                e.answer = answer;
+            }
             return self.end(id, Outcome::Done, "exited", receipt);
         }
         let s = job.spec();
@@ -1579,6 +1633,35 @@ enum Attempt {
 enum Ended {
     Clean { receipt: Option<LaunchReceipt> },
     Outcome(Outcome, String, Option<LaunchReceipt>),
+}
+
+/// The session's final message, from its harness's own terminal event: Claude `stream-json`'s `result` (a success, not
+/// an error), or Codex `exec --json`'s `turn.completed` with the last `agent_message` item before it.
+///
+/// The terminal is not the harness's alone: a process the check runs can print on it (bhishma H1). So the stream must
+/// hold exactly one terminal event, and it must be the last JSON line. A forged event printed before or after the
+/// real one leaves no answer, and the check fails closed; it never becomes the answer.
+pub(super) fn final_message(events: &str) -> Option<String> {
+    let evs: Vec<Value> = events.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(Value::is_object).collect();
+    let ty = |v: &Value| v.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+    let terminal = |v: &Value| matches!(ty(v).as_str(), "result" | "turn.completed" | "turn.failed");
+    let (last, before) = evs.split_last()?;
+    if !terminal(last) || before.iter().any(terminal) {
+        return None;
+    }
+    match ty(last).as_str() {
+        "result" => {
+            let ok = last.get("subtype").and_then(Value::as_str) == Some("success") && last.get("is_error").and_then(Value::as_bool) == Some(false);
+            last.get("result").and_then(Value::as_str).filter(|_| ok).map(str::to_string)
+        }
+        "turn.completed" => before
+            .iter()
+            .rev()
+            .find(|v| ty(v) == "item.completed" && v.pointer("/item/type").and_then(Value::as_str) == Some("agent_message"))
+            .and_then(|v| v.pointer("/item/text").and_then(Value::as_str))
+            .map(str::to_string),
+        _ => None,
+    }
 }
 
 fn kill_outcome(r: KillReason) -> (Outcome, &'static str) {

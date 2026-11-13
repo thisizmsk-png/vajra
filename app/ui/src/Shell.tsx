@@ -9,6 +9,7 @@ import { ProjectsProvider, useProjects } from "./projects/store";
 import { useProjectState } from "./projects/state";
 import { proposalsFor } from "./screens/orch/dgApi";
 import { CurrentProject } from "./projects/current";
+import { PingHost } from "./projects/PingHost";
 import type { Current } from "./projects/current";
 import { ProjectTabs, stateText } from "./shell/ProjectTabs";
 import { ProjectColumn } from "./shell/ProjectColumn";
@@ -164,6 +165,7 @@ function Frame() {
   return (
     <PreferencesProvider projectId={preferenceScope(project)}>
       <PreferenceKeys openSettings={openSettings} />
+    <PingHost>
     <PaletteHost commands={commands}>
       <CurrentProject.Provider value={current}>
         <div className={["v-app", OVERLAY && "v-app--overlay", showColumn ? "" : "v-app--nocol"].filter(Boolean).join(" ")}>
@@ -211,6 +213,7 @@ function Frame() {
         </div>
       </CurrentProject.Provider>
     </PaletteHost>
+    </PingHost>
     </PreferencesProvider>
   );
 }

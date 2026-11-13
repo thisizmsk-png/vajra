@@ -1,5 +1,5 @@
 import { ACCOUNTS, AGENTS, USAGE } from "./accountsFixture";
-import { DEFAULT_PREFERENCES } from "./preferenceContract";
+import { DEFAULT_PING, DEFAULT_PREFERENCES } from "./preferenceContract";
 // Dev only: a fixture engine state for screenshots and the click crawl (DESIGN.md "Verification"). main.tsx loads it
 // when the dev server runs with `?fixture`; production builds drop the import (import.meta.env.DEV is false there).
 // Nothing here reaches a real engine: every command answers from the objects below.
@@ -36,6 +36,7 @@ const proofFixture = (slug: string, label: ProofLabel): RunProof => ({
   record_note: label === "evidence_unguarded"
     ? "Checked by Vajra on this Mac. The evidence ran outside the guard, so this record isn't tamper-evident."
     : "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
+  requires: "The evidence check needs macOS 15 or later.",
   export: true,
   markdown: `## Vajra proof: Add per-key rate limiting\n\n**${S.run.proof.label[label] ?? ""}**.`,
 });
@@ -280,7 +281,7 @@ export function installFixture(mode = "") {
     { name: "Vajra engine", ok: false, detail: "not installed", fix: "bash scripts/install.sh" },
   ], start_enabled: false }) };
   let revision = 0;
-  let global = { ...DEFAULT_PREFERENCES };
+  let global = mode === "pings" ? { ...DEFAULT_PREFERENCES, ping: { ...DEFAULT_PING, batch_minutes: 0, questions: false } } : { ...DEFAULT_PREFERENCES };
   const projects = new Map<string, Record<string, unknown>>();
   const receipts = new Map<string, unknown>();
   // Multi-provider fixture state. A saved key flips the account to "key saved"; the key itself is dropped on the floor.
@@ -324,7 +325,18 @@ export function installFixture(mode = "") {
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },
-    on: () => () => {},
+    // `?fixture=pings`: a burst of arrivals shortly after load, for the ping toast and the Inbox's recent pings. The rule
+    // there groups nothing (so the ping shows at once) and keeps questions quiet (so the log has a "not pinged" line).
+    on: (event, cb) => {
+      if (mode !== "pings" || event !== "inbox_new") return () => {};
+      const h = setTimeout(() => {
+        // The shell's id for ~/code/harbor-api in this fixture (folder-derived: no stored project).
+        cb({ project_id: "p_6fd1feaf", kind: "blocked", count: 2 });
+        cb({ project_id: "p_6fd1feaf", kind: "plan", count: 1 });
+        cb({ project_id: "p_573f96e9", kind: "question", count: 1 });
+      }, 300);
+      return () => clearTimeout(h);
+    },
   };
   setTransport(terminalFixture(t));
 }

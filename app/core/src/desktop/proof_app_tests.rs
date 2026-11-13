@@ -46,14 +46,72 @@ fn green(id: &str, criterion: &str) -> Value {
 
 /// The guarded `seats.json` a Start would have written for `RUN`, with the given trust and campaign slug.
 fn seats(t: &Tmp, trust: &str, slug: &str, consumed: bool) {
+    seats_with(t, trust, slug, json!([{"seat": "verifier", "role": "verifier", "account": "openai", "harness": "codex"}]));
+    // `consumed` is the old seats field only; the proof never reads it (`approve_and_consume` runs the real flow).
+    let _ = consumed;
+}
+
+fn seats_with(t: &Tmp, trust: &str, slug: &str, all: Value) {
     let dir = t.0.join("data/control/lead").join(RUN);
     fs::create_dir_all(&dir).unwrap();
     let doc = json!({
         "schema": "vajra.run_seats/1", "run_id": RUN, "evidence_seat": "verifier", "evidence_trust": trust, "campaign_slug": slug,
-        "evidence_approval": {"consumed": consumed},
-        "seats": [{"seat": "verifier", "role": "verifier", "account": "openai", "harness": "codex"}],
+        // A field here is never trusted: the proof reads the core's N20 approval record.
+        "evidence_approval": {"consumed": true},
+        "seats": all,
     });
     fs::write(dir.join("seats.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+}
+
+/// bhishma M1 on #237: Codex can read the signing key (owner's choice), so a Verified run with any Codex seat never
+/// says the key was guarded, on the card or in the export. A run of Claude seats only keeps the guarded note; an
+/// unknown harness counts as able to read it.
+#[test]
+fn a_run_with_a_codex_seat_never_says_the_signing_key_was_guarded() {
+    let slug = format!("deliver-{RUN}");
+    let Some((t, app)) = signed_run(&slug, "g", "done", vec![green("t1", "c")]) else { return };
+    let claude = json!({"seat": "verifier", "role": "verifier", "account": "anthropic", "harness": "claude"});
+    let codex_writer = json!({"seat": "backend", "role": "worker", "account": "openai", "harness": "codex"});
+    for (all, readable) in [
+        (json!([claude, codex_writer]), true),
+        (json!([claude, {"seat": "w", "role": "worker", "account": "x", "harness": null}]), true),
+        (json!([claude]), false),
+    ] {
+        seats_with(&t, "guarded", &slug, all.clone());
+        let p = app.run_proof(&slug).unwrap();
+        assert_eq!(p["label"], "verified", "{p}");
+        let note = p["record_note"].as_str().unwrap();
+        let md = p["markdown"].as_str().unwrap();
+        if readable {
+            assert_eq!(note, proof::KEY_READABLE_NOTE, "{all}");
+            assert!(!note.contains("is guarded") && !md.contains("signing key is guarded"), "{all}: {md}");
+            assert!(md.contains(proof::KEY_READABLE_NOTE));
+        } else {
+            assert_eq!(note, proof::record_note(proof::Label::Verified, false), "{all}");
+            assert!(note.contains("signing key is guarded"));
+        }
+    }
+}
+
+/// The signed progress line `text`, written through the real script (as the evidence ticket, or an agent, could).
+fn signed_line(t: &Tmp, slug: &str, text: &str) {
+    let script = t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh");
+    let out = std::process::Command::new("bash").arg(script).args(["progress", text, "--campaign", slug]).env("HOME", t.home()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// The N20 flow in `app` (the proof's own app: the consume is held in its memory): asked, approved by a person,
+/// consumed by the evidence ticket, which then writes the signed progress line (`signed`) naming the list.
+fn approve_and_consume(t: &Tmp, app: &App, slug: &str, signed: bool) {
+    use crate::desktop::evidence_approval::{progress_line, Ask};
+    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()] };
+    let now = std::time::SystemTime::now();
+    let sha = app.request_evidence_approval(&ask, now).unwrap();
+    app.answer_evidence_approval_at(RUN, &sha, true, now).unwrap();
+    app.consume_evidence_approval(&ask, now).unwrap();
+    if signed {
+        signed_line(t, slug, &progress_line(&sha));
+    }
 }
 
 #[test]
@@ -67,7 +125,8 @@ fn a_guarded_run_with_every_criterion_green_is_verified_with_its_record_hash() {
     assert_eq!(p["integrity"], "ok");
     assert_eq!(p["record_sha256"].as_str().map(str::len), Some(64), "{p}");
     let md = p["markdown"].as_str().unwrap();
-    assert!(md.contains(proof::record_note(proof::Label::Verified)) && md.contains(p["record_sha256"].as_str().unwrap()), "{md}");
+    // Its checker is a Codex seat, so the note says the key could be read (bhishma M1 on #237).
+    assert!(md.contains(proof::KEY_READABLE_NOTE) && md.contains(p["record_sha256"].as_str().unwrap()), "{md}");
     assert!(md.contains("codex (openai)"), "the harness that ran the check is named: {md}");
 }
 
@@ -160,8 +219,54 @@ fn an_unconsumed_approval_is_not_verified_and_a_consumed_one_is() {
     let Some((t, app)) = signed_run(&slug, "g", "done", vec![green("t1", "c")]) else { return };
     seats(&t, "guarded_by_approval", &slug, false);
     assert_eq!(app.run_proof(&slug).unwrap()["label"], "not_verified");
-    seats(&t, "guarded_by_approval", &slug, true);
+    approve_and_consume(&t, &app, &slug, true);
     assert_eq!(app.run_proof(&slug).unwrap()["label"], "verified_approved");
+    // After a restart nothing is held: the same files and signed line read not verified, and the card says why.
+    let mut restarted = t.app();
+    restarted.proof_ledger = Some(proof::Ledger::Match);
+    let p = restarted.run_proof(&slug).unwrap();
+    assert_eq!(p["label"], "not_verified");
+    assert_eq!(p["reason"], proof::RESTART_REASON);
+    assert_eq!(p["requires"], proof::MACOS_NEED, "the card names what the evidence check needs");
+}
+
+#[test]
+fn a_forged_consumed_record_and_signed_line_with_no_approval_in_this_app_is_not_verified() {
+    // Opus on #226: an agent writes approval.json as consumed with a sha it picks, and adds the matching signed line
+    // through the script. No ask or answer happened in this app.
+    use crate::desktop::evidence_approval::{progress_line, Ask};
+    let slug = format!("deliver-{RUN}");
+    let Some((t, app)) = signed_run(&slug, "g", "done", vec![green("t1", "c")]) else { return };
+    seats(&t, "guarded_by_approval", &slug, false);
+    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()] };
+    let sha = ask.sha256();
+    let rec = json!({"state": "consumed", "ask": {"run_id": RUN, "round": 1, "commit": "0".repeat(40), "seat": "verifier", "account": "openai", "commands": ["npm test"]}, "sha256": sha, "asked_at": 1, "consumed_at": 2});
+    fs::write(t.0.join("data/control/lead").join(RUN).join("approval.json"), rec.to_string()).unwrap();
+    signed_line(&t, &slug, &progress_line(&sha));
+    assert_ne!(app.run_proof(&slug).unwrap()["label"], "verified_approved");
+    assert_eq!(app.run_proof(&slug).unwrap()["label"], "not_verified");
+    // A signed line that only ends with the approval text (a prefix the agent chose) doesn't count either, even with a
+    // real consume held.
+    let Some((t, app)) = signed_run(&slug, "g", "active", vec![green("t1", "c")]) else { return };
+    seats(&t, "guarded_by_approval", &slug, false);
+    approve_and_consume(&t, &app, &slug, false);
+    let sha = ask.sha256();
+    signed_line(&t, &slug, &format!("note: {}", progress_line(&sha)));
+    let out = std::process::Command::new("bash").arg(t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh")).args(["close", &slug, "--status", "done"]).env("HOME", t.home()).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(app.run_proof(&slug).unwrap()["label"], "not_verified");
+}
+
+#[test]
+fn a_consumed_approval_without_its_signed_progress_line_is_not_verified() {
+    let slug = format!("deliver-{RUN}");
+    let Some((t, app)) = signed_run(&slug, "g", "active", vec![green("t1", "c")]) else { return };
+    seats(&t, "guarded_by_approval", &slug, false);
+    approve_and_consume(&t, &app, &slug, false);
+    let out = std::process::Command::new("bash").arg(t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh")).args(["close", &slug, "--status", "done"]).env("HOME", t.home()).output().unwrap();
+    assert!(out.status.success());
+    // The record says consumed, but no signed line names the list: the file alone never reads approved.
+    assert_eq!(app.run_proof(&slug).unwrap()["label"], "not_verified");
 }
 
 #[test]
