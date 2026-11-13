@@ -32,3 +32,62 @@ Each Director-General turn that ran writes a `vajra.token_receipt/1` object (`fr
 tokens too, so a goal's sum counts them). `ade_bench.py tokens` counts every ledger line that carries a receipt. It comes from the provider's own `usage` fields. Nothing is estimated and no price is applied.
 `side` is Vajra's own off-request spend (titles, branch names): always 0. `ade_bench.py tokens` reads these back; the signed run
 record can pick the same object up.
+
+## Request anatomy ("lean first request")
+
+```
+python3 app/bench/ade/ade_bench.py anatomy app/bench/ade/anatomy_arms.json anatomy.json   # spends real tokens, about $0.45
+python3 app/bench/ade/ade_bench.py report anatomy.json anatomy.md
+```
+
+One `hello` turn per arm in an empty directory, read from the CLI's own `usage` and `modelUsage`. The first request is fresh +
+cache write + cache read. Tools and MCP servers come from the init event. Side tokens are anything billed to a model other than
+the one that answered (a title or summary call would show there). `anatomy_arms.json` mirrors the Director-General's launch flags
+(`build_lead_argv`), with its production agent description and prompt (`LEAD_AGENTS`), minus only what needs the app's own files:
+the settings file, the MCP config and its six control tools. A Rust test (`argv_tests.rs`) pins the arm to the production argv, so a
+prompt change fails CI until the arms file follows. Add an arm for any other harness.
+
+One run each, claude 2.1.296, this machine (the plain arm includes the owner's own plugins, skills and four claude.ai MCP servers,
+so it is not comparable to anyone else's bare CLI):
+
+| arm | first request | tools | MCP servers | side tokens |
+|---|---|---|---|---|
+| plain CLI | 51,658 | 36 | 4 | 0 |
+| Director-General flags | 3,251 | 3 | 0 | 0 |
+
+The Director-General's per-turn header, same flags, one `hello` each (first request, tokens): no header 3,251; the old header
+(with ask and run ids) 3,319, so +68; the fixed header 3,280, so +29. The ids are gone from the header (nothing read them back
+from the model's context), which makes it the same bytes every turn.
+
+Worker sessions run the user's own CLI settings (we add none), so their first request is the plain-CLI figure plus whatever the
+engine hooks inject. The hooks add model-visible text only on demand (a relayed steer, or a warning), never per turn.
+## Typing lag in a real browser (the CI gate)
+
+`app/ui/scripts/typing-lag.mjs` opens the built typing-lag page (`app/ui/lag.html`, the real Director-General composer and
+transcript on a scripted core with 5 agents streaming 20 lines/s each) in the installed Chrome and types 120 keys.
+Per key it records the time from the key's own timestamp to the first frame after the update. A second pass with nothing
+streaming is the control, and long animation frames over 50 ms are counted. **The gate checks what streaming adds at p95 over
+that control (20 ms), not an absolute figure**: the CI runner's own rendering costs about 69 ms at p95 with nothing streaming
+(13 Nov), so a flat 50 ms measures the VM. `--absolute` also checks the old 50 ms budget, for a fast machine. Two ceilings are
+always on, because the delta cannot see a cost in the composer's own keystroke path (it lands in the streaming pass and the idle
+control alike): the idle control's p95 must be at most 150 ms (about 2x the runner's 69) and streaming's at most 250 ms.
+
+```
+cd app/ui && npx vite build -c vite.lag.config.ts && node scripts/typing-lag.mjs --gate
+node scripts/typing-lag.mjs --software --throttle 6 --profile   # GPU off, main thread 6x slower, top self-time functions
+```
+
+First runner run (13 Nov, macOS VM): streaming p95 189.2 ms, idle control p95 68.8 ms, so streaming added about 120 ms.
+Locally it adds about 1 ms, and a CPU throttle up to 30x with the GPU off does not change that (the throttle works: a busy loop
+runs 10x slower at `--throttle 10`), so the runner's extra cost is not main-thread JavaScript. The profile (6x throttle, streaming
+vs idle) shows JavaScript is negligible in both, the browser's own style, layout and paint time is about 50% higher while
+streaming (1,524 vs 992 ms over the pass), and `scrollIntoView` (a forced layout, run when each batch of lines arrives) is the one
+app function that appears only while streaming (about 100 ms). The `typing-lag` job now also prints this profile from the runner.
+
+Measured on an Apple M-series laptop, Chrome 157: streaming p50 9.6 ms, p95 16 to 22 ms; idle control p95 16 to 17 ms; no
+long frames. The `typing-lag` job in `perf.yml` runs it; it is report-only (`continue-on-error`) until 2026-11-20, then blocks.
+
+Caveat: Chrome's Event Timing API reports a much larger "presentation delay" for the same keys under streaming
+(p95 about 440 ms in headless Chrome) while the main thread shows no long frame. That is compositor or GPU presentation in
+automation, not page work, and it is rounded and hidden under 16 ms, so the gate does not use it. It is printed as
+`event_timing_p95_ms` for anyone who wants to chase it.
