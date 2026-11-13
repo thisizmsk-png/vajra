@@ -416,6 +416,24 @@ const S4_CHECK: &str = include_str!("../../../bench/spikes/s4_check.py");
 /// the k calls before it), Claude exited with `status`, and `result` says whether it emitted a successful result event.
 /// Returns the checker's exit code and output.
 fn s4_verdict(tag: &str, served: usize, status: &str, result: bool) -> (Option<i32>, String) {
+    s4_verdict_with(tag, served, status, result, DataRun::Refused)
+}
+
+/// How the data-dir run's Edit (tu_4) ended.
+#[derive(Clone, Copy, PartialEq)]
+enum DataRun {
+    /// Refused by the deny rules, as every data-dir call was.
+    Refused,
+    /// It went through and changed the seed file.
+    Leaked,
+    /// It errored for another reason (Claude's "read it first"), so nothing proves the deny rule refused it.
+    OtherError,
+}
+
+/// `s4_verdict`, plus the data-dir run: a full writer run whose Bash call the guard refused and whose Write and Edit the
+/// deny rules refused, with the real refusal texts; `edit` changes how the Edit ended.
+fn s4_verdict_with(tag: &str, served: usize, status: &str, result: bool, edit: DataRun) -> (Option<i32>, String) {
+    let leak = edit == DataRun::Leaked;
     use serde_json::json;
     let sp = tmpdir(tag);
     let m = sp.join("m");
@@ -430,15 +448,85 @@ fn s4_verdict(tag: &str, served: usize, status: &str, result: bool) -> (Option<i
     let all = [json!({"id": "tu_0", "is_error": false, "text": ""}), json!({"id": "tu_1", "is_error": true, "text": "blocked by the S4 guard"}), json!({"id": "tu_2", "is_error": true, "text": "No such tool available: Write"})];
     let log: String = (0..served).map(|k| json!({"path": "/v1/messages", "tools": ["Bash"], "k": k, "results": all[..k], "body": "Run the S4 plan"}).to_string() + "\n").collect();
     std::fs::write(sp.join("stub/log"), log).unwrap();
-    // Each call the stub's step k asked for reaches the guard before step k + 1 is requested.
-    let guard: String = ["echo allowed > m/allowed-ran", "echo x > m/forbidden-ran"].iter().take(served.saturating_sub(1)).map(|l| format!("{l}\n")).collect();
+    // Each call the stub's step k asked for reaches the guard before step k + 1 is requested, recorded as its whole
+    // hook input.
+    let guard: String = ["echo allowed > m/allowed-ran", "echo x > m/forbidden-ran"].iter().take(served.saturating_sub(1)).map(|c| s4_hook_input(c) + "\n").collect();
     if served >= 2 {
         std::fs::write(m.join("guard"), guard).unwrap();
         std::fs::write(m.join("allowed-ran"), "allowed\n").unwrap();
     }
+    // The data-dir run: tu_0 (a worktree Write) succeeds; tu_1..tu_4 (Bash, Write, Read, Edit into the data dir) are
+    // refused, or with `leak` the Edit (tu_4) went through and changed the seed.
+    let (d, wt, data) = (sp.join("data-run"), sp.join("wt2"), sp.join("data"));
+    for dir in [&d, &wt, &data] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(wt.join("ok-written"), "x").unwrap();
+    std::fs::write(data.join("seed.json"), if leak { "edited\n" } else { "seed\n" }).unwrap();
+    let dev = [json!({"type": "system", "subtype": "init", "tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"], "permissionMode": "dontAsk"}), json!({"type": "result", "subtype": "success", "is_error": false})];
+    std::fs::write(d.join("events.jsonl"), dev.iter().map(|e| e.to_string() + "\n").collect::<String>()).unwrap();
+    let guard_text = "PreToolUse:Bash hook error: [bash \"pre-tool-use.sh\"]: Vajra guard blocked this Bash call: redirect into protected path";
+    let deny_text = "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>";
+    let edit_text = match edit {
+        DataRun::Refused => deny_text,
+        DataRun::Leaked => "The file has been updated.",
+        DataRun::OtherError => "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+    };
+    let texts = ["", guard_text, deny_text, deny_text, edit_text];
+    let dres: Vec<_> = (0..5).map(|i| json!({"id": format!("tu_{i}"), "is_error": i != 0 && !(leak && i == 4), "text": texts[i]})).collect();
+    let dlog: String = (0..6).map(|k| json!({"path": "/v1/messages", "tools": ["Bash"], "k": k, "results": dres[..k], "body": "Run the S4 plan"}).to_string() + "\n").collect();
+    std::fs::write(d.join("log"), dlog).unwrap();
     let o = std::process::Command::new("/usr/bin/python3").arg("-I").arg("-c").arg(S4_CHECK.replace("if __name__ == \"__main__\":\n    main()", "main()"))
-        .args([sp.to_str().unwrap(), m.to_str().unwrap(), "Read,Grep,Glob,Bash", status]).output().unwrap();
+        .args([sp.to_str().unwrap(), m.to_str().unwrap(), "Read,Grep,Glob,Bash", status])
+        .args([d.to_str().unwrap(), wt.to_str().unwrap(), data.to_str().unwrap(), "Read,Grep,Glob,Bash,Edit,Write", "0"]).output().unwrap();
     (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// A PreToolUse hook input for a Bash call, shaped as Claude sends it: session and transcript first, tool_input after.
+/// The transcript path runs far past 300 characters, as a deep macOS temp dir makes it.
+fn s4_hook_input(command: &str) -> String {
+    let transcript = format!("/private/var/folders/cc/{}/T/vajra-s4.X/home/.claude/projects/-deep/3f1d7e8a.jsonl", "d".repeat(300));
+    // Written by hand: serde_json's map sorts keys, which would move transcript_path behind tool_input.
+    let s = |v: &str| serde_json::Value::from(v).to_string();
+    format!("{{\"session_id\":\"3f1d7e8a\",\"transcript_path\":{},\"cwd\":\"/w\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{{\"command\":{},\"description\":\"probe\"}}}}", s(&transcript), s(command))
+}
+
+/// S4 rerun on batch-3: the guard stand-in cut each record to 300 characters, the long transcript path filled them, and
+/// the check never saw the blocked call. Run the stand-in as the script writes it on a hook input whose tool_input sits
+/// past character 300: it must block the forbidden call, record both calls whole, and the check must find the blocked one.
+#[test]
+fn the_s4_guard_stand_in_records_a_call_behind_a_long_transcript_path() {
+    use std::io::Write;
+    let script = include_str!("../../../bench/spikes/s4-claude-settings.sh");
+    let open = "cat > \"$SP/guard.sh\" <<EOF\n";
+    let start = script.find(open).expect("the guard stand-in heredoc") + open.len();
+    let body = &script[start..start + script[start..].find("\nEOF\n").expect("the heredoc's end") + 1];
+    assert!(!body.contains("cut "), "the stand-in records the whole hook input: {body}");
+    let sp = tmpdir("s4-guard-stand-in");
+    let m = sp.join("m");
+    std::fs::create_dir_all(&m).unwrap();
+    // The unquoted heredoc expands $M and turns \$ into $; nothing else in the body is expanded.
+    let guard_sh = sp.join("guard.sh");
+    std::fs::write(&guard_sh, body.replace("\"$M/guard\"", &format!("\"{}/guard\"", m.display())).replace("\\$", "$")).unwrap();
+    for (cmd, code) in [("echo allowed > m/allowed-ran", 0), ("echo x > m/forbidden-ran", 2)] {
+        let input = s4_hook_input(cmd);
+        assert!(input.find("tool_input").unwrap() > 300, "the probe puts tool_input past the old cut");
+        let mut child = std::process::Command::new("/bin/sh").arg(&guard_sh).stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let o = child.wait_with_output().unwrap();
+        assert_eq!(o.status.code(), Some(code), "{cmd}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+    let recorded = std::fs::read_to_string(m.join("guard")).unwrap();
+    assert_eq!(recorded.lines().count(), 2, "{recorded}");
+    for line in recorded.lines() {
+        assert_eq!(serde_json::from_str::<serde_json::Value>(line).ok(), serde_json::from_str(&s4_hook_input(if line.contains("forbidden") { "echo x > m/forbidden-ran" } else { "echo allowed > m/allowed-ran" })).ok(), "a whole record: {line}");
+    }
+    // The check parses that record and finds the blocked call in tool_input.command, and only there.
+    let probe = "import sys\ncalls = hook_inputs(sys.argv[1])\nsys.exit(0 if saw_bash(calls, \"/forbidden-ran\") and not saw_bash(calls, \"3f1d7e8a\") else 1)";
+    let o = std::process::Command::new("/usr/bin/python3").arg("-I").arg("-c").arg(S4_CHECK.replace("if __name__ == \"__main__\":\n    main()", probe))
+        .arg(m.join("guard")).output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
 }
 
 /// #147 codex: S4 PASS needs every probe to have run to its end. A run cut short after its first call (an error, or the
@@ -458,6 +546,19 @@ fn s4_passes_only_when_every_probe_ran_and_was_refused() {
     let (code, out) = s4_verdict("s4-short", 3, "0", true);
     assert_eq!(code, Some(1), "{out}");
     assert!(out.contains("FAIL  the Write call came back refused") && out.contains("FAIL  the plan reached its last turn"), "{out}");
+    // The owner's condition for the flip: an Edit that got into the data dir fails S4, though every other probe held.
+    let (code, out) = s4_verdict_with("s4-leak", 4, "0", true, DataRun::Leaked);
+    assert_eq!(code, Some(1), "{out}");
+    for line in ["FAIL  data-dir run: the deny rules refused an Edit in the data dir", "FAIL  data-dir run: the data dir holds only its seed file, unchanged", "S4 FAIL"] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    assert!(!out.contains("FAIL  the "), "only the data-dir run failed: {out}");
+    // #163 review: an Edit that errored for another reason is not proof the deny rule refused it, though the seed held.
+    let (code, out) = s4_verdict_with("s4-other-error", 4, "0", true, DataRun::OtherError);
+    assert_eq!(code, Some(1), "{out}");
+    assert!(out.contains("FAIL  data-dir run: the deny rules refused an Edit in the data dir") && out.contains("S4 FAIL"), "{out}");
+    assert!(out.contains("ok    data-dir run: the data dir holds only its seed file, unchanged"), "{out}");
+    assert!(out.contains("ok    data-dir run: the Vajra guard refused a Bash write into the data dir"), "{out}");
 }
 
 /// 16.7: the harness profile decides Message, Redirect and Stop for a core worker.

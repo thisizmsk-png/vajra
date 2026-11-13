@@ -512,9 +512,29 @@ impl RunProtocol {
         });
     }
 
-    /// The status the core computes when the run ends with no passed round.
-    fn computed(st: &St) -> RunStatus {
-        if st.questions.iter().any(|q| matches!(q, Question::PickSeat { .. })) { RunStatus::NeedsUser } else { RunStatus::NotVerified }
+    /// The status the core computes when the run ends with no passed round: `needs_user` while the human is waited
+    /// on (a seat pick, or a task whose latest worker the runtime ended `needs_user`), else `not_verified`.
+    fn computed(&self, st: &St) -> RunStatus {
+        let pick = st.questions.iter().any(|q| matches!(q, Question::PickSeat { .. }));
+        if pick || self.human_hold(st).is_some() { RunStatus::NeedsUser } else { RunStatus::NotVerified }
+    }
+
+    /// The first task whose latest ticket ended `needs_user` (a typed auth, quota or other provider error the human must
+    /// fix), with why: a human hold, not a generic failure (#153 review P2). A later ticket for the task clears it.
+    fn human_hold(&self, st: &St) -> Option<String> {
+        st.tasks.iter().find_map(|t| {
+            let (_, tk, _) = t.tickets.last()?;
+            let v = self.0.workers.view(tk).filter(|v| v.outcome == Some(Outcome::NeedsUser))?;
+            Some(format!("task {} needs you: {}", t.spec.id, v.reason.unwrap_or_else(|| "a worker needs the human".into())))
+        })
+    }
+
+    /// Ends the run with the computed status; a human hold's own reason replaces `why`, so the human sees what to do.
+    fn finalize_computed(&self, st: &mut St, why: impl Into<String>) -> RunStatus {
+        let s = self.computed(st);
+        let why = if s == RunStatus::NeedsUser { self.human_hold(st).unwrap_or_else(|| why.into()) } else { why.into() };
+        Self::finalize(st, s, why);
+        st.status.as_ref().map_or(s, |(s, _)| *s)
     }
 
     /// The run time that counts: paused while a task waits on the human's seat pick.
@@ -816,7 +836,10 @@ impl RunProtocol {
             self.ask(st, q);
             return Ok(Dispatched::Held { task: id.to_string() });
         };
-        let from = t.tickets.iter().rev().find_map(|(_, tk, _)| self.0.workers.view(tk).and_then(|v| v.commit)).unwrap_or_else(|| self.0.cfg.base.clone());
+        // Only a done or progress commit carries on: a stopped ticket can keep its snapshot commit (a cancel can turn
+        // the outcome after the snapshot), and a stopped worker is held back, never built on or integrated.
+        let eligible = |v: Tick| v.commit.filter(|_| matches!(v.outcome, Some(Outcome::Done | Outcome::Progress)));
+        let from = t.tickets.iter().rev().find_map(|(_, tk, _)| self.0.workers.view(tk).and_then(eligible)).unwrap_or_else(|| self.0.cfg.base.clone());
         let mut brief = t.spec.brief.clone();
         if let Some(f) = feedback {
             brief.push_str("\n\n");
@@ -839,6 +862,19 @@ impl RunProtocol {
             Ok(tk) => tk,
             Err(DispatchError::Exists) => return refuse(NOT_READY, format!("task {id} already ran in round {r}")),
             Err(DispatchError::Invalid(w)) => return refuse(INVALID, format!("the core can't dispatch this {w}")),
+            // The app is quitting: nothing new is queued, so the run stops as a human Stop would.
+            Err(DispatchError::Closed) => {
+                let why = "Vajra is quitting, so no new worker can start";
+                Self::finalize(st, RunStatus::Stopped, why);
+                return refuse(RUN_ENDED, format!("the run has ended (stopped): {why}"));
+            }
+            // The run's recorded history wasn't read whole, so the ticket ids it used are unknown and nothing new can
+            // go into it. No retry or later round fixes that: the run ends unverified, saying why.
+            Err(DispatchError::HistoryIncomplete) => {
+                let why = "this run's recorded history couldn't be read whole, so no new worker can be added to it; start a new run";
+                Self::finalize(st, RunStatus::NotVerified, why);
+                return refuse(RUN_ENDED, format!("the run has ended (not_verified): {why}"));
+            }
         };
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));
@@ -983,6 +1019,9 @@ impl RunProtocol {
         let merged = self.0.workers.integrate(&at, &commits);
         let mut st = self.lock();
         match merged {
+            // The run ended while the merge ran (a Stop, a timeout tick, or the lead lost) and made its one kill: the
+            // round's checks never start, so nothing they launch escapes that kill (#153 review P2).
+            Ok(_) if st.status.is_some() => self.release(st),
             Ok(head) => {
                 drop(st);
                 let (p, tasks) = (self.clone(), order.clone());
@@ -1059,7 +1098,7 @@ impl RunProtocol {
         round.rework = order.into_iter().filter(|t| feedback.contains_key(t)).collect();
         round.feedback = feedback;
         if r >= self.0.cfg.limits.rounds {
-            Self::finalize(st, RunStatus::NotVerified, format!("no round passed in {r} round(s)"));
+            self.finalize_computed(st, format!("no round passed in {r} round(s)"));
         }
     }
 
@@ -1099,9 +1138,7 @@ impl RunProtocol {
         }
         st.notes = Some(self.text(report));
         st.finish_called = true;
-        let s = Self::computed(st);
-        Self::finalize(st, s, "the lead finished the run with no passed round");
-        Ok(st.status.as_ref().map_or(s, |(s, _)| *s))
+        Ok(self.finalize_computed(st, "the lead finished the run with no passed round"))
     }
 
     // ------------------------------------------------------------ the lead's lifetime and the run limits
@@ -1112,7 +1149,7 @@ impl RunProtocol {
         self.enforce(&mut st);
         let action = match (&st.status, st.finish_called) {
             (Some((s, _)), _) => LeadAction::Ended(*s),
-            (None, true) => LeadAction::Ended(Self::computed(&st)),
+            (None, true) => LeadAction::Ended(self.computed(&st)),
             _ if exit == LeadExit::Retryable && st.retries < self.0.cfg.limits.lead_retries => {
                 st.retries += 1;
                 LeadAction::Restart { backoff: LEAD_BACKOFF * 2u32.pow(st.retries - 1) }
@@ -1127,9 +1164,7 @@ impl RunProtocol {
                 }
             }
             _ => {
-                let s = Self::computed(&st);
-                Self::finalize(&mut st, s, "the lead exited with no live workers and no passed round");
-                LeadAction::Ended(s)
+                LeadAction::Ended(self.finalize_computed(&mut st, "the lead exited with no live workers and no passed round"))
             }
         };
         self.release(st);

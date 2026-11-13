@@ -4,6 +4,8 @@ use super::*;
 
 /// How long a queued message waits for the worker's next tool call.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
+/// The most ended core workers' nonces the redactor keeps carrying (oldest out first).
+pub const RETIRED_NONCES: usize = 4096;
 /// An inflight claim with no ack after this is "delivery unknown" (5.4 step 6).
 /// Cap for files a worker can write in the control dir (acks, stops).
 pub const MAX_ACK_BYTES: u64 = 16 * 1024;
@@ -315,6 +317,8 @@ pub struct AskRecord<'a> {
     pub reason: Option<&'a str>,
     /// The Director-General's project and conversation the ask went to (FG-02c); `None` only in the service's tests.
     pub project: Option<(&'a str, u32)>,
+    /// The ended turn's token receipt (`vajra.token_receipt/1`), written on the `done` line, or on the `failed` line of a turn that ran and errored.
+    pub tokens: Option<&'a serde_json::Value>,
 }
 
 /// A human decision on a plan item (ADR-14).
