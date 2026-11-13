@@ -138,11 +138,19 @@ pub trait Workers: Send + Sync {
     fn await_any(&self, tickets: &[String], wait: Duration) -> Option<Tick>;
     fn cancel(&self, ticket: &str) -> bool;
     fn kill_run(&self, run: &str, reason: KillReason);
-    /// Merge `commits` in order into the round's integration branch; returns its head.
-    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError>;
+    /// Merge `commits` in order into the round's integration branch; returns its head and the paths it changed.
+    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<Integrated, GitwError>;
     /// The run's `max_in_flight`: at most `n` of its writers run at once and the rest wait queued (#153 codex P2).
     /// Check tickets are exempt.
     fn limit_writers(&self, run: &str, n: u32);
+}
+
+/// A round's integration branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Integrated {
+    pub head: String,
+    /// The paths changed from the base; `None` when they couldn't be read, which flags the run (it fails closed).
+    pub paths: Option<Vec<String>>,
 }
 
 /// The 6c runtime and the core's git writer.
@@ -170,12 +178,13 @@ impl Workers for CoreWorkers {
     fn limit_writers(&self, run: &str, n: u32) {
         self.rt.limit_writers(run, n);
     }
-    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
+    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<Integrated, GitwError> {
         let it = self.gw.integration_tree(at.repo, at.project, at.run, at.round, at.base)?;
         let head = self.gw.integrate(&it, at.base, commits)?;
+        let paths = self.gw.diff_paths(&it, at.base, &head).ok();
         // Retention: the merged tickets' trees go once their capture check passes (16.6).
         self.rt.integrated(at.run, commits, &Gitw::integration_ref(&it));
-        Ok(head)
+        Ok(Integrated { head, paths })
     }
 }
 
@@ -459,6 +468,8 @@ struct St {
     round: u32,
     rounds: BTreeMap<u32, Round>,
     security: bool,
+    /// SEC_RE matched a criterion's text or check as the lead wrote it, before sanitising or redaction (owner, M2).
+    criteria_named: bool,
     status: Option<(RunStatus, String)>,
     finish_called: bool,
     /// The clock when the run started: run time counts from here, not from the clock's origin.
@@ -519,6 +530,14 @@ struct Inner {
 /// One run's protocol. Cheap to clone.
 #[derive(Clone)]
 pub struct RunProtocol(Arc<Inner>);
+
+/// SEC_RE over text as written, or as the core reads it: with controls, invisible characters and U+FFFD (an odd byte
+/// in git's lossily decoded output) dropped, so none of them can split a security word (bhishma on #181: M1, L1, L2).
+/// Either matching flags. Homoglyphs and camelCase stay unmatched, for parity with the workflow's SEC_RE.
+fn security_named(s: &str) -> bool {
+    let whole: String = s.chars().filter(|c| !(c.is_control() || crate::control::lead::invisible(*c) || *c == '\u{fffd}')).collect();
+    security::matches(s) || security::matches(&whole)
+}
 
 /// `<artifact from="...">` around JSON, as the workflow's `data()` frames it: data, not instructions.
 pub(crate) fn data(from: &str, v: &Value) -> String {
@@ -1080,6 +1099,7 @@ impl RunProtocol {
         let r = p.round;
         let clean = |t: &PlanTask| PlanTask { title: self.text(&t.title), brief: self.text(&t.brief), ..t.clone() };
         if r == 1 {
+            st.criteria_named = p.criteria.iter().flatten().any(|c| security_named(&c.criterion) || security_named(&c.check));
             st.criteria = p.criteria.as_deref().map(|c| self.criteria(c)).and_then(Result::ok).unwrap_or_default();
             st.decisions = p.decisions.iter().map(|d| Decision { title: self.text(&d.title), rationale: self.text(&d.rationale) }).collect();
         }
@@ -1115,7 +1135,7 @@ impl RunProtocol {
             None => merged.iter().map(|t| t.id.clone()).collect(),
             Some(c) => c.rework.clone(),
         };
-        let ask_named = security::matches(&self.0.cfg.ask) || st.criteria.iter().any(|c| security::matches(&c.criterion));
+        let ask_named = security_named(&self.0.cfg.ask) || st.criteria_named;
         st.security |= ask_named || st.tasks.iter().any(|t| t.security);
         // A security flag that only the plan raised was never on the proposal card: ask the human now, not at dispatch.
         let mut held = Vec::new();
@@ -1386,7 +1406,9 @@ impl RunProtocol {
             // The run ended while the merge ran (a Stop, a timeout tick, or the lead lost) and made its one kill: the
             // round's checks never start, so nothing they launch escapes that kill (#153 review P2).
             Ok(_) if st.status.is_some() => self.release(st),
-            Ok(head) => {
+            Ok(Integrated { head, paths }) => {
+                // The owner's M2 rule: the diff flags the run whatever the plan's words. Sticky; unreadable paths flag.
+                st.security |= paths.is_none_or(|p| p.iter().any(|f| security_named(f)));
                 st.last_good = Some((r, head.clone()));
                 self.log(LogKind::Integrated { round: r, ok: true, head: Some(head.clone()), why: None });
                 self.log(LogKind::ChecksStarted { round: r });

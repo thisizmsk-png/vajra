@@ -30,6 +30,8 @@ struct FakeWorkers {
     kills: Mutex<Vec<KillReason>>,
     merges: Mutex<Vec<Vec<String>>>,
     merge_result: Mutex<Option<GitwError>>,
+    /// The paths each integration changed, by round; a round with none changed `src/a/x.rs`.
+    paths: Mutex<BTreeMap<u32, Option<Vec<String>>>>,
     fast: std::sync::atomic::AtomicBool,
     /// Every dispatch answers this error while it is set.
     dispatch_error: Mutex<Option<DispatchError>>,
@@ -131,7 +133,7 @@ impl Workers for FakeWorkers {
             self.end(&id, if reason == KillReason::Stopped { Outcome::Stopped } else { Outcome::Failed });
         }
     }
-    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
+    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<Integrated, GitwError> {
         assert_eq!(at.base, BASE);
         let hold = crate::lock(&self.integrate_hold).take();
         if let Some((entered, release)) = hold {
@@ -141,7 +143,10 @@ impl Workers for FakeWorkers {
         crate::lock(&self.merges).push(commits.to_vec());
         match crate::lock(&self.merge_result).take() {
             Some(e) => Err(e),
-            None => Ok(format!("{:f>40}", at.round)),
+            None => {
+                let paths = crate::lock(&self.paths).get(&at.round).cloned().unwrap_or_else(|| Some(vec!["src/a/x.rs".into()]));
+                Ok(Integrated { head: format!("{:f>40}", at.round), paths })
+            }
         }
     }
 }
@@ -1157,6 +1162,106 @@ fn the_gate_gets_the_round_with_its_criteria_tasks_flag_and_security_writers() {
     assert_eq!(i.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t1", "t2", "t3"]);
     assert!(i.security);
     assert_eq!(i.security_writers.iter().map(|s| s.slot.as_str()).collect::<Vec<_>>(), ["w1"], "the seats that ran security tasks");
+}
+
+/// The owner's M2 rule: the core flags a run whatever the lead's wording. A bland ask and plan, plus its round-1 flag.
+fn flagged_after_round_1(criteria: Vec<Criterion>, paths: Option<Vec<String>>) -> (Rig, bool) {
+    let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+    if let Some(p) = paths {
+        crate::lock(&r.w.paths).insert(1, Some(p));
+    }
+    r.p.plan_tasks(PlanInput { criteria: Some(criteria), ..plan1() }).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::from([("t3".to_string(), json!("redo"))]) });
+    r.await_round(1);
+    let flagged = r.gate.inputs.lock().unwrap()[0].security;
+    (r, flagged)
+}
+
+#[test]
+fn a_bland_criterion_whose_check_names_a_security_area_flags_the_run() {
+    let c = vec![Criterion { id: "ac-1".into(), criterion: "export has --json".into(), check: "cargo test auth::token".into() }];
+    let (r, flagged) = flagged_after_round_1(c, None);
+    assert!(flagged, "the check field counts, not only the criterion text");
+    assert!(r.p.card().security);
+    // Matched on the lead's raw text: a word only a redacted span holds still flags (bhishma L3). The stored
+    // criterion is redacted, so the flag can only come from the raw text.
+    const SPAN: &str = "token_reset_0123";
+    let r = rig_redacting("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false, Redactor::new(Some(SPAN)));
+    let c = vec![Criterion { id: "ac-1".into(), criterion: format!("export keeps {SPAN}"), check: "npm test".into() }];
+    r.p.plan_tasks(PlanInput { criteria: Some(c), ..plan1() }).unwrap();
+    assert!(!r.p.lock().criteria[0].criterion.contains(SPAN), "the stored text is redacted");
+    assert!(r.p.card().security, "flagged before redaction");
+}
+
+/// bhishma (vajra-66) M1 on #181: an invisible or control character inside a security word splits it in the raw text,
+/// but the stored, sanitised text reads the word whole. Either matching flags the run.
+#[test]
+fn an_invisible_or_control_character_inside_a_security_word_still_flags_the_run() {
+    for (criterion, check) in [("keep the to\u{200b}kens fresh", "npm test"), ("export has --json", "cargo test au\u{1}th::x"), ("rotate the pass\u{2060}word", "npm test")] {
+        let c = vec![Criterion { id: "ac-1".into(), criterion: criterion.into(), check: check.into() }];
+        let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+        r.p.plan_tasks(PlanInput { criteria: Some(c), ..plan1() }).unwrap();
+        assert!(r.p.card().security, "{criterion:?} / {check:?}");
+    }
+}
+
+/// bhishma L2 on #181: the ask has the same gap.
+#[test]
+fn an_invisible_character_inside_a_security_word_of_the_ask_flags_the_run() {
+    for ask in ["rotate the pass\u{200b}word", "fix the lo\u{7}gin page"] {
+        let r = rig_with(ask, vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+        r.p.plan_tasks(plan1()).unwrap();
+        assert!(r.p.card().security, "{ask:?}");
+    }
+}
+
+/// bhishma L1 on #181: git's output is decoded lossily, so an odd byte inside a path word arrives as U+FFFD and splits
+/// it; the word read whole still flags.
+#[test]
+fn an_odd_byte_inside_a_security_path_word_still_flags_the_run() {
+    let (_, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/to\u{fffd}ken_store.rs".into()]));
+    assert!(flagged);
+    let (_, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/se\u{200b}ssion.rs".into()]));
+    assert!(flagged);
+}
+
+#[test]
+fn a_bland_plan_whose_diff_touches_a_security_path_flags_the_run() {
+    let (r, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/auth/session.rs".into(), "docs/x.md".into()]));
+    assert!(flagged, "the integrated diff's paths flag the round's checks");
+    assert!(r.p.card().security);
+    // A diff whose paths can't be read flags the run too: it fails closed.
+    let (_, flagged) = {
+        let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+        crate::lock(&r.w.paths).insert(1, None);
+        r.p.plan_tasks(plan1()).unwrap();
+        r.round_done(&["t1", "t2", "t3"]);
+        r.p.integrate(1).unwrap();
+        r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+        r.await_round(1);
+        let f = r.gate.inputs.lock().unwrap()[0].security;
+        (r, f)
+    };
+    assert!(flagged, "unreadable diff paths");
+    // And a bland diff stays unflagged.
+    let (_, flagged) = flagged_after_round_1(criteria(), None);
+    assert!(!flagged, "the bland run is not flagged");
+}
+
+#[test]
+fn a_flag_set_in_round_1_survives_a_clean_round_2() {
+    let (r, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/auth/session.rs".into()]));
+    assert!(flagged);
+    crate::lock(&r.w.paths).insert(2, Some(vec!["docs/readme.md".into()]));
+    r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() }).unwrap();
+    r.round_done(&["t3"]);
+    r.p.integrate(2).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(2);
+    assert!(r.gate.inputs.lock().unwrap()[1].security, "a clean round 2 doesn't clear the flag");
+    assert!(r.p.card().security);
 }
 
 /// bhishma M1: a run flagged by its ask alone has no security task; the reviewer is then compared with every seat
