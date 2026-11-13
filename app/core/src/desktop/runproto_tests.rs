@@ -32,6 +32,8 @@ struct FakeWorkers {
     merge_result: Mutex<Option<GitwError>>,
     /// Every dispatch answers this error while it is set.
     dispatch_error: Mutex<Option<DispatchError>>,
+    /// The writer limits the protocol set, in order.
+    limits: Mutex<Vec<(String, u32)>>,
     /// While set, `integrate` says it entered, then blocks until released (#153 review: a stop during the merge).
     integrate_hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
@@ -70,6 +72,9 @@ fn commit_of(id: &str) -> String {
 }
 
 impl Workers for FakeWorkers {
+    fn limit_writers(&self, run: &str, n: u32) {
+        crate::lock(&self.limits).push((run.to_string(), n));
+    }
     fn dispatch(&self, spec: TaskSpec, seat: WorkerSeat) -> Result<String, DispatchError> {
         if let Some(e) = crate::lock(&self.dispatch_error).clone() {
             return Err(e);
@@ -892,7 +897,11 @@ fn a_check_ticket_asked_for_after_the_run_ended_never_starts() {
     assert_eq!(r.p.stop(), RunStatus::Stopped);
     assert_eq!(*crate::lock(&r.w.kills), [KillReason::Stopped], "the run's one kill already ran");
     release.send(()).unwrap();
-    r.await_round(1);
+    // The round ticket can answer as soon as the run ends; the gate's refused start is recorded on its own thread.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while crate::lock(&r.gate.starts).is_empty() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
     assert_eq!(*crate::lock(&r.gate.starts), [false], "the ended run refused the start");
     // While the run is open, a start goes through.
     let r = rig();
@@ -907,4 +916,11 @@ fn a_check_ticket_asked_for_after_the_run_ended_never_starts() {
     r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
     r.await_round(1);
     assert_eq!(*crate::lock(&r.gate.starts), [true]);
+}
+
+/// #153 codex P2: the run's max_in_flight reaches the runtime, which holds it however the lead calls dispatch.
+#[test]
+fn the_runs_writer_limit_is_handed_to_the_runtime() {
+    let r = rig();
+    assert_eq!(*crate::lock(&r.w.limits), [("r1".to_string(), 4)]);
 }

@@ -131,6 +131,9 @@ pub trait Workers: Send + Sync {
     fn kill_run(&self, run: &str, reason: KillReason);
     /// Merge `commits` in order into the round's integration branch; returns its head.
     fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError>;
+    /// The run's `max_in_flight`: at most `n` of its writers run at once and the rest wait queued (#153 codex P2).
+    /// Check tickets are exempt.
+    fn limit_writers(&self, run: &str, n: u32);
 }
 
 /// The 6c runtime and the core's git writer.
@@ -154,6 +157,9 @@ impl Workers for CoreWorkers {
     }
     fn kill_run(&self, run: &str, reason: KillReason) {
         self.rt.kill_run_workers(run, reason);
+    }
+    fn limit_writers(&self, run: &str, n: u32) {
+        self.rt.limit_writers(run, n);
     }
     fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
         let it = self.gw.integration_tree(at.repo, at.project, at.run, at.round, at.base)?;
@@ -489,6 +495,8 @@ impl RunProtocol {
     pub fn new(cfg: RunConfig, workers: Arc<dyn Workers>, gate: Arc<dyn RoundGate>, clock: Arc<dyn RunClock>) -> Self {
         let now = clock.now();
         let st = St { last_call: now, started: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
+        // The waves the lead is given are only advice; the runtime holds the limit however dispatch is called.
+        workers.limit_writers(&cfg.run, cfg.max_in_flight);
         RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new() }))
     }
 
