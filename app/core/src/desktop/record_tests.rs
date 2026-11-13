@@ -864,6 +864,45 @@ fn the_real_scripts_take_a_replanned_role_and_dependency_and_the_record_verifies
     r.verify_record().unwrap();
 }
 
+/// codex on #190, with the real scripts: after the core's own report is recorded, editing or deleting report.md
+/// (campaign.json and state.sig untouched, so the signature still checks) makes the record not verified.
+#[test]
+fn the_real_scripts_report_edited_or_deleted_makes_the_record_not_verified() {
+    if ["/usr/bin/jq", "/usr/bin/openssl", "/usr/bin/python3"].iter().any(|p| !Path::new(p).is_file()) {
+        eprintln!("skipped: the engine needs /usr/bin/jq, /usr/bin/openssl and /usr/bin/python3");
+        return;
+    }
+    for delete in [false, true] {
+        let t = Tmp::new();
+        let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+        let mut b = Bridge::new(scripts.canonicalize().unwrap()).with_home(t.0.join("home"));
+        let key = t.0.join("home/.claude/vajra/.hmac-key");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&key, "00".repeat(32)).unwrap();
+        std::fs::create_dir_all(t.0.join("home/.claude/agents")).unwrap();
+        for a in ["bhima", "abhimanyu"] {
+            std::fs::write(t.0.join("home/.claude/agents").join(format!("{a}.md")), "---\nname: x\n---\n").unwrap();
+        }
+        b.record_cwd = Some(super::super::record_app::record_dir(&t.0.join("data")).unwrap());
+        b.timeout = RECORD_TIMEOUT;
+        let campaigns = t.0.join("home/.claude/vajra/campaigns");
+        let store = super::super::record_app::AppLedgerStore::new(&t.0.join("data"), SLUG, campaigns.clone(), key.clone(), b.clone()).unwrap();
+        let r = CoreRecord::new(t.cfg(false), b.clone(), Arc::new(store)).unwrap();
+        r.plan(&plan()).unwrap();
+        let b64 = "IyByZXBvcnQK"; // "# report\n"
+        r.write(&Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: fnv32(b64), base64: b64.into() }).unwrap();
+        r.verify_record().unwrap();
+        let report = campaigns.join(SLUG).join("report.md");
+        if delete {
+            std::fs::remove_file(&report).unwrap();
+        } else {
+            std::fs::write(&report, "# all good, ship it\n").unwrap();
+        }
+        let why = r.verify_record().unwrap_err();
+        assert!(why.contains("report"), "{} report: {why}", if delete { "deleted" } else { "edited" });
+    }
+}
+
 /// bhishma on f689ce2: the core's close must reach the ledger as `closed` from the real script's answer, not only
 /// from JSON a test hands in. Green signed evidence in a temp repo, the temp HOME's test key, no injected output.
 #[test]
