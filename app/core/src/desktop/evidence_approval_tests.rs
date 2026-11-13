@@ -330,6 +330,39 @@ fn if_the_audit_line_cant_be_written_nothing_changes_and_the_person_sees_why() {
     fs::set_permissions(&log, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+/// The next approval record write fails (the audit log still works).
+fn fail_next_write() {
+    super::FAIL_WRITE.with(|f| f.set(true));
+}
+
+#[test]
+fn a_failed_write_of_the_answer_can_be_retried() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = app.request_evidence_approval(&ask(), at(T0)).unwrap();
+    fail_next_write();
+    let err = app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 1)).unwrap_err();
+    assert_eq!(err["error"], "io_error", "{err}");
+    // Nothing stuck: still pending in memory and in the file, so the same answer goes through.
+    assert_eq!(app.evidence_approval_read_at(RUN, at(T0 + 2)).unwrap()["state"], "pending");
+    assert_eq!(app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 3)).unwrap()["state"], "approved");
+    assert!(app.consume_evidence_approval(&ask(), at(T0 + 4)).is_ok());
+}
+
+#[test]
+fn a_failed_write_of_the_consume_can_be_retried() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = app.request_evidence_approval(&ask(), at(T0)).unwrap();
+    app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 1)).unwrap();
+    fail_next_write();
+    assert!(app.consume_evidence_approval(&ask(), at(T0 + 2)).is_err());
+    assert!(app.evidence_approval_consumed(RUN).is_none());
+    assert_eq!(app.evidence_approval_read_at(RUN, at(T0 + 3)).unwrap()["state"], "approved", "still usable");
+    assert_eq!(app.consume_evidence_approval(&ask(), at(T0 + 4)).unwrap(), sha);
+    assert_eq!(app.evidence_approval_consumed(RUN).as_deref(), Some(sha.as_str()));
+}
+
 #[test]
 fn a_command_that_would_show_differently_from_what_runs_is_refused() {
     let t = Tmp::new();

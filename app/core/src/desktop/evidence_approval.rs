@@ -39,6 +39,12 @@ const MAX_COMMAND: usize = 4096;
 /// File read-modify-writes run under this lock, so a consume can't race an answer.
 static LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the next record write on this thread fails (a full disk, a lost mount).
+    pub(crate) static FAIL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// What the human is asked to approve: everything the approval is bound to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ask {
@@ -138,6 +144,10 @@ impl App {
     }
 
     fn write_approval(&self, run_id: &str, v: &Value) -> Result<(), String> {
+        #[cfg(test)]
+        if FAIL_WRITE.with(|f| f.replace(false)) {
+            return Err("injected write failure".into());
+        }
         let dir = self.data.join("control/lead").join(run_id);
         fsx::private_dir(&self.data.join("control")).and_then(|_| fsx::private_dir(&self.data.join("control/lead"))).and_then(|_| fsx::private_dir(&dir)).map_err(|e| e.to_string())?;
         fsx::write_atomic(&dir, FILE, v.to_string().as_bytes()).map(drop).map_err(|e| e.to_string())
@@ -212,12 +222,13 @@ impl App {
         }
         let what = if approve { "approved" } else { "declined" };
         self.audit_approval(if approve { "ALLOW" } else { "DENY" }, what, run_id, sha, now).map_err(|e| fail("audit_failed", e))?;
+        rec["state"] = json!(what);
+        rec["answered_at"] = json!(secs(now));
+        // The file first, memory only once it's written: a failed write leaves both pending, so the person can retry.
+        self.write_approval(run_id, &rec).map_err(|e| fail("io_error", e))?;
         if let Some(h) = crate::lock(&self.approvals).get_mut(run_id) {
             h.answer = Some(approve);
         }
-        rec["state"] = json!(what);
-        rec["answered_at"] = json!(secs(now));
-        self.write_approval(run_id, &rec).map_err(|e| fail("io_error", e))?;
         Ok(json!({"run_id": run_id, "state": what, "sha256": sha}))
     }
 
@@ -258,12 +269,13 @@ impl App {
             return refuse("the approval record doesn't match the answer given");
         };
         self.audit_approval("ALLOW", "consumed", &ask.run_id, &sha, now)?;
+        rec["state"] = json!("consumed");
+        rec["consumed_at"] = json!(secs(now));
+        // The file first, memory only once it's written: a failed write leaves both approved, so the ticket can retry.
+        self.write_approval(&ask.run_id, &rec)?;
         if let Some(h) = crate::lock(&self.approvals).get_mut(&ask.run_id) {
             h.consumed = true;
         }
-        rec["state"] = json!("consumed");
-        rec["consumed_at"] = json!(secs(now));
-        self.write_approval(&ask.run_id, &rec)?;
         Ok(sha)
     }
 
