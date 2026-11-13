@@ -239,6 +239,9 @@ pub struct App {
     claude: PathBuf,
     /// Where provider CLIs are looked for; `None` is the user's resolved PATH. Tests point it at a temp dir.
     provider_dirs: Option<Vec<PathBuf>>,
+    /// Tests only: the write-ledger answer for the proof label, until 6h's ledger is wired (`proof_app::ledger_of`).
+    #[cfg(test)]
+    proof_ledger: Option<proof::Ledger>,
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
@@ -362,6 +365,13 @@ impl App {
         svc.set_seat_policy(seat_env.clone());
         svc.set_seats_enabled(seat_env.route());
         svc.set_core_workers(workers.clone());
+        // Before any agent: control dirs no session needs any more (an earlier life's core workers, finished runs) go.
+        // Every session an index line names is kept, whatever its harness or folder, so a run that may be resumed keeps
+        // its steering dir. The index is worker-writable, so a forged line can only keep a dir, never remove one. Only
+        // the app holding the instance locks prunes: a second one would remove the first app's live sessions' dirs.
+        if let Some(keep) = instance.as_ref().and_then(|_| control_keep(data)) {
+            svc.prune_control_dirs(&keep);
+        }
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             workers,
@@ -391,6 +401,8 @@ impl App {
             reader: Mutex::new(None),
             claude,
             provider_dirs: None,
+            #[cfg(test)]
+            proof_ledger: None,
             provider_cache: Mutex::new(None),
             keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
@@ -497,8 +509,8 @@ impl App {
             // A ticket that ended can't be stopped: a Lead's stop still waiting for the human is refused. On its own
             // thread, since a human Stop ends a queued ticket while it holds the control lock.
             on_outcome: Some(Box::new(move |v: &workers::TicketView| {
-                let (control, id) = (control.clone(), v.id.clone());
-                std::thread::spawn(move || lock(&control).core_ticket_ended(&id));
+                let (control, id, sid) = (control.clone(), v.id.clone(), v.harness_session.clone());
+                std::thread::spawn(move || lock(&control).core_ticket_ended(&id, sid.as_deref()));
             })),
         };
         // A Claude task worker's steering channel: its own control dir and nonce, opened before it starts (16.7).
@@ -2129,7 +2141,12 @@ impl App {
     /// hashes" (`verify-digest`), so it stays the only HMAC key holder. Result `{slug, integrity, text?}` where
     /// integrity is `ok`, `no_report`, `integrity_failed`, `not_text` or `unknown` (too large / could not run).
     pub fn read_report(&self, slug: &str) -> Res {
-        self.read_report_with(slug, &|_| {}, &|| {})
+        self.read_report_with(slug, &|_| {}, &|| {}).map(|mut v| {
+            if let Some(m) = v.as_object_mut() {
+                m.remove(VERIFIED_KEY);
+            }
+            v
+        })
     }
 
     /// `seam` is passed to the held reader and is also called with `"check:report"` right before the report check;
@@ -2201,7 +2218,7 @@ impl App {
         if bridge.find_jq().is_none() {
             return unknown(reason("jq_missing", None, None));
         }
-        let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
+        let o = match bridge.run(&Request::VerifyDigest { input: input.as_bytes().to_vec() }) {
             Ok(o) => o,
             Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };
@@ -2226,20 +2243,31 @@ impl App {
         // "ok" is published once, only after every check that applies has passed (plain `verify` also fails a
         // recorded report that is missing or edited), so a concurrent listing can never see a partial success.
         seam("check:report");
+        // The record hash (6i export): the sha256 of the exact digest lines the script just accepted, so a reader on this
+        // Mac can match an export to the record it came from. It carries no key material.
+        // `VERIFIED_KEY`: the campaign and progress exactly as checked here, for the proof label (6i). `read_report` drops it.
+        let progress = String::from_utf8_lossy(&h.progress).into_owned();
+        let record = |v: Res| {
+            v.map(|mut v| {
+                v["record_sha256"] = json!(hex_digest(input.as_bytes()));
+                v[VERIFIED_KEY] = json!({"campaign": campaign, "progress": progress});
+                v
+            })
+        };
         let want = campaign.get("reportSha256").and_then(Value::as_str).unwrap_or("");
         if want.is_empty() {
             self.settle(slug, "ok", ticket);
-            return verdict("no_report", None);
+            return record(verdict("no_report", None));
         }
         let Some(report) = h.report else { return bad(self) };
         if hex_digest(&report) != want {
             return bad(self);
         }
         self.settle(slug, "ok", ticket);
-        match String::from_utf8(report) {
+        record(match String::from_utf8(report) {
             Ok(t) => verdict("ok", Some(t)),
             Err(_) => verdict("not_text", None),
-        }
+        })
     }
 
     pub fn take_over(&self, stream: &str, on: bool) -> Res {
@@ -2361,6 +2389,9 @@ fn key_state(account: &str, r: Result<bool, crate::providers::keychain::Error>) 
     }
 }
 
+/// `read_report_with`'s internal answer: the campaign and progress bytes its check verified (never sent to the UI).
+pub(super) const VERIFIED_KEY: &str = "_verified";
+
 fn invalid(field: &str, reason: &str) -> Value {
     json!({"error": "invalid_args", "detail": format!("{field}: {reason}")})
 }
@@ -2380,6 +2411,52 @@ fn repo_dir(s: &str) -> Result<PathBuf, Value> {
 /// Claude Code's project dir name for a cwd: every non-alphanumeric is `-`.
 fn project_slug(cwd: &Path) -> String {
     cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// The largest run index the start-up prune reads whole; a bigger one skips the prune.
+const PRUNE_INDEX_CAP: u64 = 64 << 20;
+
+/// The control session dirs start-up pruning keeps besides the live ones: every session the whole run index names
+/// (launch and Lead sessions), and every Lead session recorded under `<control>/lead/<run>/lead_session`. `None` when
+/// the index can't be read whole: then nothing is pruned (a missed name would remove a dir a resume needs).
+fn control_keep(data: &Path) -> Option<std::collections::HashSet<String>> {
+    let mut keep = std::collections::HashSet::new();
+    for e in runindex::entries_all(&data.join("runs.jsonl"), PRUNE_INDEX_CAP).ok()? {
+        keep.insert(e.session_id);
+        keep.extend(e.lead_session_id);
+    }
+    // The guarded run records keep their sessions whatever the index says (#179 codex P1): a worker that drops a run
+    // from `runs.jsonl` must not get its control dir, nonce and acknowledged stops deleted. Each run's own session
+    // (`session`, written by `record_run_pinned`) and its Lead's (`lead_session`) are kept. A record that exists but
+    // can't be read whole (a link, an oversized file, an unreadable entry) prunes nothing at all, and neither does one
+    // that isn't exactly a canonical session id once trimmed (#179 review): a lossy decode of invalid UTF-8, or any
+    // other text, would keep a name that matches no dir while the real session's dir was deleted.
+    let lead = data.join("control").join("lead");
+    match std::fs::read_dir(&lead) {
+        Ok(rd) => {
+            for d in rd {
+                let d = d.ok()?;
+                for name in ["session", "lead_session"] {
+                    match crate::control::fsx::read_nofollow_capped(&d.path().join(name), 256) {
+                        Ok(b) => {
+                            let id = String::from_utf8(b).ok()?;
+                            let id = id.trim();
+                            if !ids::valid_session_id(id) {
+                                return None;
+                            }
+                            keep.insert(id.to_string());
+                        }
+                        // No such record, or the entry is no run dir: nothing to keep from it.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {}
+                        Err(_) => return None,
+                    }
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    Some(keep)
 }
 
 fn lines_json(lines: &[bus::Line]) -> Vec<Value> {
@@ -2452,6 +2529,8 @@ mod board;
 mod lead_acts;
 mod runindex;
 mod runview;
+pub mod proof;
+mod proof_app;
 mod state;
 pub use state::Envelope;
 

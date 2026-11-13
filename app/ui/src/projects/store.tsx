@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { S } from "../../strings";
 import type { StatusKey } from "../../strings";
 import { api, onChanged } from "../ipc";
+import { forgetRead, ownedRead } from "../reads";
 import type { Campaign, CrewNodeDto, InboxItem } from "../ipc";
 import { problemDetail } from "../screens/states";
 import { parseWorkerProvider } from "../workerProvider";
@@ -72,11 +73,18 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
     last.current = Date.now();
     void (async () => {
       // Campaigns and their folders decide the projects; without either, saying "no projects" would be wrong.
-      const [camps, targets, active, inbox, store] = await Promise.allSettled([api.listCampaigns(), api.resumeTargets(), api.activeRuns(), api.inbox(), api.projectList()]);
+      const [camps, targets, active, inbox, store] = await Promise.allSettled([
+        ownedRead("list_campaigns", () => api.listCampaigns()), ownedRead("resume_targets", () => api.resumeTargets()),
+        ownedRead("active_runs", () => api.activeRuns()), ownedRead("inbox", () => api.inbox()), ownedRead("project_list", () => api.projectList()),
+      ]);
       if (mine !== seq.current) return;
       if (camps.status === "rejected" || targets.status === "rejected") {
         const e = camps.status === "rejected" ? camps.reason : (targets as PromiseRejectedResult).reason;
-        setData((d) => ({ ...d, state: "error", error: problemDetail(e) }));
+        // A successful inbox read is still the newest answer: the Board shares it, so it must not keep an older one.
+        const fresh = inbox.status === "fulfilled" && Array.isArray(inbox.value?.items)
+          ? { inbox: inbox.value.items, inboxFailed: false, inboxCount: Number.isSafeInteger(inbox.value.count) && inbox.value.count >= inbox.value.items.length ? inbox.value.count : inbox.value.items.length }
+          : {};
+        setData((d) => ({ ...d, ...fresh, state: "error", error: problemDetail(e) }));
         return;
       }
       const campaigns = Array.isArray(camps.value?.campaigns) ? camps.value.campaigns : [];
@@ -118,6 +126,8 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let later: ReturnType<typeof setTimeout> | undefined;
     const off = onChanged(() => {
+      // The core says something moved: a read already in flight started before that and must not be joined.
+      forgetRead();
       const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
       if (wait <= 0) load();
       else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);

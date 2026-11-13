@@ -1,5 +1,9 @@
 // User-visible wording of the kit. Screens add their own strings next to these.
 // Log every wording change in docs/design/changed-strings.md for the owner's approval.
+type PingGroupKey = "decisions" | "questions" | "blocked";
+const PING_GROUP: Record<PingGroupKey, [one: string, many: string]> = { decisions: ["decision", "decisions"], questions: ["question", "questions"], blocked: ["blocked task", "blocked tasks"] };
+/** "a", "a and b", "a, b and c". */
+const andList = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
 export const S = {
   dismiss: "Dismiss",
   cancel: "Cancel",
@@ -170,7 +174,9 @@ export const S = {
     proposal: "Run proposal",
     proposals: "Proposed runs",
     proposalLede: "The Director-General proposes; nothing runs until you start it.",
-    exactAsk: "What the workers will be asked",
+    exactAsk: "Goal, as the workers will be asked",
+    threads: "Threads",
+    threadCount: (n: number, owners: string) => `${n} ${n === 1 ? "thread" : "threads"}: ${owners}`,
     base: "Base",
     rounds: "Fix rounds",
     fromGeneration: (n: number) => `From conversation ${n}`,
@@ -185,8 +191,57 @@ export const S = {
       refused: (why: string) => `Not done: ${why}`,
     },
   },
+  /** What a ping says, and why it pinged (or did not). Counts and project names only, never an item's own text. */
+  ping: {
+    one: {
+      decisions: (p: string) => `A decision needs you in ${p}`,
+      questions: (p: string) => `A worker has a question in ${p}`,
+      blocked: (p: string) => `A task is blocked in ${p}`,
+    } as Record<PingGroupKey, (p: string) => string>,
+    /** One project's share of a grouped ping: "2 blocked tasks and 1 decision in harbor-api". */
+    inProject: (counts: [PingGroupKey, number][], p: string) => `${andList(counts.map(([g, n]) => `${n} ${PING_GROUP[g][n === 1 ? 0 : 1]}`))} in ${p}`,
+    many: (total: number, parts: string[]) => `${total} things need you: ${parts.join("; ")}`,
+    group: (g: PingGroupKey) => PING_GROUP[g][1],
+    groupLabels: { decisions: "Decisions", questions: "Questions", blocked: "Blocked tasks" } as Record<PingGroupKey, string>,
+    groupHints: {
+      decisions: "Plans to approve, and runs the Director-General proposes",
+      questions: "A worker asks you something",
+      blocked: "A task is blocked, or failed a check its worker could not fix",
+    } as Record<PingGroupKey, string>,
+    why: {
+      rule: (groups: PingGroupKey[]) => `Pinged because your rule is on for ${andList(groups.map((g) => PING_GROUP[g][1]))}.`,
+      grouped: (m: number) => `Grouped: they arrived within ${m} min of the first.`,
+      held: (n: number) => `Held until now: you allow ${n} ${n === 1 ? "ping" : "pings"} an hour.`,
+      off: "Not pinged: notifications are off.",
+      muted: (g: PingGroupKey) => `Not pinged: your rule is off for ${PING_GROUP[g][1]}.`,
+    },
+  },
   inbox: {
     title: "Inbox",
+    rule: {
+      title: "Ping rule",
+      summary: (perHour: number, batch: number, on: PingGroupKey[]) => {
+        const budget = `At most ${perHour} ${perHour === 1 ? "ping" : "pings"} an hour.`;
+        const group = batch === 0 ? "Each arrival pings on its own." : `Arrivals within ${batch} min are one ping.`;
+        const list = on.length === 0 ? "Nothing pings; everything waits here quietly." : `On for ${andList(on.map((g) => PING_GROUP[g][1]))}.`;
+        return `${budget} ${group} ${list}`;
+      },
+      edit: "Change",
+      save: "Save rule",
+      saved: "Saved. New arrivals follow this rule.",
+      perHour: "Most pings in an hour",
+      batch: "Group arrivals within",
+      batchOption: (m: number) => (m === 0 ? "Don't group" : `${m} min`),
+      kinds: "Ping me for",
+      note: "The rule only decides when you are pinged. Everything still lands in this list, and the rule cannot start or approve anything.",
+      unavailable: "The ping rule could not be read. Pings use the default until it can.",
+    },
+    recent: "Recent pings",
+    recentEmpty: "No pings since Vajra opened.",
+    pinged: "Pinged",
+    quiet: "Not pinged",
+    proposalKind: "Run to start",
+    openProposal: "Review in Director-General",
     empty: "Nothing needs you",
     failed: "Could not read your inbox.",
     emptyHint: "Questions, plans to approve and failures from every project appear here.",
@@ -336,6 +391,7 @@ export const S = {
     maxInFlight: "Workers at once (1 to 16)",
     advanced: "Advanced",
     startButton: "Start run",
+    startNeedsAnswer: "A run cannot start until the checks below finish.",
     startNeedsChecks: (n: number) => n === 1 ? "A run cannot start until the failing check below passes." : "A run cannot start until the failing checks below pass.",
     lede: "The workers build in their own worktrees and report back. This app never pushes.",
     checksSummary: (n: number, m: number) => `${n} of ${m} checks pass`,
@@ -448,6 +504,42 @@ export const S = {
     detailTruncated: "The evidence file is too large to show here.",
     exit: (n: number | null) => (n === null ? "no exit code" : `exit ${n}`),
     output: "Output (end of log)", notes: "Verifier notes", writtenBy: "Written by", copyWhat: "command",
+    proof: {
+      title: "Proof",
+      loading: "Checking the signed record",
+      failed: "Could not read the run's proof.",
+      label: {
+        verified: "Verified",
+        verified_approved: "Verified (check commands approved by you)",
+        evidence_unguarded: "Verified (evidence ran outside the guard)",
+        not_verified: "Not verified",
+        rejected: "Rejected by review",
+        abandoned: "Abandoned",
+        in_progress: "In progress",
+      },
+      why: "Why?",
+      record: "Signed record",
+      recordOk: "Signature checked on this Mac",
+      recordFailed: "Signature failed its check on this Mac",
+      recordUnknown: "Signature not checked",
+      hash: "Record hash (sha256)",
+      copyHash: "Copy hash",
+      exportPage: "Export page",
+      exported: (path: string) => `Saved to ${path}`,
+      copyComment: "Copy as PR comment",
+      copied: "Copied",
+      post: "Post to pull request",
+      prLink: "Pull request link",
+      prHint: "For example https://github.com/acme/web/pull/42",
+      prInvalid: "Use a GitHub pull request link: https://github.com/<owner>/<repo>/pull/<number>.",
+      confirmTitle: "Post the proof to this pull request?",
+      confirmBody: (repo: string, pr: number) => `Vajra will post this run's proof as a comment on ${repo} #${pr}, using your GitHub CLI sign-in. Anyone who can see the pull request can read it.`,
+      confirmPost: "Post comment",
+      posted: (repo: string, pr: number) => `Posted to ${repo} #${pr}.`,
+      postFailed: (why: string) => `Not posted: ${why}`,
+      notFinished: "Export and posting open once the run has finished.",
+      exportOff: "Exporting the proof is not available in this build.",
+    },
   },
   history: {
     title: "History",

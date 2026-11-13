@@ -125,6 +125,8 @@ pub struct Done {
     /// The `file_path` of every Read that a permission rule refused (matched through the call's id, or taken from the
     /// result's `permission_denials`). The self-test accepts a denial only if it names the canary.
     pub denied_paths: Vec<String>,
+    /// What the turn spent, from the `result` event's `usage` (absent if the event had none).
+    pub tokens: Option<super::token_receipt::TokenReceipt>,
     /// `tool_use` id to the Read's `file_path`, for matching a denied result back to its call.
     read_paths: std::collections::HashMap<String, String>,
 }
@@ -364,6 +366,7 @@ fn dispatch(ev: &Value, sink: &mut dyn Sink, done: &mut Done, said: &mut bool) -
                     }
                 }
             }
+            done.tokens = ev.get("usage").and_then(super::token_receipt::TokenReceipt::from_usage);
             let res = ev.get("result").and_then(Value::as_str).unwrap_or("");
             if done.is_error {
                 done.provider_error = Some(crate::providers::errors::classify(res)).filter(|c| c.kind != crate::providers::errors::Kind::UnexplainedExit);

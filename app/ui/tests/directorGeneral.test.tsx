@@ -458,4 +458,25 @@ describe("run proposals (D4: only a human starts a run)", () => {
     expect(within(card()).getByRole("status").textContent).toBe(S.dg.receipt.dismissed);
     expect(f.calls.find((c) => c.cmd === "dismiss_proposal")?.args).toEqual({ id: "proposal:a1" });
   });
+
+  // The plan card: the goal, then its threads by owner, before anything starts. Nothing is sent until Start.
+  it("Given a plan with threads, Then it shows the goal and the threads by owner, and nothing starts until Start", async () => {
+    const workers = [
+      { slot: "w1", role: "backend", task: "Token bucket", account: "claude", model: null, effort: "high", source: "role_default", why: "auth" },
+      { slot: "w2", role: "backend", task: "429 body", account: "claude", model: null, effort: "high", source: "role_default", why: "same path" },
+      { slot: "w3", role: "docs", task: "Document it", account: "claude", model: null, effort: null, source: "dg", why: "plain writing" },
+    ];
+    const { f } = mount({ provider_accounts: { schema: "vajra.provider_accounts/1", accounts: [] }, provider_usage: { usage: [] }, provider_agents: {} },
+      cur({ proposals: [proposal({ workers } as Partial<InboxItem>)] }));
+    await screen.findByRole("log", { name: S.dg.transcript });
+    expect(within(card()).getByText(S.dg.exactAsk)).toBeTruthy();
+    expect(within(card()).getByText(S.dg.threadCount(3, "2 Backend, 1 Docs"))).toBeTruthy();
+    expect(f.calls.some((c) => c.cmd === "start_proposal")).toBe(false);
+  });
+
+  it("Given a plan with no threads listed, Then no thread line is invented", async () => {
+    mount({}, cur({ proposals: [proposal()] }));
+    await screen.findByRole("log", { name: S.dg.transcript });
+    expect(within(card()).queryByText(S.dg.threads)).toBeNull();
+  });
 });
