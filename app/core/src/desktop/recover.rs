@@ -204,4 +204,4 @@ fn resume_refusal(d: &Pinned, run: &str, core: &Option<Value>, env: &ResumeEnv) 
 
 #[cfg(test)]
 #[path = "recover_tests.rs"]
-mod tests;
+pub(crate) mod tests;

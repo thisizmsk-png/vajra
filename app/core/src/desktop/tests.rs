@@ -5579,22 +5579,15 @@ fn the_lead_shutdown_with_no_leads_ends_nothing_and_after_it_no_run_lead_starts(
 
 #[test]
 fn opening_the_app_after_a_crash_kills_the_earlier_lifes_recorded_lead_first() {
-    use std::os::unix::process::CommandExt;
     let t = Tmp::new();
     let data = t.0.join("data");
     fs::create_dir_all(&data).unwrap();
-    let mut c = std::process::Command::new("/bin/sleep");
-    c.arg("60");
-    // SAFETY: setsid is async-signal-safe and has no preconditions.
-    unsafe {
-        c.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let mut lead = c.spawn().unwrap();
-    let pid = lead.id();
-    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None , tries: 0 };
+    let mark = "feedfacefeedfacefeedfacefeedface";
+    let kid = super::recover::tests::marked_kid(mark);
+    let pid = kid.0.id();
+    let mut lead = kid;
+    let lead = &mut lead.0;
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None, tries: 0, mark: Some(mark.into()) };
     crate::owned::Ledger::new(crate::owned::ledger_path(&data)).record(o).unwrap();
     let app = t.app();
     let gone = (0..150).any(|_| {
@@ -5626,7 +5619,7 @@ fn a_second_app_on_the_same_data_folder_kills_nothing_and_starts_no_agent() {
     let mut lead = c.spawn().unwrap();
     let pid = lead.id();
     // The first app's live lead, as its supervisor records it.
-    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None, tries: 0 };
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None, tries: 0, mark: Some("feedface".into()) };
     first.owned_ledger().record(o).unwrap();
     let second = t.app();
     std::thread::sleep(Duration::from_millis(300));

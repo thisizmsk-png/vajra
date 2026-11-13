@@ -8,7 +8,8 @@
 //! is gone is dropped; a pid that is alive with another start stamp was reused by someone else and is dropped too,
 //! untouched. `recover` signals only what `reconcile` proves is owned, re-proves it first, and never matches by name.
 //! For shells nothing here runs by itself: the human chooses to recover. Leads and workers are ended at start-up
-//! (`end_agents`), before any agent of this life starts, through the same proof.
+//! (`end_agents`), before any agent of this life starts, through the same proof, and only if the process itself carries
+//! the record's random mark in its environment (`AGENT_MARK`): a record alone never proves who started a process.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -43,7 +44,15 @@ pub struct Owner {
     /// Start-up reconciles that signalled it and could not end it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub tries: u32,
+    /// A lead's or worker's mark: the random value the supervisor put in its environment as `AGENT_MARK` when it
+    /// started it. The start-up reconcile signals a recorded agent only if its environment still carries this value
+    /// (`could_be_ours`), so a damaged or forged record naming another of the user's processes ends nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<String>,
 }
+
+/// The environment variable that carries a lead's or worker's mark (`Owner::mark`).
+pub const AGENT_MARK: &str = "VAJRA_AGENT_MARK";
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
@@ -68,7 +77,7 @@ pub enum Kind {
 impl Owner {
     /// A shell record.
     pub fn shell(pid: u32, stamp: u64, cwd: PathBuf) -> Self {
-        Self { pid, stamp, cwd, kind: Kind::Shell, run: None, ticket: None, tries: 0 }
+        Self { pid, stamp, cwd, kind: Kind::Shell, run: None, ticket: None, tries: 0, mark: None }
     }
 }
 
@@ -228,7 +237,7 @@ impl Ledger {
                 Verdict::Reused => Ended::Reused,
                 // The stamp proves the record names a live process, not that this app started it: one that could not
                 // be a supervisor child of ours is never signalled.
-                Verdict::Owned { .. } if !could_be_ours(o.pid) => Ended::Reused,
+                Verdict::Owned { .. } if !could_be_ours(&o) => Ended::Reused,
                 Verdict::Owned { .. } => end_session(&o),
             };
             let _ = self.forget(o.pid, o.stamp);
@@ -472,12 +481,20 @@ pub enum Ended {
     Unrecorded,
 }
 
-/// Could `pid` be a lead or worker this app's supervisor started? Each is its own session's leader (the PTY child),
-/// runs as this user, and is neither this app nor its parent.
-fn could_be_ours(pid: u32) -> bool {
-    // SAFETY: getppid and getsid have no preconditions.
-    let (ppid, sid) = unsafe { (libc::getppid(), libc::getsid(pid as i32)) };
-    pid > 1 && pid != std::process::id() && pid as i32 != ppid && sid == pid as i32 && crate::procsweep::is_same_user(pid)
+/// Is the recorded process a lead or worker this app's supervisor started? Each is its own session's leader (the PTY
+/// child), runs as this user, is not this app, and carries the record's mark in its environment (`AGENT_MARK`), read
+/// from the process itself. A record says nothing about provenance on its own: one without a mark, or whose process
+/// does not carry it (another of the user's sessions, or a program whose environment macOS hides), is never signalled.
+fn could_be_ours(o: &Owner) -> bool {
+    let pid = o.pid;
+    // SAFETY: getsid has no preconditions.
+    let sid = unsafe { libc::getsid(pid as i32) };
+    let Some(mark) = o.mark.as_deref().filter(|m| !m.is_empty()) else { return false };
+    pid > 1
+        && pid != std::process::id()
+        && sid == pid as i32
+        && crate::procsweep::is_same_user(pid)
+        && crate::procsweep::env_var(pid, AGENT_MARK).is_some_and(|v| v.as_encoded_bytes() == mark.as_bytes())
 }
 
 /// SIGKILL a recorded agent's whole session through the 6c-3 sweep's proof (`procsweep::kill_proved`): the leader and

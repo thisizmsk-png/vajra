@@ -407,6 +407,13 @@ impl Supervisor {
         if spec.rows == 0 || spec.cols == 0 {
             return Err(SessionError::InvalidSize);
         }
+        let ledger = lock(&self.owned).clone();
+        // The agent's mark (`owned::Owner::mark`): only a process started here carries it, so the crash reconcile can
+        // prove a record's process is ours from the process itself.
+        let mark = match &ledger {
+            Some(_) => Some(crate::control::nonce::random_hex(16).map_err(|e| SessionError::Ledger(format!("its mark could not be made: {e}")))?),
+            None => None,
+        };
         let mut sessions = lock(&self.sessions);
         if let Some(old) = sessions.get(id) {
             if lock(&old.exit).is_none() {
@@ -434,6 +441,9 @@ impl Supervisor {
         for (k, v) in &spec.extra_env {
             cmd.env(k, v);
         }
+        if let Some(m) = &mark {
+            cmd.env(crate::owned::AGENT_MARK, m);
+        }
         cmd.cwd(&spec.cwd);
 
         let child = pair
@@ -443,7 +453,6 @@ impl Supervisor {
         // Drop our slave fd so the reader sees EOF when the child is gone.
         drop(pair.slave);
         let pid = child.process_id().unwrap_or(0);
-        let ledger = lock(&self.owned).clone();
         let owned = match ledger {
             Some(l) => {
                 let refuse = |mut child: Box<dyn Child + Send + Sync>, e: String| {
@@ -467,6 +476,7 @@ impl Supervisor {
                     run: Some(who.run.unwrap_or_else(|| id.to_string())),
                     ticket: who.ticket,
                     tries: 0,
+                    mark,
                 };
                 if let Err(e) = l.record(o) {
                     return refuse(child, e.to_string());

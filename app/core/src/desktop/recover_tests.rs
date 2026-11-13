@@ -28,16 +28,25 @@ impl Drop for Tmp {
 }
 
 /// A process in its own session, as the supervisor's PTY children are; killed and reaped on drop if it still runs.
-struct Kid(Child);
+pub(crate) struct Kid(pub(crate) Child);
 impl Drop for Kid {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
+/// The mark every `kid` carries, as the supervisor puts one in each agent's environment.
+const MARK: &str = "0123456789abcdef0123456789abcdef";
+
+/// A session leader that carries `MARK`: this test binary, sleeping (not `/bin/sleep`, whose environment macOS hides).
 fn kid() -> Kid {
-    let mut c = Command::new("/bin/sleep");
-    c.arg("60");
+    marked_kid(MARK)
+}
+
+pub(crate) fn marked_kid(mark: &str) -> Kid {
+    let mut c = Command::new(std::env::current_exe().unwrap());
+    c.args(["--exact", "procsweep::tests::sleeper_body", "--ignored", "--nocapture"]).env("VAJRA_SWEEP_SLEEP", "1");
+    c.env(crate::owned::AGENT_MARK, mark).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
     // SAFETY: setsid is async-signal-safe and has no preconditions.
     unsafe {
         c.pre_exec(|| {
@@ -45,7 +54,14 @@ fn kid() -> Kid {
             Ok(())
         });
     }
-    Kid(c.spawn().unwrap())
+    let k = Kid(c.spawn().unwrap());
+    // Its environment is readable once it has exec'd: wait for it, so a record of it is provable.
+    let t0 = Instant::now();
+    while crate::procsweep::env_var(k.0.id(), crate::owned::AGENT_MARK).is_none_or(|v| v != mark) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "its mark never became readable");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    k
 }
 
 fn alive(k: &mut Kid) -> bool {
@@ -61,7 +77,7 @@ fn alive(k: &mut Kid) -> bool {
 
 fn agent(k: &Kid, kind: Kind, run: &str, ticket: Option<&str>) -> Owner {
     let pid = k.0.id();
-    Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind, run: Some(run.into()), ticket: ticket.map(String::from) , tries: 0 }
+    Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind, run: Some(run.into()), ticket: ticket.map(String::from), tries: 0, mark: Some(MARK.into()) }
 }
 
 const RUN: &str = "20261112-0930";
@@ -160,7 +176,7 @@ fn a_spawn_whose_record_cannot_be_written_is_refused_and_its_process_killed() {
 fn a_ledger_full_of_agent_records_refuses_one_more_and_a_shell_too() {
     let t = Tmp::new("full");
     let ledger = Ledger::new(t.0.join("owned.jsonl"));
-    let worker = |pid: u32| Owner { pid, stamp: 1, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0 };
+    let worker = |pid: u32| Owner { pid, stamp: 1, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0, mark: Some(MARK.into()) };
     for i in 0..256u32 {
         ledger.record(worker(10_000 + i)).unwrap();
     }
@@ -276,7 +292,7 @@ fn a_record_naming_this_app_its_parent_or_a_non_leader_is_never_signalled() {
     // A child in our own session: alive and stamped right, but not a session leader.
     let mut plain = Kid(Command::new("/bin/sleep").arg("60").spawn().unwrap());
     for pid in [me, parent, plain.0.id()] {
-        let o = Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: Kind::Lead, run: Some(RUN.into()), ticket: None, tries: 0 };
+        let o = Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: Kind::Lead, run: Some(RUN.into()), ticket: None, tries: 0, mark: Some(MARK.into()) };
         ledger.record(o).unwrap();
     }
     let ended: Vec<Ended> = ledger.end_agents().into_iter().map(|(_, e)| e).collect();
@@ -285,11 +301,31 @@ fn a_record_naming_this_app_its_parent_or_a_non_leader_is_never_signalled() {
     assert!(ledger.load().is_empty(), "and forgotten");
 }
 
+/// #176 review: a forged or damaged record naming another of this user's session leaders ends nothing. The record's pid
+/// and stamp are right, and the target is a same-user session leader that is not this app, but its environment does not
+/// carry the record's mark: one with no mark at all, one with another mark, and a record with no mark naming a process
+/// that does carry one. Each is left running, and only the one the record and the process agree on is ended.
+#[test]
+fn a_record_whose_process_does_not_carry_its_mark_is_never_signalled() {
+    let t = Tmp::new("mark");
+    let ledger = Ledger::new(t.0.join("owned.jsonl"));
+    let (mut a, mut b, mut c, mut ours) = (marked_kid("aaaa"), marked_kid("bbbb"), kid(), kid());
+    let rec = |k: &Kid, mark: Option<&str>| Owner { mark: mark.map(String::from), ..agent(k, Kind::Lead, RUN, None) };
+    ledger.record(rec(&a, Some(MARK))).unwrap(); // forged: claims our mark, the process has "aaaa"
+    ledger.record(rec(&b, Some("cccc"))).unwrap(); // damaged: another mark than its own
+    ledger.record(rec(&c, None)).unwrap(); // no mark: a record cannot vouch for itself
+    ledger.record(rec(&ours, Some(MARK))).unwrap();
+    let ended: Vec<Ended> = ledger.end_agents().into_iter().map(|(_, e)| e).collect();
+    assert_eq!(ended, vec![Ended::Reused, Ended::Reused, Ended::Reused, Ended::Killed]);
+    assert!(alive(&mut a) && alive(&mut b) && alive(&mut c), "no other session is signalled");
+    assert!(!alive(&mut ours), "the one whose process carries its mark is ended");
+}
+
 #[test]
 fn a_record_that_survives_its_kill_is_tried_a_few_times_then_dropped() {
     let t = Tmp::new("tries");
     let ledger = Ledger::new(t.0.join("owned.jsonl"));
-    let o = Owner { pid: 4242, stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: MAX_TRIES - 1 };
+    let o = Owner { pid: 4242, stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: MAX_TRIES - 1, mark: Some(MARK.into()) };
     ledger.record(o).unwrap();
     // Gone (no such pid with that stamp): dropped at once whatever its count.
     assert_eq!(ledger.end_agents()[0].1, Ended::Gone);
@@ -300,7 +336,7 @@ fn a_record_that_survives_its_kill_is_tried_a_few_times_then_dropped() {
 fn shells_at_the_cap_never_push_out_a_lead_or_worker_record() {
     let t = Tmp::new("trim");
     let ledger = Ledger::new(t.0.join("owned.jsonl"));
-    let worker = Owner { pid: 9_000, stamp: 1, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0 };
+    let worker = Owner { pid: 9_000, stamp: 1, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0, mark: Some(MARK.into()) };
     ledger.record(worker.clone()).unwrap();
     for i in 0..300u32 {
         ledger.record(Owner::shell(10_000 + i, 1, "/tmp".into())).unwrap();
@@ -374,7 +410,7 @@ fn a_record_too_long_to_read_back_refuses_the_spawn_and_kills_its_process() {
 #[test]
 fn a_survivor_whose_record_cannot_be_written_back_is_reported_unrecorded() {
     let t = Tmp::new("unrec");
-    let o = Owner { pid: 4242, stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0 };
+    let o = Owner { pid: 4242, stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0, mark: Some(MARK.into()) };
     let kept = Ledger::new(t.0.join("owned.jsonl"));
     assert_eq!(kept.keep_survivor(&o), Ended::Survived);
     assert_eq!(kept.load()[0].tries, 1, "written back with one more try");

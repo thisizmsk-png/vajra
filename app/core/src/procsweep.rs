@@ -329,7 +329,7 @@ fn open_paths(pid: u32) -> Vec<PathBuf> {
 const MAX_ARGS: usize = 1 << 20;
 
 /// One variable of `pid`'s environment as it was at exec, or `None` (hidden, gone, or unset).
-fn env_var(pid: u32, name: &str) -> Option<OsString> {
+pub(crate) fn env_var(pid: u32, name: &str) -> Option<OsString> {
     use std::os::unix::ffi::OsStrExt;
     let block = env_block(pid)?;
     let key = format!("{name}=");
