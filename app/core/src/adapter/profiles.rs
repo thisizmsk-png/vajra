@@ -511,10 +511,12 @@ pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Pa
 }
 
 /// The env vars a Claude worker's flag file may carry over from the user's own `settings.json`: model routing only (the
-/// gateway base URL, model names, the cloud-provider switches, region and project, the proxy). Never a key or token
+/// gateway base URL, model names, the cloud-provider switches, region and project). Never a key or token
 /// (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`), never a credential selector
 /// (`AWS_PROFILE`), and never a `CLAUDE_CODE_*` switch outside the provider ones: any of those could change what the
-/// worker can do rather than which model it talks to.
+/// worker can do rather than which model it talks to. Never a proxy variable either (`CLAUDE_CARRY_NEVER`): settings
+/// env also reaches the worker's sandboxed Bash, and a proxy on loopback, which the sandbox allows, would give that
+/// Bash a way off the machine (#224 bhishma). Proxy users need a follow-up.
 pub const CLAUDE_CARRY_ENV: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
@@ -533,10 +535,11 @@ pub const CLAUDE_CARRY_ENV: &[&str] = &[
     "ANTHROPIC_FOUNDRY_RESOURCE",
     "AWS_REGION",
     "CLOUD_ML_REGION",
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "NO_PROXY",
 ];
+
+/// Proxy variables, in both cases, which never carry over (see `CLAUDE_CARRY_ENV`).
+pub const CLAUDE_CARRY_NEVER: &[&str] =
+    &["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "all_proxy", "no_proxy"];
 
 /// A carried-over value is a short single-line string.
 const CARRY_MAX: usize = 512;

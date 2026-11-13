@@ -239,7 +239,9 @@ fn only_the_default_model_and_named_routing_env_carry_over_from_the_users_settin
         "env": {"ANTHROPIC_BASE_URL": "https://gw.example/v1", "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2",
                 "HTTPS_PROXY": "http://proxy:3128", "ANTHROPIC_API_KEY": "sk-not-carried", "ANTHROPIC_AUTH_TOKEN": "t",
                 "ANTHROPIC_CUSTOM_HEADERS": "x-key: v", "AWS_PROFILE": "p", "CLAUDE_CODE_SANDBOX": "off", "PATH": "/evil",
-                "ANTHROPIC_MODEL": "bad\nline", "ANTHROPIC_SMALL_FAST_MODEL": 7, "NO_PROXY": "  "},
+                "ANTHROPIC_MODEL": "bad\nline", "ANTHROPIC_SMALL_FAST_MODEL": 7, "NO_PROXY": "localhost",
+                "HTTP_PROXY": "http://127.0.0.1:8080", "ALL_PROXY": "socks5://127.0.0.1:1080", "https_proxy": "http://127.0.0.1:3128",
+                "http_proxy": "x", "all_proxy": "x", "no_proxy": "x"},
         "permissions": {"allow": ["Bash(*)"], "defaultMode": "bypassPermissions"},
         "sandbox": {"enabled": false, "filesystem": {"allowRead": ["/"]}, "excludedCommands": ["*"]},
         "hooks": {"PreToolUse": []}, "disableAllHooks": true, "apiKeyHelper": "/bin/echo k",
@@ -251,11 +253,16 @@ fn only_the_default_model_and_named_routing_env_carry_over_from_the_users_settin
         ("ANTHROPIC_BASE_URL", "https://gw.example/v1".to_string()),
         ("CLAUDE_CODE_USE_BEDROCK", "1".to_string()),
         ("AWS_REGION", "us-west-2".to_string()),
-        ("HTTPS_PROXY", "http://proxy:3128".to_string()),
-    ], "only named, single-line, non-blank strings");
+    ], "only named, single-line, non-blank strings; no proxy variable");
     for k in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "AWS_PROFILE", "PATH"] {
         assert!(!CLAUDE_CARRY_ENV.contains(&k), "{k}");
     }
+    // #224 bhishma Low: settings env reaches the sandboxed Bash, and a loopback proxy would be a way off the machine.
+    for k in CLAUDE_CARRY_NEVER {
+        assert!(!CLAUDE_CARRY_ENV.iter().any(|c| c.eq_ignore_ascii_case(k)), "{k}");
+    }
+    assert!(CLAUDE_CARRY_ENV.iter().all(|k| !k.to_ascii_uppercase().contains("PROXY")));
+    assert_eq!(CLAUDE_CARRY_NEVER.len(), 8, "the four proxy variables in both cases");
     assert!(CLAUDE_CARRY_ENV.iter().all(|k| !k.contains("KEY") && !k.contains("TOKEN") && !k.contains("HEADER")));
     for t in [None, Some(""), Some("not json"), Some("[1]"), Some(r#"{"model": 3, "env": "x"}"#)] {
         assert_eq!(claude_carry_over(t), CarryOver::default(), "{t:?}");
@@ -271,7 +278,7 @@ fn only_the_default_model_and_named_routing_env_carry_over_from_the_users_settin
     let base: Value = serde_json::from_str(&claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).unwrap()).unwrap();
     let mut with: Value = serde_json::from_str(&claude_worker_flag_with(&home, &work, std::slice::from_ref(&repo), &data, &tmp, &c).unwrap()).unwrap();
     assert_eq!(with["model"], "opus-plan");
-    assert_eq!(with["env"], json!({"ANTHROPIC_BASE_URL": "https://gw.example/v1", "AWS_REGION": "us-west-2", "CLAUDE_CODE_USE_BEDROCK": "1", "HTTPS_PROXY": "http://proxy:3128"}));
+    assert_eq!(with["env"], json!({"ANTHROPIC_BASE_URL": "https://gw.example/v1", "AWS_REGION": "us-west-2", "CLAUDE_CODE_USE_BEDROCK": "1"}));
     assert!(base.get("model").is_none() && base.get("env").is_none(), "the template carries nothing");
     let o = with.as_object_mut().unwrap();
     o.remove("model");
