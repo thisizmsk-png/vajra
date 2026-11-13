@@ -288,7 +288,7 @@ fn stdin_is_exactly_the_framed_ask_and_env_is_scrubbed() {
     let r = drive(child, &h, quick(), &mut Collect::default());
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(std::fs::read(d.join("stdin.bin")).unwrap(), ask.as_bytes());
-    assert!(std::fs::read(d.join("stdin.bin")).unwrap().starts_with(b"[Vajra Desktop: question from the human, ask "));
+    assert!(std::fs::read(d.join("stdin.bin")).unwrap().starts_with(b"[Vajra Desktop: question from the human. Answer"));
     assert_eq!(std::fs::read_to_string(d.join("args.txt")).unwrap(), "-p\n--resume\n");
     let envtxt = std::fs::read_to_string(d.join("env.txt")).unwrap();
     let mut names: Vec<&str> = envtxt.lines().filter_map(|l| l.split_once('=').map(|x| x.0)).filter(|n| !matches!(*n, "PWD" | "SHLVL" | "_" | "OLDPWD")).collect();

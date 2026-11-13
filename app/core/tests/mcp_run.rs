@@ -42,6 +42,7 @@ impl Workers for NoWorkers {
     fn integrate(&self, _: &Integration<'_>, _: &[String]) -> Result<String, GitwError> {
         Err(GitwError::Invalid("no merges in this test"))
     }
+    fn limit_writers(&self, _: &str, _: u32) {}
 }
 
 fn proto() -> RunProtocol {

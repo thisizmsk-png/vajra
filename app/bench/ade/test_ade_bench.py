@@ -39,6 +39,51 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(b.read_tokens(tempfile.mkdtemp()), [])
 
 
+class AnatomyTests(unittest.TestCase):
+    def run_lines(self, usage, model_usage, tools=3, mcp=0, answered="opus"):
+        lines = [json.dumps({"type": "system", "subtype": "init", "tools": ["t"] * tools, "mcp_servers": [{}] * mcp}), "not json"]
+        if answered:
+            lines.append(json.dumps({"type": "assistant", "message": {"model": answered}}))
+        return lines + [json.dumps({"type": "result", "usage": usage, "modelUsage": model_usage, "total_cost_usd": 0.5})]
+
+    def test_first_request_is_fresh_plus_cache_write_plus_cache_read(self):
+        u = {"input_tokens": 2, "cache_creation_input_tokens": 3106, "cache_read_input_tokens": 10, "output_tokens": 44}
+        mu = {"opus": {"inputTokens": 2, "cacheCreationInputTokens": 3106, "cacheReadInputTokens": 10, "outputTokens": 44}}
+        a = b.parse_anatomy(self.run_lines(u, mu, tools=3, mcp=1))
+        self.assertEqual((a["first_request_tokens"], a["tools"], a["mcp_servers"], a["side_tokens"], a["answered_by"]), (3118, 3, 1, 0, "opus"))
+
+    def test_tokens_billed_to_another_model_are_side_tokens(self):
+        u = {"input_tokens": 2, "cache_creation_input_tokens": 1000, "output_tokens": 5}
+        mu = {"opus": {"inputTokens": 2, "cacheCreationInputTokens": 1000, "outputTokens": 5}, "haiku": {"inputTokens": 300, "outputTokens": 20}}
+        self.assertEqual(b.parse_anatomy(self.run_lines(u, mu))["side_tokens"], 320)
+
+    def test_the_answering_model_is_the_one_on_the_assistant_message_even_when_a_side_model_used_more_input(self):
+        # The answering model sent 1,000 tokens; a secondary model sent 2,000. Volume must not decide which is "main".
+        u = {"input_tokens": 1000, "output_tokens": 5}
+        mu = {"opus": {"inputTokens": 1000, "outputTokens": 5}, "haiku": {"inputTokens": 2000, "outputTokens": 30}}
+        a = b.parse_anatomy(self.run_lines(u, mu))
+        self.assertEqual((a["answered_by"], a["side_tokens"]), ("opus", 2030))
+
+    def test_with_no_assistant_message_the_answering_model_and_side_tokens_are_unknown_not_guessed(self):
+        mu = {"opus": {"inputTokens": 1000, "outputTokens": 5}, "haiku": {"inputTokens": 2000, "outputTokens": 30}}
+        a = b.parse_anatomy(self.run_lines({"input_tokens": 1000}, mu, answered=None))
+        self.assertEqual((a["answered_by"], a["side_tokens"]), (None, None))
+        # A synthetic placeholder is not a model.
+        lines = self.run_lines({"input_tokens": 1}, mu, answered="<synthetic>")
+        self.assertIsNone(b.parse_anatomy(lines)["answered_by"])
+
+    def test_no_result_event_is_none_and_malformed_usage_reads_zero(self):
+        self.assertIsNone(b.parse_anatomy(["not json", json.dumps({"type": "system", "subtype": "init"})]))
+        a = b.parse_anatomy(self.run_lines({"input_tokens": -4, "output_tokens": "9"}, {}))
+        self.assertEqual(a["first_request_tokens"], 0)
+
+    def test_the_shipped_arms_file_is_valid_and_keeps_the_leads_settings_off(self):
+        arms = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "anatomy_arms.json")))
+        self.assertEqual(arms["plain_cli"], [])
+        self.assertIn("--strict-mcp-config", arms["lead"])
+        self.assertEqual(arms["lead"][arms["lead"].index("--setting-sources") + 1], "")
+
+
 class ReportTests(unittest.TestCase):
     def test_an_unmeasured_metric_is_listed_with_its_reason_never_as_a_number(self):
         md = b.render_report([{"scenario": "weight", "at_rest_footprint_mib": 150.0, "at_rest_rss_mib": 190.0, "idle_cpu_pct": 0.1,

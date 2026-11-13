@@ -112,6 +112,8 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 
 .v-toasts { position: fixed; right: var(--space-lg); bottom: var(--space-lg); display: flex; flex-direction: column; gap: var(--space-sm); }
 .v-toast { display: flex; align-items: center; gap: var(--space-md); min-height: var(--ctl-lg); padding: var(--space-sm) var(--space-md); background: var(--c-surface-elevated); color: var(--c-text); border: 1px solid var(--c-border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-floating); font: 400 13px/19px var(--font-ui); }
+.v-toast__body { display: flex; flex-direction: column; gap: 2px; max-width: 44ch; }
+.v-toast__detail { color: var(--c-text-muted); font-size: 12px; line-height: 17px; }
 .v-toast--success .v-status-dot { color: var(--c-success); }
 .v-toast--danger .v-status-dot { color: var(--c-danger); }
 .v-toast--info .v-status-dot { color: var(--c-info); }
