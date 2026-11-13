@@ -29,6 +29,14 @@ describe("History", () => {
     expect(within(table).getByText(/bad signature/)).toBeTruthy();
   });
 
+  // A narrow table shortens the run name with an ellipsis, so the whole name is also the tooltip, as it is for the goal.
+  it("gives each run name its full text as a tooltip", async () => {
+    setTransport(fakeIpc({ list_campaigns: camps }).transport);
+    render(<History />);
+    const table = await screen.findByRole("table");
+    for (const slug of ["a-camp", "b-camp", "bad"]) expect(within(table).getByRole("button", { name: slug }).getAttribute("title")).toBe(slug);
+  });
+
   it("sorts by keyboard-reachable header buttons", async () => {
     setTransport(fakeIpc({ list_campaigns: camps }).transport);
     render(<History />);

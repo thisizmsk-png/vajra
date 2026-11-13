@@ -318,6 +318,30 @@ fn tool_use_results_and_errors_are_tagged() {
 }
 
 #[test]
+fn a_result_event_with_usage_yields_a_token_receipt_and_one_without_yields_none() {
+    let with = json!({"type": "result", "is_error": false, "result": "ok",
+        "usage": {"input_tokens": 3, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 200, "output_tokens": 7}});
+    let d = tmp("usage");
+    let done = run(&fake_printing(&d, &format!("{}\n{}", good_init(), with)), quick()).0.unwrap();
+    let t = done.tokens.expect("usage parsed");
+    assert_eq!((t.fresh, t.cache_write, t.cache_read, t.output, t.side), (3, 10, 200, 7, 0));
+    let d = tmp("no-usage");
+    let bare = json!({"type": "result", "is_error": false, "result": "ok"});
+    assert!(run(&fake_printing(&d, &format!("{}\n{}", good_init(), bare)), quick()).0.unwrap().tokens.is_none());
+}
+
+#[test]
+fn an_erroring_result_with_usage_still_yields_its_token_receipt() {
+    let d = tmp("err-usage");
+    let ev = json!({"type": "result", "subtype": "error", "is_error": true, "result": "it went wrong",
+        "usage": {"input_tokens": 9, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 500, "output_tokens": 40}});
+    let done = run(&fake_printing(&d, &format!("{}\n{}", good_init(), ev)), quick()).0.unwrap();
+    assert!(done.is_error);
+    let t = done.tokens.expect("an erroring turn still reports what it spent");
+    assert_eq!((t.fresh, t.cache_read, t.output), (9, 500, 40));
+}
+
+#[test]
 fn an_erroring_result_names_a_typed_provider_failure() {
     use crate::providers::errors::Kind;
     for (text, kind) in [("API Error: 429 rate_limit_error", Some(Kind::RateLimit)), ("API Error: 401 authentication_error", Some(Kind::Auth)), ("it went wrong somehow", None)] {

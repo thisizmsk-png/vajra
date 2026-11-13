@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { fakeIpc } from "./fakeIpc";
@@ -19,6 +19,13 @@ describe("FG-08 preferences",()=>{
   const theme=await screen.findByLabelText("Theme");fireEvent.change(theme,{target:{value:"dark"}});expect(f.calls.filter(c=>c.cmd==="act_preferences_update")).toHaveLength(0);
   fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");expect(f.calls.find(c=>c.cmd==="act_preferences_update")?.args).toMatchObject({envelope:{project_id:P,expect_generation:0},patch:{theme:"dark"},reset:false});
   fireEvent.click(screen.getByRole("button",{name:"Reset this scope"}));await waitFor(()=>expect(f.calls.filter(c=>c.cmd==="act_preferences_update")).toHaveLength(2));expect(f.calls.filter(c=>c.cmd==="act_preferences_update")[1].args).toMatchObject({envelope:{project_id:P},reset:true});
+ });
+ it("puts Save and Discard first, and sets the rare Reset and Reload apart from them",async()=>{
+  setTransport(fakeIpc({preferences_read:view()}).transport);render(<PreferenceForm projectId={null} section="appearance"/>);
+  const save=await screen.findByRole("button",{name:"Save preferences"});const rare=(n:string)=>screen.getByRole("button",{name:n}).closest(".v-pref__rare");
+  expect(rare("Reset this scope")).not.toBeNull();expect(rare("Reload preferences")).toBe(rare("Reset this scope"));
+  expect(save.closest(".v-pref__rare")).toBeNull();expect(rare("Discard changes")).toBeNull();
+  expect(save.compareDocumentPosition(screen.getByRole("button",{name:"Reset this scope"}))&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
  });
  it("shows inherited values and lets one field inherit without resetting the rest",async()=>{
   const f=fakeIpc({preferences_read:()=>({...view(P),sources:{...view(P).sources,theme:"project"},overrides:{theme:"dark"}}),act_preferences_update:()=>done(view(P,1))});setTransport(f.transport);
@@ -58,10 +65,13 @@ describe("FG-08 preferences",()=>{
   // General holds only what the core reads (closing finished workers); editor and shell stay hidden.
   expect(await screen.findByRole("switch",{name:"Close finished workers automatically"})).toBeTruthy();
   expect(screen.queryByLabelText("Default editor")).toBeNull();expect(screen.queryByLabelText("Terminal shell")).toBeNull();expect(screen.queryByText("Not built yet")).toBeNull();
+  // Sections that do nothing yet are not listed, and an old link to one lands on Providers, not on an empty page.
+  const listed=within(screen.getByRole("navigation",{name:"Settings sections"})).getAllByRole("link").map(a=>a.textContent);
+  expect(listed).toEqual(["Providers","General","Models and capacity","Appearance","Keyboard"]);
   r.unmount();window.location.hash="#/settings?section=notifications";
   const n=render(<PreferencesProvider projectId={null}><Settings/></PreferencesProvider>);
-  expect(await screen.findByText("Not built yet")).toBeTruthy();
-  expect(screen.queryByRole("checkbox")).toBeNull();expect(screen.queryByRole("button",{name:"Save preferences"})).toBeNull();
+  expect((await screen.findByRole("link",{name:"Providers"})).getAttribute("aria-current")).toBe("page");
+  expect(screen.queryByText("Not built yet")).toBeNull();expect(screen.queryByRole("heading",{name:"Notifications"})).toBeNull();
   n.unmount();render(<PreferenceForm projectId={null} section="appearance"/>);
   fireEvent.change(await screen.findByLabelText("Theme"),{target:{value:"dark"}});fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");
   const write=f.calls.find(c=>c.cmd==="act_preferences_update");expect(write?.args?.patch).toEqual({theme:"dark"});

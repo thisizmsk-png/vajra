@@ -4,11 +4,40 @@ import { DEFAULT_PREFERENCES } from "./preferenceContract";
 // when the dev server runs with `?fixture`; production builds drop the import (import.meta.env.DEV is false there).
 // Nothing here reaches a real engine: every command answers from the objects below.
 import { setTransport } from "./ipc";
-import type { CrewNodeDto, Transport } from "./ipc";
+import type { CrewNodeDto, ProofLabel, RunProof, Transport } from "./ipc";
 import { terminalFixture } from "./terminal/fixtureShell";
+import { S } from "../strings";
 
 const RUN = "20261106-2140";
 const SLUG = `deliver-${RUN}`;
+
+/** The core's `run_proof` answer for each label, as the 6i core writes it. */
+const PROOF_REASON: Record<ProofLabel, string> = {
+  verified: "Every criterion passed on the delivered commit.",
+  verified_approved: "Every criterion passed. You approved the check commands for this run.",
+  evidence_unguarded: "Every criterion passed, but the evidence ran outside the guard.",
+  not_verified: "1 of 6 criteria have no current passing evidence.",
+  rejected: "A review rejected the approach.",
+  abandoned: "The run was closed as abandoned.",
+  in_progress: "The run has not finished.",
+};
+const proofFixture = (slug: string, label: ProofLabel): RunProof => ({
+  slug,
+  goal: "Add per-key rate limiting",
+  label: label in PROOF_REASON ? label : "evidence_unguarded",
+  reason: PROOF_REASON[label] ?? PROOF_REASON.evidence_unguarded,
+  why: label === "evidence_unguarded"
+    ? "A helper outside the Vajra guard wrote the final check. Vajra ran it with the signing key locked away, but the helper itself could read the key, so it could have copied it to fake Vajra records and approvals. A coming update stops helpers reading the key. A key already copied stays valid."
+    : null,
+  hint: label === "evidence_unguarded" ? "To get plain Verified, pick a Claude helper as the checker." : null,
+  integrity: "ok",
+  record_sha256: "3f9a1c0e7b2d48a6915e0c4f7a83b2d6e1f05c9a7b3d2e8f4a6c1b0d9e7f5a23",
+  record_note: label === "evidence_unguarded"
+    ? "Checked by Vajra on this Mac. The evidence ran outside the guard, so this record isn't tamper-evident."
+    : "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
+  export: true,
+  markdown: `## Vajra proof: Add per-key rate limiting\n\n**${S.run.proof.label[label] ?? ""}**.`,
+});
 
 const n = (id: string, kind: string, title: string, status: string, children: CrewNodeDto[] = [], extra: Partial<CrewNodeDto> = {}): CrewNodeDto =>
   ({ id, kind, title, engine_id: null, role: null, status, overlays: [], children, ...extra });
@@ -198,21 +227,21 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     slug: SLUG, run_id: RUN, stale: false,
     timeline: { phases: [{ name: "Plan", state: "done" }, { name: "Execute", state: "current", round: 1, max_rounds: 3 }, { name: "Verify", state: "pending" }], current: "Execute", status: "active" },
     graph: { waves: 3, tasks: [
-      { id: `${RUN}.t1`, local: "t1", title: "Design the limiter", owner: "arjuna", status: "done", deps: [], wave: 1, provider: onClaude },
-      { id: `${RUN}.t2`, local: "t2", title: "Token bucket middleware", owner: "bhima", status: "in_progress", deps: ["t1"], wave: 2, provider: onClaude },
-      { id: `${RUN}.t3`, local: "t3", title: "Show limits on the API keys page", owner: "nakula", status: "in_progress", deps: ["t1"], wave: 2, provider: onGateway },
-      { id: `${RUN}.t4`, local: "t4", title: "429 body and Retry-After header", owner: "sepoy-backend-1", status: "question", deps: ["t2"], wave: 2, provider: onHarnessB },
-      { id: `${RUN}.t5`, local: "t5", title: "Check AC-1 to AC-5", owner: "vidura", status: "ready", deps: ["t2", "t3", "t4"], wave: 3 },
-      { id: `${RUN}.t6`, local: "t6", title: "Document the limits", owner: "bhima", status: "pending", deps: ["t2"], wave: 3 },
-      { id: `${RUN}.t7`, local: "t7", title: "Redis store adapter", owner: "bhima", status: "done", deps: ["t1"], wave: 2 },
+      { id: `${RUN}.t1`, local: "t1", title: "Design the limiter", owner: "Architect", status: "done", deps: [], wave: 1, provider: onClaude },
+      { id: `${RUN}.t2`, local: "t2", title: "Token bucket middleware", owner: "Backend", status: "in_progress", deps: ["t1"], wave: 2, provider: onClaude },
+      { id: `${RUN}.t3`, local: "t3", title: "Show limits on the API keys page", owner: "Frontend", status: "in_progress", deps: ["t1"], wave: 2, provider: onGateway },
+      { id: `${RUN}.t4`, local: "t4", title: "429 body and Retry-After header", owner: "Backend worker 1", status: "question", deps: ["t2"], wave: 2, provider: onHarnessB },
+      { id: `${RUN}.t5`, local: "t5", title: "Check AC-1 to AC-5", owner: "Verifier", status: "ready", deps: ["t2", "t3", "t4"], wave: 3 },
+      { id: `${RUN}.t6`, local: "t6", title: "Document the limits", owner: "Backend", status: "pending", deps: ["t2"], wave: 3 },
+      { id: `${RUN}.t7`, local: "t7", title: "Redis store adapter", owner: "Backend", status: "done", deps: ["t1"], wave: 2 },
     ] },
   }),
   evidence_list: () => ({ slug: SLUG, stale: false, rows: [
-    { task: `${RUN}.t1`, title: "Design the limiter", owner: "arjuna", criterion: "AC-2", status: "pass", head: "4e1c9a2", path: null, commands: 1, report: null },
-    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "bhima", criterion: "AC-4", status: "pass", head: "4e1c9a2", path: null, commands: 2, report: null },
-    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "bhima", criterion: "AC-5", status: "not_run", head: null, path: null, commands: null, report: null },
-    { task: `${RUN}.t2`, title: "Token bucket middleware", owner: "bhima", criterion: "AC-1", status: "not_run", head: null, path: null, commands: null, report: null },
-    { task: `${RUN}.t3`, title: "Show limits on the API keys page", owner: "nakula", criterion: "AC-3", status: "not_run", head: null, path: null, commands: null, report: null },
+    { task: `${RUN}.t1`, title: "Design the limiter", owner: "Architect", criterion: "AC-2", status: "pass", head: "4e1c9a2", path: null, commands: 1, report: null },
+    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "Backend", criterion: "AC-4", status: "pass", head: "4e1c9a2", path: null, commands: 2, report: null },
+    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "Backend", criterion: "AC-5", status: "not_run", head: null, path: null, commands: null, report: null },
+    { task: `${RUN}.t2`, title: "Token bucket middleware", owner: "Backend", criterion: "AC-1", status: "not_run", head: null, path: null, commands: null, report: null },
+    { task: `${RUN}.t3`, title: "Show limits on the API keys page", owner: "Frontend", criterion: "AC-3", status: "not_run", head: null, path: null, commands: null, report: null },
   ] }),
   active_runs: () => ({ count: 1, runs: [{ run_id: RUN, campaign: SLUG }] }),
   crew: () => crew,
@@ -230,6 +259,10 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   task: () => ({ task: { title: "Token bucket middleware", owner_agent: "bhima", deps: ["t1"], files: ["src/middleware/rateLimit.ts", "src/server.ts"], acceptance: ["AC-1", "AC-3"], attempts: 1 } }),
   start_run: () => ({ stream: "s-new", session_id: "u-new", run_id: RUN, campaign: SLUG }),
   read_report: (a) => ({ slug: String(a?.slug), integrity: "ok", text: REPORT }),
+  // `?fixture&proof=<label>` picks the run's label for screenshots; the default is the outside-the-guard run.
+  run_proof: (a) => proofFixture(String(a?.slug), (new URLSearchParams(location.search).get("proof") ?? "evidence_unguarded") as ProofLabel),
+  export_proof_page: (a) => ({ slug: String(a?.slug), path: `~/Library/Application Support/Vajra/exports/${String(a?.slug)}-proof.html`, label: "evidence_unguarded" }),
+  act_post_proof_comment: () => ({ receipt: { action_id: "a_fixture5", state: "done" }, result: { repo: "acme/web", pr: 42 } }),
   verify_campaign: (a) => ({ slug: String(a?.slug), ok: true, restore: null }),
   kb_search: () => ({ code: 0, hits: [
     { id: "k1", kind: "decision", title: "Rate limits are per API key, not per IP, so shared NATs are not throttled together" },
@@ -238,9 +271,13 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   diff: () => ({ code: 0, diff, truncated: false, timed_out: false, untracked: ["test/rateLimit.redis.test.ts"] }),
 };
 
-/** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "down" is a core that does not answer. */
+/** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "blocked" is a first run whose checks stop a start; "down" is a core that does not answer. */
 export function installFixture(mode = "") {
   const empty: typeof replies = { list_campaigns: () => ({ campaigns: [] }), resume_targets: () => ({ targets: {} }), active_runs: () => ({ count: 0, runs: [] }), inbox: () => ({ count: 0, items: [] }) };
+  const blocked: typeof replies = { ...empty, preflight: () => ({ rows: [
+    { name: "Git", ok: true, detail: "2.46.0", fix: "" },
+    { name: "Vajra engine", ok: false, detail: "not installed", fix: "bash scripts/install.sh" },
+  ], start_enabled: false }) };
   let revision = 0;
   let global = { ...DEFAULT_PREFERENCES };
   const projects = new Map<string, Record<string, unknown>>();
@@ -282,7 +319,7 @@ export function installFixture(mode = "") {
       if (cmd === "provider_base_url_save") { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === args?.accountId ? { ...a, base_url: String(args?.baseUrl) } : a) }; return null; }
       if (cmd === "provider_agents") return agents;
       if (cmd === "provider_agents_save") { agents = { schema: AGENTS.schema, ...(args?.agents as object) }; return agents; }
-      const r = (mode === "empty" ? empty[cmd] : undefined) ?? replies[cmd];
+      const r = (mode === "empty" ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },

@@ -9,6 +9,7 @@ pub mod owned;
 pub mod paths;
 pub mod preferences;
 pub mod procid;
+pub mod procsweep;
 
 pub mod bus;
 pub mod diagnostics;
