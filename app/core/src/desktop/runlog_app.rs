@@ -12,8 +12,15 @@ use super::record_app::record_bridge;
 use super::runlog;
 use super::runlog_store::{self, RunLog};
 
-/// The named event the UI hears: `{run_id, seq}`, the written head. It then asks `run_log_since`.
+/// The named event the UI hears: a `Notice` with the written head and the entries since the last one. The UI asks
+/// `run_log_since` only on a gap.
 pub const EVENT: &str = "run_log";
+
+/// A run log read as a command answer: `{"error": ...}` becomes `Err`, so the UI's call rejects with the core's error
+/// (a run with no log is `not_found`) instead of resolving with something that isn't a page.
+pub fn answered(v: Value) -> super::Res {
+    if v.get("error").is_some() { Err(v) } else { Ok(v) }
+}
 
 /// A log as a read sees it: the live one this app holds, or a read-only snapshot of the file.
 enum Read {

@@ -45,12 +45,14 @@ export type RunLogStats = { notices: number; calls: number };
 
 /** Follow `runId`'s log: `onView` gets each new view. Returns the stop function; `stats` counts notices and calls. One read
  *  runs at a time; notices that arrive during it are applied at once, a stop they bring outlives the read's older page,
- *  and a gap they leave costs one more read after it. */
+ *  and a gap they leave costs one more read after it. `onRead` hears how each read ended: `null` when it was answered
+ *  (even with nothing new), else the error (a run with no log yet answers `not_found`). */
 export function followRunLog(
   runId: string,
   onView: (v: RunLogView) => void,
   start: RunLogView = emptyRunLog,
   stats: RunLogStats = { notices: 0, calls: 0 },
+  onRead?: (failed: unknown) => void,
 ): () => void {
   let view = start;
   let reading = false;
@@ -85,9 +87,11 @@ export function followRunLog(
         }));
         // A page is capped in the core: read on while it moved the view and more is written.
         if (lastSeq(view) > before && lastSeq(view) < page.head_seq) again = true;
+        if (!again) onRead?.(null);
       } while (again && !stopped);
-    } catch {
+    } catch (e) {
       // A failed read is retried on the next notice; the view keeps what it has.
+      if (!stopped) onRead?.(e ?? "failed");
     } finally {
       reading = false;
     }
