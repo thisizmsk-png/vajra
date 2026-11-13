@@ -55,19 +55,29 @@ pub struct WorkerHost {
     /// Taken once at open. `Err`: why agents are off and what to do.
     baseline: Result<GlobalBaseline, Off>,
     rt: OnceLock<WorkerRuntime>,
+    startup_swept: crate::procsweep::Swept,
 }
 
 impl WorkerHost {
     /// The roots check and the baseline, nothing else: no thread starts here. With no git under `dev_roots`, git is never
     /// run and agents stay off with the install action.
-    pub fn open(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>, dev_roots: &[PathBuf]) -> WorkerHost {
+    ///
+    /// `sole`: this app holds the instance locks (`instance::InstanceLock`), so the work root's leftover workers are an
+    /// earlier life's of its own, never a running app's. Without them nothing is swept, no baseline is taken and every
+    /// agent launch is refused.
+    pub fn open(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>, dev_roots: &[PathBuf], sole: bool) -> WorkerHost {
         let work = gitw::work_root(home);
-        let baseline = if git_installed(dev_roots) {
+        let baseline = if !sole {
+            Err(Off { why: super::instance::OTHER_INSTANCE.into(), fix: super::instance::OTHER_INSTANCE_FIX, action: None })
+        } else if git_installed(dev_roots) {
             gitw::check_roots(data, &work).and_then(|()| GlobalBaseline::take_or_load(git, data, home, xdg)).map_err(|e| Off { why: why(&e), fix: fix(&e), action: None })
         } else {
             Err(Off { why: NO_GIT.into(), fix: "", action: Some(INSTALL_DEV_TOOLS) })
         };
-        WorkerHost { git: git.to_path_buf(), home: home.to_path_buf(), data: data.to_path_buf(), work, baseline, rt: OnceLock::new() }
+        // Before any agent can start: an earlier app life's workers that a crash left running are killed, each proved by
+        // its ticket TMPDIR under this work root and a start before this app (6c-3, disclosed in the lifecycle report).
+        let startup_swept = if sole && work.is_dir() { crate::procsweep::sweep_earlier_lives(&work) } else { Default::default() };
+        WorkerHost { git: git.to_path_buf(), home: home.to_path_buf(), data: data.to_path_buf(), work, baseline, rt: OnceLock::new(), startup_swept }
     }
 
     /// `Err`: the line to show where a launch was refused.
@@ -119,6 +129,21 @@ impl WorkerHost {
         }))
     }
 
+    /// App quit: the runtime's tickets end (see `WorkerRuntime::quit`). Nothing to do if it was never built.
+    pub fn quit(&self, wait: std::time::Duration) -> Vec<String> {
+        self.rt.get().map(|rt| rt.quit(wait)).unwrap_or_default()
+    }
+
+    /// What the startup sweep killed (an earlier app life's worker processes, 6c-3), for the lifecycle report.
+    pub fn startup_swept(&self) -> crate::procsweep::Swept {
+        self.startup_swept
+    }
+
+    /// The runtime's descendant sweep totals (`WorkerRuntime::swept`); zero if it was never built.
+    pub fn runtime_swept(&self) -> (u64, u64) {
+        self.rt.get().map(WorkerRuntime::swept).unwrap_or_default()
+    }
+
     /// Built yet? (Tests: an idle app never builds it.)
     pub fn runtime_built(&self) -> bool {
         self.rt.get().is_some()
@@ -127,6 +152,11 @@ impl WorkerHost {
     /// The crew view's `core:<ticket>` workers for `run`, from the runtime if it was built (never builds it).
     pub fn core_workers(&self, run: &str) -> Vec<crate::crew::tree::CoreWorker> {
         self.rt.get().map(|rt| rt.list(run).iter().map(super::workers::TicketView::core_worker).collect()).unwrap_or_default()
+    }
+
+    /// `run` has a core ticket that hasn't ended (never builds the runtime).
+    pub fn run_has_live_tickets(&self, run: &str) -> bool {
+        self.rt.get().is_some_and(|rt| rt.list(run).iter().any(|v| v.state != super::workers::State::Ended))
     }
 
     /// Settings: the disk under `<work>`, every copy any app life made. A walk only: no git, and no runtime is built.

@@ -1,14 +1,44 @@
 import { ACCOUNTS, AGENTS, USAGE } from "./accountsFixture";
-import { DEFAULT_PREFERENCES } from "./preferenceContract";
+import { DEFAULT_PING, DEFAULT_PREFERENCES } from "./preferenceContract";
 // Dev only: a fixture engine state for screenshots and the click crawl (DESIGN.md "Verification"). main.tsx loads it
 // when the dev server runs with `?fixture`; production builds drop the import (import.meta.env.DEV is false there).
 // Nothing here reaches a real engine: every command answers from the objects below.
 import { setTransport } from "./ipc";
-import type { CrewNodeDto, Transport } from "./ipc";
+import type { CrewNodeDto, ProofLabel, RunProof, Transport } from "./ipc";
 import { terminalFixture } from "./terminal/fixtureShell";
+import { S } from "../strings";
 
 const RUN = "20261106-2140";
 const SLUG = `deliver-${RUN}`;
+
+/** The core's `run_proof` answer for each label, as the 6i core writes it. */
+const PROOF_REASON: Record<ProofLabel, string> = {
+  verified: "Every criterion passed on the delivered commit.",
+  verified_approved: "Every criterion passed. You approved the check commands for this run.",
+  evidence_unguarded: "Every criterion passed, but the evidence ran outside the guard.",
+  not_verified: "1 of 6 criteria have no current passing evidence.",
+  rejected: "A review rejected the approach.",
+  abandoned: "The run was closed as abandoned.",
+  in_progress: "The run has not finished.",
+};
+const proofFixture = (slug: string, label: ProofLabel): RunProof => ({
+  slug,
+  goal: "Add per-key rate limiting",
+  label: label in PROOF_REASON ? label : "evidence_unguarded",
+  reason: PROOF_REASON[label] ?? PROOF_REASON.evidence_unguarded,
+  why: label === "evidence_unguarded"
+    ? "A helper outside the Vajra guard wrote the final check. Vajra ran it with the signing key locked away, but the helper itself could read the key, so it could have copied it to fake Vajra records and approvals. A coming update stops helpers reading the key. A key already copied stays valid."
+    : null,
+  hint: label === "evidence_unguarded" ? "To get plain Verified, pick a Claude helper as the checker." : null,
+  integrity: "ok",
+  record_sha256: "3f9a1c0e7b2d48a6915e0c4f7a83b2d6e1f05c9a7b3d2e8f4a6c1b0d9e7f5a23",
+  record_note: label === "evidence_unguarded"
+    ? "Checked by Vajra on this Mac. The evidence ran outside the guard, so this record isn't tamper-evident."
+    : "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
+  requires: "The evidence check needs macOS 15 or later.",
+  export: true,
+  markdown: `## Vajra proof: Add per-key rate limiting\n\n**${S.run.proof.label[label] ?? ""}**.`,
+});
 
 const n = (id: string, kind: string, title: string, status: string, children: CrewNodeDto[] = [], extra: Partial<CrewNodeDto> = {}): CrewNodeDto =>
   ({ id, kind, title, engine_id: null, role: null, status, overlays: [], children, ...extra });
@@ -230,6 +260,10 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   task: () => ({ task: { title: "Token bucket middleware", owner_agent: "bhima", deps: ["t1"], files: ["src/middleware/rateLimit.ts", "src/server.ts"], acceptance: ["AC-1", "AC-3"], attempts: 1 } }),
   start_run: () => ({ stream: "s-new", session_id: "u-new", run_id: RUN, campaign: SLUG }),
   read_report: (a) => ({ slug: String(a?.slug), integrity: "ok", text: REPORT }),
+  // `?fixture&proof=<label>` picks the run's label for screenshots; the default is the outside-the-guard run.
+  run_proof: (a) => proofFixture(String(a?.slug), (new URLSearchParams(location.search).get("proof") ?? "evidence_unguarded") as ProofLabel),
+  export_proof_page: (a) => ({ slug: String(a?.slug), path: `~/Library/Application Support/Vajra/exports/${String(a?.slug)}-proof.html`, label: "evidence_unguarded" }),
+  act_post_proof_comment: () => ({ receipt: { action_id: "a_fixture5", state: "done" }, result: { repo: "acme/web", pr: 42 } }),
   verify_campaign: (a) => ({ slug: String(a?.slug), ok: true, restore: null }),
   kb_search: () => ({ code: 0, hits: [
     { id: "k1", kind: "decision", title: "Rate limits are per API key, not per IP, so shared NATs are not throttled together" },
@@ -246,7 +280,7 @@ export function installFixture(mode = "") {
     { name: "Vajra engine", ok: false, detail: "not installed", fix: "bash scripts/install.sh" },
   ], start_enabled: false }) };
   let revision = 0;
-  let global = { ...DEFAULT_PREFERENCES };
+  let global = mode === "pings" ? { ...DEFAULT_PREFERENCES, ping: { ...DEFAULT_PING, batch_minutes: 0, questions: false } } : { ...DEFAULT_PREFERENCES };
   const projects = new Map<string, Record<string, unknown>>();
   const receipts = new Map<string, unknown>();
   // Multi-provider fixture state. A saved key flips the account to "key saved"; the key itself is dropped on the floor.
@@ -290,7 +324,18 @@ export function installFixture(mode = "") {
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },
-    on: () => () => {},
+    // `?fixture=pings`: a burst of arrivals shortly after load, for the ping toast and the Inbox's recent pings. The rule
+    // there groups nothing (so the ping shows at once) and keeps questions quiet (so the log has a "not pinged" line).
+    on: (event, cb) => {
+      if (mode !== "pings" || event !== "inbox_new") return () => {};
+      const h = setTimeout(() => {
+        // The shell's id for ~/code/harbor-api in this fixture (folder-derived: no stored project).
+        cb({ project_id: "p_6fd1feaf", kind: "blocked", count: 2 });
+        cb({ project_id: "p_6fd1feaf", kind: "plan", count: 1 });
+        cb({ project_id: "p_573f96e9", kind: "question", count: 1 });
+      }, 300);
+      return () => clearTimeout(h);
+    },
   };
   setTransport(terminalFixture(t));
 }

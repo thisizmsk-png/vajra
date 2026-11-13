@@ -1,6 +1,6 @@
 // Project scope in Settings > Providers: the default agent, a default per crew role (provider and model, effort) and the allowed
 // set. The Director-General starts from the role default and may only pick from `allowed`, so every picker here offers the allowed
-// choices and nothing else, and an allowed entry that a default still uses cannot be turned off. Every option reads "Model · provider".
+// choices and nothing else, and an allowed entry that a default still uses cannot be turned off. Every option reads "Model via provider".
 import { useEffect, useId, useState } from "react";
 import { Button, Text } from "../../components/ui/base";
 import { S } from "../../strings";

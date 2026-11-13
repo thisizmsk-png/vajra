@@ -6,8 +6,8 @@
 // Every read and action goes through dgApi (FG-02c's project-keyed shapes, each action with its envelope). Until FG-02c
 // lands the core addresses these by a run of the project (`runId`), so a project with no run yet cannot be asked; the
 // view says so.
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { UIEvent } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { RefObject, UIEvent } from "react";
 import type { KeyboardEvent } from "react";
 import { Badge, Button, Icon, Kbd, ariaShortcut } from "../../../components/ui/base";
 import { S } from "../../../strings";
@@ -44,11 +44,11 @@ export function DirectorGeneral() {
   const [lines, setLines] = useState<string[]>([]);
   const [echo, setEcho] = useState<string | null>(null);
   const [askId, setAskId] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
   const [askErr, setAskErr] = useState("");
   const [sending, setSending] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
-  const end = useRef<HTMLDivElement>(null);
+  const pane = useRef<HTMLDivElement>(null);
+  const frame = useRef(0);
   const watch = useRef<ResizeObserver | null>(null);
   const atEnd = useRef(true);
   const lastTop = useRef(0);
@@ -135,7 +135,19 @@ export function DirectorGeneral() {
   // New lines, the reader's own question and a new proposal bring the end into view, but only while the reader is at
   // the end. Someone who scrolled up to read is left where they are; asking a question or scrolling back down pins
   // them again.
-  useEffect(() => { if (atEnd.current) end.current?.scrollIntoView?.({ block: "end" }); }, [lines.length, showEcho, proposals.length]);
+  // The scroll is one write of `scrollTop` in the next animation frame, however many things ask for it in between: a batch
+  // of lines, the resize it causes and a new proposal share a single forced layout instead of one each (and no
+  // `scrollIntoView`, which also walks every scrollable ancestor).
+  const pin = useCallback(() => {
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const el = pane.current;
+      if (el && atEnd.current) el.scrollTop = el.scrollHeight;
+    });
+  }, []);
+  useEffect(() => () => { if (frame.current) cancelAnimationFrame(frame.current); frame.current = 0; }, []);
+  useEffect(() => { if (atEnd.current) pin(); }, [lines.length, showEcho, proposals.length, pin]);
   // A proposal's worker table and a long answer arrive after that scroll and push the newest turn (and Start run) below
   // the fold. While the reader is at the end, growth keeps them there; once they scroll up, nothing moves them.
   // A callback ref, not a mount effect: the column only exists once there is a project with a run, which can be long
@@ -146,10 +158,10 @@ export function DirectorGeneral() {
     if (!el || typeof ResizeObserver === "undefined") return;
     atEnd.current = true;
     lastTop.current = 0;
-    const ro = new ResizeObserver(() => { if (atEnd.current) end.current?.scrollIntoView?.({ block: "end" }); });
+    const ro = new ResizeObserver(() => { if (atEnd.current) pin(); });
     ro.observe(el);
     watch.current = ro;
-  }, []);
+  }, [pin]);
   // Growth never moves the scroll position up, so only an upward scroll means the reader left the end. (Judging every
   // scroll event by its distance from the end would unpin on our own scroll when more content lands before the event.)
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
@@ -164,24 +176,30 @@ export function DirectorGeneral() {
   // The core's id once it has answered with one (the T1 project id); the run serves the interim calls.
   const target: Target = { projectId: st?.project_id ?? null, runId: dgRun ?? null };
 
-  const send = async () => {
-    const text = draft.trim();
-    if (!dgRun || !text || !canAsk) return;
+  // Optimistic: the question shows at once (the composer clears its own draft) and the answer only confirms it. A refusal
+  // takes the echo back and returns false, so the composer puts the text back. Returns whether the ask was taken.
+  const send = async (raw: string): Promise<boolean> => {
+    const text = raw.trim();
+    if (!dgRun || !text || !canAsk) return false;
     const run = dgRun, at = epoch.current;
     setSending(true);
     setAskErr("");
-    const r = await dg.ask(target, envelope(target, actionId(), generation), text);
-    setSending(false);
-    if (!still(run, at)) return;
-    if (!r.ok) { setAskErr(r.outcome.text); return; }
-    setAskId(r.value.ask_id);
-    // Their own question, and the answer to it, are what they want to see now.
     atEnd.current = true;
     setEcho(text);
-    setDraft("");
+    const r = await dg.ask(target, envelope(target, actionId(), generation), text);
+    setSending(false);
+    if (!still(run, at)) return false;
+    if (!r.ok) { setEcho(null); setAskErr(r.outcome.text); return false; }
+    setAskId(r.value.ask_id);
     if (typeof r.value.generation === "number") setGeneration(r.value.generation);
     if (r.value.stream && r.value.stream !== active.current) follow(r.value.stream);
+    return true;
   };
+  // The composer is memoised and must not see a new function on every stream render, so it calls the latest `send`
+  // and `cancel` through these.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const onSend = useCallback((text: string) => sendRef.current(text), []);
   const cancel = async () => {
     if (!askId) return;
     const run = dgRun, at = epoch.current;
@@ -201,9 +219,9 @@ export function DirectorGeneral() {
     setLines([]);
     setEcho(null);
   };
-  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); }
-  };
+  const cancelRef = useRef(cancel);
+  cancelRef.current = cancel;
+  const onCancel = useCallback(() => void cancelRef.current(), []);
 
   useCommands(dgRun ? [
     { id: "dg-ask", label: S.dg.ask, run: () => field.current?.focus() },
@@ -247,7 +265,7 @@ export function DirectorGeneral() {
 
       {loadErr && !st && <div className="v-dgv__state"><Problem title={S.dg.loadFailed} detail={loadErr} retry={() => void readStatus()} /></div>}
 
-      <div className="v-dgv__scroll" onScroll={onScroll}>
+      <div className="v-dgv__scroll" ref={pane} onScroll={onScroll}>
         <div className="v-dgv__col" ref={col}>
           <div role="log" aria-label={S.dg.transcript} aria-live="polite" className="v-dgv__log">
             {shown.length === 0 && !showEcho && st && (
@@ -258,30 +276,60 @@ export function DirectorGeneral() {
             {busy && <p className="v-dgv__thinking" role="status"><i aria-hidden="true" />{S.dg.thinking}</p>}
           </div>
           <Proposals items={proposals} target={target} />
-          <div ref={end} />
+          <div aria-hidden="true" />
         </div>
       </div>
 
-      <form className="v-dgv__composer" onSubmit={(e) => { e.preventDefault(); void send(); }}>
-        <div className="v-dgv__box">
-          <label className="v-sr" htmlFor="dg-ask">{S.dg.ask}</label>
-          <textarea id="dg-ask" ref={field} className="v-dgv__field" rows={2} value={draft} placeholder={S.dg.askPlaceholder}
-            onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey} readOnly={!available}
-            aria-disabled={!available || undefined} aria-describedby={askErr ? "dg-ask-err" : undefined}
-            aria-keyshortcuts={ariaShortcut(["⌘", "↵"])} />
-          <div className="v-dgv__bar">
-            {askErr ? <span id="dg-ask-err" className="v-dgv__err" role="alert">{askErr}</span> : <span className="v-dgv__hint"><Kbd keys={["⌘", "↵"]} decorative /></span>}
-            {busy && askId
-              ? <Button size="sm" variant="secondary" onClick={() => void cancel()}>{S.dg.cancel}</Button>
-              : <Button size="sm" variant="primary" type="submit" disabled={!canAsk || !draft.trim()} busy={sending}>{S.dg.send}</Button>}
-          </div>
-        </div>
-      </form>
+      <Composer field={field} available={available} canAsk={canAsk} cancellable={busy && !!askId} sending={sending} askErr={askErr} onSend={onSend} onCancel={onCancel} />
     </section>
   );
 }
 
-function TurnView({ role, text }: { role: "you" | "dg" | "tool" | "error"; text: string }) {
+type ComposerProps = {
+  field: RefObject<HTMLTextAreaElement>;
+  available: boolean;
+  canAsk: boolean;
+  cancellable: boolean;
+  sending: boolean;
+  askErr: string;
+  /** Resolves to whether the ask was taken; false puts the text back. */
+  onSend: (text: string) => Promise<boolean>;
+  onCancel: () => void;
+};
+
+/** The composer owns its draft and takes only stable props, so a streaming transcript re-rendering its parent never
+ *  re-renders it, and a keystroke re-renders nothing else. */
+const Composer = memo(function Composer({ field, available, canAsk, cancellable, sending, askErr, onSend, onCancel }: ComposerProps) {
+  const [draft, setDraft] = useState("");
+  const submit = async () => {
+    const text = draft;
+    if (!text.trim() || !canAsk) return;
+    setDraft("");
+    if (!(await onSend(text))) setDraft((now) => now || text);
+  };
+  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(); }
+  };
+  return (
+    <form className="v-dgv__composer" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
+      <div className="v-dgv__box">
+        <label className="v-sr" htmlFor="dg-ask">{S.dg.ask}</label>
+        <textarea id="dg-ask" ref={field} className="v-dgv__field" rows={2} value={draft} placeholder={S.dg.askPlaceholder}
+          onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey} readOnly={!available}
+          aria-disabled={!available || undefined} aria-describedby={askErr ? "dg-ask-err" : undefined}
+          aria-keyshortcuts={ariaShortcut(["⌘", "↵"])} />
+        <div className="v-dgv__bar">
+          {askErr ? <span id="dg-ask-err" className="v-dgv__err" role="alert">{askErr}</span> : <span className="v-dgv__hint"><Kbd keys={["⌘", "↵"]} decorative /></span>}
+          {cancellable
+            ? <Button size="sm" variant="secondary" onClick={onCancel}>{S.dg.cancel}</Button>
+            : <Button size="sm" variant="primary" type="submit" disabled={!canAsk || !draft.trim()} busy={sending}>{S.dg.send}</Button>}
+        </div>
+      </div>
+    </form>
+  );
+});
+
+const TurnView = memo(function TurnView({ role, text }: { role: "you" | "dg" | "tool" | "error"; text: string }) {
   if (role === "tool") {
     return (
       <details className="v-turn v-turn--tool">
@@ -297,7 +345,7 @@ function TurnView({ role, text }: { role: "you" | "dg" | "tool" | "error"; text:
       <p className="v-turn__t">{text}</p>
     </article>
   );
-}
+});
 
 function Proposals({ items, target }: { items: InboxItem[]; target: Target }) {
   if (items.length === 0) return null;
@@ -309,6 +357,21 @@ function Proposals({ items, target }: { items: InboxItem[]; target: Target }) {
   );
 }
 
+/** The plan's threads at a glance, by owner: "4 threads: 2 Backend, 1 Docs, 1 Tests". The table below has each one's
+ *  model, effort and why. A light read of the raw list, so the pickers' chunk still loads only when there are workers. */
+function threadLine(workers: unknown): string | null {
+  if (!Array.isArray(workers) || workers.length === 0) return null;
+  const by = new Map<string, number>();
+  for (const w of workers.slice(0, 16)) {
+    const role = (w as { role?: unknown } | null)?.role;
+    if (typeof role !== "string" || !role) continue;
+    const label = S.agents.role[role] ?? role;
+    by.set(label, (by.get(label) ?? 0) + 1);
+  }
+  const n = [...by.values()].reduce((a, b) => a + b, 0);
+  return n === 0 ? null : S.dg.threadCount(n, [...by].map(([r, c]) => `${c} ${r}`).join(", "));
+}
+
 function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
   const [out, setOut] = useState<Outcome | null>(null);
   // One action id per click. After an unknown outcome the same click is retried with the same id, so the core answers
@@ -317,6 +380,7 @@ function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
   // The picks the user changed on the workers, to be carried by Start (nothing is sent before).
   const [overrides, setOverrides] = useState<ProposalOverride[]>([]);
   const hasWorkers = Array.isArray((item as { workers?: unknown }).workers) && ((item as { workers?: unknown[] }).workers?.length ?? 0) > 0;
+  const threads = threadLine((item as { workers?: unknown }).workers);
   const pending = out?.kind === "pending";
   const settled = out?.kind === "done";
   const act = async (what: "start" | "dismiss") => {
@@ -340,6 +404,7 @@ function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
       <p className="v-prop__label">{S.dg.exactAsk}</p>
       <p className="v-prop__ask">{item.ask ?? item.body}</p>
       <dl className="v-prop__kv">
+        {threads && <><dt>{S.dg.threads}</dt><dd>{threads}</dd></>}
         {item.base && <><dt>{S.dg.base}</dt><dd>{item.base}</dd></>}
         {typeof item.rounds === "number" && <><dt>{S.dg.rounds}</dt><dd>{item.rounds}</dd></>}
         {typeof item.generation === "number" && <><dt>{S.views.orch}</dt><dd>{S.dg.fromGeneration(item.generation)}</dd></>}

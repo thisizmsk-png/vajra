@@ -17,95 +17,22 @@ fn deny() -> &'static [PathBuf] {
 /// A launch's permission profile name, as `codex_profile_name` would make it.
 const PROFILE: &str = "vajra-0123456789abcdef";
 
-/// The proven switch-off values for a launch whose Codex has one MCP server, `files`.
-fn off() -> &'static [String] {
-    static O: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    O.get_or_init(|| CODEX_OFF.iter().map(|s| s.to_string()).chain(["mcp_servers.files.enabled=false".to_string()]).collect())
-}
-
 fn launch(kind: RoleKind, network: bool) -> WorkerLaunch<'static> {
     WorkerLaunch {
         kind, prompt: "Do the task", model: Some("vendor/model-a"), effort: Some("high"), network, ticket_tmp: Path::new(TMP), worktree: Path::new(WT),
-        deny: deny(), profile: PROFILE, off: off(),
+        deny: deny(), profile: PROFILE,
     }
 }
 
-/// A Codex that answers `mcp list --json` and `features list` the way 0.166 does under the given `-c` values: a server
-/// shows `enabled: false` once its `mcp_servers.<name>.enabled=false` is passed; the four features follow theirs.
-fn fake_codex<'a>(servers: &'static [&'static str], stuck: Option<&'static str>, asked: &'a std::sync::Mutex<Vec<Vec<String>>>) -> impl Fn(&[String]) -> Option<crate::providers::detect::Out> + 'a {
-    move |args: &[String]| {
-        asked.lock().unwrap().push(args.to_vec());
-        let has = |v: &str| args.windows(2).any(|w| w[0] == "-c" && w[1] == v);
-        let ok = |s: String| Some(crate::providers::detect::Out { code: Some(0), stdout: s, stderr: String::new() });
-        match args.first().map(String::as_str) {
-            Some("mcp") => {
-                let rows: Vec<Value> = servers.iter().map(|n| json!({"name": n, "enabled": !has(&format!("mcp_servers.{n}.enabled=false")) || stuck == Some(n)})).collect();
-                ok(serde_json::to_string(&rows).unwrap())
-            }
-            Some("features") => ok(["hooks", "plugins", "remote_plugin", "apps", "multi_agent"]
-                .iter()
-                .map(|f| format!("{f:<40} stable             {}\n", !has(&format!("features.{f}=false")) || stuck == Some(f)))
-                .collect()),
-            _ => None,
-        }
-    }
-}
-
-/// bhishma #216 cloud-managed config (vajra-1's interim decision B): Codex's own `login status` saying ChatGPT, or an
-/// answer that can't be read, means cloud-managed settings could apply. Spike (stand-in CODEX_HOME, fake token): on a
-/// workspace plan `features list`, `mcp list` and `exec` all load the cloud config the same way; on plus, pro and team
-/// none of them do. The login status never names the plan, so every ChatGPT login is treated alike.
+/// Owner 2026-11-13, "keep my extras, no key claim": no Codex launch switches off the user's own hooks, plugins, apps,
+/// MCP servers or notify.
 #[test]
-fn a_chatgpt_login_or_an_unreadable_one_could_bring_cloud_settings_and_an_api_key_login_cannot() {
-    let say = |code: Option<i32>, out: &'static str| move |a: &[String]| {
-        assert_eq!(a, ["login", "status"]);
-        Some(crate::providers::detect::Out { code, stdout: out.into(), stderr: String::new() })
-    };
-    assert!(codex_cloud_login(&say(Some(0), "Logged in using ChatGPT\n")));
-    assert!(!codex_cloud_login(&say(Some(0), "Logged in using an API key - sk-***\n")));
-    assert!(!codex_cloud_login(&say(Some(1), "Not logged in\n")));
-    assert!(codex_cloud_login(&say(None, "")), "killed: can't tell");
-    assert!(codex_cloud_login(&|_: &[String]| None), "didn't run: can't tell");
-}
-
-/// bhishma #216 H2-b (vajra-1's decision): hooks, plugins, apps, notify and each MCP server are switched off in the
-/// argv and proven off under exactly those values; anything the proof can't show fails closed.
-#[test]
-fn every_tool_outside_the_sandbox_is_switched_off_and_proven_off_or_the_launch_is_not_allowed() {
-    let asked = std::sync::Mutex::new(Vec::new());
-    let got = codex_tools_off(&fake_codex(&["files", "plug-x"], None, &asked)).unwrap();
-    let mut want: Vec<String> = CODEX_OFF.iter().map(|s| s.to_string()).collect();
-    want.extend(["mcp_servers.files.enabled=false".to_string(), "mcp_servers.plug-x.enabled=false".to_string()]);
-    assert_eq!(got, want);
-    let asked = asked.lock().unwrap().clone();
-    // Asked: the server list under the base values, the list again and the features under the full set.
-    assert_eq!(asked.len(), 3, "{asked:?}");
-    for a in &asked[1..] {
-        for v in &want {
-            assert!(a.windows(2).any(|w| w[0] == "-c" && &w[1] == v), "{v} missing from {a:?}");
-        }
+fn a_codex_launch_keeps_the_users_own_codex_tools() {
+    let lead = codex_run_lead_argv(Path::new("/opt/tools/bin/codex"), "x", PROFILE, deny(), Path::new(WT), Path::new(TMP)).unwrap();
+    for a in [codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), codex_login_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), lead] {
+        let c = pairs(&a);
+        assert!(!c.iter().any(|x| x.starts_with("features.") || x.starts_with("mcp_servers") || x.starts_with("notify")), "{c:?}");
     }
-    let none = std::sync::Mutex::new(Vec::new());
-    assert_eq!(codex_tools_off(&fake_codex(&[], None, &none)).unwrap(), CODEX_OFF.map(String::from).to_vec(), "no servers: the base set");
-    let fails = |servers: &'static [&'static str], stuck: Option<&'static str>, why: &str| {
-        let a = std::sync::Mutex::new(Vec::new());
-        assert_eq!(codex_tools_off(&fake_codex(servers, stuck, &a)).unwrap_err(), CODEX_TOOLS_ON, "{why}");
-    };
-    fails(&["files"], Some("files"), "a server that stays on (a managed or plugin layer)");
-    fails(&[], Some("hooks"), "hooks that stay on");
-    fails(&[], Some("plugins"), "plugins that stay on");
-    fails(&["we ird"], None, "a server name Vajra can't switch off by name");
-    assert_eq!(codex_tools_off(&|_: &[String]| None).unwrap_err(), CODEX_TOOLS_ON, "codex can't be asked");
-    let garbled = |_: &[String]| Some(crate::providers::detect::Out { code: Some(0), stdout: "not json".into(), stderr: String::new() });
-    assert_eq!(codex_tools_off(&garbled).unwrap_err(), CODEX_TOOLS_ON, "an answer Vajra can't read");
-    // The argv never carries anything but the proven base set and per-server switch-offs.
-    let mut bad = launch(RoleKind::Worker, false);
-    let short: Vec<String> = CODEX_OFF[..4].iter().map(|s| s.to_string()).collect();
-    bad.off = &short;
-    assert_eq!(codex_login_worker_argv(&bad).unwrap_err().field, "off", "never without notify off");
-    let extra: Vec<String> = off().iter().cloned().chain(["sandbox_mode=\"danger-full-access\"".to_string()]).collect();
-    bad.off = &extra;
-    assert_eq!(codex_login_worker_argv(&bad).unwrap_err().field, "off", "never a value the proof didn't make");
 }
 
 /// bhishma #216 M1-b: Codex loads a worktree's own `.codex` and `.agents`; any non-empty one refuses a launch.
@@ -138,30 +65,26 @@ fn profile_kv(network: bool) -> [String; 3] {
     ]
 }
 
-/// bhishma #216 H1 and M-Lead: the plain Codex run Lead gets a worker's profile, approvals and switch-offs, with the
-/// project and temp dir writable and no network.
+/// bhishma #216 H1 and M-Lead: the plain Codex run Lead gets a worker's profile and approvals, with the project and
+/// temp dir writable and no network; web search is the user's own setting (vajra-1 2026-11-13).
 #[test]
-fn the_codex_run_lead_runs_like_a_worker_with_no_approvals_and_its_outside_tools_off() {
+fn the_codex_run_lead_runs_like_a_worker_with_no_approvals() {
     let bin = Path::new("/opt/tools/bin/codex");
-    let a = codex_run_lead_argv(bin, "exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP), off()).unwrap();
-    // bhishma #216 Low 1: the binary the proof ran, by its absolute path.
+    let a = codex_run_lead_argv(bin, "exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP)).unwrap();
+    // bhishma #216 Low 1: the binary Vajra found, by its absolute path.
     let mut want: Vec<String> = vec!["/opt/tools/bin/codex".into(), "-c".into(), "approval_policy=\"never\"".into()];
     for o in codex_profile_overrides(PROFILE, deny(), &[Path::new(WT), Path::new(TMP)], false).unwrap() {
         want.extend(["-c".into(), o]);
-    }
-    want.extend(["-c".into(), "web_search=\"disabled\"".into()]);
-    for o in off() {
-        want.extend(["-c".into(), o.clone()]);
     }
     want.extend(["--".into(), "exec this --flag".into()]);
     assert_eq!(a, want);
     assert!(a.iter().any(|x| x.contains(&format!("\"{}\"=\"none\"", DENY[0]))), "{a:?}");
     assert!(a.iter().any(|x| x.ends_with(".network={enabled=false}")), "{a:?}");
+    assert!(!a.iter().any(|x| x.starts_with("web_search")), "{a:?}");
     assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
-    assert!(codex_run_lead_argv(bin, "x", PROFILE, &[], Path::new(WT), Path::new(TMP), off()).is_err(), "never without the deny set");
-    assert!(codex_run_lead_argv(bin, "x", "vajra", deny(), Path::new(WT), Path::new(TMP), off()).is_err(), "never under a guessable name");
-    assert!(codex_run_lead_argv(bin, "x", PROFILE, deny(), Path::new(WT), Path::new(TMP), &[]).is_err(), "never without the switch-offs");
-    assert!(codex_run_lead_argv(Path::new("codex"), "x", PROFILE, deny(), Path::new(WT), Path::new(TMP), off()).is_err(), "never the bare word");
+    assert!(codex_run_lead_argv(bin, "x", PROFILE, &[], Path::new(WT), Path::new(TMP)).is_err(), "never without the deny set");
+    assert!(codex_run_lead_argv(bin, "x", "vajra", deny(), Path::new(WT), Path::new(TMP)).is_err(), "never under a guessable name");
+    assert!(codex_run_lead_argv(Path::new("codex"), "x", PROFILE, deny(), Path::new(WT), Path::new(TMP)).is_err(), "never the bare word");
 }
 
 /// S11 hostile-config check: a user table named like ours merges into it, so each launch gets a name nobody can guess,
@@ -189,25 +112,18 @@ fn pairs(a: &[String]) -> Vec<&str> {
     a.windows(2).filter(|w| w[0] == "-c").map(|w| w[1].as_str()).collect()
 }
 
-/// `-c <v>` for each proven switch-off value, as the argv ends before `--`.
-fn off_args() -> Vec<String> {
-    off().iter().flat_map(|o| ["-c".to_string(), o.clone()]).collect()
-}
-
 #[test]
 fn codex_gateway_worker_argv_snapshot() {
     let a = codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap();
     let id = crate::providers::codex_home::PROVIDER_ID;
     let [fs, net, dp] = profile_kv(false);
-    let mut want: Vec<String> = [
+    let want: Vec<String> = [
         "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
         "-c", &format!("model_providers.{id}.request_max_retries=0"), "-c", &format!("model_providers.{id}.stream_max_retries=0"),
         "-c", "approval_policy=\"never\"", "-c", &fs, "-c", &net, "-c", &dp,
-        "-c", "web_search=\"disabled\"",
+        "--", "Do the task",
     ].map(String::from).into();
-    want.extend(off_args());
-    want.extend(["--".to_string(), "Do the task".to_string()]);
     assert_eq!(a, want);
 }
 
@@ -215,42 +131,42 @@ fn codex_gateway_worker_argv_snapshot() {
 fn codex_login_worker_argv_snapshot_has_no_builtin_provider_override() {
     let a = codex_login_worker_argv(&launch(RoleKind::Verifier, false)).unwrap();
     let [fs, net, dp] = profile_kv(false);
-    let mut want: Vec<String> = [
+    let want: Vec<String> = [
         "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
         "-c", "approval_policy=\"never\"", "-c", &fs, "-c", &net, "-c", &dp,
-        "-c", "web_search=\"disabled\"",
+        "--", "Do the task",
     ].map(String::from).into();
-    want.extend(off_args());
-    want.extend(["--".to_string(), "Do the task".to_string()]);
     assert_eq!(a, want);
     // S3: `model_providers.openai.*` makes codex refuse to load, so the login route never passes one.
     assert!(!a.iter().any(|x| x.contains("model_providers.openai")));
 }
 
+/// vajra-1 2026-11-13: network follows the seat's switch, and web search is always left to the user's own Codex
+/// setting (no `web_search` override, on or off).
 #[test]
-fn a_network_seat_turns_network_on_and_leaves_web_search_to_the_user() {
-    let a = codex_login_worker_argv(&launch(RoleKind::Worker, true)).unwrap();
-    let c = pairs(&a);
-    assert!(c.contains(&"permissions.vajra-0123456789abcdef.network={enabled=true}"));
-    assert!(!c.iter().any(|x| x.starts_with("web_search")), "{c:?}");
+fn network_follows_the_seat_and_web_search_is_left_to_the_user() {
+    for net in [false, true] {
+        for a in [codex_login_worker_argv(&launch(RoleKind::Worker, net)).unwrap(), codex_worker_argv(&launch(RoleKind::Verifier, net)).unwrap()] {
+            let c = pairs(&a);
+            let want = format!("permissions.vajra-0123456789abcdef.network={{enabled={net}}}");
+            assert!(c.contains(&want.as_str()), "{c:?}");
+            assert!(!c.iter().any(|x| x.starts_with("web_search")), "{c:?}");
+        }
+    }
 }
 
 /// The "always" settings are present whatever the seat. Spike S3 ran this argv's overrides with a real codex 0.166
 /// against a hostile temp `config.toml` (`danger-full-access`, `on-request`, network on, a user writable root, web
-/// search live) and every override won. bhishma #216 (vajra-1's decision): the user's hooks, plugins, MCP servers and
-/// notify are switched off too (the 6k spike: with these values none of a hostile config's MCP server, notify or
-/// hooks ran, and the model saw no MCP tool).
+/// search live) and every override won. The user's own hooks, plugins, MCP servers and notify stay on (owner
+/// 2026-11-13); `a_codex_launch_keeps_the_users_own_codex_tools` pins that.
 #[test]
-fn codex_worker_forces_every_always_setting_and_switches_off_the_users_outside_tools() {
+fn codex_worker_forces_every_always_setting() {
     for a in [codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), codex_login_worker_argv(&launch(RoleKind::Worker, false)).unwrap()] {
         let c = pairs(&a);
         let [fs, net, dp] = profile_kv(false);
-        for want in ["approval_policy=\"never\"", fs.as_str(), net.as_str(), dp.as_str(), "web_search=\"disabled\""] {
+        for want in ["approval_policy=\"never\"", fs.as_str(), net.as_str(), dp.as_str()] {
             assert!(c.contains(&want), "{want} missing from {c:?}");
-        }
-        for want in off() {
-            assert!(c.contains(&want.as_str()), "{want} missing from {c:?}");
         }
         // S11: `--sandbox` would switch the profile off, and the legacy keys are ignored under one.
         assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
@@ -512,65 +428,6 @@ fn the_deny_dirs_are_the_state_dir_and_the_data_dir_in_written_and_real_form() {
     assert_eq!(flat, vec![real.join(".claude/vajra"), real.join("data")], "no duplicate when the path is already real");
     assert!(codex_profile_overrides(PROFILE, &[], &[], false).is_err(), "a Codex profile never goes out with no Vajra dirs denied");
     assert_eq!(codex_profile_overrides(PROFILE, &[PathBuf::from("/a\"b")], &[], false).unwrap_err().field, "deny");
-}
-
-/// A `Probe` whose codex answers the launch-time check the way it is told to, and records what it was asked.
-struct FakeCodex {
-    found: bool,
-    answer: Option<(i32, String, String)>,
-    asked: std::sync::Mutex<Vec<String>>,
-}
-
-impl crate::providers::detect::Probe for FakeCodex {
-    fn find(&self, name: &str) -> Option<PathBuf> {
-        (self.found && name == "codex").then(|| PathBuf::from("/bin/codex"))
-    }
-    fn run(&self, _path: &Path, args: &[&str]) -> Option<crate::providers::detect::Out> {
-        *self.asked.lock().unwrap() = args.iter().map(|s| s.to_string()).collect();
-        self.answer.clone().map(|(c, stdout, stderr)| crate::providers::detect::Out { code: Some(c), stdout, stderr })
-    }
-    fn env(&self, _key: &str) -> Option<OsString> {
-        None
-    }
-}
-
-fn out(code: i32, stdout: &str, stderr: &str) -> Option<(i32, String, String)> {
-    Some((code, stdout.into(), stderr.into()))
-}
-
-#[test]
-fn the_launch_time_check_passes_only_when_the_os_refuses_the_listing() {
-    let home = tmpdir("probe");
-    let state = home.join(".claude/vajra");
-    std::fs::create_dir_all(&state).unwrap();
-    let data = home.join("data");
-    let fake = |found: bool, answer| FakeCodex { found, answer, asked: Default::default() };
-    let eperm = format!("ls: {}: Operation not permitted\n", state.display());
-    let ok = fake(true, out(1, "", &eperm));
-    assert!(codex_key_probe(&ok, &home, &data));
-    // It runs `codex sandbox` with the very profile a session gets, then lists the state dir; it never names the key.
-    let asked = ok.asked.lock().unwrap().clone();
-    assert_eq!(asked[0], "sandbox");
-    // The probe makes its own fresh name; the rest of the profile is the one a session gets under that name.
-    let name = asked.iter().find_map(|a| a.strip_prefix("default_permissions=\"")?.strip_suffix('"')).unwrap().to_string();
-    assert!(valid_profile_name(&name), "{name}");
-    let ov = codex_profile_overrides(&name, &vajra_deny_dirs(&home, &data), &[], false).unwrap();
-    for o in &ov {
-        assert!(asked.windows(2).any(|w| w[0] == "-c" && &w[1] == o), "{o} missing from {asked:?}");
-    }
-    assert_eq!(asked[asked.len() - 3..], ["--".to_string(), "/bin/ls".into(), state.to_str().unwrap().into()]);
-    assert!(!asked.iter().any(|a| a.contains("hmac")), "{asked:?}");
-    for (f, why) in [
-        (fake(true, out(0, ".hmac-key\ncampaigns\n", "")), "the listing worked"),
-        (fake(true, out(1, "", "ls: x: No such file or directory\n")), "another error"),
-        (fake(true, out(2, "", "Error: unknown option\n")), "codex refused the profile"),
-        (fake(true, None), "timed out"),
-        (fake(false, out(1, "", &eperm)), "no codex"),
-    ] {
-        assert!(!codex_key_probe(&f, &home, &data), "{why}");
-    }
-    let empty = tmpdir("probe-nostate");
-    assert!(!codex_key_probe(&fake(true, out(1, "", &eperm)), &empty, &data), "no state dir: nothing proven");
 }
 
 #[test]

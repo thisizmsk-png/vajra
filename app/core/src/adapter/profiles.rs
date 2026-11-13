@@ -6,7 +6,7 @@
 //! `CODEX_HOME` holding hostile settings, a real `codex exec` against a loopback stub) decided the Codex keys:
 //! - `--sandbox`, `approval_policy`, `sandbox_workspace_write.*`, `notify` and `model_provider` given with `-c` win over
 //!   the user's `config.toml`; `writable_roots` replaces the user's list;
-//! - `tools.web_search=false` does NOT hold (the tool is still offered); `web_search="disabled"` does, so it is used;
+//! - `tools.web_search=false` does NOT hold (the tool is still offered); `web_search="disabled"` does (no longer passed: the user's own web search setting applies, and network follows the seat's switch, vajra-1 2026-11-13);
 //! - the built-in `openai` provider cannot be overridden at all (codex refuses to load), so the login route passes no
 //!   retry keys; Codex's own retry default stays, and the card does not claim otherwise;
 //! - a legacy `profile = ...` key makes codex refuse to start (fails closed); a `<name>.config.toml` profile loads only
@@ -74,18 +74,18 @@ pub struct Profile {
 const CODEX_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`codex exec --json`, stdin /dev/null" },
     Always { setting: "sandbox", how: "a fresh `vajra-<16 hex>` permission profile per launch (`-c default_permissions=...`), replacing the user's sandbox" },
-    Always { setting: "vajra_dirs", how: "the Vajra state dir and the app data dir are `none`: the session can't read the signing key or the stores (6k)" },
+    Always { setting: "vajra_dirs", how: "the Vajra state dir and the app data dir are `none` in the profile, as defense in depth; the user's own Codex tools run outside it, so nothing is claimed about the key (owner 2026-11-13)" },
     Always { setting: "writable_roots", how: "only the worktree and the ticket tmp are `write`; `/tmp` and `$TMPDIR` aren't" },
-    Always { setting: "network", how: "`-c permissions.vajra-<16 hex>.network={enabled=<seat.network>}`" },
-    Always { setting: "web_search", how: "`-c web_search=\"disabled\"` unless the seat has network" },
+    Always { setting: "network", how: "`-c permissions.vajra-<16 hex>.network={enabled=<seat.network>}`: network follows the seat's switch (vajra-1 2026-11-13)" },
+    Always { setting: "web_search", how: "not overridden: the user's own Codex web search setting applies (vajra-1 2026-11-13)" },
     Always { setting: "approval", how: "`-c approval_policy=\"never\"`" },
     Always { setting: "working_dir", how: "the core's worktree under <work>" },
     Always { setting: "model_and_effort", how: "`-m`, `-c model_reasoning_effort` when the seat names them" },
     Always { setting: "provider_route", how: "gateway: a Vajra-owned CODEX_HOME and zero retries; login: the user's own" },
-    Always { setting: "outside_tools", how: "`-c` switches hooks, plugins, apps and notify off, and each MCP server's `enabled=false`, proven by `codex mcp list` and `codex features list` under the same values before launch" },
 ];
 
-const CODEX_WORKER_USER: &[&str] = &["login", "AGENTS.md", "history", "default model"];
+/// Owner 2026-11-13, "keep my extras": the user's own hooks, plugins, apps, MCP servers and notify stay on.
+const CODEX_WORKER_USER: &[&str] = &["login", "hooks", "plugins", "apps", "mcp_servers", "notify", "AGENTS.md", "history", "default model"];
 
 const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
@@ -153,12 +153,11 @@ pub struct WorkerLaunch<'a> {
     pub deny: &'a [PathBuf],
     /// This launch's permission profile name, a fresh `codex_profile_name` (unused by other harnesses).
     pub profile: &'a str,
-    /// The switch-off values `codex_tools_off` proved for this launch (Codex only; empty for other harnesses).
-    pub off: &'a [String],
 }
 
-/// 6k (S11): what a Codex session may not read. The Vajra state dir holds the signing key and the stores; the app data
-/// dir holds seats, ledgers and control files. Seatbelt matches real paths, so each dir is given as written and, when
+/// 6k (S11): what a Codex session's profile denies, as defense in depth only: the user's own Codex tools run outside
+/// it, so no claim is made about the key (owner 2026-11-13). The Vajra state dir holds the signing key and the stores;
+/// the app data dir holds seats, ledgers and control files. Seatbelt matches real paths, so each dir is given as written and, when
 /// that differs, as its canonical form (`/var` is `/private/var`). A dir that doesn't exist yet is resolved through
 /// its parent.
 pub fn vajra_deny_dirs(home: &Path, data: &Path) -> Vec<PathBuf> {
@@ -174,132 +173,7 @@ pub fn vajra_deny_dirs(home: &Path, data: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// 6k's launch-time check (ADR-16 16.5a): under the same permission profile a Codex session gets, `codex sandbox`
-/// lists the Vajra state dir, and the listing must be refused by the OS. Anything else (no codex, no state dir, a
-/// listing that works, any other error, a timeout) means not proven, so a Codex verifier stays `outside_guard`. The
-/// probe names the dir, never the key, and reads nothing from it.
-pub fn codex_key_probe(probe: &dyn crate::providers::detect::Probe, home: &Path, data: &Path) -> bool {
-    let state = home.join(".claude").join("vajra");
-    if !state.is_dir() {
-        return false;
-    }
-    let (Some(codex), Some(target)) = (probe.find("codex"), state.to_str()) else { return false };
-    let Ok(name) = codex_profile_name() else { return false };
-    let Ok(ov) = codex_profile_overrides(&name, &vajra_deny_dirs(home, data), &[], false) else { return false };
-    let mut args: Vec<&str> = vec!["sandbox"];
-    for o in &ov {
-        args.extend(["-c", o.as_str()]);
-    }
-    args.extend(["--", "/bin/ls", target]);
-    probe.run(&codex, &args).is_some_and(|o| o.code.is_some_and(|c| c != 0) && o.stdout.trim().is_empty() && o.stderr.contains("Operation not permitted"))
-}
-
-/// Whether a Codex seat is kept from Vajra's key: `Ok` when it is, or the plain reason it isn't (shown on the card).
-pub type CodexLock = Result<(), String>;
-
-pub const CODEX_NOT_PROVEN: &str = "Vajra couldn't confirm on this Mac that Codex's sandbox keeps it away from Vajra's signing key.";
-pub const CODEX_MANAGED: &str = "Codex on this Mac has a managed config, which can turn on tools that run outside Codex's sandbox and could read Vajra's signing key.";
-pub const CODEX_TOOLS_ON: &str = "Vajra couldn't confirm that your Codex hooks, plugins, MCP servers and notify are off for this session. They run outside Codex's sandbox and could read Vajra's signing key.";
 pub const CODEX_PROJECT_TOOLS: &str = "The worktree has its own .codex or .agents folder, which Codex would load outside its sandbox.";
-pub const CODEX_CLOUD: &str = "ChatGPT login: cloud-managed settings can't be checked, so Vajra can't prove the key is out of reach.";
-
-/// bhishma #216 (vajra-1's interim decision B, the owner's call): a Codex seat on a ChatGPT login (or one whose login
-/// can't be told) is not guarded, with `CODEX_CLOUD` as the cause, but still launches. `true` is option A: it is
-/// refused like any failed proof. An API-key login and the gateway route stay provable.
-pub const CODEX_CLOUD_REFUSES_LAUNCH: bool = false;
-
-/// Whether Codex's own `login status` (never a token) could bring cloud-managed settings: a ChatGPT login, or an answer
-/// that can't be read. Run with the launch's binary, folder and env, so a gateway's own CODEX_HOME is the one asked.
-pub fn codex_cloud_login(run: CodexRun<'_>) -> bool {
-    match run(&["login".to_string(), "status".to_string()]) {
-        Some(o) if o.code.is_some() => format!("{}\n{}", o.stdout, o.stderr).to_ascii_lowercase().contains("chatgpt"),
-        _ => true,
-    }
-}
-
-/// bhishma #216 H2-b (vajra-1's decision): every Codex seat, the Lead included, runs with these switched off: hooks
-/// (config tables, hooks.json, plugin hooks), plugins (and the MCP servers and hooks they bring), apps (connectors) and
-/// notify. MCP servers are switched off one by one by name (`mcp_servers={}` doesn't clear the table: S11 spike).
-pub const CODEX_OFF: [&str; 5] = ["features.hooks=false", "features.plugins=false", "features.remote_plugin=false", "features.apps=false", "notify=[]"];
-const CODEX_FEATURES_OFF: [&str; 4] = ["hooks", "plugins", "remote_plugin", "apps"];
-
-fn mcp_name_ok(n: &str) -> bool {
-    !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// Whether `v` is one of the switch-off values `codex_tools_off` makes.
-fn off_value_ok(v: &str) -> bool {
-    CODEX_OFF.contains(&v) || v.strip_prefix("mcp_servers.").and_then(|r| r.strip_suffix(".enabled=false")).is_some_and(mcp_name_ok)
-}
-
-/// A managed Codex layer (admin config, requirements, or an MDM profile) can turn tools back on over the argv, and
-/// Vajra can't read all of it: any one of them means not proven.
-pub fn codex_managed_layer(user: &str) -> bool {
-    let mdm = |d: &str| Path::new(d).join("com.openai.codex.plist");
-    [
-        PathBuf::from("/etc/codex/managed_config.toml"),
-        PathBuf::from("/etc/codex/requirements.toml"),
-        mdm("/Library/Managed Preferences"),
-        mdm(&format!("/Library/Managed Preferences/{user}")),
-    ]
-    .iter()
-    .any(|p| p.symlink_metadata().is_ok())
-}
-
-/// Runs `codex <args>` the way the launch will: the same binary, cwd and env.
-pub type CodexRun<'a> = &'a dyn Fn(&[String]) -> Option<crate::providers::detect::Out>;
-
-/// The real `CodexRun`: `codex` in `cwd` with the scrubbed launch env plus `env` (a launch's own extra variables).
-pub fn codex_check_runner<'a>(codex: &'a Path, cwd: &'a Path, env: &'a [(&'static str, OsString)], dirs: &'a [PathBuf]) -> impl Fn(&[String]) -> Option<crate::providers::detect::Out> + 'a {
-    move |args: &[String]| {
-        let e: Vec<(&str, &Path)> = env.iter().map(|(k, v)| (*k, Path::new(v))).collect();
-        let o = crate::vajra::bridge::run_codex_check(codex, args, cwd, &e, dirs).ok()?;
-        o.whole().then_some(crate::providers::detect::Out { code: o.code, stdout: o.stdout, stderr: o.stderr })
-    }
-}
-
-fn with_c(head: &[&str], vals: &[String]) -> Vec<String> {
-    let mut a: Vec<String> = head.iter().map(|s| s.to_string()).collect();
-    for v in vals {
-        a.extend(["-c".to_string(), v.clone()]);
-    }
-    a
-}
-
-fn mcp_list(run: CodexRun<'_>, vals: &[String]) -> Option<Vec<Value>> {
-    let out = run(&with_c(&["mcp", "list", "--json"], vals)).filter(|o| o.code == Some(0))?;
-    match serde_json::from_str::<Value>(&out.stdout).ok()? {
-        Value::Array(a) => Some(a),
-        _ => None,
-    }
-}
-
-/// The `-c` values that switch off everything that would run outside the sandbox for this launch, each one proven off:
-/// under exactly these values, `codex features list` shows the four features false and `codex mcp list --json` shows
-/// every server disabled. Anything it can't show is `Err` with the cause (fail closed). The rollout records none of
-/// these, so this check, run with the launch's own binary, cwd and env, is the read-back.
-pub fn codex_tools_off(run: CodexRun<'_>) -> Result<Vec<String>, String> {
-    let mut off: Vec<String> = CODEX_OFF.iter().map(|s| s.to_string()).collect();
-    for s in mcp_list(run, &off).ok_or_else(|| CODEX_TOOLS_ON.to_string())? {
-        let name = s["name"].as_str().filter(|n| mcp_name_ok(n)).ok_or_else(|| CODEX_TOOLS_ON.to_string())?;
-        off.push(format!("mcp_servers.{name}.enabled=false"));
-    }
-    let after = mcp_list(run, &off).ok_or_else(|| CODEX_TOOLS_ON.to_string())?;
-    if after.iter().any(|s| s["enabled"] != json!(false)) {
-        return Err(CODEX_TOOLS_ON.into());
-    }
-    let feats = run(&with_c(&["features", "list"], &off)).filter(|o| o.code == Some(0)).ok_or_else(|| CODEX_TOOLS_ON.to_string())?;
-    for f in CODEX_FEATURES_OFF {
-        let shown = feats.stdout.lines().find_map(|l| {
-            let mut w = l.split_whitespace();
-            (w.next() == Some(f)).then(|| w.last().map(str::to_string)).flatten()
-        });
-        if shown.as_deref() != Some("false") {
-            return Err(CODEX_TOOLS_ON.into());
-        }
-    }
-    Ok(off)
-}
 
 /// bhishma #216 M1-b: Codex loads a worktree's own `.codex` (config, hooks.json, agents) and `.agents` (skills), and an
 /// earlier session there can write them. A Codex launch over either one, unless it is an empty folder, is refused.
@@ -317,23 +191,6 @@ pub fn codex_project_outside(worktree: &Path) -> Option<String> {
         }
     }
     None
-}
-
-/// The whole launch-time answer for a Codex seat (6k, bhishma #216 H2): the OS keeps the session from the state dir,
-/// no managed layer is present, and every tool that would run outside the sandbox is proven off. Matches the Claude
-/// worker rule: judge what would load, and name the cause.
-pub fn codex_lock(probe: &dyn crate::providers::detect::Probe, home: &Path, data: &Path, user: &str, run: CodexRun<'_>) -> CodexLock {
-    if !codex_key_probe(probe, home, data) {
-        return Err(CODEX_NOT_PROVEN.into());
-    }
-    if codex_managed_layer(user) {
-        return Err(CODEX_MANAGED.into());
-    }
-    codex_tools_off(run)?;
-    if codex_cloud_login(run) {
-        return Err(CODEX_CLOUD.into());
-    }
-    Ok(())
 }
 
 /// A fresh name for one launch's Codex permission profile: `vajra-` and 16 random hex digits. A user's `config.toml`
@@ -374,19 +231,17 @@ pub fn codex_profile_overrides(name: &str, deny: &[PathBuf], write: &[&Path], ne
 
 /// bhishma #216 H1: the plain Codex run Lead (`start_run` with provider `codex`), `codex -c ... -- <ask>`. It runs under
 /// a fresh permission profile like a worker's: the Vajra dirs unreadable, writes only in the project folder and the
-/// system temp dir, no network, no approvals, and its outside tools proven off (`off`, from `codex_tools_off`). A Codex
-/// Lead's run is still never counted guarded (`evidence_of`): it is the user's own interactive session.
-pub fn codex_run_lead_argv(codex: &Path, ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path, off: &[String]) -> Result<Vec<String>, InvalidInput> {
+/// system temp dir, no network (a Lead has no seat switch) and no approvals; web search is the user's own setting. The user's own Codex tools stay on (owner 2026-11-13). A Codex Lead's
+/// run is never counted guarded (`evidence_of`): it is the user's own interactive session.
+pub fn codex_run_lead_argv(codex: &Path, ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path) -> Result<Vec<String>, InvalidInput> {
     argv::check_ask(ask)?;
-    // bhishma #216 Low 1: the binary the proof ran, by its absolute path, never the bare word looked up on PATH again.
-    let codex = codex.to_str().filter(|c| codex.is_absolute() && !c.is_empty()).ok_or_else(|| bad("codex", "the proven codex must be an absolute UTF-8 path"))?;
+    // bhishma #216 Low 1: the binary Vajra found, by its absolute path, never the bare word looked up on PATH again.
+    let codex = codex.to_str().filter(|c| codex.is_absolute() && !c.is_empty()).ok_or_else(|| bad("codex", "codex must be an absolute UTF-8 path"))?;
     let mut a = vec![codex.to_string()];
     // bhishma #216 M-Lead (vajra-1's decision): the Lead gets a worker's approvals and sandbox, with no way to run a
-    // command outside it, and its outside tools proven off like a worker's.
+    // command outside it.
     let mut kv = vec!["approval_policy=\"never\"".to_string()];
     kv.extend(codex_profile_overrides(profile, deny, &[project, tmp], false)?);
-    kv.push("web_search=\"disabled\"".into());
-    kv.extend(checked_off(off)?);
     for o in kv {
         a.extend(["-c".to_string(), o]);
     }
@@ -425,20 +280,9 @@ fn codex_confinement(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> 
     toml_path(l.ticket_tmp, "ticket_tmp")?;
     toml_path(l.worktree, "worktree")?;
     let mut kv = vec!["approval_policy=\"never\"".to_string()];
+    // vajra-1 2026-11-13: network follows the seat's switch; web search is left to the user's own Codex setting.
     kv.extend(codex_profile_overrides(l.profile, l.deny, &[l.worktree, l.ticket_tmp], l.network)?);
-    if !l.network {
-        kv.push("web_search=\"disabled\"".into());
-    }
-    kv.extend(checked_off(l.off)?);
     Ok(kv.into_iter().flat_map(|v| ["-c".to_string(), v]).collect())
-}
-
-/// The proven switch-off values, never a launch without the base set, and nothing else (bhishma #216 H2-b).
-fn checked_off(off: &[String]) -> Result<Vec<String>, InvalidInput> {
-    if !CODEX_OFF.iter().all(|b| off.iter().any(|o| o == b)) || !off.iter().all(|o| off_value_ok(o)) {
-        return Err(bad("off", "a Codex session always runs with its hooks, plugins, MCP servers and notify proven off"));
-    }
-    Ok(off.to_vec())
 }
 
 /// Insert `extra` before the trailing `-- <prompt>` of a Codex exec argv.

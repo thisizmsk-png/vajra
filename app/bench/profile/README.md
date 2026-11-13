@@ -17,6 +17,8 @@ app and helper count per sample; a sample with extra helpers or load above 6 is 
   `terms8` (8 idle terminals, the ADR-15 per-project cap).
 - `fg12_profile.py bin`: the shipping binary and its WebKit helpers, idle.
 - `test_profile.py`: unit tests for the sampler (`python3 -m unittest app/bench/profile/test_profile.py`).
+- `app/core/tests/profile_harness.rs`: builds the harness and starts one run with it for two seconds
+  (`cargo test --test profile_harness`), so a change to what a run needs cannot break the load scenarios unnoticed.
 
 ## Run it
 ```
