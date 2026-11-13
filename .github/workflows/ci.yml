@@ -63,6 +63,10 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: app/core
         run: cargo clippy --all-targets -- -D warnings
+      - name: The profile harness still starts a run
+        if: runner.os == 'macOS'
+        working-directory: app/core
+        run: cargo test --test profile_harness
 
   core-tests:
     # The core Rust tests on macOS (owner decision, 2026-11-12). Every test runs: most in parallel, and the ones listed in
