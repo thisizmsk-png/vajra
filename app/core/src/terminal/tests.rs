@@ -290,13 +290,31 @@ fn output_waits_for_acks_instead_of_queueing_without_bound() {
     t.ack(info.id, got).unwrap();
     let end = Instant::now() + Duration::from_secs(30);
     let mut tail = String::new();
+    // Diagnostics for a stall seen only on the macOS CI runner (#182): what arrived after the first ack, and how.
+    let (mut after, mut last, mut exit) = (0usize, Vec::<u8>::new(), None);
     while Instant::now() < end && !tail.contains("DO2NE") {
-        if let Ok(Event::Data(d)) = out.0.recv_timeout(Duration::from_millis(100)) {
-            t.ack(info.id, d.len()).unwrap();
-            tail.push_str(&String::from_utf8_lossy(&d[d.len().saturating_sub(64)..]));
+        match out.0.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Data(d)) => {
+                t.ack(info.id, d.len()).unwrap();
+                after += d.len();
+                last.extend_from_slice(&d);
+                last.drain(..last.len().saturating_sub(200));
+                tail.push_str(&String::from_utf8_lossy(&d[d.len().saturating_sub(64)..]));
+            }
+            Ok(Event::Exit(code)) => exit = Some(code),
+            _ => {}
         }
     }
-    assert!(tail.contains("DO2NE"), "the flood never finished after acks");
+    let term = t.get(info.id).ok();
+    let credit = term.as_ref().map(|t| *lock(&t.credit));
+    let exited = term.as_ref().map(|t| t.exited.load(Ordering::SeqCst));
+    assert!(
+        tail.contains("DO2NE"),
+        "the flood never finished after acks: {got} bytes before the first ack, {after} after it (of {} written); \
+         the core's read credit at the end {credit:?}; shell exited flag {exited:?}, exit event {exit:?}; last 200 bytes {:?}",
+        4 * window,
+        String::from_utf8_lossy(&last),
+    );
 }
 
 #[test]
