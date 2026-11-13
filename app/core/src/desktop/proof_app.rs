@@ -67,7 +67,7 @@ impl App {
             approval_consumed: approval,
             rejected,
             slug_field: &slug_field,
-            ledger: self.ledger_of(slug),
+            ledger: self.ledger_of(slug, &verified),
         });
         let red = self.campaign_redactor(slug);
         // Text only: the nonce set, secret fields, then key-shaped words and home paths. Commits and the record hash are
@@ -122,15 +122,57 @@ impl App {
         (Some(trust), checker, seats["evidence_approval"]["consumed"] == true)
     }
 
-    /// The read-back record against the core's own write ledger. The ledger comes with the signed record (6h, #190);
-    /// until it is wired here every record is `Missing`, so no run reads Verified (the Codex H1 follow-up and the
-    /// evidence runner gate it too, in PR B).
-    fn ledger_of(&self, _slug: &str) -> proof::Ledger {
+    /// The record against the core's own write ledger (6h, #190; bhishma's rule): the campaign, features and progress
+    /// are the bytes the record check just verified (the same ones the label reads, so a signed swap between two
+    /// reads can't pass one check and feed the other), with the task graph read by `list --json`; the ledger is the
+    /// core's own file for this slug. A run with no ledger (one this app's core didn't record) is `Missing`. A run
+    /// whose record is still held live also answers `CoreRecord::verify_record`, and both must pass.
+    pub(super) fn ledger_of(&self, slug: &str, verified: &Value) -> proof::Ledger {
+        use super::record::{LedgerStore, ReadBack};
+        use crate::vajra::bridge::Request;
         #[cfg(test)]
         if let Some(l) = self.proof_ledger {
             return l;
         }
-        proof::Ledger::Missing
+        let Ok(store) = self.ledger_store(slug, &self.bridge) else { return proof::Ledger::Mismatch };
+        let ledger = match store.load() {
+            Ok(Some(l)) if l.slug == slug => l,
+            Ok(None) => return proof::Ledger::Missing,
+            // Unreadable, or saved under another campaign's name: never a match.
+            _ => return proof::Ledger::Mismatch,
+        };
+        let (Some(campaign), Some(features), Some(progress)) = (verified.get("campaign"), verified.get("features"), verified["progress"].as_str()) else {
+            return proof::Ledger::Mismatch;
+        };
+        // A run still going reads In progress before the ledger counts: no task-graph read on every poll.
+        if campaign["status"] == "active" {
+            return proof::Ledger::Missing;
+        }
+        let tasks = match self.bridge.run(&Request::TasksList { slug: slug.into() }) {
+            Ok(o) if o.exit() == Some(0) && !o.truncated => match serde_json::from_str::<Value>(&o.stdout) {
+                Ok(v) => v,
+                Err(_) => return proof::Ledger::Mismatch,
+            },
+            _ => return proof::Ledger::Mismatch,
+        };
+        let back = ReadBack { campaign: campaign.clone(), features: features.clone(), progress: progress.to_string(), tasks };
+        if ledger.check(&back).is_err() {
+            return proof::Ledger::Mismatch;
+        }
+        if let Some(rec) = self.live_record(slug) {
+            if rec.verify_record().is_err() {
+                return proof::Ledger::Mismatch;
+            }
+        }
+        proof::Ledger::Match
+    }
+
+    /// The run's record, if the app still holds it, for this campaign.
+    fn live_record(&self, slug: &str) -> Option<std::sync::Arc<super::record::CoreRecord>> {
+        use super::record::RunRecord;
+        let run = slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r))?;
+        let rec = lock(&self.live_records).get(run)?.upgrade()?;
+        (rec.card().campaign == slug).then_some(rec)
     }
 
     fn campaign_redactor(&self, slug: &str) -> Redactor {

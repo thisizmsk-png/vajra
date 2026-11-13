@@ -5308,6 +5308,8 @@ mod board_cards;
 
 #[path = "proof_app_tests.rs"]
 mod proof_app;
+#[path = "proof_ledger_tests.rs"]
+mod proof_ledger;
 
 /// #80 optional: a finished run's worker count is forgotten when it is reaped, not only on the next start, so a long
 /// session of runs that start and finish keeps the map bounded by the runs still going.

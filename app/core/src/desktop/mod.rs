@@ -2249,12 +2249,13 @@ impl App {
         seam("check:report");
         // The record hash (6i export): the sha256 of the exact digest lines the script just accepted, so a reader on this
         // Mac can match an export to the record it came from. It carries no key material.
-        // `VERIFIED_KEY`: the campaign and progress exactly as checked here, for the proof label (6i). `read_report` drops it.
+        // `VERIFIED_KEY`: the campaign, features and progress exactly as checked here, for the proof label and its
+        // write-ledger check (6i). `read_report` drops it.
         let progress = String::from_utf8_lossy(&h.progress).into_owned();
         let record = |v: Res| {
             v.map(|mut v| {
                 v["record_sha256"] = json!(hex_digest(input.as_bytes()));
-                v[VERIFIED_KEY] = json!({"campaign": campaign, "progress": progress});
+                v[VERIFIED_KEY] = json!({"campaign": campaign, "features": features, "progress": progress});
                 v
             })
         };
