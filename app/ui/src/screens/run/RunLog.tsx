@@ -70,6 +70,11 @@ const time = (ms: number) => new Date(ms).toLocaleTimeString("en-US", { hour: "2
 /** The core's caveat is a clause ("hash-chained; until ..."); shown after a sentence, it starts with a capital. */
 const sentence = (s: string) => (s ? `${s[0].toUpperCase()}${s.slice(1)}${/[.!?]$/.test(s) ? "" : "."}` : "");
 
+/** How far the check vouches. "Signed" covers only the entries up to the last anchor the signed record holds; the
+ *  ones after it are hash-chained but not signed yet, and the line says so. */
+const reach = (c: RunLogVerify) =>
+  c.standing === "signed" && c.signed ? L.signedTo(c.signed.signed_to, c.signed.unsigned_tail) : L.checkedTo(c.head_seq);
+
 const tone: Record<RunLogStanding, "success" | "warning" | "danger"> = { signed: "success", unconfirmed: "warning", not_verified: "danger" };
 
 type Read = "loading" | "ok" | "none" | "failed";
@@ -136,7 +141,7 @@ export function RunLog({ runId, stats }: { runId: string; stats?: RunLogStats })
               {check && typeof check === "object" && (
                 <>
                   <Badge status={tone[check.standing]}>{L.standing[check.standing]}</Badge>
-                  <Text as="span" variant="body-sm" muted>{L.checkedTo(check.head_seq)} {sentence(check.caveat)}</Text>
+                  <Text as="span" variant="body-sm" muted>{reach(check)} {sentence(check.caveat)}</Text>
                 </>
               )}
             </span>

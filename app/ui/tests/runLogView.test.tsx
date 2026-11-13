@@ -103,6 +103,49 @@ describe("RunLog, live", () => {
     expect(c.calls().map((x) => x.args?.afterSeq)).toEqual([0, 5]);
   });
 
+  it("coming back to a run whose log broke earlier on disk drops the kept entries from the break on", async () => {
+    let broken = false;
+    const all = Array.from({ length: 100 }, (_, i) => entry(i + 1));
+    const ipc = fakeIpc({
+      run_log_since: (a?: Record<string, unknown>) => {
+        const after = Number(a?.afterSeq ?? 0);
+        // Entry 50 was changed on disk: the core reads the good prefix, 1 to 49, and reports the break at 50.
+        return broken
+          ? { run_id: RUN, entries: all.slice(Math.min(after, 49), 49), head_seq: 49, broken: { seq: 50, why: "edited" }, io_error: null }
+          : { run_id: RUN, entries: all.slice(after), head_seq: 100, broken: null, io_error: null };
+      },
+    });
+    setTransport(ipc.transport);
+    const first = render(<RunLog runId={RUN} />);
+    await screen.findByText(L.count(100));
+    first.unmount();
+    broken = true;
+    render(<RunLog runId={RUN} />);
+    expect(await screen.findByText(L.broken(50, L.why.edited))).toBeTruthy();
+    expect(screen.getByText(L.count(49))).toBeTruthy();
+    expect(screen.queryByText(L.count(100))).toBeNull();
+    // Kept for the next visit as shown: 49 entries, so a third look shows no row past the break either.
+    cleanup();
+    render(<RunLog runId={RUN} />);
+    expect(screen.getByText(L.count(49))).toBeTruthy();
+  });
+
+  it("coming back to a run whose log is shorter now drops the kept entries past its head", async () => {
+    let head = 12;
+    const all = Array.from({ length: 12 }, (_, i) => entry(i + 1));
+    const ipc = fakeIpc({
+      run_log_since: (a?: Record<string, unknown>) =>
+        ({ run_id: RUN, entries: all.slice(Number(a?.afterSeq ?? 0), head), head_seq: head, broken: null, io_error: null }),
+    });
+    setTransport(ipc.transport);
+    const first = render(<RunLog runId={RUN} />);
+    await screen.findByText(L.count(12));
+    first.unmount();
+    head = 7; // the file was cut back to 7 entries
+    render(<RunLog runId={RUN} />);
+    expect(await screen.findByText(L.count(7))).toBeTruthy();
+  });
+
   it("says when the log stopped or its chain breaks, and keeps the entries it has", async () => {
     const c = core(2);
     render(<RunLog runId={RUN} />);
@@ -136,6 +179,26 @@ describe("RunLog, live", () => {
     answer = new Error("busy");
     fireEvent.click(screen.getByRole("button", { name: L.check }));
     expect(await screen.findByText(L.checkFailed)).toBeTruthy();
+  });
+
+  it("a signed check says where the signing stops and how many entries after it are only hash-chained", async () => {
+    const signed = (signed_to: number, unsigned_tail: number) => ({
+      run_id: RUN, head_seq: 50, standing: "signed", verified: true, caveat: "hash-chained", chain: { ok_to: 50, broken: null }, broken: null,
+      signed: { signed_to, unsigned_tail, mismatch: null }, record_error: null, io_error: null, skipped_anchors: 0,
+    });
+    let answer = signed(40, 10);
+    core(50, { run_log_verify: () => answer });
+    render(<RunLog runId={RUN} />);
+    await screen.findByText(L.count(50));
+    fireEvent.click(screen.getByRole("button", { name: L.check }));
+    const badge = await screen.findByText(L.standing.signed);
+    const line = badge.closest("[role=status]")?.textContent ?? "";
+    expect(line).toContain("Signed up to entry 40. The last 10 entries are hash-chained but not signed yet.");
+    expect(line).not.toContain(L.checkedTo(50));
+    answer = signed(50, 0);
+    fireEvent.click(screen.getByRole("button", { name: L.check }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Signed up to entry 50. Hash-chained."));
+    expect(L.signedTo(49, 1)).toBe("Signed up to entry 49. The last entry is hash-chained but not signed yet.");
   });
 });
 

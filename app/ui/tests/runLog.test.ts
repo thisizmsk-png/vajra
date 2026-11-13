@@ -60,6 +60,11 @@ describe("applyNotice", () => {
     const v = applyPage(emptyRunLog, page([1, 2, 3]));
     expect(seqs(applyNotice(v, notice(4, 1, [2, 3, 4].map((s) => entry(s)))).view)).toEqual([1, 2, 3, 4]);
   });
+  it("a break drops the entries it covers, even ones the view already held", () => {
+    const v = applyPage(emptyRunLog, page([1, 2, 3, 4, 5]));
+    const next = applyPage(v, { ...page([]), head_seq: 2, broken: { seq: 3, why: "edited" } });
+    expect([seqs(next), next.headSeq, next.broken]).toEqual([[1, 2], 2, { seq: 3, why: "edited" }]);
+  });
   it("copies the log's stop into the view, even from a notice with no entries", () => {
     const v = applyPage(emptyRunLog, page([1, 2]));
     const stopped = applyNotice(v, notice(2, 2, [], { io_error: "the run log stopped at seq 2: disk full" })).view;
@@ -159,7 +164,7 @@ describe("followRunLog in a 4-worker run", () => {
   });
 
   it("a stop told while a read is pending outlives that read's older, healthy page", async () => {
-    const stops: Partial<Pick<RunLogNotice, "io_error" | "broken">>[] = [{ io_error: "the run log stopped at seq 3: disk full" }, { broken: { seq: 3, why: "unanchored" } }];
+    const stops: Partial<Pick<RunLogNotice, "io_error" | "broken">>[] = [{ io_error: "the run log stopped at seq 3: disk full" }, { broken: { seq: 4, why: "unanchored" } }];
     for (const state of stops) {
       const c = core();
       c.write(2);

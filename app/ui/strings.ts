@@ -527,6 +527,8 @@ export const S = {
       checking: "Checking",
       checkFailed: "Could not check the chain.",
       checkedTo: (n: number) => `Checked up to entry ${n}.`,
+      signedTo: (to: number, tail: number) =>
+        `Signed up to entry ${to}.${tail ? ` ${tail === 1 ? "The last entry is" : `The last ${tail} entries are`} hash-chained but not signed yet.` : ""}`,
       standing: { signed: "Signed", unconfirmed: "Not confirmed", not_verified: "Not verified" },
       who: { core: "Vajra", verifier: "Verifier", lead: "Lead", human: "You" } as Record<string, string>,
       worker: (ticket: string) => `Worker ${ticket}`,
