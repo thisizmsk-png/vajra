@@ -232,6 +232,8 @@ type StateKey = (PathBuf, Option<PathBuf>);
 type WorktreeCache = HashMap<StateKey, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
+pub const SETUP_PLAN_SCHEMA: &str = "vajra.setup_plan/1";
+
 pub struct App {
     preferences: Mutex<crate::preferences::Store>,
     data: PathBuf,
@@ -338,6 +340,8 @@ pub struct App {
     sink: Mutex<Option<ChangeSink>>,
     /// New-item notifications (`inbox_new`), coalesced over 5 s (see `arrivals`).
     events: Arc<arrivals::Hub>,
+    /// One-click install consents (ADR-17 rule 4): tokens in memory only, one run per harness at a time.
+    consents: crate::providers::install::consent::Consents,
     /// ADR 16.6: the global git baseline (taken first thing in `open`) and the worker runtime, built on first use.
     workers: Arc<worker_host::WorkerHost>,
 }
@@ -445,6 +449,7 @@ impl App {
             live_logs: Mutex::new(HashMap::new()),
             log_anchors: Default::default(),
             closeout: closeout::Store::open(data),
+            consents: Default::default(),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -931,7 +936,58 @@ impl App {
             crate::userpath::refresh(&self.home);
         }
         let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
-        serde_json::to_value(crate::providers::setup::list(&self.provider_probe(), engine)).map_err(|e| fail("internal", e))
+        let marks = crate::providers::install::marks::Marks::at(&self.data);
+        serde_json::to_value(crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks)).map_err(|e| fail("internal", e))
+    }
+
+    /// `setup_plan` (`vajra.setup_plan/1`): the one-click plan for catalog harness `id` (ADR-17 rule 3: the exact
+    /// command, source, version, tools, target, needs_admin, notes, scope registry and dependencies), or `manual` with
+    /// why it is "Install it yourself". Installs nothing; npm's pack folder is private and removed before this answers.
+    pub fn setup_plan(&self, id: &str) -> Res {
+        use crate::providers::install::flow;
+        let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        let answer = |r: Result<Value, &str>| match r {
+            Ok(plan) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "plan": plan }),
+            Err(code) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "manual": code }),
+        };
+        // An unverified source never resolves a tool or runs anything.
+        if !h.verified() {
+            return Ok(answer(Err("source_not_verified")));
+        }
+        let offer = flow::offer(h, &flow::Machine::this(&self.home));
+        Ok(answer(offer.and_then(|o| serde_json::to_value(&o.plan).map_err(|_| "internal"))))
+    }
+
+    /// `setup_consent`: the user clicked Install on the plan whose hash is `hash`. A single-use token bound to {id,
+    /// hash}, valid for two minutes; it is never logged or stored.
+    pub fn setup_consent(&self, id: &str, hash: &str) -> Res {
+        crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(fail("bad_hash", "a plan hash is 64 hex digits"));
+        }
+        Ok(serde_json::json!({ "token": self.consents.mint(id, hash, std::time::Instant::now()) }))
+    }
+
+    /// `setup_run`: install `id` with consent `token`. The plan is recomputed and must hash the same; the install
+    /// streams on `setup-<id>`, is checked on every exit, rolled back or marked Broken, and audited. Blocks until done.
+    pub fn setup_run(&self, id: &str, token: &str) -> Res {
+        use crate::providers::install::{flow, run};
+        let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if !h.verified() {
+            return Err(fail("source_not_verified", "this harness is Install it yourself"));
+        }
+        // Read after the install too (a repair counts only if the program runs), so the PATH is refreshed first and
+        // the probe is built fresh: a newly linked binary must be found.
+        let current = || {
+            crate::userpath::refresh(&self.home);
+            crate::providers::setup::current(h, &self.provider_probe())
+        };
+        let audit = self.claude.join("vajra/audit.log");
+        let paths = flow::Paths { data: &self.data, audit: &audit };
+        let r = flow::run(h, &flow::Machine::this(&self.home), &self.consents, token, &self.sup, paths, &current).map_err(|c| fail(c, "setup refused"))?;
+        // The new binary is found without a restart.
+        crate::userpath::refresh(&self.home);
+        Ok(serde_json::json!({ "stream": run::stream(id), "report": r }))
     }
 
     /// The CLI's own sign-in for `id`, for a user terminal: only for a catalog harness that is installed and reports a

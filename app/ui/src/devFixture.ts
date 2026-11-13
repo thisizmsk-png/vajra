@@ -6,6 +6,7 @@ import { DEFAULT_PING, DEFAULT_PREFERENCES } from "./preferenceContract";
 import { setTransport } from "./ipc";
 import type { CrewNodeDto, ProofLabel, RunProof, Transport } from "./ipc";
 import { terminalFixture } from "./terminal/fixtureShell";
+import { setupReplies } from "./setupFixture";
 import { S } from "../strings";
 
 const RUN = "20261106-2140";
@@ -349,7 +350,7 @@ export function installFixture(mode = "") {
       if (cmd === "provider_base_url_save") { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === args?.accountId ? { ...a, base_url: String(args?.baseUrl) } : a) }; return null; }
       if (cmd === "provider_agents") return agents;
       if (cmd === "provider_agents_save") { agents = { schema: AGENTS.schema, ...(args?.agents as object) }; return agents; }
-      const r = (mode === "empty" ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd];
+      const r = (mode === "empty" ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd] ?? setupReplies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },

@@ -3686,12 +3686,14 @@ dependencies = [
 name = "vajra-desktop"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "libc",
  "objc2",
  "objc2-foundation",
  "portable-pty",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "toml 1.2.0+spec-1.1.0",
