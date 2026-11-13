@@ -39,6 +39,35 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(b.read_tokens(tempfile.mkdtemp()), [])
 
 
+class AnatomyTests(unittest.TestCase):
+    def run_lines(self, usage, model_usage, tools=3, mcp=0):
+        return [json.dumps({"type": "system", "subtype": "init", "tools": ["t"] * tools, "mcp_servers": [{}] * mcp}),
+                "not json",
+                json.dumps({"type": "result", "usage": usage, "modelUsage": model_usage, "total_cost_usd": 0.5})]
+
+    def test_first_request_is_fresh_plus_cache_write_plus_cache_read(self):
+        u = {"input_tokens": 2, "cache_creation_input_tokens": 3106, "cache_read_input_tokens": 10, "output_tokens": 44}
+        mu = {"opus": {"inputTokens": 2, "cacheCreationInputTokens": 3106, "cacheReadInputTokens": 10, "outputTokens": 44}}
+        a = b.parse_anatomy(self.run_lines(u, mu, tools=3, mcp=1))
+        self.assertEqual((a["first_request_tokens"], a["tools"], a["mcp_servers"], a["side_tokens"]), (3118, 3, 1, 0))
+
+    def test_tokens_billed_to_another_model_are_side_tokens(self):
+        u = {"input_tokens": 2, "cache_creation_input_tokens": 1000, "output_tokens": 5}
+        mu = {"opus": {"inputTokens": 2, "cacheCreationInputTokens": 1000, "outputTokens": 5}, "haiku": {"inputTokens": 300, "outputTokens": 20}}
+        self.assertEqual(b.parse_anatomy(self.run_lines(u, mu))["side_tokens"], 320)
+
+    def test_no_result_event_is_none_and_malformed_usage_reads_zero(self):
+        self.assertIsNone(b.parse_anatomy(["not json", json.dumps({"type": "system", "subtype": "init"})]))
+        a = b.parse_anatomy(self.run_lines({"input_tokens": -4, "output_tokens": "9"}, {}))
+        self.assertEqual(a["first_request_tokens"], 0)
+
+    def test_the_shipped_arms_file_is_valid_and_keeps_the_leads_settings_off(self):
+        arms = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "anatomy_arms.json")))
+        self.assertEqual(arms["plain_cli"], [])
+        self.assertIn("--strict-mcp-config", arms["lead"])
+        self.assertEqual(arms["lead"][arms["lead"].index("--setting-sources") + 1], "")
+
+
 class ReportTests(unittest.TestCase):
     def test_an_unmeasured_metric_is_listed_with_its_reason_never_as_a_number(self):
         md = b.render_report([{"scenario": "weight", "at_rest_footprint_mib": 150.0, "at_rest_rss_mib": 190.0, "idle_cpu_pct": 0.1,

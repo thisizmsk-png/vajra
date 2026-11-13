@@ -1,0 +1,6 @@
+{
+  "plain_cli": [],
+  "lead": ["--setting-sources", "", "--permission-mode", "dontAsk", "--tools", "Read,Grep,Glob", "--strict-mcp-config",
+           "--agents", "{\"vajra-lead\":{\"description\":\"Vajra Desktop Director-General\",\"prompt\":\"You are the Vajra Director-General for one project. Be brief and factual.\"}}",
+           "--agent", "vajra-lead"]
+}
