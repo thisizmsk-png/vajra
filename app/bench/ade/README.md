@@ -32,3 +32,22 @@ Each Director-General turn that ran writes a `vajra.token_receipt/1` object (`fr
 tokens too, so a goal's sum counts them). `ade_bench.py tokens` counts every ledger line that carries a receipt. It comes from the provider's own `usage` fields. Nothing is estimated and no price is applied.
 `side` is Vajra's own off-request spend (titles, branch names): always 0. `ade_bench.py tokens` reads these back; the signed run
 record can pick the same object up.
+
+## Typing lag in a real browser (the CI gate)
+
+`app/ui/scripts/typing-lag.mjs` opens the built typing-lag page (`app/ui/lag.html`, the real Director-General composer and
+transcript on a scripted core with 5 agents streaming 20 lines/s each) in the installed Chrome and types 120 keys.
+Per key it records the time from the key's own timestamp to the first frame after the update; p95 must be at or under
+50 ms. A second pass with nothing streaming is the control, and long animation frames over 50 ms are counted.
+
+```
+cd app/ui && npx vite build -c vite.lag.config.ts && node scripts/typing-lag.mjs --gate
+```
+
+Measured on an Apple M-series laptop, Chrome 157: streaming p50 9.6 ms, p95 16 to 22 ms; idle control p95 16 to 17 ms; no
+long frames. The `typing-lag` job in `perf.yml` runs it; it is report-only (`continue-on-error`) until 2026-11-20, then blocks.
+
+Caveat: Chrome's Event Timing API reports a much larger "presentation delay" for the same keys under streaming
+(p95 about 440 ms in headless Chrome) while the main thread shows no long frame. That is compositor or GPU presentation in
+automation, not page work, and it is rounded and hidden under 16 ms, so the gate does not use it. It is printed as
+`event_timing_p95_ms` for anyone who wants to chase it.
