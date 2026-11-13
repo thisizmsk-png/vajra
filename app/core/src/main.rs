@@ -13,13 +13,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::Instant;
 
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
-use vajra_desktop::control::{self, mcp, service, socket};
+use vajra_desktop::control::{self, mcp};
 use serde_json::Value;
-use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
+use vajra_desktop::desktop::{App, Envelope, Pace, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
@@ -184,6 +184,11 @@ fn project_for_folder(app: State<'_, App>, path: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn project_discover(app: State<'_, App>, extra: Option<Vec<String>>) -> Res {
+    app.project_discover(&extra.unwrap_or_default())
+}
+
+#[tauri::command(async)]
 fn project_list(app: State<'_, App>, include_archived: Option<bool>) -> Res {
     app.project_list(include_archived.unwrap_or(false))
 }
@@ -298,6 +303,31 @@ fn provider_usage(app: State<'_, App>, page_open: bool) -> Res {
 #[tauri::command(async)]
 fn read_report(app: State<'_, App>, slug: String) -> Res {
     app.read_report(&slug)
+}
+
+#[tauri::command(async)]
+fn run_proof(app: State<'_, App>, slug: String) -> Res {
+    app.run_proof(&slug)
+}
+
+#[tauri::command(async)]
+fn export_proof_page(app: State<'_, App>, slug: String) -> Res {
+    app.export_proof_page(&slug)
+}
+
+#[tauri::command(async)]
+fn act_post_proof_comment(app: State<'_, App>, envelope: Envelope, slug: String, pr_url: String) -> Value {
+    app.act_post_proof_comment(&envelope, &slug, &pr_url)
+}
+
+#[tauri::command(async)]
+fn evidence_approval(app: State<'_, App>, run_id: String) -> Res {
+    app.evidence_approval(&run_id)
+}
+
+#[tauri::command(async)]
+fn act_answer_evidence_approval(app: State<'_, App>, envelope: Envelope, run_id: String, sha256: String, approve: bool) -> Value {
+    app.act_answer_evidence_approval(&envelope, &run_id, &sha256, approve)
 }
 
 #[tauri::command(async)]
@@ -495,6 +525,9 @@ fn found_lock(own: &Ownership) -> std::sync::MutexGuard<'_, Vec<Found>> {
 fn lifecycle(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>) -> Res {
     let mut v = serde_json::to_value(vajra_desktop::lifecycle_report::report(&terms.list(), &app.active_run_diags())).map_err(internal)?;
     v["found"] = serde_json::to_value(&*found_lock(&own)).map_err(internal)?;
+    // Disclosed (6c-3): what the startup sweep killed of an earlier app life's workers, and what each attempt's sweep
+    // killed of descendants that left their group.
+    v["swept"] = app.swept_report();
     Ok(v)
 }
 
@@ -662,19 +695,8 @@ fn main() {
     if let Some(l) = &app.log {
         let _ = l.log_cold_start(logging::process_start_time());
     }
-    let _watcher = service::spawn_watcher(app.control.clone(), Duration::from_secs(1));
-    match socket::bind(&control::socket_path(&data)) {
-        Ok(listener) => {
-            let svc = app.control.clone();
-            // SAFETY: getuid has no preconditions and cannot fail.
-            let uid = unsafe { libc::getuid() };
-            std::thread::spawn(move || socket::serve(listener, svc, uid));
-        }
-        Err(e) => {
-            eprintln!("vajra-desktop: control socket: {e}");
-            app.note("control_socket_failed", &[]);
-        }
-    }
+    // Only the app holding the instance locks ticks the control ledger and serves the Lead socket.
+    let _watcher = app.serve_control();
     let sub = app.bus.subscribe();
 
     // Crash reconciliation: shells an earlier session recorded are checked against the live process table now (pid and
@@ -702,12 +724,21 @@ fn main() {
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
+                // Nothing runs at rest: with no live run (and past `AFTER_RUN`), the loop waits on the bus. A line, the
+                // wake a new run sends, or the `IDLE_WAIT` housekeeping tick brings it back. Launch starts busy.
+                let mut pace = Pace::new(Instant::now());
+                let mut wait = vajra_desktop::desktop::LIVE_WAIT;
                 loop {
-                    let changed = collect_changes(&sub, Duration::from_secs(1));
+                    let changed = collect_changes(&sub, wait);
+                    let (busy, next) = pace.next(handle.state::<App>().active_run_count() > 0, Instant::now());
+                    wait = next;
                     // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
-                    handle.state::<App>().refresh_workers();
+                    if busy {
+                        handle.state::<App>().refresh_workers();
+                    }
                     // Finished workers that lose nothing are closed on their own (setting `auto_close_finished`). Git is
-                    // asked off this loop, so a slow repo never delays worker refreshes.
+                    // asked off this loop, so a slow repo never delays worker refreshes. Not gated on `busy`: at rest a
+                    // turn is an event or the `IDLE_WAIT` tick, so a worker that became safe later is still closed.
                     if handle.state::<App>().closeout_due() {
                         let h = handle.clone();
                         std::thread::spawn(move || {
@@ -726,7 +757,9 @@ fn main() {
                     #[cfg(target_os = "macos")]
                     {
                         let app = handle.state::<App>();
-                        app.reap_runs();
+                        if busy {
+                            app.reap_runs();
+                        }
                         nap.update(app.active_run_count());
                     }
                 }
@@ -759,6 +792,11 @@ fn main() {
             provider_usage,
             verify_campaign,
             read_report,
+            run_proof,
+            export_proof_page,
+            act_post_proof_comment,
+            evidence_approval,
+            act_answer_evidence_approval,
             resume_targets,
             crew,
             tail,
@@ -795,6 +833,7 @@ fn main() {
             app_info,
             project_list,
             project_for_folder,
+            project_discover,
             project_add,
             project_rename,
             project_archive,
@@ -848,9 +887,8 @@ fn main() {
             }
         }
         RunEvent::Exit => {
-            let app = handle.state::<App>();
-            app.shutdown_lead();
-            app.sup.shutdown();
+            // Director-General asks, then core tickets (with their descendants), then every session: `App::quit`.
+            handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
             handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover
         }

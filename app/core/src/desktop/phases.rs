@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::plan::{Criterion, PlanTask, one_line};
-use super::runproto::{ProtectedAction, RoundGate, RoundInput, RoundResult, RoundVerdict, data};
+use super::runproto::{ProtectedAction, RoundGate, RoundInput, RoundResult, RoundVerdict, RunLife, data};
 use super::verify::{self, Review, Verification};
 use super::workers::{CheckKind, Outcome, State, TaskSpec, WorkerRuntime};
 use crate::control::service::WorkerSeat;
@@ -252,12 +252,22 @@ impl CoreGate {
     }
 
     /// Starts the next attempt of every job in `which`, all before any wait (they run in parallel), then waits for each.
-    fn attempt(&self, round: &RoundInput, jobs: &mut [Job], which: &[usize]) {
+    /// Each start goes through `life` (#153 review): once the run has ended no check is launched, so none escapes its kill,
+    /// and the refused job counts as stopped (never retried).
+    fn attempt(&self, round: &RoundInput, jobs: &mut [Job], which: &[usize], life: &dyn RunLife) {
         let mut started = Vec::new();
         for &i in which {
             let j = &mut jobs[i];
             let n = j.tickets.len() as u32;
-            match self.checks.start(j.kind, n, self.spec(round, &j.brief), j.seat.clone(), &round.head) {
+            let mut res = None;
+            let spec = self.spec(round, &j.brief);
+            let (kind, seat) = (j.kind, j.seat.clone());
+            if !life.start(&mut || res = Some(self.checks.start(kind, n, spec.clone(), seat.clone(), &round.head))) {
+                j.stopped = true;
+                j.answer = Err("the run ended before the check started".into());
+                continue;
+            }
+            match res.expect("a start the run allowed was launched") {
                 Ok(t) => {
                     j.tickets.push(t.clone());
                     started.push((i, t));
@@ -309,7 +319,7 @@ impl CoreGate {
         v
     }
 
-    fn checked(&self, round: &RoundInput) -> RoundResult {
+    fn checked(&self, round: &RoundInput, life: &dyn RunLife) -> RoundResult {
         let picked = match pick(&self.cfg.seats, &self.cfg.defaults, round.security, &round.security_writers) {
             Ok(p) => p,
             Err(why) => return RoundResult { end: Some(why), ..RoundResult::default() },
@@ -324,11 +334,11 @@ impl CoreGate {
             jobs.push(job(CheckKind::SecurityReview, seat, review(SECURITY_LENS), Some(SECURITY_LENS), Some(shared)));
         }
         let all: Vec<usize> = (0..jobs.len()).collect();
-        self.attempt(round, &mut jobs, &all);
+        self.attempt(round, &mut jobs, &all, life);
         // A ticket with no valid result gets one retry (16.5a), unless the run was stopped under it.
         let invalid: Vec<usize> = all.iter().copied().filter(|&i| !jobs[i].stopped && self.parse(&jobs[i]).is_err()).collect();
         if !jobs.iter().any(|j| j.stopped) {
-            self.attempt(round, &mut jobs, &invalid);
+            self.attempt(round, &mut jobs, &invalid, life);
         }
         let parsed: Vec<Result<Parsed, String>> = jobs.iter().map(|j| self.parse(j)).collect();
         let mut checks: Vec<Value> = jobs.iter().zip(&parsed).map(|(j, p)| Self::record(j, p.as_ref().err().map(String::as_str))).collect();
@@ -345,7 +355,7 @@ impl CoreGate {
                 // One redo, told exactly which commands can't be re-run as written (`:680`); its failure keeps the first.
                 let fb = verify::redo_feedback(&v, &problems, &round.criteria);
                 jobs[0].brief = verify_brief(&round.head, &round.criteria, Some(&fb));
-                self.attempt(round, &mut jobs, &[0]);
+                self.attempt(round, &mut jobs, &[0], life);
                 let redo = self.parse(&jobs[0]);
                 let mut rec = Self::record(&jobs[0], redo.as_ref().err().map(String::as_str));
                 rec["redo"] = json!(true);
@@ -382,8 +392,8 @@ impl Job {
 }
 
 impl RoundGate for CoreGate {
-    fn check(&self, round: &RoundInput) -> RoundVerdict {
-        RoundVerdict::Checked(self.checked(round))
+    fn check(&self, round: &RoundInput, life: &dyn RunLife) -> RoundVerdict {
+        RoundVerdict::Checked(self.checked(round, life))
     }
 }
 

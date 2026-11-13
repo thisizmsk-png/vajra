@@ -133,8 +133,27 @@ fn approve() -> Ans {
     review("approve", json!([]))
 }
 
+/// The run's lifetime as the gate sees it: a live run lets each check start (`ended` = refuse from the n-th start on).
+#[derive(Default)]
+struct Life {
+    ended_from: Option<usize>,
+    tries: Mutex<usize>,
+}
+
+impl RunLife for Life {
+    fn start(&self, launch: &mut dyn FnMut()) -> bool {
+        let mut n = crate::lock(&self.tries);
+        *n += 1;
+        if self.ended_from.is_some_and(|from| *n > from) {
+            return false;
+        }
+        launch();
+        true
+    }
+}
+
 fn checked(fake: &Arc<Fake>, r: &RoundInput) -> RoundResult {
-    match gate(fake, seats()).check(r) {
+    match gate(fake, seats()).check(r, &Life::default()) {
         RoundVerdict::Checked(x) => x,
         v => panic!("{v:?}"),
     }
@@ -259,11 +278,11 @@ fn a_stop_under_a_check_is_not_retried() {
 fn a_missing_required_seat_ends_the_round_unchecked() {
     let f = Arc::new(Fake::default());
     let only_writers = vec![seat("w1", "backend", "codex"), seat("r1", roles::REVIEWER, "codex")];
-    let RoundVerdict::Checked(x) = gate(&f, only_writers).check(&round(false)) else { panic!() };
+    let RoundVerdict::Checked(x) = gate(&f, only_writers).check(&round(false), &Life::default()) else { panic!() };
     assert!(x.end.as_deref().unwrap().contains("no verifier seat"), "{x:?}");
     assert!(f.kinds().is_empty(), "nothing starts");
     let no_sec = vec![seat("v1", roles::VERIFIER, "codex"), seat("r1", roles::REVIEWER, "codex")];
-    let RoundVerdict::Checked(x) = gate(&f, no_sec).check(&round(true)) else { panic!() };
+    let RoundVerdict::Checked(x) = gate(&f, no_sec).check(&round(true), &Life::default()) else { panic!() };
     assert!(x.end.as_deref().unwrap().contains("security reviewer"), "{x:?}");
 }
 
@@ -274,8 +293,28 @@ fn a_role_default_seat_fills_a_missing_role() {
     let mut d = seat("vd", roles::VERIFIER, "codex");
     d.source = "role_default".into();
     let cfg = GateConfig { project: "p".into(), repo: "/repo".into(), seats: vec![seat("r1", roles::REVIEWER, "codex")], defaults: vec![d], redact: Redactor::default() };
-    let RoundVerdict::Checked(x) = CoreGate::new(cfg, f.clone()).check(&round(false)) else { panic!() };
+    let RoundVerdict::Checked(x) = CoreGate::new(cfg, f.clone()).check(&round(false), &Life::default()) else { panic!() };
     assert!(x.passed && x.checks[0]["slot"] == "vd" && x.checks[0]["source"] == "role_default", "{x:?}");
+}
+
+/// #153 review (RunLife): every check ticket starts through the run, atomically with its end. A run that ended before
+/// the checks starts none of them; one that ends between two starts launches no more, and nothing is retried.
+#[test]
+fn a_check_the_run_refuses_is_never_launched_or_retried() {
+    let f = Arc::new(Fake::default());
+    let ended = Life { ended_from: Some(0), ..Life::default() };
+    let RoundVerdict::Checked(x) = gate(&f, seats()).check(&round(false), &ended) else { panic!() };
+    assert!(f.kinds().is_empty(), "nothing starts: {:?}", f.kinds());
+    assert!(!x.passed, "{x:?}");
+    assert_eq!(*crate::lock(&ended.tries), 2, "one try per job, no retry");
+
+    let f = Arc::new(Fake::default());
+    f.on(CheckKind::Verify, 0, green());
+    let mid = Life { ended_from: Some(1), ..Life::default() };
+    let RoundVerdict::Checked(x) = gate(&f, seats()).check(&round(false), &mid) else { panic!() };
+    assert_eq!(f.kinds(), [(k(CheckKind::Verify), 0)], "only the check started before the end");
+    assert!(!x.passed, "{x:?}");
+    assert_eq!(*crate::lock(&mid.tries), 2, "no retry after the run ended");
 }
 
 // ---------------------------------------------------------------- the security reviewer's seat (16.1, N15)
