@@ -144,8 +144,15 @@ pub fn git_env(tmp: &Path, common: &Path) -> Vec<(&'static str, PathBuf)> {
     ]
 }
 
+/// The walkthrough base `verify-work --sign` gets: canonical (macOS's `/private` form), since sign resolves nothing and
+/// refuses any link in the path (#214, 48436f20). `None` if it doesn't exist or isn't a directory.
+pub fn canonical_base(base: &Path) -> Option<PathBuf> {
+    base.canonicalize().ok().filter(|p| p.is_dir())
+}
+
 /// Whether a run's commands may start: `sandbox-exec` exists and, under `profile`, a read of the Vajra state dir is
-/// refused by the OS. Any other answer (the read works, a different error, a timeout) is not proven.
+/// refused by the OS. Any other answer (the read works, a different error, a timeout) is not proven. Run by the core
+/// itself, never from inside another sandbox (macOS refuses a nested one, so the probe fails closed there).
 pub fn key_probe(profile: &Profile, state_dir: &Path) -> bool {
     if !Path::new(SANDBOX_EXEC).is_file() || !state_dir.is_dir() {
         return false;

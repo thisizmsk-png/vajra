@@ -258,6 +258,37 @@ fn git_write_tree_works_with_the_private_object_dir_and_never_writes_the_shared_
 }
 
 #[test]
+fn the_walkthrough_base_is_the_canonical_private_form() {
+    let t = Tmp::new("base");
+    // The system temp dir through its link (/var or /tmp on macOS) resolves to /private, which is what sign accepts.
+    let linked = std::env::temp_dir().join(t.0.file_name().unwrap()).join("work");
+    let base = canonical_base(&linked).unwrap();
+    assert_eq!(base, t.0.join("work"));
+    if cfg!(target_os = "macos") {
+        assert!(base.starts_with("/private"), "{}", base.display());
+    }
+    assert!(canonical_base(&t.0.join("absent")).is_none());
+    fs::write(t.0.join("file"), "x").unwrap();
+    assert!(canonical_base(&t.0.join("file")).is_none(), "a file isn't a base");
+}
+
+#[test]
+fn a_nested_sandbox_fails_the_probe_closed() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    // The probe from inside another sandbox: macOS refuses the inner one, so the probe must not pass.
+    let t = Tmp::new("nest");
+    let inner = t.profile(false).argv("/bin/ls", &[t.home().join(".claude/vajra").to_string_lossy().into_owned()]).unwrap();
+    let mut args = vec!["-p".to_string(), "(version 1)(allow default)".to_string(), "--".into(), SANDBOX_EXEC.into()];
+    args.extend(inner);
+    let o = Command::new(SANDBOX_EXEC).args(&args).output().unwrap();
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(!out.contains(".hmac-key"), "{out}");
+}
+
+#[test]
 fn the_deny_list_is_six_k_s_plus_the_configs_credentials() {
     let t = Tmp::new("list");
     let d = deny_dirs(&t.home(), &t.0.join("data"));
