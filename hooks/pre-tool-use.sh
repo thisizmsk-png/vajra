@@ -39,29 +39,39 @@ PYTHON3="/usr/bin/python3"
 # as false, so the check is skipped and the call would be allowed. Every such error is printed by bash on stderr, so
 # the hook's own stderr goes to a private file, its messages go to fd 3 (the real stderr), and `allow` refuses to
 # allow when that file holds anything. errtrace is not used: the helpers answer with their return code.
+# bhishma #218 M: the file is opened twice (fd 2 to write, fd 4 to read) and deleted by name at once, so a process the
+# agent left running can't find it to truncate it; only fd 4 is ever read. A signal or timeout kill blocks too (L).
 exec 3>&2
 DECIDED=0
 GERR=""
-# The first line bash wrote to the captured stderr, printable and at most 300 characters (built-ins only, so it can
-# run inside a trap).
-gerr_line() {
+GERR_OPEN=0
+GERR_SEEN=0
+GERR_BUF=""
+# Everything bash wrote to the captured stderr so far, up to 4096 characters, read once through fd 4 (built-ins
+# only, so it can run inside a trap). GERR_LINE: its first non-blank line, printable, at most 300 characters.
+gerr_read() {
+  if [ "$GERR_OPEN" = 1 ] && [ "$GERR_SEEN" = 0 ]; then
+    GERR_SEEN=1
+    IFS= read -r -d '' -n 4096 GERR_BUF <&4 || true
+  fi
+  local l
   GERR_LINE=""
-  [ -n "$GERR" ] && [ -s "$GERR" ] && { IFS= read -r GERR_LINE < "$GERR" || true; }
-  GERR_LINE="${GERR_LINE//[^[:print:]]/}"; GERR_LINE="${GERR_LINE:0:300}"
+  while IFS= read -r l; do
+    l="${l//[^[:print:]]/}"
+    [ -n "${l// /}" ] && { GERR_LINE="${l:0:300}"; break; }
+  done <<<"$GERR_BUF"
   return 0
 }
 internal_error() { # what -> the one fail-closed message, on the real stderr
-  gerr_line
+  gerr_read
   echo "Vajra guard: internal error ($1${GERR_LINE:+: $GERR_LINE}); blocking the tool call (fail-closed)." >&3
 }
 on_exit() {
   local rc=$?
   if [ "$DECIDED" != 1 ]; then
     internal_error "exit ${rc} without a decision"
-    [ -n "$GERR" ] && rm -f "$GERR"
     exit 2
   fi
-  [ -n "$GERR" ] && rm -f "$GERR"
 }
 trap on_exit EXIT
 on_err() {
@@ -71,8 +81,18 @@ on_err() {
   exit 2
 }
 trap 'on_err $LINENO' ERR
-GERR="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/vajra-guard-err.XXXXXX")"
-exec 2>"$GERR"
+# Killed by a signal or a timeout: never an exit Claude Code would let through.
+for sig in TERM HUP INT PIPE; do
+  trap "internal_error 'stopped by SIG$sig'; DECIDED=1; exit 2" "$sig"
+done
+if ! GERR="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/vajra-guard-err.XXXXXX" 2>/dev/null)" || [ -z "$GERR" ]; then
+  echo "Vajra guard: it could not create its private error file in the temp folder (${TMPDIR:-/tmp} is not writable), so every tool call is blocked (fail-closed). Make the temp folder writable and retry." >&3
+  DECIDED=1
+  exit 2
+fi
+exec 2>"$GERR" 4<"$GERR"
+GERR_OPEN=1
+/bin/rm -f "$GERR"
 
 VS="${HOME}/.claude/vajra"
 AUDIT_LOG="${VS}/audit.log"
@@ -91,8 +111,8 @@ block() {
 }
 
 allow() {
-  if [ -s "$GERR" ]; then
-    gerr_line
+  gerr_read
+  if [ "$GERR_OPEN" != 1 ] || [ -n "$GERR_BUF" ]; then
     block "an internal error occurred while checking it, so it is not allowed (fail-closed): ${GERR_LINE:-unknown error}"
   fi
   audit ALLOW "${TOOL:-unknown}" ""

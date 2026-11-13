@@ -975,6 +975,23 @@ r=1
 case "$INJ_ERR" in *"bad substitution"*) case "$INJ_ERR" in *"(fail-closed)"*) r=0 ;; esac ;; esac
 judge ALLOW "an injected error is named on stderr with the fail-closed reason" "$r"
 [ -z "$(ls -A "$INJ_TMP")" ]; judge ALLOW "the hook leaves no error file behind" $?
+# bhishma #218 M: while the hook checks, its error file has no name a leftover process could open and truncate.
+inject late '[ -e "$GERR" ] && { DECIDED=1; exit 7; }'
+inj_run "$INJ_BASH"; judge ALLOW "the error file is deleted by name before any check runs" $?
+[ -z "$(ls -A "$INJ_TMP")" ]; judge ALLOW "no error file is in the temp folder during the check" $?
+# Truncating what used to be the file's name changes nothing: the error is still seen through the hook's own fd.
+inject late 'inj() { local v; v="$(echo "${#PAYLOAD//x/y}")"; return 0; }; inj; : > "$GERR"'
+inj_run "$INJ_BASH"; judge BLOCK "an error is still seen after its old file name is truncated" $?
+# bhishma #218 L: a signal or a timeout kill blocks.
+for s in TERM HUP INT PIPE; do
+  inject late "kill -$s \$\$"
+  inj_run "$INJ_BASH"; judge BLOCK "inject[late] SIG$s blocks" $?
+done
+# An unwritable temp folder blocks every call, and says why.
+UT_ERR="$(printf '%s' "$INJ_BASH" | TMPDIR="$H/no-such-tmp" bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+judge BLOCK "an unwritable temp folder blocks" "$rc"
+case "$UT_ERR" in *"private error file"*"not writable"*) r=0 ;; *) r=1 ;; esac
+judge ALLOW "an unwritable temp folder is named in the message" "$r"
 
 # --- Latency ---------------------------------------------------------------
 LAT_JSON="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit -m \"wip\" && npm test -- --watch=false 2>&1 | tail -n 20"}}')"
