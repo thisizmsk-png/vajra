@@ -716,7 +716,8 @@ fn a_lead_descendant_that_outlives_its_link_to_the_lead_never_reaches_the_servic
         while !t.0.join("d").exists() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
-        let d: i32 = std::fs::read_to_string(t.0.join("d")).unwrap().trim().parse().unwrap();        match mode {
+        let d: i32 = std::fs::read_to_string(t.0.join("d")).unwrap().trim().parse().unwrap();
+        match mode {
             "lead_exits" => {
                 let _ = lead.0.wait();
                 // As the lead's watcher does once it has exited.
