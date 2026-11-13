@@ -287,6 +287,11 @@ pub struct App {
     /// Each core run's record, by run id: live until its protocol finalizes, so it is never listed as an orphan
     /// between tickets (6h).
     live_records: Mutex<HashMap<String, std::sync::Weak<record::CoreRecord>>>,
+    /// Each core run's open log, by run id (W2): `run_log_since` reads the held one, so it sees what is written.
+    live_logs: Mutex<HashMap<String, std::sync::Weak<runlog_store::RunLog>>>,
+    /// Every anchor this app session sent to a run's signed record, by run id, kept for the app's life (W2, bhishma F4):
+    /// only these confirm an anchor, and a reopened log must still hold the last one.
+    log_anchors: Arc<Mutex<HashMap<String, Vec<runlog::Anchor>>>>,
     /// Workers closed once finished (see `closeout`); persisted.
     closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
@@ -437,6 +442,8 @@ impl App {
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
             live_records: Mutex::new(HashMap::new()),
+            live_logs: Mutex::new(HashMap::new()),
+            log_anchors: Default::default(),
             closeout: closeout::Store::open(data),
             issued: Mutex::new(Default::default()),
             log,
@@ -2564,6 +2571,11 @@ pub mod record_ledger;
 pub mod runproto;
 pub mod verify;
 pub mod phases;
+pub mod runlog;
+pub mod runlog_store;
+mod runlog_app;
+#[cfg(test)]
+mod runlog_tests;
 pub mod worker_host;
 mod instance;
 mod arrivals;
