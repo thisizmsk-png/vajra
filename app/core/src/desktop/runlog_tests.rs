@@ -396,11 +396,82 @@ fn a_page_is_capped() {
 fn counting(l: &RunLog) -> Arc<Mutex<Vec<u64>>> {
     let told = Arc::new(Mutex::new(Vec::new()));
     let t = Arc::clone(&told);
-    l.set_notify(Box::new(move |run, seq| {
-        assert_eq!(run, RUN);
-        t.lock().unwrap().push(seq);
+    l.set_notify(Box::new(move |n| {
+        assert_eq!(n.run_id, RUN);
+        t.lock().unwrap().push(n.seq);
     }));
     told
+}
+
+fn notices(l: &RunLog) -> Arc<Mutex<Vec<runlog_store::Notice>>> {
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let g = Arc::clone(&got);
+    l.set_notify(Box::new(move |n| g.lock().unwrap().push(n.clone())));
+    got
+}
+
+#[test]
+fn each_notice_carries_the_written_entries_since_the_last_one() {
+    let d = scratch();
+    let l = RunLog::open(&d, RUN).unwrap();
+    let got = notices(&l);
+    for i in 1..=5 {
+        l.append(Source::Core, dispatched(i)).unwrap();
+    }
+    l.flush();
+    l.append(Source::Lead, Kind::Question { id: "q".into(), text: "?".into() }).unwrap();
+    l.append(Source::Core, dispatched(7)).unwrap();
+    l.flush();
+    let ns = got.lock().unwrap().clone();
+    // The notices chain: each starts where the last stopped, and together they carry every entry once, in order.
+    let mut at = 0;
+    for n in &ns {
+        assert_eq!(n.after, at);
+        assert_eq!(n.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), ((at + 1)..=n.seq).collect::<Vec<_>>());
+        at = n.seq;
+    }
+    assert_eq!(at, 7);
+    assert_eq!(ns.iter().flat_map(|n| n.entries.clone()).collect::<Vec<_>>(), l.since(0, 100).0);
+}
+
+#[test]
+fn a_burst_bigger_than_a_notice_is_cut_and_the_rest_left_to_since() {
+    let d = scratch();
+    let l = RunLog::open(&d, RUN).unwrap();
+    let got = notices(&l);
+    let n = runlog_store::NOTICE_MAX as u32 + 10;
+    for i in 1..=n {
+        l.append(Source::Core, dispatched(i)).unwrap();
+    }
+    l.flush();
+    let ns = got.lock().unwrap().clone();
+    assert_eq!(ns.last().unwrap().seq, u64::from(n));
+    let all = l.since(0, 500).0;
+    let mut at = 0;
+    for x in &ns {
+        assert_eq!(x.after, at);
+        let want = usize::try_from(x.seq - x.after).unwrap().min(runlog_store::NOTICE_MAX);
+        assert_eq!(x.entries, all[at as usize..at as usize + want], "the first entries after `after`, at most the cap");
+        at = x.seq;
+    }
+    // 74 ordinary entries land well inside one 100 ms batch, so one notice says seq 74 but carries only 64.
+    assert!(ns.iter().any(|x| x.seq - x.after > x.entries.len() as u64), "{:?}", ns.iter().map(|x| (x.after, x.seq, x.entries.len())).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_reopened_log_tells_only_what_it_writes_after_reopening() {
+    let d = scratch();
+    {
+        let l = RunLog::open(&d, RUN).unwrap();
+        l.append(Source::Core, dispatched(1)).unwrap();
+        l.flush();
+    }
+    let l = RunLog::open(&d, RUN).unwrap();
+    let got = notices(&l);
+    l.append(Source::Lead, Kind::Question { id: "q".into(), text: "?".into() }).unwrap();
+    l.flush();
+    let ns = got.lock().unwrap().clone();
+    assert_eq!((ns[0].after, ns[0].seq, ns[0].entries.len()), (1, 2, 1));
 }
 
 #[test]
@@ -427,9 +498,12 @@ fn nothing_is_told_before_it_is_written() {
     let d = scratch();
     let l = RunLog::open(&d, RUN).unwrap();
     let dir = d.clone();
-    l.set_notify(Box::new(move |_, seq| {
+    l.set_notify(Box::new(move |n| {
         let back = runlog_store::parse(&std::fs::read(dir.join(runlog_store::FILE)).unwrap());
-        assert!(back.entries.iter().any(|e| e.seq == seq), "seq {seq} told before it was on disk");
+        for e in &n.entries {
+            assert!(back.entries.contains(e), "seq {} told before it was on disk", e.seq);
+        }
+        assert!(back.entries.iter().any(|e| e.seq == n.seq), "seq {} told before it was on disk", n.seq);
     }));
     l.append(Source::Lead, Kind::Question { id: "q".into(), text: "?".into() }).unwrap();
     l.append(Source::Core, dispatched(2)).unwrap();
@@ -836,4 +910,17 @@ fn a_blank_line_inside_the_log_breaks_it_there() {
     assert_eq!(runlog_store::parse(doubled.as_bytes()).unreadable, Some(4), "a second trailing newline is a blank line");
     assert_eq!(runlog_store::parse(b"").entries.len(), 0);
     assert_eq!(runlog_store::parse(b"\n").unreadable, Some(1));
+}
+
+#[test]
+fn a_notice_serialises_to_the_shape_the_ui_reads() {
+    let e = entries(1).remove(0);
+    let n = runlog_store::Notice { run_id: RUN.into(), seq: 1, after: 0, entries: vec![e.clone()] };
+    let v = serde_json::to_value(&n).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["after", "entries", "run_id", "seq"]);
+    assert_eq!(v["entries"][0]["seq"], 1);
+    assert_eq!(v["entries"][0]["kind"], "dispatched");
+    assert_eq!(v["entries"][0]["hash"], e.hash);
 }
