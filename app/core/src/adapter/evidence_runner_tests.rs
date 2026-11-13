@@ -366,7 +366,7 @@ fn base(t: &Tmp) -> PathBuf {
 fn evidence_run<'a>(script: &'a Path, base: &'a Path, cmds: &'a [String], common: &'a Path, home: &'a Path) -> EvidenceRun<'a> {
     // The fake state dir under the fake HOME (leaked: a few bytes per test, so the borrow outlives the helper).
     let state_dir: &'a Path = Box::leak(home.join(".claude/vajra").into_boxed_path());
-    EvidenceRun { script, slug: SLUG, commands: cmds, base, git_common: common, home, state_dir, limit: Duration::from_secs(20) }
+    EvidenceRun { script, slug: SLUG, commands: cmds, base, git_common: common, home, state_dir, tool_path: &[], limit: Duration::from_secs(20) }
 }
 
 /// `run` under a fresh profile: each call gets its own tmp dir, as `run` requires.
@@ -710,6 +710,32 @@ fn the_evidence_write_follows_the_pinned_folder_not_a_path_swapped_after_it() {
     let out = go(&t, &evidence_run(&script, &base, &[swap], &common, &home));
     assert_eq!(out, RunOutcome::Failed("the evidence folder was replaced during the run".into()));
     assert!(!elsewhere.join(SLUG).exists() && !elsewhere.join("evidence.json").exists());
+}
+
+/// A tool installed outside the system dirs (a rustup `cargo`, a version manager's `node`) is found through the run's
+/// own environment when the user's PATH names its dir, and only then (#234 codex P2). Relative entries are dropped.
+#[test]
+fn a_run_finds_a_tool_on_the_users_path_outside_the_system_dirs() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("toolpath");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let bin = home.join(".cargo/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("vajra-fake-tool");
+    fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    let cmds = vec!["vajra-fake-tool".to_string()];
+    let path = vec![PathBuf::from("relative/bin"), bin.clone()];
+    let mut r = evidence_run(&script, &base, &cmds, &common, &home);
+    r.tool_path = &path;
+    assert!(matches!(go(&t, &r), RunOutcome::Ran { passed: true, .. }), "found on the user's PATH");
+    let r = evidence_run(&script, &base, &cmds, &common, &home);
+    assert!(matches!(go(&t, &r), RunOutcome::Ran { passed: false, .. }), "not found without it");
+    assert_eq!(run_path(&path), format!("{}:{}", bin.display(), SYSTEM_PATH.join(":")));
+    assert_eq!(run_path(&[PathBuf::from("/a:b"), PathBuf::from("/usr/bin")]), SYSTEM_PATH.join(":"));
 }
 
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.

@@ -242,6 +242,10 @@ pub struct EvidenceRun<'a> {
     pub home: &'a Path,
     /// The Vajra state dir: its key must have exactly one link before a run starts (M4).
     pub state_dir: &'a Path,
+    /// Where the commands find their tools: the user's resolved PATH (`userpath::current()`, the same one every
+    /// worker's spawn uses), so `cargo` from rustup or `node` from a version manager is found as in the verifier's
+    /// run. Only absolute entries are kept; the system dirs follow. The sandbox applies whatever a tool is.
+    pub tool_path: &'a [PathBuf],
     pub limit: Duration,
 }
 
@@ -268,6 +272,22 @@ pub enum SignOutcome {
     NoKey,
     /// Anything else (a different exit, a timeout, a first line outside the contract): treated as refused.
     Unknown(String),
+}
+
+/// The system dirs every run's PATH ends with.
+const SYSTEM_PATH: [&str; 6] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin"];
+
+/// The run's PATH: the user's tool dirs that are absolute plain paths (no `:`, no control character), then the system
+/// dirs, each once.
+fn run_path(tool_path: &[PathBuf]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let user = tool_path.iter().filter(|p| p.is_absolute()).filter_map(|p| p.to_str()).filter(|s| !s.contains(':') && !s.chars().any(char::is_control));
+    for s in user.map(str::to_string).chain(SYSTEM_PATH.iter().map(|s| s.to_string())) {
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out.join(":")
 }
 
 /// The evidence script's text: a plain file (no link), at most 256 KiB, UTF-8 with no NUL (it travels in argv).
@@ -346,7 +366,7 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     let wfd = wr.as_raw_fd();
     let mut cmd = std::process::Command::new(SANDBOX_EXEC);
     cmd.args(&argv).current_dir(&profile.worktree).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    cmd.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin").env("HOME", r.home).env("TMPDIR", &profile.tmp).env("LC_ALL", "C.UTF-8");
+    cmd.env_clear().env("PATH", run_path(r.tool_path)).env("HOME", r.home).env("TMPDIR", &profile.tmp).env("LC_ALL", "C.UTF-8");
     cmd.env("VAJRA_WALKTHROUGH_DIR", r.base).env("GIT_TERMINAL_PROMPT", "0").env("GIT_CONFIG_NOSYSTEM", "1");
     for (k, v) in git_env(&profile.tmp, r.git_common).into_iter().chain(cache_env(&profile.tmp)) {
         cmd.env(k, v);
