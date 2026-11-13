@@ -158,6 +158,32 @@ describe("followRunLog in a 4-worker run", () => {
     stop();
   });
 
+  it("a stop told while a read is pending outlives that read's older, healthy page", async () => {
+    const stops: Partial<Pick<RunLogNotice, "io_error" | "broken">>[] = [{ io_error: "the run log stopped at seq 3: disk full" }, { broken: { seq: 3, why: "unanchored" } }];
+    for (const state of stops) {
+      const c = core();
+      c.write(2);
+      const real = c.ipc.transport.call;
+      let release = () => {};
+      c.ipc.transport.call = async (cmd, args) => {
+        if (cmd !== "run_log_since") return real(cmd, args);
+        const healthy = await real(cmd, args); // the page as it was when asked: seq 2, no stop
+        await new Promise<void>((r) => (release = r));
+        return healthy;
+      };
+      let view = emptyRunLog;
+      const stop = followRunLog("r", (v) => (view = v));
+      await settle(); // the start read is held
+      c.write(1); c.tell(false, state); // every entry, plus the stop: no gap, so no further read
+      await settle();
+      release(); // the older page lands
+      await settle();
+      expect([seqs(view), view.ioError, view.broken]).toEqual([[1, 2, 3], state.io_error ?? null, state.broken ?? null]);
+      expect(c.calls()).toBe(1);
+      stop();
+    }
+  });
+
   it("ignores other runs and stops listening when stopped", async () => {
     const c = core();
     const stop = followRunLog("r", () => {});

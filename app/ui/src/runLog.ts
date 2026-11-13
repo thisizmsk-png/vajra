@@ -44,7 +44,8 @@ export function applyNotice(v: RunLogView, n: RunLogNotice): { view: RunLogView;
 export type RunLogStats = { notices: number; calls: number };
 
 /** Follow `runId`'s log: `onView` gets each new view. Returns the stop function; `stats` counts notices and calls. One read
- *  runs at a time; notices that arrive during it are applied after it, and a remaining gap costs one more read. */
+ *  runs at a time; notices that arrive during it are applied at once, a stop they bring outlives the read's older page,
+ *  and a gap they leave costs one more read after it. */
 export function followRunLog(
   runId: string,
   onView: (v: RunLogView) => void,
@@ -71,10 +72,17 @@ export function followRunLog(
       do {
         again = false;
         stats.calls++;
+        const asked = view;
         const page = await runLogSince(runId, lastSeq(view));
         if (stopped) return;
         const before = lastSeq(view);
-        show(applyPage(view, page));
+        // A notice applied while this read was pending is newer than its page: keep the stop it brought, or the page
+        // would hide it and a stopped writer may never send another notice.
+        show(applyPage(view, {
+          ...page,
+          io_error: view.ioError !== asked.ioError ? view.ioError : page.io_error,
+          broken: view.broken !== asked.broken ? view.broken : page.broken,
+        }));
         // A page is capped in the core: read on while it moved the view and more is written.
         if (lastSeq(view) > before && lastSeq(view) < page.head_seq) again = true;
       } while (again && !stopped);
