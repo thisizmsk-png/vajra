@@ -14,6 +14,8 @@
 //!   still allows name lookups, which can carry small amounts of data out, and loopback, which reaches any local
 //!   service such as a proxy: it is not a data-loss boundary;
 //! - the key must have exactly one link (a hard link would be a path no deny names);
+//! - the engine script's own tools come only from the system dirs; the check commands use the user's PATH, so a
+//!   check is only as good as the user's toolchain (a tool replaced in a folder the user can write runs as the check);
 //! - the run is killed at `evidence_run_max_s`.
 //!
 //! The launch-time probe (`key_probe`) checks the key's link count, reads the state dir under the same profile (the
@@ -274,7 +276,15 @@ pub enum SignOutcome {
     Unknown(String),
 }
 
-/// The system dirs every run's PATH ends with.
+/// The engine script's own PATH: root-owned, SIP-protected system dirs only (macOS ships bash, jq and git there).
+const SCRIPT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// Sourced by every bash in the run (BASH_ENV). The script's bash is level 0 and keeps `SCRIPT_PATH`; the bash it
+/// starts for each check command is level 1 and switches to the user's PATH, which its children inherit. Constant
+/// text: the PATH itself only ever travels in `VAJRA_CHECK_PATH`.
+const CHECK_ENV: &str = "if [ \"${VAJRA_RUNNER_LEVEL:-0}\" = 1 ]; then PATH=\"$VAJRA_CHECK_PATH\"; export PATH; fi\nexport VAJRA_RUNNER_LEVEL=$(( ${VAJRA_RUNNER_LEVEL:-0} + 1 ))\n";
+
+/// The system dirs every check command's PATH ends with.
 const SYSTEM_PATH: [&str; 6] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin"];
 
 /// The run's PATH: the user's tool dirs that are absolute plain paths (no `:`, no control character), then the system
@@ -366,7 +376,15 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     let wfd = wr.as_raw_fd();
     let mut cmd = std::process::Command::new(SANDBOX_EXEC);
     cmd.args(&argv).current_dir(&profile.worktree).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    cmd.env_clear().env("PATH", run_path(r.tool_path)).env("HOME", r.home).env("TMPDIR", &profile.tmp).env("LC_ALL", "C.UTF-8");
+    // Two PATHs (bhishma F1 on 2e7e304f). The script's own tools (bash, jq, git, mktemp, ...) come only from the
+    // root-owned system dirs: from a folder the user can write, a planted jq or bash could forge a passing bundle that
+    // sign would accept. The check commands get the user's PATH: `CHECK_ENV`, sourced by every bash through
+    // BASH_ENV, switches to it one level down, in the `bash -c "$cmd"` the script starts for each command.
+    let check_env = profile.tmp.join("check-env.sh");
+    if std::fs::write(&check_env, CHECK_ENV).is_err() {
+        return RunOutcome::Failed("couldn't prepare the run's folders".into());
+    }
+    cmd.env_clear().env("PATH", SCRIPT_PATH).env("VAJRA_CHECK_PATH", run_path(r.tool_path)).env("BASH_ENV", &check_env).env("HOME", r.home).env("TMPDIR", &profile.tmp).env("LC_ALL", "C.UTF-8");
     cmd.env("VAJRA_WALKTHROUGH_DIR", r.base).env("GIT_TERMINAL_PROMPT", "0").env("GIT_CONFIG_NOSYSTEM", "1");
     for (k, v) in git_env(&profile.tmp, r.git_common).into_iter().chain(cache_env(&profile.tmp)) {
         cmd.env(k, v);

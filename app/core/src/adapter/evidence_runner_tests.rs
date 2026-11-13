@@ -337,7 +337,7 @@ if [ "$mode" = "--run-only" ]; then
   slug="$1"; shift
   {{ : >&3; }} 2>/dev/null || {{ echo "no fd 3" >&2; exit 2; }}
   rc=0
-  for c in "$@"; do ( exec 3>&-; /bin/sh -c "$c" ) || rc=1; done
+  for c in "$@"; do bash -c "$c" 3>&- || rc=1; done
   printf '{line}' >&3
   exec 3>&-
   exit $rc
@@ -736,6 +736,56 @@ fn a_run_finds_a_tool_on_the_users_path_outside_the_system_dirs() {
     assert!(matches!(go(&t, &r), RunOutcome::Ran { passed: false, .. }), "not found without it");
     assert_eq!(run_path(&path), format!("{}:{}", bin.display(), SYSTEM_PATH.join(":")));
     assert_eq!(run_path(&[PathBuf::from("/a:b"), PathBuf::from("/usr/bin")]), SYSTEM_PATH.join(":"));
+}
+
+/// The engine script's own tools come only from the system dirs, while the check commands see the user's PATH
+/// (bhishma F1 on 2e7e304f). A planted `bash` that reports every command passed, and a planted `jq` that prints a
+/// forged bundle, both sit in a folder on the user's PATH: neither is used by the script.
+#[test]
+fn a_planted_bash_or_jq_on_the_users_path_never_runs_as_the_scripts_own() {
+    if !macos() || !Path::new("/usr/bin/jq").is_file() {
+        return eprintln!("skipped: sandbox-exec or the system jq");
+    }
+    let t = Tmp::new("planted");
+    let (base, home, common) = (base(&t), t.home(), t.0.join("repo.git"));
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let plant = |name: &str, body: &str| {
+        fs::write(bin.join(name), body).unwrap();
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    plant("bash", "#!/bin/sh\nexit 0\n");
+    plant("jq", &format!("#!/bin/sh\necho '{{\"slug\":\"{SLUG}\",\"forged\":true}}'\n"));
+    plant("vajra-fake-tool", "#!/bin/sh\nexit 0\n");
+    // The script builds its line with jq, like the engine's, and runs each command with bash.
+    let script = script(
+        &t,
+        "jq-line",
+        r#"shift; slug="$1"; shift
+rc=0
+for c in "$@"; do bash -c "$c" 3>&- || rc=1; done
+jq -nc --arg s "$slug" '{slug:$s,results:[],git:{head:"x"}}' >&3
+exec 3>&-
+exit $rc"#,
+    );
+    let path = vec![bin.clone()];
+    // The line is the system jq's, not the planted one's.
+    let cmds = vec!["true".to_string()];
+    let mut r = evidence_run(&script, &base, &cmds, &common, &home);
+    r.tool_path = &path;
+    assert!(matches!(go(&t, &r), RunOutcome::Ran { .. }));
+    assert_eq!(fs::read(base.join(SLUG).join("evidence.json")).unwrap(), br#"{"slug":"deliver-20261113-0800","results":[],"git":{"head":"x"}}"#, "the planted jq wrote the line");
+    // A failing command stays failed: the script's bash is /bin/bash, not the planted one.
+    let cmds = vec!["exit 1".to_string()];
+    let mut r = evidence_run(&script, &base, &cmds, &common, &home);
+    r.tool_path = &path;
+    assert!(matches!(go(&t, &r), RunOutcome::Ran { passed: false, .. }), "the planted bash ran the command");
+    // The check commands themselves still find the user's tools.
+    let cmds = vec!["vajra-fake-tool && [ \"$(command -v jq)\" = \"$HOME/.local/bin/jq\" ]".to_string()];
+    let mut r = evidence_run(&script, &base, &cmds, &common, &home);
+    r.tool_path = &path;
+    assert!(matches!(go(&t, &r), RunOutcome::Ran { passed: true, .. }), "a check command sees the user's PATH");
 }
 
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
