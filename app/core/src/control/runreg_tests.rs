@@ -502,6 +502,31 @@ fn a_peer_outside_every_lead_tree_reads_no_more_than_the_small_cap() {
     assert_eq!(raw(&sock, &format!("{}\n", req(RUN, &token, "plan_tasks", plan)))[0]["error"], "request_too_large");
 }
 
+/// The socket `App::serve_control` opens routes a run lead's `vajra-run` call to the app's own registry
+/// (`App::run_leads`), the same one runs are registered in, not a fresh one: a call for a run registered there with the
+/// wrong token answers `run_token`, which only a registry holding that run can say, and a run it does not hold answers
+/// `run_gone`.
+#[test]
+fn the_apps_served_socket_routes_vajra_run_calls_to_its_own_run_registry() {
+    let t = Tmp::new("app");
+    let (data, home) = (t.0.join("d"), t.0.join("h"));
+    std::fs::create_dir_all(&home).unwrap();
+    let app = crate::desktop::App::open(&data, &home).unwrap();
+    app.run_leads.register(RUN, proto(), sha256::digest(b"the right token"));
+    let w = app.serve_control().expect("the app holding the locks serves");
+    let sock = crate::control::socket_path(&data);
+    let t0 = Instant::now();
+    while std::os::unix::net::UnixStream::connect(&sock).is_err() {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the socket never accepted");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let to = Duration::from_secs(10);
+    let call = |run: &str| super::super::socket::request_run(&sock, run, "a wrong token", "list_workers", &json!({}), to).unwrap();
+    assert_eq!(call(RUN)["error"], "run_token", "the app's registry holds the run");
+    assert_eq!(call("20261113-0900")["error"], "run_gone");
+    drop(w);
+}
+
 #[test]
 fn a_service_request_still_works_beside_the_run_route() {
     let t = Tmp::new("svc");

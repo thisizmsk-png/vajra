@@ -252,9 +252,12 @@ struct Book {
     closed: bool,
     /// Earlier app lives' tickets, read back at start (`replay`): ended, shown, never acted on.
     past: BTreeMap<String, TicketView>,
-    /// Runs whose `tickets.jsonl` was over the replay cap: none of their tickets is recovered from a prefix, and none
-    /// is dispatched in them.
-    unreplayable: std::collections::BTreeSet<String>,
+    /// Runs whose history replay could not read whole (over a size budget): their ticket ids past what was read are
+    /// unknown, so nothing new is dispatched into them (#178 codex P2).
+    incomplete: std::collections::BTreeSet<String>,
+    /// The runs folder itself could not be listed whole at start (#178 codex): which runs have history is unknown, so
+    /// no run takes a dispatch this life.
+    unlisted: bool,
 }
 
 impl Book {
@@ -285,6 +288,9 @@ struct Shared {
     /// worker that ignores its kill).
     #[cfg(test)]
     kill_test: Mutex<Option<(Duration, bool)>>,
+    /// Tests only: each stop delivery blocks this long first (a supervisor kill waiting out its grace).
+    #[cfg(test)]
+    kill_delay: Mutex<Option<Duration>>,
 }
 
 /// The runtime. Cheap to clone.
@@ -392,9 +398,11 @@ pub enum DispatchError {
     Exists,
     /// The app is quitting: nothing new is queued.
     Closed,
-    /// The run's `tickets.jsonl` was too large to read back whole at start, so which ids it used is not known: nothing
-    /// more is dispatched in that run (a new run starts clean).
-    Unreplayable,
+    /// This run's recorded history was not read whole at start (too large, unreadable, a rejected line, or past the run
+    /// cap), so which ticket ids it
+    /// used is unknown: nothing new is dispatched into it (a new run is unaffected). When the runs folder itself could
+    /// not be listed, every run answers this.
+    HistoryIncomplete,
 }
 
 impl WorkerRuntime {
@@ -411,6 +419,8 @@ impl WorkerRuntime {
             swept: AtomicU64::new(0), sweep_survived: AtomicU64::new(0), replay_gaps: AtomicU64::new(0),
             #[cfg(test)]
             kill_test: Mutex::default(),
+            #[cfg(test)]
+            kill_delay: Mutex::default(),
         }));
         rt.replay();
         rt
@@ -426,41 +436,74 @@ impl WorkerRuntime {
         let data = &self.0.cfg.data;
         let runs_dir = data.join("runs");
         // The listing gives names only; each file is then opened by the no-follow descent (`open_record_read`).
-        let real_dir = std::fs::symlink_metadata(&runs_dir).is_ok_and(|m| m.is_dir());
-        let mut runs: Vec<String> = if real_dir {
-            std::fs::read_dir(&runs_dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).collect()
-        } else {
-            Vec::new()
-        };
+        // A run the scan leaves out must not look new (#178 codex P1): its ticket ids and task refs may be taken. A
+        // listing that fails, or fails on an entry, may have dropped any run, so every dispatch is refused; a run past
+        // the run cap is counted as a gap and refused like an oversized history. A missing folder means no history.
+        let mut unlisted = false;
+        let mut runs: Vec<String> = Vec::new();
+        match std::fs::symlink_metadata(&runs_dir) {
+            Ok(m) if m.is_dir() => match std::fs::read_dir(&runs_dir) {
+                Ok(rd) => {
+                    for e in rd {
+                        match e {
+                            // A name that isn't UTF-8 is no run id a dispatch can name.
+                            Ok(e) => runs.extend(e.file_name().into_string().ok()),
+                            Err(_) => unlisted = true,
+                        }
+                    }
+                }
+                Err(_) => unlisted = true,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // A link or file in the folder's place, or a stat that fails: what it hides is unknown.
+            _ => unlisted = true,
+        }
+        // Run ids are time-ordered (`YYYYMMDD-HHMM`) and the folder is never pruned, so the newest runs are kept and the
+        // oldest are the ones left out (#178 review): the runs a restart is likely to resume stay dispatchable.
         runs.sort();
-        runs.truncate(REPLAY_MAX_RUNS);
-        let mut gaps = 0;
+        let past_cap: Vec<String> = runs.drain(..runs.len().saturating_sub(REPLAY_MAX_RUNS)).collect();
+        let mut gaps = past_cap.len() as u64 + u64::from(unlisted);
         let mut past = BTreeMap::new();
-        let mut unreplayable = std::collections::BTreeSet::new();
+        let mut incomplete: std::collections::BTreeSet<String> = past_cap.into_iter().collect();
         for run in &runs {
-            let (views, g) = replay_run(data, run);
-            gaps += g;
-            match views {
-                Some(v) => past.extend(v),
-                None => {
-                    unreplayable.insert(run.clone());
+            let mut r = replay_run(data, run);
+            gaps += r.gaps;
+            // A torn tail (a crash mid-write) is ended here, once, with a newline and the torn marker (#178 review), so
+            // no later line joins the fragment and the next start can tell the fragment apart from a damaged line: a
+            // rejected line followed by the marker is the tear replay ended, a gap only. If the repair can't be
+            // written, any later line would join the fragment, so the run takes no dispatch this life.
+            if r.torn && !r.incomplete {
+                let ended = open_record(data, run).and_then(|mut f| f.write_all(format!("\n{TORN_MARKER}\n").as_bytes()));
+                if ended.is_err() {
+                    self.0.record_failures.fetch_add(1, AtomicOrdering::Relaxed);
+                    r.incomplete = true;
                 }
             }
-        }
-        let mut ended = Vec::new();
-        for v in past.values_mut().filter(|v| v.state != State::Ended) {
-            finish_view(v, Outcome::Failed, "abandoned");
-            v.detail = Some("app_restarted".into());
-            v.summary = Some(summary(v, &self.0.cfg.redact));
-            ended.push(v.clone());
-        }
-        for v in &ended {
-            self.record(v, "outcome");
+            // A history too large to read whole is not authoritative (#178 codex P2): a ticket that looks unended in
+            // the prefix may have ended past it. Its tickets end in memory only (`history_incomplete`), nothing is
+            // written for them (a write past the read budget would repeat every start), and the run takes no new
+            // dispatch, since its ids past the prefix are unknown.
+            if r.incomplete {
+                incomplete.insert(run.clone());
+            }
+            for mut v in r.views.into_values() {
+                if v.state != State::Ended {
+                    finish_view(&mut v, Outcome::Failed, "abandoned");
+                    v.detail = Some(if r.incomplete { "history_incomplete" } else { "app_restarted" }.into());
+                    v.summary = Some(summary(&v, &self.0.cfg.redact));
+                    if !r.incomplete {
+                        // The tail was ended above, so the recovery line starts on a fresh line.
+                        self.record(&v, "outcome");
+                    }
+                }
+                past.insert(v.id.clone(), v);
+            }
         }
         self.0.replay_gaps.store(gaps, AtomicOrdering::Relaxed);
         let mut b = crate::lock(&self.0.book);
         b.past = past;
-        b.unreplayable = unreplayable;
+        b.incomplete = incomplete;
+        b.unlisted = unlisted;
         // A ticket's `seq` names its supervisor session (`core-<seq>-a<n>`), and the bus keeps a session's output on
         // disk (`<data>/spill`) across app lives: each life numbers from its start time in milliseconds, so no later
         // life's worker reads an earlier one's output under the same name.
@@ -469,7 +512,8 @@ impl WorkerRuntime {
     }
 
     /// How many `tickets.jsonl` lines the replay at start could not use (a partial last line, a damaged or oversized
-    /// line, a line for another run, or a file over the size cap). Non-zero means an earlier life's view has gaps.
+    /// line, a line for another run, or a file over the size cap), plus one per run left out past the run cap and one
+    /// for a runs folder that could not be listed whole. Non-zero means an earlier life's view has gaps.
     pub fn replay_gaps(&self) -> u64 {
         self.0.replay_gaps.load(AtomicOrdering::Relaxed)
     }
@@ -505,6 +549,11 @@ impl WorkerRuntime {
         if crate::lock(&self.0.kill_test).is_some_and(|(_, hold)| hold) {
             return;
         }
+        // Stands in for the supervisor waiting out its grace on a worker that ignores SIGHUP.
+        #[cfg(test)]
+        if let Some(d) = *crate::lock(&self.0.kill_delay) {
+            std::thread::sleep(d);
+        }
         let _ = self.0.sup.kill(sid);
     }
 
@@ -532,8 +581,8 @@ impl WorkerRuntime {
         if b.closed {
             return Err(DispatchError::Closed);
         }
-        if b.unreplayable.contains(&s.run) {
-            return Err(DispatchError::Unreplayable);
+        if b.unlisted || b.incomplete.contains(&job.spec().run) {
+            return Err(DispatchError::HistoryIncomplete);
         }
         let id = match &mut job {
             Job::Task(s) if b.taken(&id_of(s, &s.task)) => return Err(DispatchError::Exists),
@@ -560,9 +609,8 @@ impl WorkerRuntime {
             receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
-        // The ticket's first line, before dispatch answers: one still waiting for a seat when the app crashes is
-        // replayed (ended, its id kept taken) instead of vanishing. Written under the book lock, so no pump can start
-        // the ticket and write a later line ahead of it.
+        // Recorded on acceptance, under the book lock, before it can wait or start (#178 codex P2): a ticket held behind
+        // a busy seat or a cap when the app crashes is replayed and ended, and its id stays taken.
         self.record(&view, "queued");
         b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None, integration: None });
         drop(b);
@@ -635,9 +683,15 @@ impl WorkerRuntime {
     }
 
     /// App quit (6c-3): refuse new tickets, end every live one (`failed`, `abandoned`, detail `app_quit`; queued ones at
-    /// once, running ones by their attempt's own kill and descendant sweep), and wait at most `wait` for them to end.
-    /// Returns the ids still not ended when it gave up: the supervisor's shutdown that follows kills their groups.
+    /// once, running ones by their attempt's own kill and descendant sweep), and wait at most `wait` in all.
+    ///
+    /// The deadline is taken first and stops are delivered off this thread, so a worker that ignores SIGHUP (the
+    /// supervisor's kill waits its grace) never stretches the budget (#177 codex P2). A ticket still not ended at the
+    /// deadline (inside `prepare` or `finish`, with no harness the stop could reach) is ended here and its outcome line
+    /// written before `quit` returns (#177 codex P1); its thread's later writes are ignored, since an ended ticket is
+    /// never changed again. Returns the ids ended that way: the supervisor's shutdown that follows kills their groups.
     pub fn quit(&self, wait: Duration) -> Vec<String> {
+        let deadline = Instant::now() + wait;
         let live: Vec<String> = {
             let mut b = crate::lock(&self.0.book);
             b.closed = true;
@@ -649,27 +703,61 @@ impl WorkerRuntime {
             }
             ids
         };
-        self.kill_where(|e| live.contains(&e.view.id), KillReason::Abandoned);
-        let deadline = Instant::now() + wait;
-        let mut b = crate::lock(&self.0.book);
-        loop {
-            let left: Vec<String> = live.iter().filter(|id| b.tickets.get(*id).is_some_and(|e| e.view.state != State::Ended)).cloned().collect();
-            let now = Instant::now();
-            if left.is_empty() || now >= deadline {
-                return left;
-            }
-            b = self.0.changed.wait_timeout(b, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+        let sessions = self.mark_killed(|e| live.contains(&e.view.id), KillReason::Abandoned);
+        if !sessions.is_empty() {
+            let rt = self.clone();
+            // Delivered in the background: `Supervisor::kill` may wait out a grace per session.
+            let _ = std::thread::Builder::new().name("vajra-quit-stops".into()).spawn(move || {
+                for s in sessions {
+                    rt.kill_session(&s);
+                }
+            });
         }
+        let left = {
+            let mut b = crate::lock(&self.0.book);
+            loop {
+                let left: Vec<String> = live.iter().filter(|id| b.tickets.get(*id).is_some_and(|e| e.view.state != State::Ended)).cloned().collect();
+                let now = Instant::now();
+                if left.is_empty() || now >= deadline {
+                    break left;
+                }
+                b = self.0.changed.wait_timeout(b, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+            }
+        };
+        // The budget is spent: whatever is still live ends now, its line written before the app goes on to exit.
+        let mut ended = Vec::new();
+        {
+            let mut b = crate::lock(&self.0.book);
+            for id in &left {
+                let Some(e) = b.tickets.get_mut(id) else { continue };
+                if e.view.state == State::Ended {
+                    continue;
+                }
+                let (o, r) = kill_outcome(KillReason::Abandoned);
+                finish_view(&mut e.view, o, r);
+                e.view.summary = Some(summary(&e.view, &self.0.cfg.redact));
+                e.session = None;
+                self.record(&e.view, "outcome");
+                ended.push(e.view.clone());
+            }
+        }
+        for v in &ended {
+            if let Some(h) = &self.0.hooks.on_outcome {
+                h(v);
+            }
+        }
+        self.0.changed.notify_all();
+        left
     }
 
-    fn kill_where(&self, pick: impl Fn(&Entry) -> bool, reason: KillReason) -> usize {
+    /// Mark the picked live tickets killed for `reason`: queued ones end at once (their line written, `on_outcome`
+    /// called); returns the running ones' sessions, for the caller to stop.
+    fn mark_killed(&self, pick: impl Fn(&Entry) -> bool, reason: KillReason) -> Vec<String> {
         let mut sessions = Vec::new();
         let mut ended = Vec::new();
-        let n = {
+        {
             let mut b = crate::lock(&self.0.book);
-            let mut n = 0;
             for e in b.tickets.values_mut().filter(|e| pick(e) && e.view.state != State::Ended) {
-                n += 1;
                 e.kill.get_or_insert(reason);
                 match e.view.state {
                     State::Queued => {
@@ -681,17 +769,21 @@ impl WorkerRuntime {
                     _ => sessions.extend(e.session.clone()),
                 }
             }
-            n
-        };
+        }
         for v in &ended {
             if let Some(h) = &self.0.hooks.on_outcome {
                 h(v);
             }
         }
-        for s in sessions {
+        self.0.changed.notify_all();
+        sessions
+    }
+
+    fn kill_where(&self, pick: impl Fn(&Entry) -> bool, reason: KillReason) -> usize {
+        let n = crate::lock(&self.0.book).tickets.values().filter(|e| pick(e) && e.view.state != State::Ended).count();
+        for s in self.mark_killed(&pick, reason) {
             self.kill_session(&s);
         }
-        self.0.changed.notify_all();
         self.pump();
         n
     }
@@ -845,6 +937,10 @@ impl WorkerRuntime {
         let view = {
             let mut b = crate::lock(&self.0.book);
             let Some(e) = b.tickets.get_mut(id) else { return };
+            // Ended meanwhile (`quit` past its budget): an ended ticket is never changed or recorded again.
+            if e.view.state == State::Ended {
+                return;
+            }
             e.view.dispatch_head = Some(t.dispatch_head.clone());
             e.view.worktree = Some(t.wt.clone());
             e.tree = Some(t.clone());
@@ -854,7 +950,15 @@ impl WorkerRuntime {
         if let Some(h) = &self.0.hooks.on_dispatch {
             h(&view);
         }
-        let launch = match Launch::build(&self.0.cfg, &job, &seat, &t) {
+        // A steering channel opened in `build` is recorded on the ticket at once (`harness_session`), before anything
+        // there can still fail (flags, the gateway home) or the spawn does: every ending then retires it through
+        // `on_outcome`, so a failed launch never leaves its control dir and nonce registered (#179 codex P2).
+        let opened = |sid: &str| {
+            if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id).filter(|e| e.view.state != State::Ended) {
+                e.view.harness_session = Some(sid.to_string());
+            }
+        };
+        let launch = match Launch::build(&self.0.cfg, &job, &seat, &t, &opened) {
             Ok(l) => l,
             Err(reason) => return self.end(id, Outcome::Failed, reason, None),
         };
@@ -994,7 +1098,7 @@ impl WorkerRuntime {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
         let tty = self.0.sup.tty(&sid).ok().flatten();
-        if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
+        if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id).filter(|e| e.view.state != State::Ended) {
             e.session = Some(sid.clone());
             e.view.attempt = n;
             e.view.harness_session = l.session_id.clone();
@@ -1100,7 +1204,7 @@ impl WorkerRuntime {
                 let diff = snap.commit.as_deref().map(|c| self.0.gw.diff_stat(t, c));
                 {
                     let mut b = crate::lock(&self.0.book);
-                    if let Some(e) = b.tickets.get_mut(id) {
+                    if let Some(e) = b.tickets.get_mut(id).filter(|e| e.view.state != State::Ended) {
                         e.view.commit = snap.commit.clone();
                         e.view.task_ref = snap.task_ref.clone();
                         e.view.files = snap.files.clone();
@@ -1192,6 +1296,10 @@ impl WorkerRuntime {
     }
 }
 
+/// The line replay writes after a torn tail it ended (`replay`): the rejected line just before it is that fragment, a
+/// gap only, not a damaged record (#178 review). Never written anywhere else.
+const TORN_MARKER: &str = r#"{"v":1,"event":"torn"}"#;
+
 /// `<data>/runs/<run>/tickets.jsonl`, opened for append. `<data>` is the core's own canonical dir; `runs` and `<run>`
 /// are made (0700) and opened relative to their parent's descriptor with `O_NOFOLLOW | O_DIRECTORY`, and the file
 /// with `O_NOFOLLOW`, so nothing on the way is a link. A run id is one path component.
@@ -1218,18 +1326,15 @@ fn open_record(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::Fi
             return Err(std::io::Error::last_os_error());
         }
     }
-    regular(crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0o600)?)
-}
-
-/// The ticket record, only when it is a regular file. Opened `O_NONBLOCK`, so a FIFO (or a device) planted in its place
-/// cannot hold the open, and so `App::open` or the runtime's replay, waiting for a writer or reader. It is refused
-/// here, before any byte is read or written. On a regular file `O_NONBLOCK` changes nothing.
-fn regular(f: std::fs::File) -> std::io::Result<std::fs::File> {
-    if f.metadata()?.is_file() {
-        Ok(f)
-    } else {
-        Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "tickets.jsonl is not a regular file"))
+    // Non-blocking (#178 review): a FIFO with no reader planted in the file's place would block a plain open forever, and
+    // `add` records under the book lock, so every book user would hang with it. A writer opening a reader-less FIFO gets
+    // ENXIO instead (counted in `record_failures`), and anything opened that is not a regular file is refused before a
+    // byte is written. O_NONBLOCK changes nothing for a regular file's writes.
+    let f = crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0o600)?;
+    if !f.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "tickets.jsonl is not a regular file"));
     }
+    Ok(f)
 }
 
 /// `<data>/runs/<run>/tickets.jsonl` for reading, by the same no-follow descent as `open_record`, creating nothing.
@@ -1244,7 +1349,13 @@ fn open_record_read(data: &std::path::Path, run: &str) -> std::io::Result<std::f
         let c = std::ffi::CString::new(name).map_err(|_| bad())?;
         dir = crate::preferences::open_at(&dir, &c, dir_flags, 0)?;
     }
-    regular(crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0)?)
+    // Non-blocking (#178 codex P1): a FIFO planted in the file's place would block a plain open forever, and replay runs
+    // while the runtime is built. The opened descriptor must be a regular file; anything else is refused unread.
+    let f = crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0)?;
+    if !f.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "tickets.jsonl is not a regular file"));
+    }
+    Ok(f)
 }
 
 /// The most of one run's `tickets.jsonl` that replay reads, and the longest line it takes.
@@ -1319,43 +1430,80 @@ impl StoredTicket {
 
 /// A worker an earlier life left running that the start-up reconcile killed (6d2d): its ticket ends here
 /// `failed`/`abandoned` with detail `app_crashed`, in the run's own `tickets.jsonl`, before this life's replay reads it.
-/// A ticket the file has no line for, or one already ended, is left alone. Returns whether a line was written.
+/// A ticket the file has no line for, or one already ended, is left alone, and so is a history replay cannot read
+/// whole (`Replayed::incomplete`): its unended tickets may have ended past what was read (#176 review), so nothing is
+/// appended to it. Returns whether a line was written.
 pub(crate) fn record_crashed(data: &std::path::Path, run: &str, ticket: &str) -> bool {
-    // A file over the replay cap is not recovered from, so nothing is appended to it either.
-    let (Some(mut views), _) = replay_run(data, run) else { return false };
-    let Some(v) = views.get_mut(ticket).filter(|v| v.state != State::Ended) else { return false };
+    let mut r = replay_run(data, run);
+    if r.incomplete {
+        return false;
+    }
+    let Some(v) = r.views.get_mut(ticket).filter(|v| v.state != State::Ended) else { return false };
     finish_view(v, Outcome::Failed, "abandoned");
     v.detail = Some("app_crashed".into());
     v.summary = Some(summary(v, &Redactor::default()));
     let line = json!({"v": 1, "event": "outcome", "ticket": v});
-    // After a crash the last line may be torn: start a fresh one, so this line is not lost with it.
-    let torn = crate::control::fsx::ends_with_newline(&data.join("runs").join(run).join("tickets.jsonl")).is_ok_and(|nl| !nl);
-    let text = format!("{}{line}\n", if torn { "\n" } else { "" });
+    // A torn tail is ended with the torn marker first, as `replay` does, so this line does not join the fragment and
+    // the next replay tells the fragment apart from a damaged line.
+    let text = if r.torn { format!("\n{TORN_MARKER}\n{line}\n") } else { format!("{line}\n") };
     open_record(data, run).and_then(|mut f| f.write_all(text.as_bytes())).is_ok()
 }
 
-/// What replay read back from one run's file: the last view of each ticket, and how many lines it could not use.
-/// `None` when the file is over `REPLAY_MAX_FILE`: then nothing of it is taken as the run's state.
-fn replay_run(data: &std::path::Path, run: &str) -> (Option<BTreeMap<String, TicketView>>, u64) {
+/// What replay read back from one run's file.
+struct Replayed {
+    /// The last view of each ticket.
+    views: BTreeMap<String, TicketView>,
+    /// Lines (or files) it could not use.
+    gaps: u64,
+    /// The history was not read whole: the file is over the read budget (so `views` is a prefix), it could not be
+    /// opened or read, or a whole line in it was rejected (#178 codex: that line may be the only copy of a ticket's id).
+    /// No unended ticket in it may be taken as crashed, and the run's used ids are unknown, so it takes no dispatch. A
+    /// partial last line alone does not make it incomplete: that is the crash's own torn write, whose `add` never
+    /// returned, so no caller holds its id and no worktree was made for it. Nor does a rejected line followed by the
+    /// torn marker: that is such a fragment, ended by an earlier start's replay.
+    incomplete: bool,
+    /// The file ends in a partial line, which `replay` ends with the torn marker before anything else is written.
+    torn: bool,
+}
+
+fn replay_run(data: &std::path::Path, run: &str) -> Replayed {
     use std::io::Read;
-    let mut out = BTreeMap::new();
-    let Ok(f) = open_record_read(data, run) else { return (Some(out), 0) };
+    let mut out = Replayed { views: BTreeMap::new(), gaps: 0, incomplete: false, torn: false };
+    let f = match open_record_read(data, run) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+        // A special file, or one that can't be opened: refused unread, counted, and the run's ids are unknown.
+        Err(_) => {
+            out.gaps = 1;
+            out.incomplete = true;
+            return out;
+        }
+    };
     let mut raw = Vec::new();
     if f.take(REPLAY_MAX_FILE + 1).read_to_end(&mut raw).is_err() {
-        return (Some(out), 1);
+        out.gaps = 1;
+        out.incomplete = true;
+        return out;
     }
     let mut gaps = 0;
-    // Past the cap the later lines (a ticket's outcome, or a ticket first seen there) are unread: a prefix is not the
-    // run's latest state, so none of it is recovered (`None`).
+    // Past the budget the later lines (a ticket's outcome, or a ticket first seen there) are unread: the prefix is not
+    // the run's latest state, so the run is incomplete and none of its unended tickets is written ended.
     if raw.len() as u64 > REPLAY_MAX_FILE {
-        return (None, 1);
+        raw.truncate(REPLAY_MAX_FILE as usize);
+        gaps += 1;
+        out.incomplete = true;
     }
     // Only newline-terminated lines are whole: a crash mid-write leaves a partial last line, which is dropped.
     let whole = raw.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     if whole < raw.len() {
         gaps += 1;
+        out.torn = true;
     }
-    for line in raw[..whole].split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+    let lines: Vec<&[u8]> = raw[..whole].split(|&b| b == b'\n').filter(|l| !l.is_empty()).collect();
+    for (i, line) in lines.iter().enumerate() {
+        if *line == TORN_MARKER.as_bytes() {
+            continue;
+        }
         let parsed = (line.len() <= REPLAY_MAX_LINE)
             .then(|| serde_json::from_slice::<StoredLine>(line).ok())
             .flatten()
@@ -1363,12 +1511,19 @@ fn replay_run(data: &std::path::Path, run: &str) -> (Option<BTreeMap<String, Tic
             .and_then(|l| l.ticket.into_view(run));
         match parsed {
             Some(v) => {
-                out.insert(v.id.clone(), v);
+                out.views.insert(v.id.clone(), v);
             }
-            None => gaps += 1,
+            None => {
+                gaps += 1;
+                // A fragment an earlier replay ended (the marker follows it) is no lost record.
+                if lines.get(i + 1) != Some(&TORN_MARKER.as_bytes()) {
+                    out.incomplete = true;
+                }
+            }
         }
     }
-    (Some(out), gaps)
+    out.gaps = gaps;
+    out
 }
 
 /// The retry policy's waits for one ticket: the configured clock, or a real wait that ends early when the ticket is
@@ -1587,7 +1742,9 @@ impl Launch {
         supported.map(|()| (engine, kind)).map_err(|u| u.reason)
     }
 
-    fn build(cfg: &Config, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket) -> Result<Launch, &'static str> {
+    /// `opened` is called with the worker's session id as soon as its steering channel exists, before any later step
+    /// that can fail.
+    fn build(cfg: &Config, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket, opened: &dyn Fn(&str)) -> Result<Launch, &'static str> {
         let (engine, kind) = Self::supported(cfg, job, seat)?;
         // A Claude worker's own session id, chosen here: its control dir and the hook's delivery are keyed by it.
         let claude_sid = match engine {
@@ -1601,7 +1758,10 @@ impl Launch {
             (_, None, _) => (None, None),
             (Job::Check(..), Some(_), _) => (None, Some(profiles::CHECK_NOT_STEERED)),
             (Job::Task(_), Some(sid), Some(open)) => match open(sid) {
-                Some(n) => (Some(n), None),
+                Some(n) => {
+                    opened(sid);
+                    (Some(n), None)
+                }
                 None => (None, Some(profiles::NO_STEER_CHANNEL)),
             },
             (Job::Task(_), Some(_), None) => (None, Some(profiles::NO_STEER_CHANNEL)),

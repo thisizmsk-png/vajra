@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { S } from "../../strings";
 import type { StatusKey } from "../../strings";
 import { api, onChanged } from "../ipc";
+import { forgetRead, ownedRead } from "../reads";
 import type { Campaign, CrewNodeDto, InboxItem } from "../ipc";
 import { problemDetail } from "../screens/states";
 import { parseWorkerProvider } from "../workerProvider";
@@ -72,7 +73,10 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
     last.current = Date.now();
     void (async () => {
       // Campaigns and their folders decide the projects; without either, saying "no projects" would be wrong.
-      const [camps, targets, active, inbox, store] = await Promise.allSettled([api.listCampaigns(), api.resumeTargets(), api.activeRuns(), api.inbox(), api.projectList()]);
+      const [camps, targets, active, inbox, store] = await Promise.allSettled([
+        ownedRead("list_campaigns", () => api.listCampaigns()), ownedRead("resume_targets", () => api.resumeTargets()),
+        ownedRead("active_runs", () => api.activeRuns()), ownedRead("inbox", () => api.inbox()), ownedRead("project_list", () => api.projectList()),
+      ]);
       if (mine !== seq.current) return;
       if (camps.status === "rejected" || targets.status === "rejected") {
         const e = camps.status === "rejected" ? camps.reason : (targets as PromiseRejectedResult).reason;
@@ -118,6 +122,8 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let later: ReturnType<typeof setTimeout> | undefined;
     const off = onChanged(() => {
+      // The core says something moved: a read already in flight started before that and must not be joined.
+      forgetRead();
       const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
       if (wait <= 0) load();
       else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);

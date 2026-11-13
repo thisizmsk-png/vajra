@@ -735,6 +735,73 @@ fn a_core_stop_is_settled_when_its_ticket_ends_and_stays_settled_after_reopening
     assert_eq!(last(&id)["state"], "done");
 }
 
+/// #177 review (2): a second app starts no control watcher and binds no Lead socket. The first app's socket is left in
+/// place (the same inode, still accepting), and the shared ledger is not ticked. The app holding the locks does serve.
+#[test]
+fn a_second_app_serves_no_control_socket_and_ticks_nothing() {
+    use std::os::unix::fs::MetadataExt as _;
+    use vajra_desktop::desktop::App;
+    // Short paths: a Unix socket path must fit in about 104 bytes.
+    let d = PathBuf::from(format!("/tmp/vsc-{}-{}", std::process::id(), uniq()));
+    let _ = fs::remove_dir_all(&d);
+    let (data, home) = (d.join("d"), d.join("h"));
+    fs::create_dir_all(&home).unwrap();
+    let first = App::open(&data, &home).unwrap();
+    let w = first.serve_control().expect("the app holding the locks serves");
+    let sock = vajra_desktop::control::socket_path(&data);
+    let ino = fs::symlink_metadata(&sock).unwrap().ino();
+    // A pending core stop in the shared ledger: the first app's live action.
+    {
+        let mut c = first.control.lock().unwrap();
+        c.start_session(SID, RUN).unwrap();
+        c.set_core_workers(Arc::new(FakeCore));
+        c.stop_worker(Actor::Human, "core:T1", None).unwrap();
+    }
+    drop(w);
+    let path = data.join("control/ledger.jsonl");
+    let before = fs::read(&path).unwrap();
+    let second = App::open(&data, &home).unwrap();
+    assert!(second.other_instance());
+    assert!(second.serve_control().is_none(), "a second app starts no watcher");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(fs::symlink_metadata(&sock).unwrap().ino(), ino, "the first app's socket is not replaced");
+    assert!(UnixStream::connect(&sock).is_ok(), "and still accepts");
+    assert_eq!(fs::read(&path).unwrap(), before, "nothing ticked the shared ledger");
+    drop(second);
+    drop(first);
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// #177 review: a second app on the same data folder (a dev build beside the installed one) settles nothing in the
+/// shared control ledger. The first app's pending core stop is its live action: the second app's open leaves the
+/// ledger byte for byte as it was. Only the next app that holds the folder, after the first is gone, settles it.
+#[test]
+fn a_second_app_leaves_the_first_apps_pending_core_stop_unsettled() {
+    use vajra_desktop::desktop::App;
+    let h = Home::new();
+    let first = App::open(&h.data(), &h.home).unwrap();
+    assert!(!first.other_instance());
+    // The first app's live stop of a core worker, recorded in the shared ledger and not yet ended.
+    let stop = {
+        let mut s = h.service();
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        s.stop_worker(Actor::Human, "core:T1", None).unwrap()["action_id"].as_str().unwrap().to_string()
+    };
+    let path = h.data().join("control/ledger.jsonl");
+    let before = fs::read(&path).unwrap();
+    let second = App::open(&h.data(), &h.home).unwrap();
+    assert!(second.other_instance());
+    drop(second);
+    assert_eq!(fs::read(&path).unwrap(), before, "a second app writes nothing to the shared control ledger");
+    // The first app ends without seeing the ticket end; the next sole app settles the leftover at open.
+    drop(first);
+    let next = App::open(&h.data(), &h.home).unwrap();
+    assert!(!next.other_instance());
+    let r = h.ledger().into_iter().rev().find(|r| r["action_id"] == stop.as_str()).unwrap();
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("app_restarted")), "{r}");
+}
+
 /// #151 review: two Stops of one core worker before its ticket ends (a second human click, or a confirmed
 /// Director-General stop) are both settled by the one ticket-ended callback; neither is left queued, now or after reopen.
 #[test]

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
-use vajra_desktop::control::{self, mcp, service, socket};
+use vajra_desktop::control::{self, mcp};
 use serde_json::Value;
 use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
 use vajra_desktop::logging;
@@ -327,6 +327,21 @@ fn provider_usage(app: State<'_, App>, page_open: bool) -> Res {
 #[tauri::command(async)]
 fn read_report(app: State<'_, App>, slug: String) -> Res {
     app.read_report(&slug)
+}
+
+#[tauri::command(async)]
+fn run_proof(app: State<'_, App>, slug: String) -> Res {
+    app.run_proof(&slug)
+}
+
+#[tauri::command(async)]
+fn export_proof_page(app: State<'_, App>, slug: String) -> Res {
+    app.export_proof_page(&slug)
+}
+
+#[tauri::command(async)]
+fn act_post_proof_comment(app: State<'_, App>, envelope: Envelope, slug: String, pr_url: String) -> Value {
+    app.act_post_proof_comment(&envelope, &slug, &pr_url)
 }
 
 #[tauri::command(async)]
@@ -711,20 +726,9 @@ fn main() {
     if let Some(l) = &app.log {
         let _ = l.log_cold_start(logging::process_start_time());
     }
-    let _watcher = service::spawn_watcher(app.control.clone(), Duration::from_secs(1));
-    match socket::bind(&control::socket_path(&data)) {
-        Ok(listener) => {
-            let svc = app.control.clone();
-            let runs = app.run_leads.clone();
-            // SAFETY: getuid has no preconditions and cannot fail.
-            let uid = unsafe { libc::getuid() };
-            std::thread::spawn(move || socket::serve(listener, svc, runs, uid));
-        }
-        Err(e) => {
-            eprintln!("vajra-desktop: control socket: {e}");
-            app.note("control_socket_failed", &[]);
-        }
-    }
+    // Only the app holding the instance locks ticks the control ledger and serves the Lead socket (and the run leads'
+    // vajra-run calls on it).
+    let _watcher = app.serve_control();
     let sub = app.bus.subscribe();
 
     // Crash reconciliation: shells an earlier session recorded are checked against the live process table now (pid and
@@ -818,6 +822,9 @@ fn main() {
             provider_usage,
             verify_campaign,
             read_report,
+            run_proof,
+            export_proof_page,
+            act_post_proof_comment,
             resume_targets,
             crew,
             tail,
@@ -911,8 +918,8 @@ fn main() {
             }
         }
         RunEvent::Exit => {
-            // The Director-General's asks, every core run's lead, core tickets (with their descendants), then every
-            // session: `App::quit`.
+            // The Director-General's asks, then every core run's lead, then core tickets (with their descendants), then
+            // every session: `App::quit`.
             handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
             // A clean quit reaped every shell, so there is nothing to recover. A second instance leaves the ledger alone.
