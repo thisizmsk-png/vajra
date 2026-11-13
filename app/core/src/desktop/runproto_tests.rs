@@ -46,6 +46,13 @@ impl FakeWorkers {
         drop(b);
         self.changed.notify_all();
     }
+    /// As `WorkerRuntime` can leave it: the snapshot commit stored, then a concurrent cancel turned the outcome
+    /// to `stopped` (#153 review).
+    fn end_stopped_with_commit(&self, id: &str) {
+        self.end(id, Outcome::Stopped);
+        crate::lock(&self.tickets).get_mut(id).unwrap().0.commit = Some(commit_of(id));
+        self.changed.notify_all();
+    }
     fn spec(&self, id: &str) -> (TaskSpec, WorkerSeat) {
         let b = crate::lock(&self.tickets);
         let (_, s, w) = &b[id];
@@ -302,6 +309,29 @@ fn later_rounds_come_only_after_a_failed_round_and_replan_only_failed_tasks() {
     assert!(code(r.p.plan_tasks(PlanInput { round: 2, criteria: crit, tasks: vec![], ..PlanInput::default() })).1.contains("fixed after round 1"));
     // Both refusals were in round 2: the run ended. A fresh rig shows the accepted path.
     assert_eq!(r.status(), Some(RunStatus::NotVerified));
+}
+
+/// #153 review P2: a stopped ticket can keep its snapshot commit. A stopped worker is held back and never
+/// integrated, so the next round's retry must not start from (and so later merge) that commit.
+#[test]
+fn a_stopped_tickets_snapshot_commit_is_never_the_next_rounds_base() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t3"]);
+    let t2 = r.dispatch("t2");
+    r.w.end_stopped_with_commit(&t2);
+    r.p.integrate(1).unwrap();
+    // A task with no done commit uses up the round: nothing merges, and the round fails without a gate call.
+    assert!(r.w.merges.lock().unwrap().is_empty(), "the stopped commit isn't integrated");
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("failed"));
+    r.p.plan_tasks(PlanInput { round: 2, tasks: vec![task("t2", "frontend", &["web/"], &["t1"], &[])], ..PlanInput::default() }).unwrap();
+    let again = r.dispatch("t2");
+    let (spec, _) = r.w.spec(&again);
+    assert_ne!(spec.from, commit_of("r1.t2.r1"), "not from the stopped ticket's commit");
+    assert_eq!(spec.from, BASE, "from the base: the task has no eligible commit");
+    r.w.end(&again, Outcome::Done);
+    r.p.integrate(2).unwrap();
+    assert!(!r.w.merges.lock().unwrap()[0].contains(&commit_of("r1.t2.r1")));
 }
 
 #[test]

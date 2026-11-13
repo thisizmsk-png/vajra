@@ -803,7 +803,10 @@ impl RunProtocol {
             self.ask(st, q);
             return Ok(Dispatched::Held { task: id.to_string() });
         };
-        let from = t.tickets.iter().rev().find_map(|(_, tk, _)| self.0.workers.view(tk).and_then(|v| v.commit)).unwrap_or_else(|| self.0.cfg.base.clone());
+        // Only a done or progress commit carries on: a stopped ticket can keep its snapshot commit (a cancel can turn
+        // the outcome after the snapshot), and a stopped worker is held back, never built on or integrated.
+        let eligible = |v: Tick| v.commit.filter(|_| matches!(v.outcome, Some(Outcome::Done | Outcome::Progress)));
+        let from = t.tickets.iter().rev().find_map(|(_, tk, _)| self.0.workers.view(tk).and_then(eligible)).unwrap_or_else(|| self.0.cfg.base.clone());
         let mut brief = t.spec.brief.clone();
         if let Some(f) = feedback {
             brief.push_str("\n\n");
