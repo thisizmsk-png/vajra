@@ -39,28 +39,6 @@ def median_of_runs(values, warmups=WARMUPS):
     return statistics.median(kept), kept
 
 
-def parse_footprint(text):
-    """Total MiB from `footprint -p ... ` output ('Footprint: 123 MB' lines, or a 'TOTAL' row). None if unparseable."""
-    total = 0.0
-    found = False
-    for m in re.finditer(r"(?:^|\n)\s*(?:Footprint|TOTAL)[^\n]*?([\d.]+)\s*(KB|MB|GB)", text):
-        n, unit = float(m.group(1)), m.group(2)
-        total += n * {"KB": 1 / 1024, "MB": 1.0, "GB": 1024.0}[unit]
-        found = True
-    return round(total, 1) if found else None
-
-
-def footprint_mib(pids):
-    """Combined footprint of `pids` in MiB, or None where the tool is missing or refuses."""
-    if not pids:
-        return None
-    try:
-        out = subprocess.run(["footprint", "-p", ",".join(str(p) for p in sorted(pids))], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return parse_footprint(out.stdout)
-
-
 def group_pids(proc, before):
     rows = measure.ps()
     return sorted(measure.descendants(rows, proc.pid) | (measure.webkit_pids(rows) - before)), rows
@@ -116,7 +94,7 @@ def weight_scenario(binary, out):
         pids, _ = group_pids(proc, before)
         s = measure.sample(proc, before)
         rss.append(s["total_mib"])
-        fp.append(footprint_mib(pids))
+        fp.append(measure.footprint_mib(proc, before))
         cpu.append(cpu_percent(pids, 10))
         measure.stop(proc)
         time.sleep(3)

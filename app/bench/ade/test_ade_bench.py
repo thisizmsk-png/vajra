@@ -13,13 +13,9 @@ class MethodTests(unittest.TestCase):
         self.assertEqual(b.median_of_runs([9, None, 2.0, None, 4.0])[0], 3.0)
         self.assertEqual(b.median_of_runs([9, None, None]), (None, []))
 
-    def test_footprint_output_is_summed_in_mib(self):
-        text = "Footprint: 120 MB (16384 bytes per page)\n\nFootprint: 512 KB\nFootprint: 1.5 GB\n"
-        self.assertEqual(b.parse_footprint(text), round(120 + 0.5 + 1536, 1))
-        self.assertIsNone(b.parse_footprint("no numbers here"))
-
-    def test_footprint_of_no_pids_is_none(self):
-        self.assertIsNone(b.footprint_mib([]))
+    def test_the_weight_scenario_uses_the_memory_gates_footprint_function(self):
+        self.assertIs(b.measure.footprint_mib, __import__("measure").footprint_mib)
+        self.assertFalse(hasattr(b, "footprint_mib"))
 
 
 class TokenTests(unittest.TestCase):
