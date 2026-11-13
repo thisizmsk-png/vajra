@@ -589,7 +589,51 @@ fn make_tmp(profile: &Profile) -> Result<(), &'static str> {
     for d in std::iter::once(profile.tmp.join("objects")).chain(cache_env(&profile.tmp).into_iter().map(|(_, d)| d)) {
         walk(Some(&tmp), &rel(&d)?, true).map_err(|_| "couldn't prepare the run's folders")?;
     }
+    // git's private index (`git_env`) starts as a copy of the worktree's own (codex P2 on f95df103): a missing one
+    // reads as empty, so every tracked file would look deleted and untracked. Written through the pinned tmp.
+    if let Some(index) = worktree_index(&profile.worktree)? {
+        tmp.write_atomic("index", &index).map_err(|_| "couldn't copy the worktree's git index")?;
+    }
     Ok(())
+}
+
+/// The evidence worktree's git index, read by the core: its path from the system git (`--git-path index`, which knows
+/// a linked worktree's own), opened without following a link, a plain file of at most 512 MiB. `None` when the
+/// worktree isn't in git or has no index yet (nothing staged ever).
+fn worktree_index(worktree: &Path) -> Result<Option<Vec<u8>>, &'static str> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let bad = "couldn't read the worktree's git index";
+    let out = std::process::Command::new("/usr/bin/git")
+        .args(["-C"])
+        .arg(worktree)
+        .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
+        .env_clear()
+        .env("PATH", SCRIPT_PATH)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|_| bad)?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(String::from_utf8(out.stdout).map_err(|_| bad)?.trim_end_matches('\n'));
+    let f = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(bad),
+    };
+    const CAP: u64 = 512 << 20;
+    if !f.metadata().is_ok_and(|m| m.file_type().is_file() && m.len() <= CAP) {
+        return Err(bad);
+    }
+    let mut bytes = Vec::new();
+    f.take(CAP + 1).read_to_end(&mut bytes).map_err(|_| bad)?;
+    if bytes.len() as u64 > CAP {
+        return Err(bad);
+    }
+    Ok(Some(bytes))
 }
 
 fn save_evidence(base: &Path, slug: &str, json: &[u8]) -> std::io::Result<()> {

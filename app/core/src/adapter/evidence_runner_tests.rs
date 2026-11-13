@@ -888,6 +888,36 @@ fn a_tmp_swapped_for_a_link_while_it_is_made_refuses_the_run() {
     assert!(!allow.contains(&format!("(subpath \"{}\")", t.0.display())), "{allow}");
 }
 
+/// A run's private git index starts as the worktree's own (codex P2 on f95df103): on a clean linked worktree, a clean
+/// tracked file is neither deleted nor untracked, through the production `run()`.
+#[test]
+fn a_run_sees_a_clean_worktree_as_clean_in_git() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("gitindex");
+    let repo = t.0.join("repo");
+    let git = |dir: &Path, args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(dir).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", t.home()).output().unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    assert!(git(&repo, &["init", "-q", "-b", "main"]).status.success());
+    fs::write(repo.join("README.md"), "one\ntwo\n").unwrap();
+    assert!(git(&repo, &["add", "README.md"]).status.success());
+    assert!(git(&repo, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "a"]).status.success());
+    let _ = fs::remove_dir_all(t.0.join("work"));
+    assert!(git(&repo, &["worktree", "add", "-q", t.0.join("work").to_str().unwrap()]).status.success());
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    let cmds = vec!["git diff --exit-code HEAD -- README.md && test -z \"$(git ls-files --others)\" && git ls-files --error-unmatch README.md".to_string()];
+    let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
+    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "a clean tracked file read as changed: {out:?}");
+    // Not in git at all: no index to copy, and the run still goes.
+    let t2 = Tmp::new("noindex");
+    let (script2, home2) = (fake(&t2, "ok", BUNDLE, "exit 2"), t2.home());
+    let base2 = base(&t2);
+    assert!(matches!(go(&t2, &evidence_run(&script2, &base2, &["true".to_string()], &t2.0.join("none.git"), &home2)), RunOutcome::Ran { passed: true, .. }));
+}
+
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
 #[test]
 fn a_run_refuses_a_tmp_that_already_exists() {
