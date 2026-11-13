@@ -679,6 +679,39 @@ fn the_engine_script_runs_from_its_denied_folder_and_a_rewrite_mid_run_changes_n
     assert!(matches!(go(&t, &evidence_run(&link, &base, &["true".to_string()], &common, &home)), RunOutcome::Failed(_)));
 }
 
+/// The evidence write goes through the pinned bundle folder (#234 codex P1): a swap of the folder, or of a folder above
+/// it, for a link, by a process that outlived the kill, can't send the core's write outside the folder it opened.
+#[test]
+fn the_evidence_write_follows_the_pinned_folder_not_a_path_swapped_after_it() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("pinned");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["true".to_string()];
+    let elsewhere = t.0.join("data/elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    // After the folder is opened: it is moved away and a link to elsewhere takes its name.
+    let (slug_dir, moved, target) = (base.join(SLUG), base.join("moved"), elsewhere.clone());
+    super::AFTER_PIN.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            fs::rename(&slug_dir, &moved).unwrap();
+            std::os::unix::fs::symlink(&target, &slug_dir).unwrap();
+        }))
+    });
+    let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
+    super::AFTER_PIN.with(|h| *h.borrow_mut() = None);
+    assert!(matches!(out, RunOutcome::Ran { .. }), "{out:?}");
+    assert!(!elsewhere.join("evidence.json").exists(), "the write followed the swapped name");
+    assert_eq!(fs::read(base.join("moved/evidence.json")).unwrap(), br#"{"slug":"deliver-20261113-0800","results":[],"git":{"head":"x"}}"#);
+    // A command swaps a folder above the bundle (the base itself) for a link: the walk refuses it.
+    let real_base = t.0.join("work/walkthroughs-real");
+    let swap = format!("mv '{0}' '{1}' && mkdir -p '{2}' && ln -s '{2}' '{0}'", base.display(), real_base.display(), elsewhere.display());
+    let out = go(&t, &evidence_run(&script, &base, &[swap], &common, &home));
+    assert_eq!(out, RunOutcome::Failed("the evidence folder was replaced during the run".into()));
+    assert!(!elsewhere.join(SLUG).exists() && !elsewhere.join("evidence.json").exists());
+}
+
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
 #[test]
 fn a_run_refuses_a_tmp_that_already_exists() {

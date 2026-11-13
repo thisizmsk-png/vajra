@@ -422,18 +422,43 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     if v.get("hmac").is_some() || v["slug"].as_str() != Some(r.slug) {
         return RunOutcome::Failed("the evidence isn't an unsigned bundle for this check".into());
     }
-    // The bundle folder is under the worktree, which the commands could write: it must be a plain folder at exactly
-    // this path, never a link a command left to send the core's write somewhere else.
-    let dir = r.base.join(r.slug);
-    let _ = std::fs::create_dir(&dir);
-    let plain = std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_dir()) && canonical_base(&dir).as_deref() == Some(dir.as_path());
-    if !plain {
+    if save_evidence(r.base, r.slug, json).is_err() {
         return RunOutcome::Failed("the evidence folder was replaced during the run".into());
     }
-    if let Err(e) = crate::control::fsx::write_atomic(&dir, "evidence.json", json) {
-        return RunOutcome::Failed(format!("couldn't save the evidence: {e}"));
-    }
     RunOutcome::Ran { passed: code == 0, sha256: crate::control::sha256::hex_digest(json) }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs after the bundle folder is pinned and before the write, to swap the path under the core.
+    pub(super) static AFTER_PIN: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Write `<base>/<slug>/evidence.json` through pinned folders. The base is under the worktree, which a check's
+/// commands can write, and a process of theirs can outlive the kill (`setsid`), so any name on the way could be
+/// swapped for a link at any moment. The walk opens every component from `/` with O_NOFOLLOW, holds the bundle
+/// folder's descriptor, and does the whole atomic write (`openat`, `renameat`) relative to it: a swap after the open
+/// can't redirect the write, and a link on the way fails it.
+fn save_evidence(base: &Path, slug: &str, json: &[u8]) -> std::io::Result<()> {
+    use crate::projects::pinned::Pinned;
+    use std::path::Component;
+    let bad = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a plain path");
+    let mut dir = Pinned::open(Path::new("/"), false)?;
+    for c in base.components() {
+        match c {
+            Component::RootDir => {}
+            Component::Normal(n) => dir = dir.child(n.to_str().ok_or_else(bad)?, false)?,
+            _ => return Err(bad()),
+        }
+    }
+    let dir = dir.child(slug, true)?;
+    #[cfg(test)]
+    AFTER_PIN.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f()
+        }
+    });
+    dir.write_atomic("evidence.json", json)
 }
 
 /// `<script> --sign <slug> --expect-sha256 <sha>`, outside the sandbox (it holds the key), in the evidence worktree
