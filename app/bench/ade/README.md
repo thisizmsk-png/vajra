@@ -33,6 +33,34 @@ tokens too, so a goal's sum counts them). `ade_bench.py tokens` counts every led
 `side` is Vajra's own off-request spend (titles, branch names): always 0. `ade_bench.py tokens` reads these back; the signed run
 record can pick the same object up.
 
+## Request anatomy ("lean first request")
+
+```
+python3 app/bench/ade/ade_bench.py anatomy app/bench/ade/anatomy_arms.json anatomy.json   # spends real tokens, about $0.45
+python3 app/bench/ade/ade_bench.py report anatomy.json anatomy.md
+```
+
+One `hello` turn per arm in an empty directory, read from the CLI's own `usage` and `modelUsage`. The first request is fresh +
+cache write + cache read. Tools and MCP servers come from the init event. Side tokens are anything billed to a model other than
+the one that answered (a title or summary call would show there). `anatomy_arms.json` mirrors the Director-General's launch flags
+(`build_lead_argv`), with its production agent description and prompt (`LEAD_AGENTS`), minus only what needs the app's own files:
+the settings file, the MCP config and its six control tools. A Rust test (`argv_tests.rs`) pins the arm to the production argv, so a
+prompt change fails CI until the arms file follows. Add an arm for any other harness.
+
+One run each, claude 2.1.296, this machine (the plain arm includes the owner's own plugins, skills and four claude.ai MCP servers,
+so it is not comparable to anyone else's bare CLI):
+
+| arm | first request | tools | MCP servers | side tokens |
+|---|---|---|---|---|
+| plain CLI | 51,658 | 36 | 4 | 0 |
+| Director-General flags | 3,251 | 3 | 0 | 0 |
+
+The Director-General's per-turn header, same flags, one `hello` each (first request, tokens): no header 3,251; the old header
+(with ask and run ids) 3,319, so +68; the fixed header 3,280, so +29. The ids are gone from the header (nothing read them back
+from the model's context), which makes it the same bytes every turn.
+
+Worker sessions run the user's own CLI settings (we add none), so their first request is the plain-CLI figure plus whatever the
+engine hooks inject. The hooks add model-visible text only on demand (a relayed steer, or a warning), never per turn.
 ## Typing lag in a real browser (the CI gate)
 
 `app/ui/scripts/typing-lag.mjs` opens the built typing-lag page (`app/ui/lag.html`, the real Director-General composer and

@@ -3,6 +3,7 @@
   ade_bench.py window  APP_BINARY OUT_JSON   cold start and relaunch (launch to window ready)
   ade_bench.py weight  APP_BINARY OUT_JSON   at rest (footprint beside RSS), idle CPU, and weight with the load fixture
   ade_bench.py tokens  DATA_DIR   OUT_JSON   token receipts of the finished turns in a control ledger ("hello", real prompt)
+  ade_bench.py anatomy ARMS_JSON  OUT_JSON   first request per harness arm ("hello"): tokens, tools, MCP servers, side tokens (spends tokens)
   ade_bench.py report  IN_JSON... OUT_MD     one table from the JSON files above
 
 Method (the owner's memory-gate method): 1 warm-up launch that is thrown away, then the median of 5. The runner and its
@@ -16,7 +17,7 @@ What is and is not measured here:
   with the reason instead of printing a number it did not take.
 - Typing lag with 5 agents streaming is gated in the UI test job (app/ui/tests/typingLag.test.tsx); this rig does not repeat it.
 """
-import json, os, re, statistics, subprocess, sys, time
+import json, os, re, statistics, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ci"))
 import measure  # noqa: E402  (the memory gate's launch, sample and runner identity, reused unchanged)
@@ -132,6 +133,57 @@ def tokens_scenario(data_dir, out):
                "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, open(out, "w"), indent=1)
 
 
+def parse_anatomy(lines):
+    """One `claude -p --output-format stream-json` run -> the first request's anatomy, or None if there is no result.
+
+    first_request = fresh + cache write + cache read (everything the model was sent). `tools` and `mcp` come from the init
+    event. `side` = tokens billed to any model other than the one that answered (a title or summary call would show here).
+    The answering model is the one named on the last streamed assistant message, never the one with the most tokens; if no
+    assistant message names a model, `answered_by` and `side_tokens` are None (unknown), not a guess."""
+    init = res = None
+    answered_by = None
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("type") == "system" and e.get("subtype") == "init":
+            init = e
+        elif e.get("type") == "assistant":
+            m = (e.get("message") or {}).get("model")
+            if isinstance(m, str) and m and not m.startswith("<"):  # "<synthetic>" is not a model
+                answered_by = m
+        elif e.get("type") == "result":
+            res = e
+    if not res:
+        return None
+    u = res.get("usage") or {}
+    n = lambda d, k: d.get(k) if isinstance(d.get(k), int) and d.get(k) >= 0 else 0
+    first = n(u, "input_tokens") + n(u, "cache_creation_input_tokens") + n(u, "cache_read_input_tokens")
+    models = res.get("modelUsage") or {}
+    side = None if answered_by is None else sum(
+        n(v, "inputTokens") + n(v, "cacheCreationInputTokens") + n(v, "cacheReadInputTokens") + n(v, "outputTokens")
+        for m, v in models.items() if m != answered_by)
+    init = init or {}
+    return {"first_request_tokens": first, "fresh": n(u, "input_tokens"), "cache_write": n(u, "cache_creation_input_tokens"),
+            "cache_read": n(u, "cache_read_input_tokens"), "output": n(u, "output_tokens"), "side_tokens": side, "answered_by": answered_by, "models": sorted(models),
+            "tools": len(init.get("tools") or []), "mcp_servers": len(init.get("mcp_servers") or []), "cost_usd": res.get("total_cost_usd")}
+
+
+def anatomy_scenario(arms_file, out, claude="claude", prompt="hello"):
+    """Run one `prompt` turn per arm in an empty temp dir. ARMS_FILE is {"name": [extra claude args...]}. Spends real tokens."""
+    arms = json.load(open(arms_file))
+    cwd = tempfile.mkdtemp(prefix="vajra-anatomy-")
+    results = {}
+    for name, extra in arms.items():
+        p = subprocess.run([claude, "-p", prompt, "--output-format", "stream-json", "--verbose", "--max-turns", "1", *extra],
+                           cwd=cwd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=180)
+        results[name] = parse_anatomy(p.stdout.splitlines()) or {"error": f"no result (exit {p.returncode})"}
+    json.dump({"scenario": "anatomy", "prompt": prompt, "claude": subprocess.run([claude, "--version"], capture_output=True, text=True).stdout.strip(),
+               "arms": results, "note": "one run per arm; the plain arm includes the user's own plugins, skills and MCP servers",
+               "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, open(out, "w"), indent=1)
+
+
 def render_report(results):
     """One markdown table from the scenario JSON files; an unmeasured column says why."""
     lines = ["| metric | value | note |", "|---|---|---|"]
@@ -141,6 +193,9 @@ def render_report(results):
         elif r.get("scenario") == "weight":
             lines.append(f"| at rest, footprint (MiB) | {r['at_rest_footprint_mib']} | beside RSS {r['at_rest_rss_mib']}; {r['method']} |")
             lines.append(f"| idle CPU (%) | {r['idle_cpu_pct']} | {r['method']} |")
+        elif r.get("scenario") == "anatomy":
+            for name, a in r["arms"].items():
+                lines.append(f"| first request, {name} (tokens) | {a.get('first_request_tokens', a.get('error'))} | tools {a.get('tools')}, MCP servers {a.get('mcp_servers')}, side tokens {'unknown' if a.get('side_tokens') is None and 'error' not in a else a.get('side_tokens')}; {r['claude']} |")
         elif r.get("scenario") == "tokens":
             for name in ("hello", "real_prompt"):
                 t = r.get(name)
@@ -159,6 +214,8 @@ if __name__ == "__main__":
         weight_scenario(*rest)
     elif mode == "tokens":
         tokens_scenario(*rest)
+    elif mode == "anatomy":
+        anatomy_scenario(*rest)
     elif mode == "report":
         *ins, out = rest
         open(out, "w").write(render_report([json.load(open(p)) for p in ins]))
