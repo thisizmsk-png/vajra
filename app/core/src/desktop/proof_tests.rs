@@ -37,10 +37,15 @@ fn verified_needs_the_ledger_match_and_the_signed_slug_field() {
 #[test]
 fn the_record_note_says_tamper_evident_only_when_switched_on_and_never_for_an_outside_guard_record() {
     for l in [Label::Verified, Label::VerifiedApproved, Label::NotVerified, Label::Rejected, Label::Abandoned, Label::InProgress] {
-        assert_eq!(record_note(l), "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.");
+        assert_eq!(record_note(l, false), "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.");
+        // A worker that could read the key (bhishma M1 on #237): never "guarded", never tamper-evident.
+        assert_eq!(record_note(l, true), KEY_READABLE_NOTE);
+        assert!(!record_note(l, true).contains("is guarded") && !record_note(l, true).to_lowercase().contains("tamper-evident"));
     }
-    assert!(record_note(Label::EvidenceUnguarded).contains("isn't tamper-evident"));
-    assert!(!record_note(Label::EvidenceUnguarded).to_lowercase().starts_with("tamper-evident"));
+    for readable in [false, true] {
+        assert!(record_note(Label::EvidenceUnguarded, readable).contains("isn't tamper-evident"));
+        assert!(!record_note(Label::EvidenceUnguarded, readable).to_lowercase().starts_with("tamper-evident"));
+    }
 }
 
 fn proof(label: Label, rows: Vec<(&str, &str)>) -> Proof {
@@ -56,6 +61,7 @@ fn proof(label: Label, rows: Vec<(&str, &str)>) -> Proof {
             .map(|(c, s)| Row { criterion: c.into(), task: "t1".into(), status: s.into(), commit: Some("0123456789abcdef".into()), ran_by: Some("codex (openai)".into()) })
             .collect(),
         report: Some("# Delivery report".into()),
+        key_readable: false,
     }
 }
 
@@ -128,7 +134,9 @@ fn the_export_shows_each_label_on_its_matching_fixture() {
         if l != Label::Verified && l != Label::VerifiedApproved {
             assert!(!md.contains("**Verified**"), "{l:?}");
         }
-        assert!(md.contains(record_note(l)) && html.contains(&esc(record_note(l))), "{l:?}");
+        assert!(md.contains(record_note(l, false)) && html.contains(&esc(record_note(l, false))), "{l:?}");
+        let kr = Proof { key_readable: true, ..proof(l, vec![("c", "pass")]) };
+        assert!(markdown(&kr).contains(record_note(l, true)) && page(&kr).contains(&esc(record_note(l, true))), "{l:?}");
         assert!(md.contains("Checked by Vajra on this Mac"));
         assert!(md.contains(&"ab".repeat(32)), "the record hash is in the export");
         assert!(md.contains("stale evidence"));

@@ -60,7 +60,7 @@ impl App {
         // `checking`, which is not a pass, so the label can only come out weaker, never stronger.
         let list = self.evidence_list(slug).unwrap_or_else(|_| json!({"rows": []}));
         let rows_json = list["rows"].as_array().cloned().unwrap_or_default();
-        let (trust, checker, consumed) = self.trust_of(slug);
+        let (trust, checker, consumed, key_readable) = self.trust_of(slug);
         // N20 (bhishma M1, Opus on #226): the consume this app holds in memory names the list, the core's record agrees
         // (`evidence_approval_consumed`), and a signed progress line is exactly the approval line for that list (the
         // whole line text after its timestamp, no prefix). Neither the file nor the line counts alone.
@@ -108,23 +108,29 @@ impl App {
             record_sha256: report["record_sha256"].as_str().filter(|h| is_hex(h, 64..=64)).map(str::to_string),
             rows,
             report: report_text,
+            key_readable,
         })
     }
 
     /// The core's own trust record for the campaign's run: `seats.json`'s trust, who checked (harness and account of the
     /// evidence seat) and whether a single-use approval was consumed. A campaign no run of this app started has none; one
     /// whose record can't be read answers `"?"`, so the label fails closed.
-    fn trust_of(&self, slug: &str) -> (Option<String>, Option<String>, Option<String>) {
-        let Some(run) = run_of(slug) else { return (None, None, None) };
+    ///
+    /// The last value is true when a worker in the run could read the signing key: any seat that isn't a Claude seat
+    /// (Codex can, by the owner's choice; an unknown harness counts too), or a seats record that can't be read or names
+    /// another campaign. A campaign no run of this app started keeps today's note (bhishma M1 on #237).
+    fn trust_of(&self, slug: &str) -> (Option<String>, Option<String>, Option<String>, bool) {
+        let Some(run) = run_of(slug) else { return (None, None, None, false) };
         let seats = match self.read_run_seats(run) {
             Ok(Some(s)) => s,
-            Ok(None) => return (None, None, None),
-            Err(_) => return (Some("?".into()), None, None),
+            Ok(None) => return (None, None, None, false),
+            Err(_) => return (Some("?".into()), None, None, true),
         };
         // The record must name this campaign; one that names another is not this run's.
         if seats["campaign_slug"].as_str() != Some(slug) {
-            return (Some("?".into()), None, None);
+            return (Some("?".into()), None, None, true);
         }
+        let key_readable = seats["seats"].as_array().is_none_or(|all| all.iter().any(|s| s["harness"].as_str() != Some("claude")));
         let trust = seats["evidence_trust"].as_str().unwrap_or("?").to_string();
         let seat = seats["evidence_seat"].as_str();
         let checker = seats["seats"].as_array().and_then(|all| all.iter().find(|s| s["seat"].as_str() == seat)).map(|s| {
@@ -133,7 +139,7 @@ impl App {
         });
         // N20: the list the core's own approval record says this run consumed (never a `seats.json` field); the caller
         // also needs the signed progress line.
-        (Some(trust), checker, self.evidence_approval_consumed(run))
+        (Some(trust), checker, self.evidence_approval_consumed(run), key_readable)
     }
 
     /// The record against the core's own write ledger (6h, #190; bhishma's rule): the campaign, features and progress

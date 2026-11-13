@@ -46,17 +46,51 @@ fn green(id: &str, criterion: &str) -> Value {
 
 /// The guarded `seats.json` a Start would have written for `RUN`, with the given trust and campaign slug.
 fn seats(t: &Tmp, trust: &str, slug: &str, consumed: bool) {
+    seats_with(t, trust, slug, json!([{"seat": "verifier", "role": "verifier", "account": "openai", "harness": "codex"}]));
+    // `consumed` is the old seats field only; the proof never reads it (`approve_and_consume` runs the real flow).
+    let _ = consumed;
+}
+
+fn seats_with(t: &Tmp, trust: &str, slug: &str, all: Value) {
     let dir = t.0.join("data/control/lead").join(RUN);
     fs::create_dir_all(&dir).unwrap();
     let doc = json!({
         "schema": "vajra.run_seats/1", "run_id": RUN, "evidence_seat": "verifier", "evidence_trust": trust, "campaign_slug": slug,
         // A field here is never trusted: the proof reads the core's N20 approval record.
         "evidence_approval": {"consumed": true},
-        "seats": [{"seat": "verifier", "role": "verifier", "account": "openai", "harness": "codex"}],
+        "seats": all,
     });
     fs::write(dir.join("seats.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
-    // `consumed` is the old seats field only; the proof never reads it (`approve_and_consume` runs the real flow).
-    let _ = consumed;
+}
+
+/// bhishma M1 on #237: Codex can read the signing key (owner's choice), so a Verified run with any Codex seat never
+/// says the key was guarded, on the card or in the export. A run of Claude seats only keeps the guarded note; an
+/// unknown harness counts as able to read it.
+#[test]
+fn a_run_with_a_codex_seat_never_says_the_signing_key_was_guarded() {
+    let slug = format!("deliver-{RUN}");
+    let Some((t, app)) = signed_run(&slug, "g", "done", vec![green("t1", "c")]) else { return };
+    let claude = json!({"seat": "verifier", "role": "verifier", "account": "anthropic", "harness": "claude"});
+    let codex_writer = json!({"seat": "backend", "role": "worker", "account": "openai", "harness": "codex"});
+    for (all, readable) in [
+        (json!([claude, codex_writer]), true),
+        (json!([claude, {"seat": "w", "role": "worker", "account": "x", "harness": null}]), true),
+        (json!([claude]), false),
+    ] {
+        seats_with(&t, "guarded", &slug, all.clone());
+        let p = app.run_proof(&slug).unwrap();
+        assert_eq!(p["label"], "verified", "{p}");
+        let note = p["record_note"].as_str().unwrap();
+        let md = p["markdown"].as_str().unwrap();
+        if readable {
+            assert_eq!(note, proof::KEY_READABLE_NOTE, "{all}");
+            assert!(!note.contains("is guarded") && !md.contains("signing key is guarded"), "{all}: {md}");
+            assert!(md.contains(proof::KEY_READABLE_NOTE));
+        } else {
+            assert_eq!(note, proof::record_note(proof::Label::Verified, false), "{all}");
+            assert!(note.contains("signing key is guarded"));
+        }
+    }
 }
 
 /// The signed progress line `text`, written through the real script (as the evidence ticket, or an agent, could).
@@ -91,7 +125,8 @@ fn a_guarded_run_with_every_criterion_green_is_verified_with_its_record_hash() {
     assert_eq!(p["integrity"], "ok");
     assert_eq!(p["record_sha256"].as_str().map(str::len), Some(64), "{p}");
     let md = p["markdown"].as_str().unwrap();
-    assert!(md.contains(proof::record_note(proof::Label::Verified)) && md.contains(p["record_sha256"].as_str().unwrap()), "{md}");
+    // Its checker is a Codex seat, so the note says the key could be read (bhishma M1 on #237).
+    assert!(md.contains(proof::KEY_READABLE_NOTE) && md.contains(p["record_sha256"].as_str().unwrap()), "{md}");
     assert!(md.contains("codex (openai)"), "the harness that ran the check is named: {md}");
 }
 

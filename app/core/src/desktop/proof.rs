@@ -211,13 +211,18 @@ pub fn export_allowed() -> bool {
 pub const TAMPER_EVIDENT: bool = false;
 
 /// What the record note says, for this label. An outside-the-guard record is never called tamper-evident.
-pub fn record_note(label: Label) -> &'static str {
-    match (label, TAMPER_EVIDENT) {
-        (Label::EvidenceUnguarded, _) => "Checked by Vajra on this Mac. The evidence ran outside the guard, so this record isn't tamper-evident.",
-        (_, true) => "Tamper-evident on your Mac: only the Mac that signed this record can check it.",
-        (_, false) => "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
+/// `key_readable`: a worker in this run could read the signing key (a Codex seat, by the owner's choice, or any seat
+/// that isn't a Claude one), so the note never says the key was guarded, nor tamper-evident (bhishma M1 on #237).
+pub fn record_note(label: Label, key_readable: bool) -> &'static str {
+    match (label, key_readable, TAMPER_EVIDENT) {
+        (Label::EvidenceUnguarded, _, _) => "Checked by Vajra on this Mac. The evidence ran outside the guard, so this record isn't tamper-evident.",
+        (_, true, _) => KEY_READABLE_NOTE,
+        (_, false, true) => "Tamper-evident on your Mac: only the Mac that signed this record can check it.",
+        (_, false, false) => "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
     }
 }
+
+pub const KEY_READABLE_NOTE: &str = "Checked by Vajra on this Mac. A worker in this run could read the signing key (Codex workers can), so the key wasn't guarded.";
 pub const WHY_OUTSIDE: &str = crate::desktop::seat_start::OUTSIDE_GUARD_WHY;
 pub const PLAIN_HINT: &str = "To get plain Verified, pick a Claude helper as the checker.";
 
@@ -239,6 +244,8 @@ pub struct Proof {
     pub record_sha256: Option<String>,
     pub rows: Vec<Row>,
     pub report: Option<String>,
+    /// A worker in this run could read the signing key; see `record_note`.
+    pub key_readable: bool,
 }
 
 fn row_word(label: Label, status: &str) -> String {
@@ -293,7 +300,7 @@ pub fn markdown(p: &Proof) -> String {
             cell(r.ran_by.as_deref().unwrap_or("")),
         ));
     }
-    out.push_str(&format!("\nCampaign `{}`. {}\n\n{}\n", cell(&p.slug), record_line(p), record_note(p.label)));
+    out.push_str(&format!("\nCampaign `{}`. {}\n\n{}\n", cell(&p.slug), record_line(p), record_note(p.label, p.key_readable)));
     out
 }
 
@@ -332,7 +339,7 @@ pre{{white-space:pre-wrap}}.why{{border-left:3px solid currentColor;padding-left
         reason = esc(&p.reason),
         slug = esc(&p.slug),
         record = esc(&record_line(p)),
-        note = esc(record_note(p.label)),
+        note = esc(record_note(p.label, p.key_readable)),
     )
 }
 
@@ -367,7 +374,7 @@ pub fn proof_json(p: &Proof, markdown_text: &str) -> Value {
         "hint": (p.label == Label::EvidenceUnguarded).then_some(PLAIN_HINT),
         "integrity": p.integrity,
         "record_sha256": p.record_sha256,
-        "record_note": record_note(p.label),
+        "record_note": record_note(p.label, p.key_readable),
         "requires": MACOS_NEED,
         "export": export_allowed(),
         "markdown": markdown_text,
