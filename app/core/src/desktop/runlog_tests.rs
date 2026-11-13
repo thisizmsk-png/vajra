@@ -555,3 +555,152 @@ fn the_app_reads_a_runs_log_by_seq_and_refuses_a_bad_run_id() {
     assert_eq!((ver["verified"].as_bool(), ver["chain"]["ok_to"].as_u64()), (Some(false), Some(3)));
     assert!(ver["record_error"].is_string());
 }
+
+// ---------------------------------------------------------------- bhishma's fixes (F1, F3, F4, F6, F7, F8)
+
+fn hex64(c: char) -> String {
+    c.to_string().repeat(64)
+}
+
+#[test]
+fn f1_the_anchor_format_is_fixed_and_fits_the_progress_cap_whole() {
+    use crate::vajra::bridge_record::{PROGRESS_MAX, one_line, text};
+    let long_run = "r".repeat(64);
+    let a = Anchor { seq: u64::MAX, hash: hex64('f') };
+    let t = runlog::anchor_text(&long_run, &a);
+    assert_eq!(one_line(&t, PROGRESS_MAX), t, "nothing is cut");
+    assert!(text(&t, PROGRESS_MAX, true).is_ok());
+    assert_eq!(runlog::parse_anchor(&t), Some((long_run, a)));
+    let ok = format!("log head {RUN} 7 {}", hex64('a'));
+    assert!(runlog::parse_anchor(&ok).is_some());
+    for bad in [
+        format!("log head {RUN} 007 {}", hex64('a')),
+        format!("log head {RUN} 0 {}", hex64('a')),
+        format!("log head {RUN} 7 {}", hex64('A')),
+        format!("log head {RUN} 7 {}", "a".repeat(63)),
+        format!("log head {RUN} 7 {} ", hex64('a')),
+        format!("log head {RUN} 7 {} x", hex64('a')),
+        format!("log head  {RUN} 7 {}", hex64('a')),
+        format!("log head r/1 7 {}", hex64('a')),
+        format!("log head {} 7 {}", "r".repeat(65), hex64('a')),
+    ] {
+        assert_eq!(runlog::parse_anchor(&bad), None, "{bad}");
+    }
+}
+
+fn shown(texts: &[String]) -> String {
+    texts.iter().map(|t| format!("- 2026-11-12T09:30:00Z {t}\n")).collect()
+}
+
+#[test]
+fn f3_an_anchor_counts_only_when_the_cores_ledger_holds_that_write() {
+    let a1 = Anchor { seq: 2, hash: hex64('a') };
+    let other = runlog::anchor_text("20261112-0931-other", &Anchor { seq: 9, hash: hex64('b') });
+    let held = vec![format!("run {RUN} round 1: 1/2 criteria passing"), runlog::anchor_text(RUN, &a1), other.clone()];
+    assert_eq!(runlog::held_anchors(RUN, &held, &shown(&held)), Ok(vec![a1.clone()]), "other runs' held anchors are skipped");
+    // A forged anchor appended (and signed) by someone else: not verified, not skipped.
+    let forged = runlog::anchor_text(RUN, &Anchor { seq: 5, hash: hex64('c') });
+    let mut with_forged = held.clone();
+    with_forged.push(forged);
+    assert!(runlog::held_anchors(RUN, &held, &shown(&with_forged)).unwrap_err().contains("didn't write"));
+    // A malformed log head line is a claim too.
+    let mut junk = held.clone();
+    junk.insert(1, "log head nonsense".into());
+    assert!(runlog::held_anchors(RUN, &held, &shown(&junk)).is_err());
+    // A held anchor missing from the record.
+    assert!(runlog::held_anchors(RUN, &held, &shown(&held[..1])).unwrap_err().contains("missing"));
+}
+
+#[test]
+fn f4_only_anchors_this_session_sent_make_a_log_signed() {
+    let v = entries(4);
+    let a2 = anchor_of(&v[1]);
+    let a4 = anchor_of(&v[3]);
+    let held = [a2.clone(), a4.clone()];
+    assert_eq!(runlog::standing(RUN, &v, &held, &held).0, runlog::Standing::Signed);
+    assert_eq!(runlog::standing(RUN, &v, &held, &[]).0, runlog::Standing::Unconfirmed, "after a restart");
+    assert_eq!(runlog::standing(RUN, &v, &held, std::slice::from_ref(&a2)).0, runlog::Standing::NotVerified, "an anchor this session didn't send");
+    assert_eq!(runlog::standing(RUN, &v, &[], &[]).0, runlog::Standing::NotVerified, "nothing anchored");
+    let mut cut = v.clone();
+    cut[0].at_ms += 1;
+    assert_eq!(runlog::standing(RUN, &cut, &held, &held).0, runlog::Standing::NotVerified);
+}
+
+#[test]
+fn f4_a_log_that_no_longer_holds_the_sessions_anchor_is_broken_there() {
+    let mut l = log_of(4);
+    let good = l.head_anchor().unwrap();
+    assert!(l.require(&good));
+    assert!(!l.require(&Anchor { seq: 2, hash: hex64('0') }));
+    assert_eq!(l.broken().map(|b| (b.seq, b.why)), Some((2, Why::Unanchored)));
+    assert_eq!(l.append(Source::Core, dispatched(5), 1).err(), Some(Refused::Broken(2)));
+    let mut short = log_of(2);
+    assert!(!short.require(&good), "a log cut below the anchor");
+}
+
+#[test]
+fn f4_reopening_a_rewritten_log_in_the_same_session_breaks_it() {
+    const R: &str = "20261112-0930";
+    let d = scratch();
+    let app = crate::desktop::App::open(&d.join("data"), &d.join("home")).unwrap();
+    {
+        let log = app.run_log(R).unwrap();
+        log.set_record(Arc::new(FakeRecord::default()));
+        for i in 1..=3 {
+            log.append(Source::Core, dispatched(i)).unwrap();
+        }
+        log.anchor();
+        log.flush();
+    }
+    // Rebuild the whole chain with one event changed: its own links hold, but not the anchor this session sent.
+    let path = d.join("data/runlog").join(R).join(runlog_store::FILE);
+    let old = runlog_store::parse(&std::fs::read(&path).unwrap()).entries;
+    let mut l = Log::new(R);
+    for (i, e) in old.iter().enumerate() {
+        let k = if i == 1 { Kind::Dispatched { task: "x".into(), ticket: "x".into(), seat: "x".into() } } else { e.kind.clone() };
+        l.append(e.source.clone(), k, e.at_ms).unwrap();
+    }
+    let body: Vec<u8> = l.entries().iter().flat_map(|e| [serde_json::to_vec(e).unwrap(), b"\n".to_vec()].concat()).collect();
+    std::fs::write(&path, body).unwrap();
+    let again = app.run_log(R).unwrap();
+    assert_eq!(again.card().broken.map(|b| (b.seq, b.why)), Some((3, Why::Unanchored)));
+    assert_eq!(app.run_log_verify(R)["standing"], "not_verified");
+}
+
+#[test]
+fn f6_the_canonical_bytes_are_pinned() {
+    let mut l = Log::new(RUN);
+    l.append(Source::Worker("k1".into()), Kind::TicketEnded { task: "t1".into(), ticket: "k1".into(), outcome: "done".into() }, 1_731_400_000_000).unwrap();
+    let e = &l.entries()[0];
+    let want = format!(
+        r#"{{"at_ms":1731400000000,"body":{{"outcome":"done","task":"t1","ticket":"k1"}},"kind":"ticket_ended","prev":"{}","seq":1,"source":{{"worker":"k1"}},"v":1}}"#,
+        runlog::genesis(RUN)
+    );
+    assert_eq!(String::from_utf8(e.canonical_bytes()).unwrap(), want);
+    // Both computed outside Rust: `printf … | shasum -a 256`.
+    assert_eq!(runlog::genesis(RUN), "97028a1dd4c734866ceaf409c729ec2922470b895d55e672f32cb22154f1836f");
+    assert_eq!(e.hash, "936d417ff36b9164411737b71e350ab8b79b500517e7cfff76ec404fc90ecf2a");
+}
+
+#[test]
+fn f7_text_is_redacted_before_it_is_hashed() {
+    let k = Kind::Question { id: "q".into(), text: "token SECRET here".into() }.map_text(&|s| s.replace("SECRET", "[redacted]"));
+    let mut l = Log::new(RUN);
+    l.append(Source::Lead, k, 1).unwrap();
+    let e = &l.entries()[0];
+    assert!(!String::from_utf8(e.canonical_bytes()).unwrap().contains("SECRET"));
+    assert_eq!(e.compute_hash(), e.hash);
+}
+
+#[test]
+fn f8_a_run_folder_that_is_a_link_is_refused() {
+    let d = scratch();
+    std::fs::create_dir_all(d.join("real")).unwrap();
+    std::fs::create_dir_all(d.join("runlog")).unwrap();
+    std::os::unix::fs::symlink(d.join("real"), d.join("runlog").join(RUN)).unwrap();
+    assert!(RunLog::open(&d.join("runlog").join(RUN), RUN).is_err());
+    let parent_link = scratch();
+    std::fs::create_dir_all(&parent_link).unwrap();
+    std::os::unix::fs::symlink(d.join("real"), parent_link.join("runlog")).unwrap();
+    assert!(RunLog::open(&parent_link.join("runlog").join(RUN), RUN).is_err(), "the parent is checked too");
+}

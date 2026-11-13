@@ -95,9 +95,14 @@ impl Kind {
         matches!(self, Kind::CheckResult { .. } | Kind::RoundVerdict { .. })
     }
 
-    /// Every text field as one capped line.
+    /// Every text field as one capped line. Applied by `Log::append` before hashing, so a stored entry rehashes the same.
     fn capped(self) -> Kind {
-        let c = |s: String| one_line(&s, TEXT_MAX);
+        self.map_text(&|s| one_line(&s, TEXT_MAX))
+    }
+
+    /// Every text field through `f` (the protocol's redactor, before the entry is hashed; bhishma F7).
+    pub fn map_text(self, f: &dyn Fn(String) -> String) -> Kind {
+        let c = |s: String| f(s);
         let co = |s: Option<String>| s.map(c);
         match self {
             Kind::RunStarted { resumed_from } => Kind::RunStarted { resumed_from: co(resumed_from) },
@@ -164,15 +169,21 @@ fn canonical(v: &Value, out: &mut String) {
 }
 
 impl Entry {
-    /// The sha256 of this entry's canonical JSON without `hash`.
-    pub fn compute_hash(&self) -> String {
+    /// The bytes an entry's hash covers: its JSON without `hash`, keys sorted at every level, no whitespace, UTF-8.
+    /// No field is a float. A golden test pins these bytes, so a serde change can't move every hash unnoticed (F6).
+    pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut v = serde_json::to_value(self).unwrap_or(Value::Null);
         if let Value::Object(m) = &mut v {
             m.remove("hash");
         }
         let mut s = String::new();
         canonical(&v, &mut s);
-        sha256::hex_digest(s.as_bytes())
+        s.into_bytes()
+    }
+
+    /// The sha256 of `canonical_bytes`.
+    pub fn compute_hash(&self) -> String {
+        sha256::hex_digest(&self.canonical_bytes())
     }
 }
 
@@ -251,9 +262,19 @@ impl Log {
         &self.entries[from..to]
     }
 
-    /// The anchor line for the current head: `log head <run> <seq> <hash>`.
-    pub fn anchor_line(&self) -> Option<String> {
-        self.head().map(|h| format!("{ANCHOR_PREFIX}{} {} {}", self.run_id, h.seq, h.hash))
+    /// The anchor for the current head.
+    pub fn head_anchor(&self) -> Option<Anchor> {
+        self.head().map(|h| Anchor { seq: h.seq, hash: h.hash.clone() })
+    }
+
+    /// Require the chain to hold `a` (an anchor this app session sent; F4). If it doesn't, the log is broken at that
+    /// seq: nothing more is appended and the run can't be verified on it. `true` when it holds.
+    pub fn require(&mut self, a: &Anchor) -> bool {
+        let ok = usize::try_from(a.seq).ok().and_then(|s| s.checked_sub(1)).and_then(|i| self.entries.get(i)).is_some_and(|e| e.hash == a.hash);
+        if !ok && self.broken.as_ref().is_none_or(|b| b.seq > a.seq) {
+            self.broken = Some(Break { seq: a.seq, why: Why::Unanchored });
+        }
+        ok
     }
 }
 
@@ -273,6 +294,8 @@ pub enum Why {
     WrongRun,
     /// An entry of another format.
     Format,
+    /// The chain at an anchor this app session sent doesn't hold that anchor's hash (the log changed under it; F4).
+    Unanchored,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -321,21 +344,61 @@ pub struct Anchor {
     pub hash: String,
 }
 
-/// This run's anchors in the signed record's progress text (`- <time> log head <run> <seq> <hash>` lines), in order.
-/// Other runs' anchors (a resumed run shares the campaign) and every other line are skipped.
+/// The one anchor format (bhishma F1): `log head <run id> <seq> <64 lowercase hex>`, single spaces, nothing else.
+/// The run id is in it because a resumed run shares its campaign, so several runs' anchors sit in one progress file.
+/// With a run id of at most 64 characters it is at most 9 + 64 + 1 + 20 + 1 + 64 = 159 characters, under the record's
+/// progress cap of 300 after `one_line`, so the hash is never cut (a test pins it).
+pub fn anchor_text(run_id: &str, a: &Anchor) -> String {
+    format!("{ANCHOR_PREFIX}{run_id} {} {}", a.seq, a.hash)
+}
+
+/// Parse one progress text (no timestamp) as an anchor: `(run id, anchor)`, or `None` if it isn't exactly the format.
+pub fn parse_anchor(text: &str) -> Option<(String, Anchor)> {
+    let mut it = text.strip_prefix(ANCHOR_PREFIX)?.split(' ');
+    let (run, seq, hash) = (it.next()?, it.next()?, it.next()?);
+    let hex = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let seq: u64 = seq.parse().ok().filter(|s: &u64| *s >= 1)?;
+    let a = Anchor { seq, hash: hash.to_string() };
+    // Canonical only: "007" or a trailing space doesn't parse back to the same text.
+    let run_ok = !run.is_empty() && run.len() <= 64 && run.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
+    (it.next().is_none() && hex && run_ok && anchor_text(run, &a) == text).then(|| (run.to_string(), a))
+}
+
+/// Does this progress text claim to be an anchor (well-formed or not)?
+fn claims_anchor(text: &str) -> bool {
+    text.trim_start().starts_with(ANCHOR_PREFIX.trim_end())
+}
+
+/// The text of each `- <time> <text>` line of a progress file.
+fn progress_texts(progress: &str) -> impl Iterator<Item = &str> {
+    progress.lines().filter_map(|l| l.strip_prefix("- ")?.split_once(' ').map(|x| x.1))
+}
+
+/// This run's anchors in a progress file, in order (for tests and display; verification uses `held_anchors`).
 pub fn anchors(run_id: &str, progress: &str) -> Vec<Anchor> {
-    progress
-        .lines()
-        .filter_map(|l| {
-            // `- <time> <text>`: the text itself must be the anchor, not merely contain one.
-            let text = l.strip_prefix("- ")?.split_once(' ')?.1;
-            let mut it = text.strip_prefix(ANCHOR_PREFIX)?.split(' ');
-            let (run, seq, hash) = (it.next()?, it.next()?, it.next()?);
-            (run == run_id && it.next().is_none() && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-                .then(|| seq.parse().ok().map(|seq| Anchor { seq, hash: hash.to_string() }))
-                .flatten()
-        })
-        .collect()
+    progress_texts(progress).filter_map(parse_anchor).filter(|(r, _)| r == run_id).map(|x| x.1).collect()
+}
+
+/// This run's anchors, counted only from progress writes the core's own ledger recorded (bhishma F3). `held`: the
+/// ledger's progress texts, in order; `shown`: the signed progress file read back. A line in `shown` that claims to be
+/// an anchor and isn't, in order, one the core wrote is an error: the result is "not verified", never a skipped line.
+pub fn held_anchors(run_id: &str, held: &[String], shown: &str) -> Result<Vec<Anchor>, String> {
+    let shown_claims: Vec<&str> = progress_texts(shown).filter(|t| claims_anchor(t)).collect();
+    let held_claims: Vec<&str> = held.iter().map(String::as_str).filter(|t| claims_anchor(t)).collect();
+    if let Some(i) = (0..shown_claims.len().max(held_claims.len())).find(|&i| shown_claims.get(i) != held_claims.get(i)) {
+        return Err(match shown_claims.get(i) {
+            Some(t) => format!("a log head line the core didn't write: {}", one_line(t, 120)),
+            None => "a log head line the core wrote is missing from the record".into(),
+        });
+    }
+    let mut out = Vec::new();
+    for t in held_claims {
+        let (run, a) = parse_anchor(t).ok_or_else(|| format!("a log head line isn't in the anchor format: {}", one_line(t, 120)))?;
+        if run == run_id {
+            out.push(a);
+        }
+    }
+    Ok(out)
 }
 
 /// How far the signed record vouches for the log.
@@ -353,6 +416,39 @@ impl Signed {
     pub fn verified(&self) -> bool {
         self.mismatch.is_none() && self.signed_to > 0
     }
+}
+
+/// What the run card may say about a log. Never "tamper-evident": until the worker sandboxes land, an agent on the same
+/// Mac could rewrite the log and its anchors together (bhishma F5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Standing {
+    /// The chain holds, and every anchor in the signed record is one the core's ledger holds and this app session sent.
+    Signed,
+    /// The chain holds and matches the ledger's anchors, but this app session sent none of them (the app restarted):
+    /// "hash-chained, anchors not confirmed by this session".
+    Unconfirmed,
+    /// The chain breaks, an anchor doesn't match, a log head line isn't the core's, or nothing was anchored.
+    NotVerified,
+}
+
+pub const CAVEAT: &str = "hash-chained; until the worker sandboxes land, an agent on this Mac could rewrite this log together with its anchors";
+
+/// The standing of a log: `held` are the anchors the core's ledger holds (`held_anchors`), `sent` the ones this app
+/// session sent. An anchor the session didn't send, while it sent others, is not confirmed: not verified.
+pub fn standing(run_id: &str, entries: &[Entry], held: &[Anchor], sent: &[Anchor]) -> (Standing, Signed) {
+    let s = signed(run_id, entries, held);
+    let chain_ok = verify(run_id, entries).broken.is_none();
+    let st = if !chain_ok || !s.verified() {
+        Standing::NotVerified
+    } else if held.iter().all(|a| sent.contains(a)) {
+        Standing::Signed
+    } else if sent.is_empty() {
+        Standing::Unconfirmed
+    } else {
+        Standing::NotVerified
+    };
+    (st, s)
 }
 
 /// Compare the log's valid prefix with every anchor. Any anchor it doesn't match is a mismatch, even an old one: a log

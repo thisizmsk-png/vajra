@@ -32,9 +32,19 @@ impl App {
         if let Some(l) = held.get(run_id).and_then(std::sync::Weak::upgrade) {
             return Ok(l);
         }
-        let log = Arc::new(RunLog::open(&self.run_log_dir(run_id)?, run_id)?);
+        let dir = self.run_log_dir(run_id)?;
+        if let Some(parent) = dir.parent() {
+            crate::control::fsx::private_dir(parent).map_err(|e| format!("the run log folder can't be made: {e}"))?;
+        }
+        let log = Arc::new(RunLog::open(&dir, run_id)?);
+        // Reopened in this app's life: the file must still hold the last anchor this session sent (F4).
+        if let Some(last) = super::lock(&self.log_anchors).get(run_id).and_then(|v| v.last().cloned()) {
+            log.require(&last);
+        }
         let events = Arc::clone(&self.events);
         log.set_notify(Box::new(move |run, seq| events.emit(EVENT, json!({"run_id": run, "seq": seq}))));
+        let sent = Arc::clone(&self.log_anchors);
+        log.set_on_anchor(Box::new(move |run, a| super::lock(&sent).entry(run.to_string()).or_default().push(a.clone())));
         held.insert(run_id.to_string(), Arc::downgrade(&log));
         Ok(log)
     }
@@ -64,9 +74,13 @@ impl App {
         json!({"run_id": run_id, "entries": entries, "head_seq": head_seq, "broken": card.broken, "io_error": card.io_error})
     }
 
-    /// How far the log holds, and how far the signed record vouches for it. Verified only when the chain holds to its
-    /// head, the campaign reads back with a valid signature and exactly the core's writes (#190's ledger), and every
-    /// anchor in it matches the log. Entries after the last anchor are "hash-chained, not yet signed".
+    /// How far the log holds, and how far the signed record vouches for it (`standing`):
+    /// - `signed`: the chain holds to its head; the campaign reads back with a valid signature and exactly the core's
+    ///   writes (#190's ledger); every anchor in it is one the ledger holds (F3) and this app session sent (F4); and the
+    ///   log matches each. Entries after the last anchor are "hash-chained, not yet signed".
+    /// - `unconfirmed`: all of that except the session part. The ledger is saved in the app's data folder and does
+    ///   survive a restart, but an agent of this user could edit that file, so after a restart it confirms nothing.
+    /// - `not_verified`: anything else, with the reason.
     pub fn run_log_verify(&self, run_id: &str) -> Value {
         let log = match self.run_log_read(run_id) {
             Ok(l) => l,
@@ -75,11 +89,15 @@ impl App {
         let entries = log.entries();
         let card = log.card();
         let chain = runlog::verify(run_id, &entries);
-        let (signed, record_error) = match self.run_log_anchors(run_id) {
-            Ok(anchors) => (Some(runlog::signed(run_id, &entries, &anchors)), None),
-            Err(why) => (None, Some(why)),
+        let sent = super::lock(&self.log_anchors).get(run_id).cloned().unwrap_or_default();
+        let (standing, signed, record_error) = match self.run_log_anchors(run_id) {
+            Ok(held) => {
+                let (st, s) = runlog::standing(run_id, &entries, &held, &sent);
+                (st, Some(s), None)
+            }
+            Err(why) => (runlog::Standing::NotVerified, None, Some(why)),
         };
-        let verified = card.broken.is_none() && chain.broken.is_none() && signed.as_ref().is_some_and(runlog::Signed::verified);
+        let standing = if card.broken.is_some() { runlog::Standing::NotVerified } else { standing };
         json!({
             "run_id": run_id,
             "head_seq": card.head_seq,
@@ -87,11 +105,14 @@ impl App {
             "broken": card.broken,
             "signed": signed,
             "record_error": record_error,
-            "verified": verified,
+            "standing": standing,
+            "verified": standing == runlog::Standing::Signed,
+            "caveat": runlog::CAVEAT,
         })
     }
 
-    /// This run's anchors, read back from its signed campaign, after checking the campaign holds only the core's writes.
+    /// This run's anchors from progress writes the core's ledger recorded, after checking the campaign reads back with
+    /// a valid signature and only the core's writes. A log head line the ledger doesn't hold is an error (F3).
     fn run_log_anchors(&self, run_id: &str) -> Result<Vec<runlog::Anchor>, String> {
         let seats = self.read_run_seats(run_id).map_err(|e| format!("the run's seats can't be read: {e}"))?.ok_or("the run has no seats")?;
         let slug = seats["campaign_slug"].as_str().ok_or("the run's seats name no campaign")?.to_string();
@@ -100,6 +121,6 @@ impl App {
         let rb = store.read_back(&slug)?;
         let ledger = store.load()?.ok_or("the run record has no ledger")?;
         ledger.check(&rb).map_err(|why| format!("the run record isn't only the core's: {why}"))?;
-        Ok(runlog::anchors(run_id, &rb.progress))
+        runlog::held_anchors(run_id, &ledger.progress, &rb.progress)
     }
 }

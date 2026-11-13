@@ -279,6 +279,9 @@ pub struct App {
     live_records: Mutex<HashMap<String, std::sync::Weak<record::CoreRecord>>>,
     /// Each core run's open log, by run id (W2): `run_log_since` reads the held one, so it sees what is written.
     live_logs: Mutex<HashMap<String, std::sync::Weak<runlog_store::RunLog>>>,
+    /// Every anchor this app session sent to a run's signed record, by run id, kept for the app's life (W2, bhishma F4):
+    /// only these confirm an anchor, and a reopened log must still hold the last one.
+    log_anchors: Arc<Mutex<HashMap<String, Vec<runlog::Anchor>>>>,
     /// Workers closed once finished (see `closeout`); persisted.
     closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
@@ -414,6 +417,7 @@ impl App {
             run_workers: Mutex::new(HashMap::new()),
             live_records: Mutex::new(HashMap::new()),
             live_logs: Mutex::new(HashMap::new()),
+            log_anchors: Default::default(),
             closeout: closeout::Store::open(data),
             issued: Mutex::new(Default::default()),
             log,

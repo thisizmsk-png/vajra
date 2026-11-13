@@ -1114,3 +1114,20 @@ fn a_receipt_is_logged_before_the_runs_last_anchor() {
     let s = crate::desktop::runlog::signed("r1", &entries, &crate::desktop::runlog::anchors("r1", &progress_text(&rec)));
     assert!(s.verified() && s.signed_to >= at, "the receipt (seq {at}) is inside the signed prefix {s:?}");
 }
+
+#[test]
+fn the_protocol_redacts_log_text_before_it_is_hashed() {
+    const NONCE: &str = "abcdef0123456789abcdef0123456789";
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("vajra-runproto-redact-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut r = rig_redacting("add a --json flag", default_seats(), Limits::default(), true, Redactor::new(Some(NONCE)));
+    let log = Arc::new(RunLog::open(&dir, "r1").unwrap());
+    let placeholder = rig().p;
+    r.p = std::mem::replace(&mut r.p, placeholder).with_log(log.clone(), None);
+    r.p.receipt("run", &format!("opus {NONCE}"), crate::desktop::runlog::Tokens::default(), 0, None);
+    log.flush();
+    let on_disk = std::fs::read_to_string(dir.join(crate::desktop::runlog_store::FILE)).unwrap();
+    assert!(on_disk.contains("receipt") && !on_disk.contains(NONCE), "{on_disk}");
+    assert_eq!(crate::desktop::runlog::verify("r1", &log.entries()).broken, None);
+}

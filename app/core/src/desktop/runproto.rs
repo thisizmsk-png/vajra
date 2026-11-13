@@ -533,9 +533,10 @@ impl RunProtocol {
         self.log_as(LogSource::Core, k);
     }
 
+    /// Every text field is redacted here, then capped by the log, both before the entry is hashed (bhishma F7).
     fn log_as(&self, s: LogSource, k: LogKind) {
         if let Some(l) = &self.0.log {
-            let _ = l.append(s, k);
+            let _ = l.append(s, k.map_text(&|t| sanitise(&t, &self.0.cfg.redact)));
         }
     }
 

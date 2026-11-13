@@ -37,6 +37,28 @@ pub const PAGE_MAX: usize = 500;
 
 /// Tells the UI that the run's log has entries up to `seq`.
 pub type Notify = Box<dyn Fn(&str, u64) + Send + Sync>;
+/// Told each anchor right after it is sent to the signed record: `(run id, anchor)`.
+pub type OnAnchor = Box<dyn Fn(&str, &runlog::Anchor) + Send + Sync>;
+
+/// Make `dir` a private directory of this user (mode 0700, owned by this uid, not a link) inside a parent that is a real
+/// directory of this user, not a link. The parent is checked, never changed: the app makes its own run-log folder
+/// private. Anything else is refused, never fixed (bhishma F8).
+fn private_run_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let uid = unsafe { libc::getuid() };
+    let refuse = |d: &Path, what: &str| io::Error::other(format!("{} is not {what}", d.display()));
+    let parent = dir.parent().ok_or_else(|| refuse(dir, "inside a folder"))?;
+    let pm = std::fs::symlink_metadata(parent)?;
+    if !pm.is_dir() || pm.uid() != uid {
+        return Err(refuse(parent, "a directory of this user"));
+    }
+    fsx::private_dir(dir)?;
+    let m = std::fs::symlink_metadata(dir)?;
+    if !m.is_dir() || m.uid() != uid || m.permissions().mode() & 0o777 != 0o700 {
+        return Err(refuse(dir, "a private directory of this user"));
+    }
+    Ok(())
+}
 
 /// What loading found on disk.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -118,6 +140,7 @@ struct Shared {
     written: Mutex<u64>,
     io_error: Mutex<Option<String>>,
     notify: Mutex<Option<Notify>>,
+    on_anchor: Mutex<Option<OnAnchor>>,
     record: Mutex<Option<Arc<dyn RunRecord>>>,
     tx: Mutex<mpsc::Sender<Msg>>,
 }
@@ -130,7 +153,7 @@ pub struct RunLog {
 impl RunLog {
     /// Open (or create) the run's log in `dir`, resuming after its last good entry.
     pub fn open(dir: &Path, run_id: &str) -> Result<Self, String> {
-        fsx::private_dir(dir).map_err(|e| format!("the run log's folder can't be made: {e}"))?;
+        private_run_dir(dir).map_err(|e| format!("the run log's folder can't be used: {e}"))?;
         let path = dir.join(FILE);
         let (log, torn) = load(&path, run_id).map_err(|e| format!("the run log can't be read: {e}"))?;
         if log.broken().is_none() {
@@ -145,6 +168,7 @@ impl RunLog {
             written: Mutex::new(written),
             io_error: Mutex::new(None),
             notify: Mutex::new(None),
+            on_anchor: Mutex::new(None),
             record: Mutex::new(None),
             tx: Mutex::new(tx),
         });
@@ -163,6 +187,15 @@ impl RunLog {
 
     pub fn set_notify(&self, n: Notify) {
         *crate::lock(&self.s.notify) = Some(n);
+    }
+
+    pub fn set_on_anchor(&self, f: OnAnchor) {
+        *crate::lock(&self.s.on_anchor) = Some(f);
+    }
+
+    /// Require the chain to hold an anchor this app session sent (on reopen; F4). A mismatch breaks the log there.
+    pub fn require(&self, a: &runlog::Anchor) -> bool {
+        crate::lock(&self.s.log).require(a)
     }
 
     /// The signed record anchors go to. Without one, `anchor` logs nothing and the log stays unsigned.
@@ -353,12 +386,17 @@ impl Shared {
             return;
         }
         let written = *crate::lock(&self.written);
-        let (line, hash) = {
+        let (run, anchor) = {
             let log = crate::lock(&self.log);
             let Some(e) = written.checked_sub(1).and_then(|i| log.entries().get(i as usize)) else { return };
-            (format!("{}{} {} {}", runlog::ANCHOR_PREFIX, log.run_id(), e.seq, e.hash), e.hash.clone())
+            (log.run_id().to_string(), runlog::Anchor { seq: e.seq, hash: e.hash.clone() })
         };
-        record.send(Event::Progress(line));
+        record.send(Event::Progress(runlog::anchor_text(&run, &anchor)));
+        // Kept in the app's memory for its life (F4): the anchors this session sent are the only ones it confirms.
+        if let Some(f) = crate::lock(&self.on_anchor).as_ref() {
+            f(&run, &anchor);
+        }
+        let hash = anchor.hash;
         // Queued behind anything appended since: the order on disk stays the log's.
         let mut log = crate::lock(&self.log);
         if let Ok(e) = log.append(Source::Core, Kind::Anchored { seq: written, hash }, super::state::now_ms()) {
