@@ -826,6 +826,19 @@ impl RunProtocol {
             Ok(tk) => tk,
             Err(DispatchError::Exists) => return refuse(NOT_READY, format!("task {id} already ran in round {r}")),
             Err(DispatchError::Invalid(w)) => return refuse(INVALID, format!("the core can't dispatch this {w}")),
+            // The app is quitting: nothing new is queued, so the run stops as a human Stop would.
+            Err(DispatchError::Closed) => {
+                let why = "Vajra is quitting, so no new worker can start";
+                Self::finalize(st, RunStatus::Stopped, why);
+                return refuse(RUN_ENDED, format!("the run has ended (stopped): {why}"));
+            }
+            // The run's recorded history wasn't read whole, so the ticket ids it used are unknown and nothing new can
+            // go into it. No retry or later round fixes that: the run ends unverified, saying why.
+            Err(DispatchError::HistoryIncomplete) => {
+                let why = "this run's recorded history couldn't be read whole, so no new worker can be added to it; start a new run";
+                Self::finalize(st, RunStatus::NotVerified, why);
+                return refuse(RUN_ENDED, format!("the run has ended (not_verified): {why}"));
+            }
         };
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));

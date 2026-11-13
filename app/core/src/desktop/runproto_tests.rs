@@ -30,6 +30,8 @@ struct FakeWorkers {
     kills: Mutex<Vec<KillReason>>,
     merges: Mutex<Vec<Vec<String>>>,
     merge_result: Mutex<Option<GitwError>>,
+    /// Every dispatch answers this error while it is set.
+    dispatch_error: Mutex<Option<DispatchError>>,
 }
 
 impl FakeWorkers {
@@ -60,6 +62,9 @@ fn commit_of(id: &str) -> String {
 
 impl Workers for FakeWorkers {
     fn dispatch(&self, spec: TaskSpec, seat: WorkerSeat) -> Result<String, DispatchError> {
+        if let Some(e) = crate::lock(&self.dispatch_error).clone() {
+            return Err(e);
+        }
         let id = format!("{}.{}.r{}", spec.run, spec.task, spec.round);
         let mut b = crate::lock(&self.tickets);
         if b.contains_key(&id) {
@@ -720,4 +725,37 @@ fn the_run_timeout_counts_from_the_runs_start_not_the_clocks_origin() {
     clock.advance(1);
     p.tick();
     assert_eq!(p.card().status, Some(RunStatus::TimedOut));
+}
+
+/// batch-3's `Closed`: the app is quitting, so nothing new is queued. The run is stopped (as a human Stop would), and
+/// the lead hears why; it is not told to retry.
+#[test]
+fn a_dispatch_refused_because_the_app_is_quitting_stops_the_run() {
+    let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), true);
+    r.p.plan_tasks(plan1()).unwrap();
+    *crate::lock(&r.w.dispatch_error) = Some(DispatchError::Closed);
+    let e = r.p.dispatch_worker("t1").unwrap_err();
+    assert_eq!(e.code, RUN_ENDED, "{e:?}");
+    assert!(e.reason.contains("quitting"), "{e:?}");
+    let card = r.p.card();
+    assert_eq!(card.status, Some(RunStatus::Stopped));
+    assert_eq!(*crate::lock(&r.w.kills), [KillReason::Stopped], "the run's workers are stopped");
+    // Every later call hears that the run ended.
+    *crate::lock(&r.w.dispatch_error) = None;
+    assert_eq!(r.p.dispatch_worker("t2").unwrap_err().code, RUN_ENDED);
+}
+
+/// batch-3's `HistoryIncomplete`: the run's recorded history wasn't read whole, so the ticket ids it used are unknown
+/// and nothing new can go into it. No retry or later round can fix that: the run ends `not_verified`, saying so.
+#[test]
+fn a_dispatch_refused_for_an_incomplete_history_ends_the_run_not_verified() {
+    let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), true);
+    r.p.plan_tasks(plan1()).unwrap();
+    *crate::lock(&r.w.dispatch_error) = Some(DispatchError::HistoryIncomplete);
+    let e = r.p.dispatch_worker("t1").unwrap_err();
+    assert_eq!(e.code, RUN_ENDED, "{e:?}");
+    let card = r.p.card();
+    assert_eq!(card.status, Some(RunStatus::NotVerified));
+    assert!(card.reason.as_deref().unwrap().contains("history"), "{card:?}");
+    assert_eq!(*crate::lock(&r.w.kills), [KillReason::Stopped]);
 }
