@@ -355,6 +355,8 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | Claude Code / Engine self-check / Safety hooks / OS sandbox / Git / Python 3 / OpenSSL / Run workflow | check names in the pre-flight list | a check with no plain name shows as the core sent it |
 | Ready / Question (were ready / question) | Review, task list status | task statuses the list had no wording for now use the shared status words, so every status has one casing |
 | A run cannot start until the failing check below passes. / ...the failing checks below pass. | beside the disabled Start run button | shown only when the checks are what blocks a start; the button points to it for screen readers |
+| "MODEL via PROVIDER" (was the two joined by a middle dot), for example "Default model via Claude Code", "DeepSeek V3.2 via OpenRouter" | every place a model is named with its provider: project column, Board, Review, Crew, worker header, proposal, the model pickers, Settings > Providers | DESIGN.md bans meta strings joined with middle dots; one helper writes the pair |
+| "BILLING, KEY NAME ..." (was joined by a middle dot), for example "Billing: can't tell, OPENAI_API_KEY set in the CLI config" | billing line under a proposed worker | same rule |
 | Back to NAME / Back | top of the Settings section list | the visible way out of Settings, which shows no view tabs; opens the project's Director-General view |
 
 One-click install (ADR-17 17b). Only a source that passed its security review gets the sheet; every other row keeps the step-1 wording and has no Install button.

@@ -1,4 +1,4 @@
-// A worker's provider, wherever the worker appears: icon, "Model · provider" (never a bare model), the billing chip,
+// A worker's provider, wherever the worker appears: icon, "Model via provider" (never a bare model), the billing chip,
 // "Ran on X (asked for Y)" when the harness ran something else, and the provider-error state. All from `effective`.
 import { Badge } from "../../components/ui/base";
 import { S } from "../../strings";

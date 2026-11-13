@@ -103,6 +103,19 @@ def summary(idle):
             f"| {post['pre_load_mib']} | {post['peak_mib']} | {post['plus2_mib']} | {post['plus10_mib']} | {post['retained_mib']} MiB |\n")
 
 
+def idle_summary(idle):
+    """Job-summary table for the idle run: the gated RSS median beside the app's footprint (reported, never gated) and the
+    launch 1 warm-up reading that the median leaves out. Empty for an idle.json from before the warm-up rule."""
+    runs = idle.get("runs") or []
+    warm = [r["median_mib"] for r in runs if r.get("warmup") and r.get("median_mib") is not None]
+    if not idle.get("gated_launches"):
+        return ""
+    return ("### Idle memory (launch 1 is warm-up; the gate judges the median of the other launches)\n\n"
+            "| gated RSS median | footprint median (reported only) | warm-up launch RSS | launches gated |\n|---|---|---|---|\n"
+            f"| {idle.get('median_of_medians_mib')} MiB | {idle.get('footprint_median_mib')} MiB | "
+            f"{', '.join(str(w) for w in warm) or 'n/a'} MiB | {idle['gated_launches']} |\n")
+
+
 def check(baseline, idle, growth, ci=None):
     return evaluate(baseline, idle, growth, ci)[0]
 
@@ -129,6 +142,6 @@ if __name__ == "__main__":
         print(f"::warning::perf gate: {w}")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-            f.write(summary(load(sys.argv[2])))
+            f.write(idle_summary(load(sys.argv[2])) + summary(load(sys.argv[2])))
     print("\n".join(fails) or "perf gate: ok")
     sys.exit(1 if fails else 0)
