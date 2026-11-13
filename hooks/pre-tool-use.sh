@@ -23,6 +23,7 @@
 # empty arrays are expanded with ${a[@]+"${a[@]}"} because of set -u.
 
 set -u
+set -o pipefail
 unset CDPATH
 # NFR-SEC-2: a hook runs outside the guard, and the programs it starts can read the HMAC key file. A same-uid worker
 # can write user dirs (for example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs
@@ -32,15 +33,46 @@ PYTHON3="/usr/bin/python3"
 # Path comparisons are case-insensitive (nocasematch is switched on only inside
 # classify/inside/icase, so `case` on flags like -c vs -C stays exact).
 
+# Fail closed on any unexpected error (item 4). The EXIT trap blocks every exit without a decision, and the ERR trap
+# blocks a failing top-level command. Neither sees an error that does not end the script: a bad substitution or an
+# unbound variable inside `$(...)` only ends that subshell and leaves an empty value, and a `[` test that errors reads
+# as false, so the check is skipped and the call would be allowed. Every such error is printed by bash on stderr, so
+# the hook's own stderr goes to a private file, its messages go to fd 3 (the real stderr), and `allow` refuses to
+# allow when that file holds anything. errtrace is not used: the helpers answer with their return code.
+exec 3>&2
 DECIDED=0
+GERR=""
+# The first line bash wrote to the captured stderr, printable and at most 300 characters (built-ins only, so it can
+# run inside a trap).
+gerr_line() {
+  GERR_LINE=""
+  [ -n "$GERR" ] && [ -s "$GERR" ] && { IFS= read -r GERR_LINE < "$GERR" || true; }
+  GERR_LINE="${GERR_LINE//[^[:print:]]/}"; GERR_LINE="${GERR_LINE:0:300}"
+  return 0
+}
+internal_error() { # what -> the one fail-closed message, on the real stderr
+  gerr_line
+  echo "Vajra guard: internal error ($1${GERR_LINE:+: $GERR_LINE}); blocking the tool call (fail-closed)." >&3
+}
 on_exit() {
   local rc=$?
   if [ "$DECIDED" != 1 ]; then
-    echo "Vajra guard: internal error (rc=${rc}); blocking the tool call (fail-closed)." >&2
+    internal_error "exit ${rc} without a decision"
+    [ -n "$GERR" ] && rm -f "$GERR"
     exit 2
   fi
+  [ -n "$GERR" ] && rm -f "$GERR"
 }
 trap on_exit EXIT
+on_err() {
+  local rc=$?
+  internal_error "line ${1:-?} failed with ${rc}"
+  DECIDED=1
+  exit 2
+}
+trap 'on_err $LINENO' ERR
+GERR="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/vajra-guard-err.XXXXXX")"
+exec 2>"$GERR"
 
 VS="${HOME}/.claude/vajra"
 AUDIT_LOG="${VS}/audit.log"
@@ -53,12 +85,16 @@ audit() { # verdict tool reason
 
 block() {
   audit BLOCK "${TOOL:-unknown}" "$1"
-  echo "Vajra guard blocked this ${TOOL:-tool} call: $1" >&2
+  echo "Vajra guard blocked this ${TOOL:-tool} call: $1" >&3
   DECIDED=1
   exit 2
 }
 
 allow() {
+  if [ -s "$GERR" ]; then
+    gerr_line
+    block "an internal error occurred while checking it, so it is not allowed (fail-closed): ${GERR_LINE:-unknown error}"
+  fi
   audit ALLOW "${TOOL:-unknown}" ""
   DECIDED=1
   exit 0
@@ -67,7 +103,9 @@ allow() {
 TOOL=""
 NOJQ="jq was not found in /usr/bin, /bin, /usr/sbin or /sbin and /usr/bin/python3 could not parse the payload, so every tool call is blocked (fail-closed). Vajra's hooks use only those root-owned system dirs: a jq in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq; otherwise xcode-select --install provides /usr/bin/python3, which the guard then uses. Retry after."
 
-PAYLOAD="$(cat)"
+# A failed read (no `cat` in the pinned dirs) falls through to the parse step's own, more specific block; `allow`
+# refuses anyway, because the failure is on the captured stderr.
+PAYLOAD="$(cat)" || PAYLOAD=""
 CWD_IN="" CMD="" P1="" P2="" P3="" PAT="" AID=""
 if command -v jq >/dev/null 2>&1; then
 PARSED="$(jq -r '
@@ -591,7 +629,7 @@ case "$TOOL" in
   Write|Edit|MultiEdit|NotebookEdit)
     for f in "$P1" "$P2" "$P3"; do
       [ -n "$f" ] || continue
-      amb_check "$f" "$CWD" uni
+      amb_check "$f" "$CWD" uni || true  # it blocks itself; 1 only means "not ambiguous"
       canon "$f" "$CWD"
       classify "$CANON"
       case "$PKIND" in
