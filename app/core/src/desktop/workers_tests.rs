@@ -103,8 +103,20 @@ case "$1" in
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
     mkdir -p "$D"
     NET=false
-    [ "$MODE" = wide ] && NET=true
-    printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"model-fake-1","effort":"medium","sandbox_policy":{{"type":"workspace-write","network_access":%s,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":["%s"]}}}}}}\n' "$WT" "$NET" "$TMPDIR" > "$D/rollout-x-$TID.jsonl"
+    [ "$MODE" = net ] && NET=true
+    ROOTS="\"$TMPDIR\""
+    [ "$MODE" = wide ] && ROOTS="\"$TMPDIR\",\"/\""
+    # 6k: like codex 0.166, report each `"<dir>"="none"` of the launch's permission profile as a `deny` entry.
+    ENT='{{"path":{{"type":"path","path":"/"}},"access":"read"}}'
+    for a in "$@"; do
+      case "$a" in permissions.vajra-*.filesystem=*)
+        for p in $(printf '%s' "$a" | grep -o '"[^"]*"="none"' | sed 's/"="none"$//; s/^"//'); do
+          ENT="$ENT,{{\"path\":{{\"type\":\"path\",\"path\":\"$p\"}},\"access\":\"deny\"}}"
+        done ;;
+      esac
+    done
+    [ "$MODE" = nodeny ] && ENT='{{"path":{{"type":"path","path":"/"}},"access":"read"}}'
+    printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"model-fake-1","effort":"medium","sandbox_policy":{{"type":"workspace-write","network_access":%s,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":[%s]}},"file_system_sandbox_policy":{{"kind":"restricted","entries":[%s]}}}}}}\n' "$WT" "$NET" "$ROOTS" "$ENT" > "$D/rollout-x-$TID.jsonl"
     echo '{{"type":"thread.started","thread_id":"'$TID'"}}'
     ;;
 esac
@@ -112,7 +124,7 @@ edit() {{ echo "worker line" >> src/lib.rs; }}
 [ -n "$SLOW" ] || SLOW=0
 echo "start $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
 case "$MODE" in
-  edit|wide) edit ;;
+  edit|wide|net|nodeny) edit ;;
   flood) perl -e 'print "x" x 1000, "\n" for 1..400'; edit ;;
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
@@ -580,8 +592,44 @@ fn no_changes_fail_and_a_wider_sandbox_is_killed() {
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("no_changes")));
     let r = rig("wide", Opts { mode: "wide", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "a writable root outside the worktree");
+    assert!(v.commit.is_none());
+    // vajra-1 2026-11-13: network follows the seat's switch, so a session with network on under a seat with it off
+    // is killed.
+    let r = rig("net", Opts { mode: "net", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "network on, asked off");
     assert!(v.commit.is_none());
+}
+
+/// 6k: a Codex worker launches under the `vajra` profile with the state dir and the data dir unreadable, and a session
+/// whose policy leaves them readable is killed before its work counts.
+#[test]
+fn a_codex_worker_cannot_read_the_vajra_dirs_or_it_does_not_run() {
+    let r = rig("deny", Opts { mode: "edit", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let r = rig("nodeny", Opts { mode: "nodeny", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "a readable Vajra dir");
+    assert!(v.commit.is_none());
+}
+
+/// bhishma #216 M1-b (vajra-1's decision): Codex loads a worktree's own `.codex` (config, hooks, agents) and `.agents`
+/// (skills), so a Codex worker never launches over either one unless it is empty, whatever it holds.
+#[test]
+fn a_codex_worker_never_launches_over_a_worktree_codex_or_agents_folder() {
+    for (name, file, body) in [
+        ("wtcodex", ".codex/config.toml", "notify = [\"/bin/sh\", \"-c\", \"true\"]\n"),
+        ("wtcodexplain", ".codex/config.toml", "model = \"x\"\n"),
+        ("wtcodexhooks", ".codex/hooks.json", "{}\n"),
+        ("wtagents", ".agents/skills/x/SKILL.md", "x\n"),
+    ] {
+        let r = rig(name, Opts { files: vec![(file, body)], ..Opts::default() });
+        let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+        assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "{file}: {v:?}");
+        assert!(v.commit.is_none());
+    }
 }
 
 #[test]

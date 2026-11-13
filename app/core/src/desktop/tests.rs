@@ -107,6 +107,11 @@ fn one_active_run_per_project() {
     let held = app.start_run(input, &cwd).unwrap_err();
     assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     assert!(held["detail"].as_str().is_some_and(|d| !d.is_empty()));
+    // bhishma #216 Low 2: a second Codex Lead is held the same way, under the launching lock and before its proof runs,
+    // so a running Lead can't write the project's `.codex` between a second Lead's proof and its launch.
+    let codex = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
+    let held = app.start_run(codex, &cwd).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     assert_eq!(app.resume_run(other, "c2", &cwd, None).unwrap_err()["reason"], "project_busy");
     // A past run's crew view never retargets the control service.

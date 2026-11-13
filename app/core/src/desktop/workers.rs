@@ -1781,6 +1781,8 @@ struct Launch {
     redact: Redactor,
     /// See `TicketView::steer_off`.
     steer_off: Option<&'static str>,
+    /// 6k: the dirs the session's read-back must show as unreadable.
+    deny: Vec<PathBuf>,
 }
 
 impl Launch {
@@ -1832,31 +1834,46 @@ impl Launch {
             brief = format!("{brief}\n\n{}", profiles::steer_brief(n));
             redact.add(Some(n));
         }
-        let wl = WorkerLaunch { kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network: seat.network, ticket_tmp: &t.tmp };
+        // 6k: the profile denies the Vajra state dir and the app data dir, as defense in depth only. The user's own
+        // Codex tools run outside it, so no claim is made about the key (owner 2026-11-13).
+        let deny = profiles::vajra_deny_dirs(&cfg.home, &cfg.data);
+        // A fresh profile name per launch, so no table in the user's Codex config merges into it.
+        let profile = profiles::codex_profile_name().map_err(|_| "spawn_failed")?;
+        let gateway = engine == Engine::Codex && seat.account != "codex";
+        // A gateway account's own `CODEX_HOME`, made (or rewritten) now through the guarded writer: a fresh account has
+        // none yet, and a worker must never start on a missing provider config (#149 codex P1).
+        let home = if gateway {
+            use crate::providers::codex_home;
+            let made = codex_home::write(&cfg.data, &seat.account, codex_home::DEFAULT_BASE_URL).map_err(|e| match e {
+                codex_home::Error::UnknownAccount => "engine_missing",
+                _ => "profile_not_applied",
+            })?;
+            Some(made)
+        } else {
+            None
+        };
+        // bhishma #216 M1-b: Codex loads the worktree's own `.codex` and `.agents`, which an earlier session there could
+        // write, so a Codex worker never launches over a non-empty one. The user's own Codex tools stay on (owner).
+        if engine == Engine::Codex && profiles::codex_project_outside(&t.wt).is_some() {
+            return Err("profile_not_applied");
+        }
+        // vajra-1 2026-11-13: network follows the seat's switch, for Codex too (its profile has no other network source).
+        let network = seat.network;
+        let wl = WorkerLaunch {
+            kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network, ticket_tmp: &t.tmp,
+            worktree: &t.wt, deny: &deny, profile: &profile,
+        };
         let mut l = Launch {
-            engine, argv: Vec::new(), env: Vec::new(), flag: None, session_id: None, tools: String::new(), network: seat.network,
-            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact, steer_off,
+            engine, argv: Vec::new(), env: Vec::new(), flag: None, session_id: None, tools: String::new(), network,
+            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact, steer_off, deny: deny.clone(),
         };
         match engine {
             Engine::Codex => {
-                let gateway = seat.account != "codex";
                 let mut argv = if gateway { profiles::codex_worker_argv(&wl) } else { profiles::codex_login_worker_argv(&wl) }.map_err(|_| "invalid_input")?;
                 // `sh -c 'exec "$@"' sh codex ...`: the harness word is the absolute binary the app resolved.
                 if argv.get(4).map(String::as_str) == Some("codex") {
                     argv[4] = cfg.codex.to_str().ok_or("invalid_input")?.to_string();
                 }
-                // A gateway account's own `CODEX_HOME`, made (or rewritten) now through the guarded writer: a fresh
-                // account has none yet, and a worker must never start on a missing provider config (#149 codex P1).
-                let home = if gateway {
-                    use crate::providers::codex_home;
-                    let made = codex_home::write(&cfg.data, &seat.account, codex_home::DEFAULT_BASE_URL).map_err(|e| match e {
-                        codex_home::Error::UnknownAccount => "engine_missing",
-                        _ => "profile_not_applied",
-                    })?;
-                    Some(made)
-                } else {
-                    None
-                };
                 if let Some(h) = &home {
                     l.codex_home = h.clone();
                 }
@@ -1913,7 +1930,7 @@ impl Launch {
                 if !rollout.lines().any(|l| l.contains("\"turn_context\"")) {
                     return None;
                 }
-                let want = CodexWant { cwd: t.wt.clone(), ticket_tmp: self.ticket_tmp.clone(), network: self.network };
+                let want = CodexWant { cwd: t.wt.clone(), ticket_tmp: self.ticket_tmp.clone(), network: self.network, deny: self.deny.clone() };
                 Some(profiles::check_codex_applied(&rollout, &want).map_err(|e| e.0))
             }
             Engine::Claude => {

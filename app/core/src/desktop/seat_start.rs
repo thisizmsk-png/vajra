@@ -21,11 +21,18 @@ pub struct StartOptions {
     pub approve_checker: bool,
 }
 
-pub const CODEX_WARNING: &str = "Runs outside the Vajra guard. Can read your files, including Vajra's signing key. With that key it could fake Vajra's records and approvals, not only test results. It can write only in its worktree. Your own Codex tools (MCP servers, notify) run with it, outside its sandbox.";
+/// Every Codex seat's card note (owner 2026-11-13, "keep my extras, no key claim"): Codex runs with the user's own
+/// settings and tools, and Vajra makes no claim that it is kept from the signing key.
+pub const CODEX_WARNING: &str = "Runs outside the Vajra guard, with your own Codex settings. Your Codex tools (MCP servers, hooks, plugins, notify) run with it, outside its sandbox. Its sandbox's internet follows this seat's switch. Web search and your Codex tools (MCP, hooks, notify) aren't limited by it. It isn't guarded against reading Vajra's signing key, and with that key it could fake Vajra's records and approvals, not only test results.";
+
+/// bhishma #216 M-Lead: the Codex Lead row also names why its run is never counted guarded.
+fn codex_lead_note() -> String {
+    format!("{CODEX_WARNING} {CODEX_LEAD_CAUSE}")
+}
 pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard. Your own Claude Code MCP servers run with it.";
 pub const NETWORK_NOTE: &str = "Internet on for this worker";
 pub const OUTSIDE_GUARD_CARD: &str = "Final check runs outside the Vajra guard";
-pub const OUTSIDE_GUARD_WHY: &str = "A helper outside the Vajra guard wrote the final check. Vajra ran it with the signing key locked away, but the helper itself could read the key, so it could have copied it and used it to fake Vajra records and approvals. A coming update stops helpers reading the key. A key already copied stays valid.";
+pub const OUTSIDE_GUARD_WHY: &str = "A helper outside the Vajra guard wrote the final check. Vajra ran it with the signing key locked away, but the helper itself isn't guarded against reading the key, so it could have copied it and used it to fake Vajra records and approvals. A key already copied stays valid.";
 pub const APPROVAL_OFFER: &str = "Approve the checker's commands when they're ready, to get plain Verified.";
 
 fn override_invalid(detail: impl Into<String>) -> Value {
@@ -93,9 +100,13 @@ pub(super) fn apply_overrides(seats: &Seats, overrides: &[Value]) -> Result<(Sea
 
 /// Who wrote the final check, and so how far its evidence can be trusted (ADR-16 16.5a). Always the verifier seat: no
 /// agent session runs the evidence, so it never moves to another seat. Fixed at Start, from the harness in effect.
+/// A Codex verifier is never guarded: it runs with the user's own settings (owner 2026-11-13).
 pub fn evidence_of(seats: &Seats, approve_checker: bool, run_id: &str) -> Value {
     let verifier = seats.first_with_role(roles::VERIFIER);
-    let claude = verifier.is_some_and(|v| harness(&v.account) == Some(Engine::Claude));
+    // bhishma #216 H1: a Codex Lead is the user's own interactive session (approvals and escalation stay theirs), so
+    // its run is never counted guarded, whatever the verifier.
+    let codex_lead = harness(&seats.lead.account) == Some(Engine::Codex);
+    let claude = !codex_lead && verifier.is_some_and(|v| harness(&v.account) == Some(Engine::Claude));
     let trust = match (claude, approve_checker) {
         (true, _) => "guarded",
         (false, true) => "guarded_by_approval",
@@ -103,6 +114,13 @@ pub fn evidence_of(seats: &Seats, approve_checker: bool, run_id: &str) -> Value 
     };
     let slug = if trust == "outside_guard" { format!("deliver-{run_id}-og") } else { format!("deliver-{run_id}") };
     json!({"evidence_seat": verifier.map(|v| v.slot.as_str()), "evidence_trust": trust, "campaign_slug": slug})
+}
+
+pub const CODEX_LEAD_CAUSE: &str = "The lead runs on Codex, in your own interactive Codex session, so Vajra doesn't count its run as guarded.";
+
+/// Why the evidence is outside the guard when the verifier alone wouldn't say: a Codex lead (bhishma #216 H1).
+pub fn outside_cause(seats: &Seats) -> Option<&'static str> {
+    (harness(&seats.lead.account) == Some(Engine::Codex)).then_some(CODEX_LEAD_CAUSE)
 }
 
 fn protection(h: Option<Engine>, kind: Kind) -> &'static str {
@@ -118,12 +136,15 @@ fn protection(h: Option<Engine>, kind: Kind) -> &'static str {
 fn seat_entry(seat: &str, role: &str, kind: Kind, account: &str, extra: Map<String, Value>, network: bool) -> Value {
     let h = harness(account);
     let (limits, mut disclosures) = match h {
-        Some(Engine::Claude) => (json!({"message": true, "redirect": true, "stop": "hook_block"}), vec![CLAUDE_NOTE]),
-        Some(Engine::Codex) => (json!({"message": false, "redirect": false, "stop": "terminate", "note": "This worker can't take a message mid-run."}), vec![CODEX_WARNING]),
+        Some(Engine::Claude) => (json!({"message": true, "redirect": true, "stop": "hook_block"}), vec![CLAUDE_NOTE.to_string()]),
+        Some(Engine::Codex) => {
+            let note = if kind == Kind::Lead { codex_lead_note() } else { CODEX_WARNING.to_string() };
+            (json!({"message": false, "redirect": false, "stop": "terminate", "note": "This worker can't take a message mid-run."}), vec![note])
+        }
         None => (json!({}), vec![]),
     };
     if network {
-        disclosures.push(NETWORK_NOTE);
+        disclosures.push(NETWORK_NOTE.to_string());
     }
     let mut v = Map::new();
     v.insert("seat".into(), json!(seat));
@@ -188,6 +209,9 @@ pub(super) fn card(p: &Proposal) -> Option<Value> {
         v["evidence"]["label"] = json!("Verified (evidence ran outside the guard)");
         v["evidence"]["why"] = json!(OUTSIDE_GUARD_WHY);
         v["evidence"]["approval_offer"] = json!(APPROVAL_OFFER);
+        if let Some(c) = outside_cause(seats) {
+            v["evidence"]["cause"] = json!(c);
+        }
     }
     if let Some(w) = security_warning(&p.ask, seats) {
         v["security_warning"] = json!(w);
