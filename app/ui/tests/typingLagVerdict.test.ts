@@ -21,6 +21,20 @@ describe("typing-lag verdict", () => {
     expect(verdict(s(20, { painted: 118 }), { p95_ms: 18 }).ok).toBe(false);
     expect(verdict(s(20, { typed: 119 }), { p95_ms: 18 }).ok).toBe(false);
   });
+  it("fails when typing is slow in both passes and the delta is small: a cost in the composer's own path", () => {
+    const v = verdict(s(300), { p95_ms: 290 });
+    expect(v.delta_p95_ms).toBe(10);
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join(" ")).toContain("idle control p95 290");
+    expect(v.reasons.join(" ")).toContain("streaming p95 300");
+    // Just over the idle ceiling alone is enough.
+    expect(verdict(s(160), { p95_ms: 155 }).ok).toBe(false);
+  });
+  it("keeps the first runner run's idle figure and a bounded streaming figure under the ceilings", () => {
+    expect(verdict(s(100), { p95_ms: 69 }).ok).toBe(false); // delta 31 over 20: still the delta that fails it
+    expect(verdict(s(85), { p95_ms: 69 }).ok).toBe(true);
+    expect(verdict(s(189.2), { p95_ms: 170 }).ok).toBe(false); // idle over 150
+  });
   it("only applies the absolute 50 ms budget when asked", () => {
     expect(verdict(s(60), { p95_ms: 58 }).ok).toBe(true);
     expect(verdict(s(60), { p95_ms: 58 }, { absolute: true }).ok).toBe(false);
