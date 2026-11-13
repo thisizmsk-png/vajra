@@ -102,6 +102,38 @@ describe("followRunLog in a 4-worker run", () => {
     stop();
   });
 
+  it("a lost or oversized notice always heals by refetching, and no entry is ever dropped", async () => {
+    const c = core(5); // pages of 5, so healing an oversized gap takes several reads
+    let view = emptyRunLog;
+    const stop = followRunLog("r", (v) => (view = v));
+    await settle();
+    const all = () => c.entries.map((e) => e.seq);
+    c.write(3); c.tell(true); // lost
+    c.write(2); c.tell(); // past the view: heals
+    await settle();
+    expect(seqs(view)).toEqual(all());
+    c.write(NOTICE_MAX * 2); c.tell(); // oversized: carries 64 of 128, the rest is read in pages
+    await settle();
+    expect(seqs(view)).toEqual(all());
+    // A refetch that fails keeps what the view has; the next notice past it heals it.
+    const real = c.ipc.transport.call;
+    let fail = true;
+    c.ipc.transport.call = async (cmd, args) => {
+      if (cmd === "run_log_since" && fail) { fail = false; throw { error: "io", detail: "busy" }; }
+      return real(cmd, args);
+    };
+    c.write(4); c.tell(true); // lost
+    c.write(1); c.tell(); // gap; this refetch fails
+    await settle();
+    expect(seqs(view).length).toBeLessThan(all().length);
+    c.write(1); c.tell(); // still a gap: refetched, healed
+    await settle();
+    expect(seqs(view)).toEqual(all());
+    // Never a hole: the view is always 1, 2, 3, ... in order.
+    expect(seqs(view)).toEqual(seqs(view).map((_, i) => i + 1));
+    stop();
+  });
+
   it("ignores other runs and stops listening when stopped", async () => {
     const c = core();
     const stop = followRunLog("r", () => {});
