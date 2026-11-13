@@ -25,20 +25,24 @@ impl Tmp {
         self.0.join("home")
     }
     fn profile(&self, network: bool) -> Profile {
-        let p = Profile {
-            worktree: self.0.join("work"),
-            tmp: self.0.join("tmp"),
-            deny: deny_dirs(&self.home(), &self.0.join("data")),
-            caches: default_caches(&self.home()),
-            network,
-        };
+        let p = self.fresh(network, "tmp");
         p.prepare().unwrap();
         p
     }
-    /// `sh -c script` in the worktree under the profile, with HOME and TMPDIR set like a run.
+    /// A profile whose tmp dir (`name`) doesn't exist yet: what `run` needs, since it refuses a tmp that already does.
+    fn fresh(&self, network: bool, name: &str) -> Profile {
+        Profile { worktree: self.0.join("work"), tmp: self.0.join(name), deny: deny_dirs(&self.home(), &self.0.join("data")), network }
+    }
+    fn state(&self) -> PathBuf {
+        self.home().join(".claude/vajra")
+    }
+    /// `sh -c script` in the worktree under the profile, with HOME, TMPDIR and the caches set like a run.
     fn run(&self, p: &Profile, script: &str, extra: &[(&str, PathBuf)]) -> std::process::Output {
         let mut c = Command::new(SANDBOX_EXEC);
         c.args(p.argv("/bin/sh", &["-c".into(), script.into()]).unwrap()).current_dir(&p.worktree).env("HOME", self.home()).env("TMPDIR", &p.tmp);
+        for (k, v) in cache_env(&p.tmp) {
+            c.env(k, v);
+        }
         for (k, v) in extra {
             c.env(k, v);
         }
@@ -78,7 +82,17 @@ fn the_profile_denies_the_vajra_dirs_last_and_limits_writes() {
     assert!(p[deny_at..].contains(&format!("(subpath \"{}\")", t.0.join("data").display())));
     assert!(p.contains("(deny file-write*)\n"));
     assert!(p.contains("(deny network-outbound)"));
-    assert!(!t.profile(true).sbpl().unwrap().contains("(deny network-outbound)"), "a network seat keeps the network");
+    let net = t.profile(true).sbpl().unwrap();
+    assert!(!net.contains("(deny network-outbound)"), "a network seat keeps the network");
+    for text in [&p, &net] {
+        // Either setting: no unix socket beyond the resolver's and the run's own (M2), and the Mach denies (M1).
+        assert!(text.lines().filter(|l| l.starts_with("(allow")).all(|l| !l.contains("unix-socket")), "{text}");
+        assert!(text.contains("(literal \"/private/var/run/mDNSResponder\")"), "{text}");
+        assert!(text.contains("(deny mach-lookup (global-name \"com.apple.coreservices.launchservicesd\")"), "{text}");
+        assert!(text.contains("(deny job-creation)"), "{text}");
+        // The Mach and network rules come before the final deny, which still comes last.
+        assert!(text.rfind("(deny file-read* file-write*").unwrap() > text.rfind("(allow network-outbound").unwrap());
+    }
 }
 
 #[test]
@@ -130,19 +144,37 @@ fn a_command_can_neither_read_nor_write_the_vajra_dirs_nor_write_outside_its_wor
         format!("echo x > '{}'", t.0.join("data/planted").display()),
         format!("echo x > '{}'", t.home().join("outside").display()),
         format!("echo x > '{}'", t.0.join("planted-next-to-work").display()),
+        // The shared caches in the home folder are read-only (M3): nothing planted there reaches a later build.
+        "mkdir -p \"$HOME/.cache/x\"".to_string(),
+        "mkdir -p \"$HOME/.cargo/registry/src/planted\"".to_string(),
+        "mkdir -p \"$HOME/go/pkg/mod/planted\"".to_string(),
+        "mkdir -p \"$HOME/.npm/planted\"".to_string(),
+        // F1: the Codex sign-in folder, the Claude config file, cloud CLI credentials.
+        "cat \"$HOME/.codex/auth.json\"".to_string(),
+        "cat \"$HOME/.claude.json\"".to_string(),
+        "ls \"$HOME/.config/gcloud\"".to_string(),
+        "ls \"$HOME/.azure\"".to_string(),
     ];
+    for d in [".codex", ".config/gcloud", ".azure"] {
+        fs::create_dir_all(t.home().join(d)).unwrap();
+    }
+    fs::write(t.home().join(".codex/auth.json"), "fake").unwrap();
+    fs::write(t.home().join(".claude.json"), "fake").unwrap();
     for c in &cases {
         let o = t.run(&p, c, &[]);
         assert!(!o.status.success(), "{c} must be refused: {}", text(&o));
         assert!(text(&o).contains("Operation not permitted"), "{c}: {}", text(&o));
     }
     assert!(!String::from_utf8_lossy(&t.run(&p, &format!("cat '{}' 2>/dev/null; true", key.display()), &[]).stdout).contains("test-key"));
-    for p2 in ["home/.claude/vajra/planted", "data/planted", "home/outside", "planted-next-to-work"] {
+    for p2 in ["home/.claude/vajra/planted", "data/planted", "home/outside", "planted-next-to-work", "home/.cache/x", "home/.cargo/registry/src/planted"] {
         assert!(!t.0.join(p2).exists(), "{p2}");
     }
-    // The worktree, the tmp dir and a cache are writable.
-    let o = t.run(&p, "echo ok > in-work && echo ok > \"$TMPDIR/in-tmp\" && mkdir -p \"$HOME/.cache/x\" && echo ok > \"$HOME/.cache/x/f\"", &[]);
+    // The worktree, the tmp dir and the caches (in the tmp dir) are writable.
+    let o = t.run(&p, "echo ok > in-work && echo ok > \"$TMPDIR/in-tmp\" && echo ok > \"$XDG_CACHE_HOME/f\" && echo ok > \"$GOCACHE/f\" && echo ok > \"$npm_config_cache/f\"", &[]);
     assert!(o.status.success(), "{}", text(&o));
+    for (_, d) in cache_env(&p.tmp) {
+        assert!(d.starts_with(&p.tmp), "every cache is in the run's tmp: {}", d.display());
+    }
 }
 
 #[test]
@@ -193,7 +225,7 @@ fn cargo_test_runs_a_real_crate_inside_the_runner() {
     fs::write(w.join("src/lib.rs"), "#[test]\nfn adds() { assert_eq!(1 + 1, 2); }\n").unwrap();
     // The fake HOME has no toolchain: point rustup and cargo at the real ones, read-only (the build dir is the worktree).
     let real_home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
-    let extra = [("RUSTUP_HOME", real_home.join(".rustup")), ("CARGO_HOME", t.home().join(".cargo")), ("CARGO_TARGET_DIR", w.join("target"))];
+    let extra = [("RUSTUP_HOME", real_home.join(".rustup")), ("CARGO_HOME", t.home().join(".cargo"))];
     let o = t.run(&t.profile(false), "cargo test --offline -q 2>&1", &extra);
     assert!(o.status.success() && text(&o).contains("1 passed"), "{}", text(&o));
 }
@@ -220,7 +252,7 @@ fn go_test_runs_a_real_module_inside_the_runner() {
     let w = t.0.join("work");
     fs::write(w.join("go.mod"), "module fixture\n\ngo 1.20\n").unwrap();
     fs::write(w.join("add_test.go"), "package fixture\n\nimport \"testing\"\n\nfunc TestAdds(t *testing.T) { if 1+1 != 2 { t.Fatal(\"no\") } }\n").unwrap();
-    let extra = [("GOCACHE", t.home().join("Library/Caches/go-build")), ("GOPATH", t.home().join("go")), ("GOFLAGS", PathBuf::from("-mod=mod")), ("GOTOOLCHAIN", PathBuf::from("local"))];
+    let extra = [("GOPATH", t.home().join("go")), ("GOFLAGS", PathBuf::from("-mod=mod")), ("GOTOOLCHAIN", PathBuf::from("local"))];
     let o = t.run(&t.profile(false), "go test ./... 2>&1", &extra);
     assert!(o.status.success() && text(&o).contains("ok"), "{}", text(&o));
 }
@@ -332,7 +364,15 @@ fn base(t: &Tmp) -> PathBuf {
 }
 
 fn evidence_run<'a>(script: &'a Path, base: &'a Path, cmds: &'a [String], common: &'a Path, home: &'a Path) -> EvidenceRun<'a> {
-    EvidenceRun { script, slug: SLUG, commands: cmds, base, git_common: common, home, limit: Duration::from_secs(20) }
+    // The fake state dir under the fake HOME (leaked: a few bytes per test, so the borrow outlives the helper).
+    let state_dir: &'a Path = Box::leak(home.join(".claude/vajra").into_boxed_path());
+    EvidenceRun { script, slug: SLUG, commands: cmds, base, git_common: common, home, state_dir, limit: Duration::from_secs(20) }
+}
+
+/// `run` under a fresh profile: each call gets its own tmp dir, as `run` requires.
+fn go(t: &Tmp, r: &EvidenceRun) -> RunOutcome {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    run(&t.fresh(false, &format!("run-{}", N.fetch_add(1, std::sync::atomic::Ordering::SeqCst))), r)
 }
 
 #[test]
@@ -345,7 +385,7 @@ fn a_run_saves_exactly_the_fd_3_line_whatever_a_command_wrote_to_the_bundle_fold
     // A command plants its own evidence.json in the bundle folder: the core's write replaces it with the fd-3 line.
     let plant = format!("mkdir -p '{0}/{SLUG}' && echo '{{\"slug\":\"{SLUG}\",\"forged\":true}}' > '{0}/{SLUG}/evidence.json'", base.display());
     let cmds = vec![plant, "echo ok".to_string()];
-    let out = run(&t.profile(false), &evidence_run(&script, &base, &cmds, &common, &home));
+    let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
     let RunOutcome::Ran { passed, sha256 } = out else { panic!("{out:?}") };
     assert!(passed);
     let saved = fs::read(base.join(SLUG).join("evidence.json")).unwrap();
@@ -353,7 +393,7 @@ fn a_run_saves_exactly_the_fd_3_line_whatever_a_command_wrote_to_the_bundle_fold
     assert_eq!(crate::control::sha256::hex_digest(&saved), sha256);
     // A failing command: still a bundle, not passed.
     let cmds = vec!["exit 1".to_string()];
-    let out = run(&t.profile(false), &evidence_run(&script, &base, &cmds, &common, &home));
+    let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
     assert!(matches!(out, RunOutcome::Ran { passed: false, .. }), "{out:?}");
 }
 
@@ -378,7 +418,7 @@ fn a_run_with_a_bad_evidence_line_fails_and_saves_nothing() {
     .enumerate()
     {
         let script = fake(&t, &format!("bad-{n}"), line, "exit 2");
-        let out = run(&t.profile(false), &evidence_run(&script, &base, &cmds, &common, &home));
+        let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
         assert!(matches!(out, RunOutcome::Failed(_)), "{why}: {out:?}");
         assert!(!base.join(SLUG).join("evidence.json").exists(), "{why}");
     }
@@ -386,8 +426,8 @@ fn a_run_with_a_bad_evidence_line_fails_and_saves_nothing() {
     let script = fake(&t, "ok", BUNDLE, "exit 2");
     let mut r = evidence_run(&script, &base, &cmds, &common, &home);
     r.slug = "../escape";
-    assert!(matches!(run(&t.profile(false), &r), RunOutcome::Failed(_)));
-    assert!(matches!(run(&t.profile(false), &evidence_run(&script, &base, &[], &common, &home)), RunOutcome::Failed(_)));
+    assert!(matches!(go(&t, &r), RunOutcome::Failed(_)));
+    assert!(matches!(go(&t, &evidence_run(&script, &base, &[], &common, &home)), RunOutcome::Failed(_)));
 }
 
 #[test]
@@ -401,7 +441,7 @@ fn a_run_past_its_limit_is_killed_and_fails() {
     let mut r = evidence_run(&script, &base, &cmds, &common, &home);
     r.limit = Duration::from_millis(500);
     let start = std::time::Instant::now();
-    assert_eq!(run(&t.profile(false), &r), RunOutcome::Failed("the evidence check ran past its time limit".into()));
+    assert_eq!(go(&t, &r), RunOutcome::Failed("the evidence check ran past its time limit".into()));
     assert!(start.elapsed() < Duration::from_secs(10), "the whole group is killed, not waited on");
     assert!(!base.join(SLUG).join("evidence.json").exists());
 }
@@ -414,7 +454,7 @@ fn a_run_and_a_sign_refuse_a_walkthrough_base_through_a_link() {
     let link = t.0.join("tmp/base-link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let cmds = vec!["true".to_string()];
-    assert!(matches!(run(&t.profile(false), &evidence_run(&script, &link, &cmds, &common, &home)), RunOutcome::Failed(_)));
+    assert!(matches!(go(&t, &evidence_run(&script, &link, &cmds, &common, &home)), RunOutcome::Failed(_)));
     assert!(matches!(sign(&script, SLUG, &"a".repeat(64), &link, &t.0.join("work"), &home), SignOutcome::Unknown(_)));
 }
 
@@ -452,6 +492,164 @@ fn sign_maps_each_contract_answer_and_fails_closed_on_anything_else() {
     }
 }
 
+fn script(t: &Tmp, name: &str, body: &str) -> PathBuf {
+    let p = t.0.join(format!("tmp/{name}.sh"));
+    fs::write(&p, format!("#!/bin/bash\n{body}\n")).unwrap();
+    p
+}
+
+/// M1: a command can't reach a Mach service that starts or reaches a process outside the sandbox. Each lookup goes
+/// through `bootstrap_look_up` from python's ctypes: nothing is opened, sent or read, and no Keychain is queried. A name
+/// counts only if it answers outside the sandbox; the test needs the three main ones to.
+#[test]
+fn a_command_can_reach_no_mach_service_that_starts_an_unsandboxed_process() {
+    if !macos() || !have("python3") {
+        return eprintln!("skipped: sandbox-exec or python3");
+    }
+    let t = Tmp::new("mach");
+    let probe = t.0.join("lookup.py");
+    fs::write(
+        &probe,
+        "import ctypes,sys\nlib=ctypes.CDLL(None)\nbp=ctypes.c_uint.in_dll(lib,'bootstrap_port')\nf=lib.bootstrap_look_up\nf.argtypes=[ctypes.c_uint,ctypes.c_char_p,ctypes.POINTER(ctypes.c_uint)]\nfor n in sys.argv[1:]:\n    p=ctypes.c_uint(0)\n    print(n, f(bp.value,n.encode(),ctypes.byref(p)))\n",
+    )
+    .unwrap();
+    let names = [
+        "com.apple.coreservices.launchservicesd",
+        "com.apple.lsd.mapdb",
+        "com.apple.lsd.modifydb",
+        "com.apple.coreservices.appleevents",
+        "com.apple.SecurityServer",
+        "com.apple.securityd.xpc",
+        "com.apple.secd",
+        "com.apple.pasteboard.1",
+    ];
+    let answers = |out: &str| -> Vec<(String, bool)> { out.lines().filter_map(|l| l.rsplit_once(' ').map(|(n, r)| (n.to_string(), r.trim() == "0"))).collect() };
+    let args = names.join(" ");
+    let outside = answers(&String::from_utf8_lossy(&Command::new("python3").arg(&probe).args(names).output().unwrap().stdout));
+    let reachable: Vec<&String> = outside.iter().filter(|(_, ok)| *ok).map(|(n, _)| n).collect();
+    for main in ["com.apple.coreservices.launchservicesd", "com.apple.coreservices.appleevents", "com.apple.SecurityServer"] {
+        if !reachable.iter().any(|n| *n == main) {
+            return eprintln!("skipped: {main} doesn't answer outside the sandbox here");
+        }
+    }
+    let p = t.profile(false);
+    let o = t.run(&p, &format!("python3 '{}' {args}", probe.display()), &[]);
+    let inside = answers(&text(&o));
+    for n in &reachable {
+        assert_eq!(inside.iter().find(|(m, _)| m == *n).map(|(_, ok)| *ok), Some(false), "{n} answered inside: {}", text(&o));
+    }
+    // A service the tools need still answers: the denial is the list, not every lookup.
+    let o = t.run(&p, &format!("python3 '{}' com.apple.system.notification_center", probe.display()), &[]);
+    assert_eq!(answers(&text(&o)), vec![("com.apple.system.notification_center".to_string(), true)], "{}", text(&o));
+    // LaunchServices names no app from inside (the launch-time probe's check), but does outside.
+    let front = |o: &std::process::Output| String::from_utf8_lossy(&o.stdout).contains("ASN:");
+    if front(&Command::new("/usr/bin/lsappinfo").arg("front").output().unwrap()) {
+        assert!(!front(&t.run(&p, "/usr/bin/lsappinfo front", &[])));
+    }
+}
+
+/// M1: launchd starts no job for a sandboxed caller. The job would only run `/usr/bin/true`, and is removed either way.
+#[test]
+fn launchd_starts_no_job_for_a_command() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("launchd");
+    let label = format!("com.vajra.test.runner-probe.{}", std::process::id());
+    let o = t.run(&t.profile(false), &format!("/bin/launchctl submit -l {label} -- /usr/bin/true"), &[]);
+    let listed = Command::new("/bin/launchctl").args(["list", &label]).output().unwrap().status.success();
+    let _ = Command::new("/bin/launchctl").args(["remove", &label]).output();
+    assert!(!o.status.success() && !listed, "launchctl submit started a job: {}", text(&o));
+}
+
+/// M2: a command reaches the system resolver and sockets of its own, never another daemon's socket.
+#[test]
+fn a_command_reaches_only_the_resolver_and_its_own_unix_sockets() {
+    if !macos() || !have("python3") {
+        return eprintln!("skipped: sandbox-exec or python3");
+    }
+    let t = Tmp::new("unix");
+    let outside = t.0.join("daemon");
+    fs::create_dir_all(&outside).unwrap();
+    let serve = "import socket,sys,os\np=sys.argv[1]\ns=socket.socket(socket.AF_UNIX)\ns.bind(p)\ns.listen(4)\nprint('up',flush=True)\nwhile True:\n    c,_=s.accept(); c.sendall(b'hi'); c.close()\n";
+    let connect = "import socket,sys\ns=socket.socket(socket.AF_UNIX)\ntry:\n    s.connect(sys.argv[1]); print('got', s.recv(2))\nexcept OSError as e:\n    print('refused', e.errno)\n";
+    fs::write(t.0.join("serve.py"), serve).unwrap();
+    fs::write(t.0.join("connect.py"), connect).unwrap();
+    for network in [false, true] {
+        let p = t.fresh(network, if network { "tmp-net" } else { "tmp-off" });
+        p.prepare().unwrap();
+        for (sock, reachable) in [(outside.join(format!("d{network}")), false), (p.tmp.join("s"), true), (p.worktree.join(format!("w{network}")), true)] {
+            let mut srv = Command::new("python3").arg(t.0.join("serve.py")).arg(&sock).stdout(std::process::Stdio::piped()).spawn().unwrap();
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(srv.stdout.take().unwrap()), &mut line).unwrap();
+            let o = t.run(&p, &format!("python3 '{}' '{}'", t.0.join("connect.py").display(), sock.display()), &[]);
+            let _ = srv.kill();
+            let _ = srv.wait();
+            assert_eq!(text(&o).contains("got b'hi'"), reachable, "network {network}, {}: {}", sock.display(), text(&o));
+        }
+        // Names still resolve through the system resolver's socket, when they do outside.
+        let lookup = "python3 -c \"import socket; print(socket.getaddrinfo('apple.com', 443)[0][4][0])\"";
+        if Command::new("/bin/sh").args(["-c", lookup]).output().unwrap().status.success() {
+            let o = t.run(&p, lookup, &[]);
+            assert!(o.status.success(), "network {network}: a name lookup failed: {}", text(&o));
+        }
+    }
+}
+
+/// M4: a hard link to the key is a name no deny rule covers, so neither the probe nor a run starts with one.
+#[test]
+fn a_key_with_a_second_link_stops_the_probe_and_the_run() {
+    let t = Tmp::new("hardlink");
+    let state = t.state();
+    assert!(crate::vajra::allowlist::key_has_one_link(&state));
+    let key = state.join(crate::vajra::allowlist::DENIED_NAME);
+    let link = t.0.join("work/innocent-name");
+    fs::hard_link(&key, &link).unwrap();
+    assert!(!crate::vajra::allowlist::key_has_one_link(&state));
+    if macos() {
+        assert!(!key_probe(&t.profile(false), &state));
+    }
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["true".to_string()];
+    assert!(matches!(go(&t, &evidence_run(&script, &base, &cmds, &common, &home)), RunOutcome::Failed(why) if why.contains("second name")));
+    fs::remove_file(&link).unwrap();
+    // A key that is a symlink fails as well; no key at all passes (signing then ends "no key").
+    let real = t.0.join("data/real-key");
+    fs::rename(&key, &real).unwrap();
+    assert!(crate::vajra::allowlist::key_has_one_link(&state));
+    std::os::unix::fs::symlink(&real, &key).unwrap();
+    assert!(!crate::vajra::allowlist::key_has_one_link(&state));
+}
+
+/// L1: a write end held open past the script's exit ends the run soon after, Failed; so does an oversized line.
+#[test]
+fn a_held_open_or_oversized_evidence_channel_fails_fast() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("held");
+    let (base, home, common) = (base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["true".to_string()];
+    let held = script(&t, "held", &format!("printf '{BUNDLE}' >&3\n(sleep 30) &\nexit 0"));
+    let start = std::time::Instant::now();
+    assert_eq!(go(&t, &evidence_run(&held, &base, &cmds, &common, &home)), RunOutcome::Failed("the evidence channel stayed open after the script ended".into()));
+    assert!(start.elapsed() < Duration::from_secs(10));
+    let big = script(&t, "big", "head -c 1100000 /dev/zero | tr '\\0' a >&3\necho >&3\nexit 0");
+    assert!(matches!(go(&t, &evidence_run(&big, &base, &cmds, &common, &home)), RunOutcome::Failed(_)));
+    assert!(!base.join(SLUG).join("evidence.json").exists());
+}
+
+/// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
+#[test]
+fn a_run_refuses_a_tmp_that_already_exists() {
+    let t = Tmp::new("staletmp");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["true".to_string()];
+    let p = t.fresh(false, "used");
+    fs::create_dir_all(&p.tmp).unwrap();
+    assert!(matches!(run(&p, &evidence_run(&script, &base, &cmds, &common, &home)), RunOutcome::Failed(why) if why.contains("fresh")));
+}
+
 #[test]
 fn the_deny_list_is_six_k_s_plus_the_configs_credentials() {
     let t = Tmp::new("list");
@@ -459,7 +657,7 @@ fn the_deny_list_is_six_k_s_plus_the_configs_credentials() {
     for p in crate::adapter::profiles::vajra_deny_dirs(&t.home(), &t.0.join("data")) {
         assert!(d.contains(&p), "{}", p.display());
     }
-    for rel in [".ssh", ".aws", ".config/gh", ".claude/skills/vajra", ".claude/hooks", "Library/Keychains"] {
+    for rel in [".ssh", ".aws", ".config/gh", ".claude/skills/vajra", ".claude/hooks", "Library/Keychains", ".codex", ".claude.json", ".config/gcloud", ".azure"] {
         assert!(d.contains(&t.home().join(rel)), "{rel}");
     }
 }

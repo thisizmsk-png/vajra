@@ -5,13 +5,20 @@
 //! - every read and write of the Vajra state dir (it holds the signing key) and the app's data dir is denied: the
 //!   list is 6k's `vajra_deny_dirs`, the same one a Codex session gets (#216), plus the config's `denyRead` credential
 //!   dirs;
-//! - writes are allowed only in the evidence worktree, the run's own tmp dir and the build caches the toolchains need
-//!   (cargo, npm, go, pip): never the repo's main checkout, never anywhere else in the home folder;
-//! - the network follows the verifier seat: `false` keeps it to loopback (a test server can still bind);
+//! - writes are allowed only in the evidence worktree and the run's own fresh tmp dir, which also holds every build
+//!   cache (`cache_env`): never the repo's main checkout, never a shared cache, never anywhere else in the home folder;
+//! - no Mach service that starts or reaches a process outside the sandbox (LaunchServices, Apple Events, the security
+//!   server, the pasteboard), and no new launchd job;
+//! - unix sockets: only the system resolver's and those under the worktree and the tmp dir;
+//! - the network follows the verifier seat: `false` keeps IP to loopback (a test server can still bind). Network off
+//!   still allows name lookups, which can carry small amounts of data out, and loopback, which reaches any local
+//!   service such as a proxy: it is not a data-loss boundary;
+//! - the key must have exactly one link (a hard link would be a path no deny names);
 //! - the run is killed at `evidence_run_max_s`.
 //!
-//! The launch-time probe (`key_probe`) reads the state dir under the same profile; the read must be refused by the
-//! OS, or the run ends `not_verified`. The probe names the dir, never the key, and reads nothing from it.
+//! The launch-time probe (`key_probe`) checks the key's link count, reads the state dir under the same profile (the
+//! read must be refused by the OS) and asks LaunchServices for the front app (no answer may come), or the run ends
+//! `not_verified`. The probe names the dir, never the key, and reads nothing from it.
 //!
 //! git inside the runner (S9): `write-tree` needs the object dir, which lives in the repo's common dir outside the
 //! worktree. The 6i-e contract copies the index into the ticket tmp, and the runner gives git `GIT_INDEX_FILE` plus a
@@ -31,15 +38,35 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 pub struct Profile {
     /// The evidence worktree: the commands' cwd, readable and writable.
     pub worktree: PathBuf,
-    /// The ticket's own tmp dir (TMPDIR, the index copy, git's private object dir): writable.
+    /// The run's own tmp dir, fresh for each run (TMPDIR, git's private object dir, every build cache): writable.
     pub tmp: PathBuf,
     /// Dirs nothing may read or write: `vajra_deny_dirs` plus the credential dirs.
     pub deny: Vec<PathBuf>,
-    /// Build caches the toolchains write (cargo registry, npm cache, go build cache, pip cache).
-    pub caches: Vec<PathBuf>,
     /// The verifier seat's network setting.
     pub network: bool,
 }
+
+/// The unix socket the system resolver answers on: the only socket outside the run a command may connect to.
+const RESOLVER_SOCKET: &str = "/var/run/mDNSResponder";
+
+/// Mach services that would let a command reach code outside the sandbox (bhishma M1 on #234). A process started
+/// through any of them is not a descendant of the sandbox, so it could read the key and use the network.
+/// - LaunchServices: `open` an app, a document or a `.command` file;
+/// - Apple Events: script another app (`osascript`, `tell application ...`);
+/// - the security server: ask for a Keychain item, such as a provider key the app stored;
+/// - the pasteboard: read what the user copied.
+///
+/// launchd refuses `launchctl submit`, `bootstrap` and `load` from a sandboxed caller by itself; `job-creation` is denied
+/// too, and the tests prove launchd's refusal.
+const DENIED_MACH: &[(&str, &str)] = &[
+    ("global-name", "com.apple.coreservices.launchservicesd"),
+    ("global-name-prefix", "com.apple.lsd."),
+    ("global-name", "com.apple.coreservices.appleevents"),
+    ("global-name", "com.apple.SecurityServer"),
+    ("global-name-prefix", "com.apple.securityd"),
+    ("global-name", "com.apple.secd"),
+    ("global-name-prefix", "com.apple.pasteboard."),
+];
 
 /// A path as a Seatbelt string literal: absolute, no NUL, quotes and backslashes escaped. `None` refuses it.
 fn lit(p: &Path) -> Option<String> {
@@ -74,19 +101,28 @@ impl Profile {
         if self.deny.is_empty() {
             return Err("the runner needs the Vajra dirs to deny".into());
         }
-        let writable = subpaths(&[vec![self.worktree.clone(), self.tmp.clone()], self.caches.clone()].concat())?;
+        let run_dirs = subpaths(&[self.worktree.clone(), self.tmp.clone()])?;
+        let resolver = both(Path::new(RESOLVER_SOCKET)).iter().map(|p| lit(p).map(|l| format!(" (literal {l})"))).collect::<Option<String>>().ok_or("the resolver socket path")?;
         let deny = subpaths(&self.deny)?;
         let mut p = String::from("(version 1)\n(allow default)\n");
-        // Writes: only the worktree, the tmp dir, the caches, and the null and tty devices.
+        // Writes: only the worktree, the run's tmp dir (which holds every build cache), and the null and tty devices.
         p.push_str("(deny file-write*)\n");
-        p.push_str(&format!("(allow file-write*{writable} (literal \"/dev/null\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n"));
-        if !self.network {
-            // Outbound only to loopback and unix sockets (a test server binds and is reached; the system resolver's
-            // socket still answers names, but no connection leaves the Mac). A `network*` allow with `local ip`
-            // matches every outbound socket (it is bound locally), so the allow names only the remote end.
-            p.push_str("(deny network-outbound)\n");
-            p.push_str("(allow network-outbound (remote ip \"localhost:*\") (remote unix-socket))\n");
+        p.push_str(&format!("(allow file-write*{run_dirs} (literal \"/dev/null\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n"));
+        // Mach services that start or reach processes outside the sandbox (M1), and new launchd jobs.
+        let mach: String = DENIED_MACH.iter().map(|(kind, name)| format!(" ({kind} \"{name}\")")).collect();
+        p.push_str(&format!("(deny mach-lookup{mach})\n(deny job-creation)\n"));
+        // Network. Unix sockets, either setting: only the system resolver's and those under the worktree and the tmp
+        // dir, never a daemon's (Docker's would start a container with the home folder mounted; ssh and gpg agents
+        // sign for the user) (M2). With no network seat, also no IP connection except to loopback: a test server
+        // binds and is reached, names still resolve through the resolver socket, but no connection leaves the Mac.
+        // A `network*` allow with `local ip` matches every outbound socket (it is bound locally), so allows name only
+        // the remote end.
+        if self.network {
+            p.push_str("(deny network-outbound (remote unix-socket))\n");
+        } else {
+            p.push_str("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n");
         }
+        p.push_str(&format!("(allow network-outbound{resolver}{run_dirs})\n"));
         // Last, so nothing above can re-open them: the Vajra dirs and the credentials, neither read nor written.
         p.push_str(&format!("(deny file-read* file-write*{deny})\n"));
         Ok(p)
@@ -108,6 +144,8 @@ pub fn deny_dirs(home: &Path, data: &Path) -> Vec<PathBuf> {
     for rel in [
         ".aws", ".ssh", ".gnupg", ".netrc", ".npmrc", ".pgpass", ".config/gh", ".docker/config.json", ".kube",
         ".claude/skills/vajra", ".claude/hooks", ".pypirc", ".git-credentials", "Library/Keychains",
+        // The Codex sign-in folder (ChatGPT tokens or an API key), the Claude config file, cloud CLI credentials (F1).
+        ".codex", ".claude.json", ".config/gcloud", ".azure",
     ] {
         let p = home.join(rel);
         if !out.contains(&p) {
@@ -117,18 +155,30 @@ pub fn deny_dirs(home: &Path, data: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The build caches the toolchains need to write, under `home`.
-pub fn default_caches(home: &Path) -> Vec<PathBuf> {
-    [".cargo/registry", ".cargo/git", ".npm", "Library/Caches/go-build", "go/pkg/mod", "Library/Caches/pip", ".cache"].iter().map(|r| home.join(r)).collect()
+/// Every build cache a toolchain writes, pointed into the run's tmp through the toolchain's own variable (M3): a check
+/// can't plant code in a shared cache that a later build outside the sandbox would compile or run. The shared caches
+/// in the home folder (cargo's registry, Go's module cache) stay readable, never writable: an offline build reuses what
+/// is already downloaded, and a build that needs a new download needs the network seat.
+pub fn cache_env(tmp: &Path) -> Vec<(&'static str, PathBuf)> {
+    let c = tmp.join("cache");
+    vec![
+        ("CARGO_TARGET_DIR", c.join("cargo-target")),
+        ("GOCACHE", c.join("go-build")),
+        ("GOTMPDIR", tmp.join("go-tmp")),
+        ("npm_config_cache", c.join("npm")),
+        ("YARN_CACHE_FOLDER", c.join("yarn")),
+        ("PIP_CACHE_DIR", c.join("pip")),
+        ("PYTHONPYCACHEPREFIX", c.join("pycache")),
+        ("XDG_CACHE_HOME", c.clone()),
+    ]
 }
 
 impl Profile {
-    /// Create the worktree's tmp dir and every cache dir before the run: inside the profile a tool can't make a
-    /// cache's parent (`~/Library`, say), since only the cache itself is writable.
+    /// Create the run's tmp dir, git's private object dir and every cache dir before the run.
     pub fn prepare(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.tmp)?;
-        for c in &self.caches {
-            std::fs::create_dir_all(c)?;
+        std::fs::create_dir_all(self.tmp.join("objects"))?;
+        for (_, d) in cache_env(&self.tmp) {
+            std::fs::create_dir_all(d)?;
         }
         Ok(())
     }
@@ -154,15 +204,19 @@ pub fn canonical_base(base: &Path) -> Option<PathBuf> {
 /// refused by the OS. Any other answer (the read works, a different error, a timeout) is not proven. Run by the core
 /// itself, never from inside another sandbox (macOS refuses a nested one, so the probe fails closed there).
 pub fn key_probe(profile: &Profile, state_dir: &Path) -> bool {
-    if !Path::new(SANDBOX_EXEC).is_file() || !state_dir.is_dir() {
+    if !Path::new(SANDBOX_EXEC).is_file() || !state_dir.is_dir() || !crate::vajra::allowlist::key_has_one_link(state_dir) {
         return false;
     }
     let Some(target) = state_dir.to_str() else { return false };
-    let Ok(argv) = profile.argv("/bin/ls", &[target.to_string()]) else { return false };
-    match crate::vajra::bridge::run_process_full(Path::new(SANDBOX_EXEC), &argv, Some(&profile.worktree), PROBE_MAX, None, None) {
-        Ok(o) => o.code.is_some_and(|c| c != 0) && !o.timed_out && o.stdout.trim().is_empty() && o.stderr.contains("Operation not permitted"),
-        Err(_) => false,
-    }
+    let under = |program: &str, args: &[String]| {
+        let argv = profile.argv(program, args).ok()?;
+        crate::vajra::bridge::run_process_full(Path::new(SANDBOX_EXEC), &argv, Some(&profile.worktree), PROBE_MAX, None, None).ok().filter(|o| !o.timed_out)
+    };
+    // The state dir: the OS refuses the read.
+    let dir_refused = under("/bin/ls", &[target.to_string()]).is_some_and(|o| o.code.is_some_and(|c| c != 0) && o.stdout.trim().is_empty() && o.stderr.contains("Operation not permitted"));
+    // LaunchServices, the way out to an unsandboxed process (M1): asking it for the front app gets no answer.
+    let launch_refused = under("/usr/bin/lsappinfo", &["front".to_string()]).is_some_and(|o| !o.stdout.contains("ASN:"));
+    dir_refused && launch_refused
 }
 
 /// The fd the unsigned evidence comes back on (6i-e's `--run-only` contract).
@@ -183,8 +237,14 @@ pub struct EvidenceRun<'a> {
     /// The repo's common git dir, for `git_env`.
     pub git_common: &'a Path,
     pub home: &'a Path,
+    /// The Vajra state dir: its key must have exactly one link before a run starts (M4).
+    pub state_dir: &'a Path,
     pub limit: Duration,
 }
+
+/// After the script exits, how long the core waits for its evidence channel to close. A background process of the
+/// check, or one outside the run that inherited the write end, could hold it open; the run then fails, never waits.
+const EOF_GRACE: Duration = Duration::from_secs(2);
 
 /// What a run gave back.
 #[derive(Debug, PartialEq, Eq)]
@@ -225,6 +285,13 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     if canonical_base(r.base).as_deref() != Some(r.base) {
         return RunOutcome::Failed("the walkthrough folder isn't a plain, resolved path".into());
     }
+    if !crate::vajra::allowlist::key_has_one_link(r.state_dir) {
+        return RunOutcome::Failed("Vajra's signing key has a second name somewhere, so the runner can't keep it out of reach".into());
+    }
+    // A fresh tmp for every run (L2): a process an earlier run left behind can't have prepared this one's files.
+    if std::fs::symlink_metadata(&profile.tmp).is_ok() {
+        return RunOutcome::Failed("the run's temp folder already exists; each run needs a fresh one".into());
+    }
     if let Err(e) = profile.prepare() {
         return RunOutcome::Failed(format!("couldn't prepare the run's folders: {e}"));
     }
@@ -242,8 +309,11 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     }
     // SAFETY: the pipe just made; each fd is owned once.
     let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    // Close-on-exec on both ends, so no other child the app spawns meanwhile inherits the write end (which would hold
-    // the read open past this run). The child gets only fd 3, made inheritable below.
+    // Close-on-exec on both ends, so no other child the app spawns later inherits either end. The child gets only fd
+    // 3, made inheritable below. macOS has no pipe2, so a child another thread forks between pipe() and these fcntls
+    // could still inherit both ends (L1). Agent sessions can't: portable-pty closes every fd above 2 in a PTY child.
+    // What's left is the core's own short-lived helpers; a held write end is bounded by EOF_GRACE and the deadline,
+    // and a stray byte breaks the one-line rule, so either ends the run Failed, never with evidence it didn't write.
     for fd in fds {
         // SAFETY: fcntl on an fd this function owns.
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
@@ -255,7 +325,7 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     cmd.args(&argv).current_dir(&profile.worktree).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     cmd.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin").env("HOME", r.home).env("TMPDIR", &profile.tmp).env("LC_ALL", "C.UTF-8");
     cmd.env("VAJRA_WALKTHROUGH_DIR", r.base).env("GIT_TERMINAL_PROMPT", "0").env("GIT_CONFIG_NOSYSTEM", "1");
-    for (k, v) in git_env(&profile.tmp, r.git_common) {
+    for (k, v) in git_env(&profile.tmp, r.git_common).into_iter().chain(cache_env(&profile.tmp)) {
         cmd.env(k, v);
     }
     cmd.process_group(0);
@@ -277,26 +347,48 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     };
     drop(wr); // only the child holds the write end now: EOF comes when it's done with fd 3
     let pid = child.id();
-    let reader = std::thread::spawn(move || {
-        let mut f = std::fs::File::from(rd);
-        let mut buf = Vec::new();
-        let _ = (&mut f).take(EVIDENCE_MAX as u64 + 1).read_to_end(&mut buf);
-        buf
-    });
+    // The reader runs in this loop, non-blocking, bounded by the run's deadline (L1): a write end held open by a
+    // process outside the run can't hang it, and more than EVIDENCE_MAX bytes ends it.
+    // SAFETY: fcntl on the read end this function owns; O_NONBLOCK applies to this end only.
+    let nonblocking = unsafe { libc::fcntl(rd.as_raw_fd(), libc::F_SETFL, libc::fcntl(rd.as_raw_fd(), libc::F_GETFL) | libc::O_NONBLOCK) } == 0;
+    let mut f = std::fs::File::from(rd);
+    let (mut line, mut chunk) = (Vec::new(), [0u8; 8192]);
     let start = std::time::Instant::now();
-    let code = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s.code(),
-            Ok(None) if start.elapsed() >= r.limit => break None,
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => break None,
+    let (mut exited, mut eof) = (None::<(Option<i32>, std::time::Instant)>, false);
+    let ended = loop {
+        while !eof && line.len() <= EVIDENCE_MAX {
+            match f.read(&mut chunk) {
+                Ok(0) => eof = true,
+                Ok(n) => line.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => eof = true,
+            }
+        }
+        if exited.is_none() {
+            match child.try_wait() {
+                Ok(Some(s)) => exited = Some((s.code(), std::time::Instant::now())),
+                Ok(None) => {}
+                Err(_) => exited = Some((None, std::time::Instant::now())),
+            }
+        }
+        match exited {
+            _ if !nonblocking => break Err("couldn't read the evidence pipe"),
+            _ if line.len() > EVIDENCE_MAX => break Err("the evidence script returned no single evidence line"),
+            Some((code, _)) if eof => break Ok(code),
+            Some((_, at)) if at.elapsed() >= EOF_GRACE => break Err("the evidence channel stayed open after the script ended"),
+            _ if start.elapsed() >= r.limit => break Err("the evidence check ran past its time limit"),
+            _ => std::thread::sleep(Duration::from_millis(20)),
         }
     };
     // SAFETY: the group this child leads (`process_group(0)`); ESRCH is fine.
     unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
     let _ = child.wait();
-    let line = reader.join().unwrap_or_default();
-    let Some(code) = code else { return RunOutcome::Failed("the evidence check ran past its time limit".into()) };
+    let code = match ended {
+        Ok(Some(c)) => c,
+        Ok(None) => return RunOutcome::Failed("the evidence script was killed".into()),
+        Err(why) => return RunOutcome::Failed(why.into()),
+    };
     if code == 2 {
         return RunOutcome::Failed("the evidence script refused the run (usage)".into());
     }

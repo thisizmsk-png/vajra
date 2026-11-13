@@ -1276,6 +1276,8 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 
 **Check worktrees.** The verify, review and evidence worktrees all get the N7 dependency clones. The evidence runner (16.5a) gets the same `network` setting as the verify ticket whose setup commands it re-runs. When the verifier seat has no network and the project's setup needs it (for example `npm ci` with no `node_modules` to clone), the proposal card warns: "The checks may fail without internet."
 
+**Network off is not a data-loss boundary.** With no network seat, the runner still allows name lookups, through the system resolver, and loopback. A check can encode small amounts of data in the names it looks up, and can reach any service listening on this Mac, such as a local proxy. What it can't do is open a connection off the Mac itself, reach a daemon's unix socket (only the resolver's and the run's own), or start a process outside the runner. The data document and the runner's settings card say so in these words.
+
 **Caps for check tickets.** Verify, review and evidence tickets run after the round's writers have ended. They count toward the 8-worker ceiling, but not toward `max_in_flight`.
 
 **The round ticket.**
