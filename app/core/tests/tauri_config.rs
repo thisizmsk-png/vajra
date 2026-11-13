@@ -114,3 +114,21 @@ fn the_install_commands_are_acl_guarded_and_only_the_main_window_may_call_them()
     let csp = conf()["app"]["security"]["csp"].as_str().map(str::to_string).unwrap_or_default();
     assert!(csp.starts_with("default-src 'self'") && !csp.contains("unsafe-eval"), "the CSP stays: {csp}");
 }
+
+/// The folder picker (D5) is the only plugin permission: the system open dialog, for the main window only. Nothing
+/// broader such as `dialog:default` (which adds save, message, ask and confirm) and no fs or shell plugin grant.
+#[test]
+fn the_only_plugin_permission_is_the_open_dialog_for_the_main_window() {
+    let mut plugin = Names::new();
+    for (p, cap, perms) in capabilities() {
+        for x in perms.iter().filter(|x| x.contains(':') && !x.starts_with("core:")) {
+            assert_eq!(cap["windows"], serde_json::json!(["main"]), "{} grants {x} beyond the main window", p.display());
+            assert!(cap.get("webviews").is_none() && cap.get("remote").is_none(), "{} grants {x} to a webview or a remote URL", p.display());
+            plugin.insert(x.clone());
+        }
+    }
+    assert_eq!(plugin, Names::from(["dialog:allow-open".to_string()]), "plugin permissions");
+    let main = std::fs::read_to_string(root().join("src/main.rs")).unwrap();
+    assert_eq!(main.matches(".plugin(").count(), 1, "one plugin is registered");
+    assert!(main.contains(".plugin(tauri_plugin_dialog::init())"), "the dialog plugin is the one registered");
+}

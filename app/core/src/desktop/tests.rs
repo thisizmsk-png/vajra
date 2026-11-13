@@ -107,6 +107,11 @@ fn one_active_run_per_project() {
     let held = app.start_run(input, &cwd).unwrap_err();
     assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     assert!(held["detail"].as_str().is_some_and(|d| !d.is_empty()));
+    // bhishma #216 Low 2: a second Codex Lead is held the same way, under the launching lock and before its proof runs,
+    // so a running Lead can't write the project's `.codex` between a second Lead's proof and its launch.
+    let codex = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
+    let held = app.start_run(codex, &cwd).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     assert_eq!(app.resume_run(other, "c2", &cwd, None).unwrap_err()["reason"], "project_busy");
     // A past run's crew view never retargets the control service.
@@ -120,6 +125,48 @@ fn one_active_run_per_project() {
 #[test]
 fn project_slug_matches_claude_code() {
     assert_eq!(project_slug(Path::new("/Users/a/my.repo")), "-Users-a-my-repo");
+}
+
+// Nothing runs at rest: a bare wake returns at once with no payload (the UI is not told anything moved), and a wake
+// mixed with lines still reports just the lines.
+#[test]
+fn a_bare_wake_returns_at_once_with_nothing_to_tell() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = app.bus.subscribe();
+    app.bus.wake();
+    let t0 = std::time::Instant::now();
+    assert!(collect_changes(&sub, Duration::from_secs(5)).is_none());
+    assert!(t0.elapsed() < Duration::from_secs(1), "a wake must not wait out the timeout");
+    app.bus.wake();
+    app.bus.push("s1", "a").unwrap();
+    let p = collect_changes(&sub, Duration::from_secs(1)).unwrap();
+    assert_eq!(p["streams"], json!(["s1"]));
+}
+
+// Given no live run, Then the loop waits on the bus with only the hour-long backstop; while a run is live and for
+// AFTER_RUN after it ends, it looks every second and does its housekeeping.
+#[test]
+fn the_loop_is_at_rest_with_no_live_run_and_busy_while_and_just_after_one() {
+    let t0 = std::time::Instant::now();
+    let mut p = Pace::new(t0);
+    let rest = t0 + AFTER_RUN;
+    assert_eq!(p.next(false, rest), (false, IDLE_WAIT));
+    assert_eq!(p.next(true, rest + Duration::from_secs(5)), (true, LIVE_WAIT));
+    assert_eq!(p.next(false, rest + Duration::from_secs(6)), (true, LIVE_WAIT), "a run that just ended is still reaped");
+    assert_eq!(p.next(false, rest + Duration::from_secs(5) + AFTER_RUN), (false, IDLE_WAIT));
+    // At rest the loop wakes on its own only for a housekeeping tick, minutes apart, never on a per-second timer.
+    assert!(IDLE_WAIT >= Duration::from_secs(60) && IDLE_WAIT <= Duration::from_secs(10 * 60));
+}
+
+#[test]
+fn a_fresh_pace_does_housekeeping_on_its_first_turn_with_no_run_live() {
+    // Launch: finished workers left from the last session are closed without waiting for a run to start.
+    let t0 = std::time::Instant::now();
+    let mut p = Pace::new(t0);
+    assert_eq!(p.next(false, t0), (true, LIVE_WAIT));
+    assert_eq!(p.next(false, t0 + AFTER_RUN - Duration::from_secs(1)), (true, LIVE_WAIT));
+    assert_eq!(p.next(false, t0 + AFTER_RUN), (false, IDLE_WAIT), "then it rests");
 }
 
 #[test]
@@ -349,6 +396,26 @@ fn a_spawn_failure_rolls_the_control_session_back() {
     assert_eq!(code(&e), "spawn_failed");
     assert!(lock(&app.control).nonce(sid).is_none(), "the control session ended with the failed spawn");
     assert_eq!(app.active_run_count(), 0);
+}
+
+// Given the loop at rest (waiting on the bus with the minutes-long housekeeping backstop), When a run starts that prints nothing, Then
+// the loop wakes at once and sees it live.
+#[test]
+fn a_run_start_wakes_a_loop_at_rest() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = app.bus.subscribe();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["sleep".into(), "2".into()]), false).unwrap();
+    let t0 = std::time::Instant::now();
+    let _ = collect_changes(&sub, IDLE_WAIT);
+    assert!(t0.elapsed() < Duration::from_secs(1), "the run's wake reaches the loop without waiting out the backstop");
+    // A pace long past launch (at rest) turns busy as soon as the run is live.
+    let mut pace = Pace::new(t0 - AFTER_RUN);
+    assert_eq!(pace.next(false, t0), (false, IDLE_WAIT));
+    assert_eq!(pace.next(app.active_run_count() > 0, std::time::Instant::now()), (true, LIVE_WAIT));
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
 }
 
 #[test]
@@ -1512,9 +1579,11 @@ fn a_hanging_check_ends_unverified_with_nothing_pending_and_is_not_re_run_every_
         ev_task(&d, "g2", "done", &["ac"], "green"),
     ];
     let (mut app, slug) = campaign_with_tasks(&t, tasks);
-    // The shipped relation: a check's own timeout fits inside the call's budget.
-    app.evidence_timeout = Duration::from_millis(400);
-    app.evidence_budget = Duration::from_millis(500);
+    // The shipped relation: a check's own timeout fits inside the call's budget. All three checks run in one parallel
+    // batch, so the green ones only need their own spawn to finish inside the timeout: a fixed-PATH `python3` (the macOS
+    // shim) takes ~60 ms idle but went past a 400 ms timeout under a loaded machine, so give it real headroom (flake fix).
+    app.evidence_timeout = Duration::from_secs(2);
+    app.evidence_budget = Duration::from_millis(2500);
     let ev_dir = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
     fs::write(ev_dir.join("slow.json"), b"{}").unwrap();
     fs::write(ev_dir.join("green.json"), b"{}").unwrap();
@@ -1522,11 +1591,11 @@ fn a_hanging_check_ends_unverified_with_nothing_pending_and_is_not_re_run_every_
     assert_eq!(row(&r, "h", "ac")["status"], "unverified", "{r}");
     assert_eq!(row(&r, "g1", "ac")["status"], "pass", "{r}");
     assert_eq!(r["pending"], 0, "{r}");
-    // Remembered briefly: the next call does not spend 400 ms on it again.
+    // Remembered briefly: the next call does not spend the 2 s timeout on it again (half of it is a wide margin).
     let start = std::time::Instant::now();
     let r = app.evidence_list(&slug).unwrap();
     assert_eq!(row(&r, "h", "ac")["status"], "unverified", "{r}");
-    assert!(start.elapsed() < Duration::from_millis(300), "{:?}", start.elapsed());
+    assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
 }
 
 #[test]
@@ -5304,6 +5373,11 @@ fn close_anyway_refuses_when_only_the_upstream_changed_since_it_was_confirmed() 
 #[path = "board_tests.rs"]
 mod board_cards;
 
+#[path = "proof_app_tests.rs"]
+mod proof_app;
+#[path = "proof_ledger_tests.rs"]
+mod proof_ledger;
+
 /// #80 optional: a finished run's worker count is forgotten when it is reaped, not only on the next start, so a long
 /// session of runs that start and finish keeps the map bounded by the runs still going.
 #[test]
@@ -5425,6 +5499,35 @@ fn the_app_opens_holding_the_git_baseline_and_builds_no_worker_runtime_until_ask
 }
 
 #[test]
+fn a_second_app_on_the_same_data_folder_refuses_every_launch_and_frees_it_when_the_first_quits() {
+    let t = Tmp::new();
+    let first = t.app();
+    assert!(!first.other_instance());
+    let second = t.app();
+    assert!(second.other_instance());
+    assert_eq!(second.swept_report()["other_instance"], true);
+    let sid = "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0c";
+    let e = second.launch(sid, "20261105-1230", "c", &t.0.join("repo"), |_| Ok(vec!["true".into()]), false).unwrap_err();
+    assert_eq!(code(&e), "agents_off", "{e}");
+    assert!(e["detail"].as_str().unwrap().starts_with("Agents are off: another Vajra Desktop is open"), "{e}");
+    assert_eq!(code(&second.worker_runtime(|| unreachable!("a second instance builds no runtime")).err().unwrap()), "agents_off");
+    assert_eq!(first.workers.agents_allowed(), Ok(()), "the first app keeps its agents");
+    drop(second);
+    // bhishma Low: a worker unlinks and replaces lock files in both folders while the first app runs; a third app is
+    // still refused (the locks are on the folders, which stay).
+    let work = crate::vajra::gitw::work_root(&t.home());
+    for f in [t.0.join("data/instance.lock"), work.join(".instance.lock")] {
+        let _ = fs::remove_file(&f);
+        fs::write(&f, "").unwrap();
+    }
+    assert!(t.app().other_instance(), "an unlinked and replaced lock file frees nothing");
+    drop(first);
+    let next = t.app();
+    assert!(!next.other_instance(), "the locks end with the app that held them");
+    assert_eq!(next.workers.agents_allowed(), Ok(()));
+}
+
+#[test]
 fn a_broken_baseline_still_opens_the_app_but_refuses_every_launch_with_a_plain_line() {
     let t = Tmp::new();
     break_baseline(&t.0.join("data"));
@@ -5452,7 +5555,7 @@ fn with_no_developer_tools_startup_never_runs_git_and_offers_the_installer() {
     fs::write(&git, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", t.0.join("git-ran").display())).unwrap();
     fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
     let none = [t.0.join("no-tools")];
-    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &none);
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &none, true);
     assert!(!t.0.join("git-ran").exists(), "git was never run");
     assert!(host.agents_allowed().unwrap_err().starts_with("Agents are off: git isn't installed."));
     assert_eq!(host.install_action(), Some(worker_host::INSTALL_DEV_TOOLS));
@@ -5461,7 +5564,7 @@ fn with_no_developer_tools_startup_never_runs_git_and_offers_the_installer() {
     // With the tools there, the same git is run for the take (so the check is what kept it from running above).
     fs::create_dir_all(t.0.join("tools/usr/bin")).unwrap();
     fs::write(t.0.join("tools/usr/bin/git"), "").unwrap();
-    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &[t.0.join("tools")]);
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &[t.0.join("tools")], true);
     assert!(t.0.join("git-ran").exists());
     assert_eq!(host.install_action(), None, "a failed take is not a missing install");
 }
@@ -5472,4 +5575,98 @@ fn install_dev_tools_is_refused_while_git_is_installed() {
     let app = t.app();
     assert!(worker_host::git_installed(&worker_host::dev_roots()), "this machine has the tools");
     assert_eq!(code(&app.install_dev_tools().unwrap_err()), "not_needed");
+}
+
+/// 6c-3 pruning at app start: a stale control session dir goes; one the run index names (a run that may be resumed,
+/// whatever its harness or folder) and a Lead's recorded session stay. An index that can't be read whole prunes nothing.
+#[test]
+fn app_start_prunes_stale_control_dirs_and_keeps_every_indexed_session() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let (stale, run, lead) = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333");
+    for d in [stale, run, lead] {
+        fs::create_dir_all(control.join(d).join("queue")).unwrap();
+    }
+    fs::create_dir_all(control.join("lead/r1")).unwrap();
+    fs::write(control.join("lead/r1/lead_session"), lead).unwrap();
+    let line = json!({"campaign": "c1", "session_id": run, "run_id": "r1", "cwd": "/nonexistent/gone", "provider": "codex"});
+    fs::write(t.0.join("data/runs.jsonl"), format!("{line}\n")).unwrap();
+    drop(t.app());
+    assert!(!control.join(stale).exists(), "the stale dir went");
+    assert!(control.join(run).is_dir() && control.join(lead).is_dir(), "indexed and Lead sessions stay");
+
+    // An index over the cap (or unreadable) is not read in part: nothing is pruned.
+    fs::create_dir_all(control.join(stale)).unwrap();
+    fs::remove_file(t.0.join("data/runs.jsonl")).unwrap();
+    fs::create_dir_all(t.0.join("data/runs.jsonl")).unwrap();
+    drop(t.app());
+    assert!(control.join(stale).is_dir(), "an index that can't be read prunes nothing");
+}
+
+/// #179 codex P1: a run's guarded record keeps its control dir even when a worker drops the run from `runs.jsonl` (or
+/// removes the index). Its nonce and an acknowledged stop file survive the start. A guarded record that can't be read
+/// whole (here a link in its place) prunes nothing at all.
+#[test]
+fn app_start_keeps_a_guarded_runs_session_dir_whatever_the_index_says() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let (run_sid, stale) = ("55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666");
+    for d in [run_sid, stale] {
+        fs::create_dir_all(control.join(d).join("queue")).unwrap();
+    }
+    fs::write(control.join(run_sid).join("nonce"), "n").unwrap();
+    fs::write(control.join(run_sid).join("queue/stop-aa870dd40540481f0.json"), "{}").unwrap();
+    fs::create_dir_all(control.join("lead/r2")).unwrap();
+    fs::write(control.join("lead/r2/session"), run_sid).unwrap();
+    // The index names no run at all: the worker removed it.
+    let _ = fs::remove_file(t.0.join("data/runs.jsonl"));
+    drop(t.app());
+    assert!(control.join(run_sid).join("nonce").is_file(), "the guarded run's nonce stays");
+    assert!(control.join(run_sid).join("queue/stop-aa870dd40540481f0.json").is_file(), "and its acknowledged stop");
+    assert!(!control.join(stale).exists(), "a dir no record names still goes");
+
+    // A link in a run record's place: the keep set can't be read reliably, so nothing is pruned.
+    fs::create_dir_all(control.join(stale)).unwrap();
+    fs::create_dir_all(control.join("lead/r3")).unwrap();
+    std::os::unix::fs::symlink(control.join("lead/r2/session"), control.join("lead/r3/session")).unwrap();
+    drop(t.app());
+    assert!(control.join(stale).is_dir(), "an unreadable guarded record prunes nothing");
+}
+
+/// #179 review: a guarded record whose bytes are not a canonical session id (invalid UTF-8, which a lossy decode would
+/// turn into a name matching no dir, or any other text) can't say which dir it keeps, so the start prunes nothing.
+#[test]
+fn app_start_prunes_nothing_when_a_guarded_record_is_not_a_session_id() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let stale = "66666666-6666-4666-8666-666666666666";
+    let _ = fs::remove_file(t.0.join("data/runs.jsonl"));
+    fs::create_dir_all(control.join("lead/r2")).unwrap();
+    for bad in [b"5555\xff5555-5555-4555-8555-555555555555".as_slice(), b"not-a-session".as_slice(), b"".as_slice()] {
+        fs::create_dir_all(control.join(stale).join("queue")).unwrap();
+        fs::write(control.join(stale).join("nonce"), "n").unwrap();
+        fs::write(control.join("lead/r2/session"), bad).unwrap();
+        drop(t.app());
+        assert!(control.join(stale).join("nonce").is_file(), "record {bad:?} prunes nothing");
+    }
+    // A canonical id (with the trailing newline a hand edit leaves) is trusted again, and the dir it doesn't name goes.
+    fs::write(control.join("lead/r2/session"), "55555555-5555-4555-8555-555555555555\n").unwrap();
+    drop(t.app());
+    assert!(!control.join(stale).exists(), "a valid record restores pruning");
+}
+
+/// 6c-3 pruning with the instance lock: a second app on the same data folder prunes nothing, since the dir it can't
+/// place may be the first app's live session's. The first app's next start, alone, does prune it.
+#[test]
+fn a_second_app_prunes_no_control_dir() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let first = t.app();
+    let live = "44444444-4444-4444-8444-444444444444";
+    fs::create_dir_all(control.join(live).join("queue")).unwrap();
+    drop(t.app());
+    assert!(control.join(live).is_dir(), "a second app leaves the first app's session dir");
+    drop(first);
+    drop(t.app());
+    assert!(!control.join(live).exists(), "an app holding the folder prunes it");
 }

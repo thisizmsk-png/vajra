@@ -1,7 +1,8 @@
 import { useId } from "react";
 import type { ReactNode } from "react";
 
-type Common = { label: string; error?: string; hint?: string; id?: string };
+/** `trailing` sits on the control's row, after it (a "Choose…" button beside a path, for example). */
+type Common = { label: string; error?: string; hint?: string; id?: string; trailing?: ReactNode };
 type Props =
   | (Common & { type?: "text" | "number" | "password"; value: string; onChange: (v: string) => void; placeholder?: string })
   | (Common & { type: "textarea"; value: string; onChange: (v: string) => void; rows?: number; placeholder?: string })
@@ -42,7 +43,7 @@ export function Input(props: Props) {
       <label className="v-field__label" htmlFor={id}>
         {props.label}
       </label>
-      {control}
+      {props.trailing ? <div className="v-field__row">{control}{props.trailing}</div> : control}
       {props.hint && (
         <span id={hintId} className="v-field__hint">
           {props.hint}
