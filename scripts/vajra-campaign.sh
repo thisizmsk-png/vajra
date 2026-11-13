@@ -64,6 +64,18 @@ sanitize_slug() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | tr -s '-' | sed 's/^-*//; s/-*$//' | cut -c1-64
 }
 
+# N17 (ADR-16 16.5a): Vajra Desktop marks a campaign whose evidence ran outside the Vajra guard at create, in the two
+# parts only create sets: the slug ends -og, or the goal starts with the marker. Either one counts, and a goal that
+# can't be read counts too (when unsure, show the label).
+OG_MARK="[evidence ran outside the Vajra guard]"
+OG_LABEL="evidence ran outside the guard"
+og_marked() {
+  case "$1" in *-og) return 0 ;; esac
+  local g; g="$(jq -r '.goal // ""' "$2/campaign.json" 2>/dev/null)" || return 0
+  case "$g" in "$OG_MARK"*) return 0 ;; esac
+  return 1
+}
+
 valid_feature_id() {
   printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 }
@@ -313,16 +325,17 @@ cmd_create() {
 cmd_list() {
   [ -d "$ROOT" ] || { echo "no campaigns"; return 0; }
   load_key
-  local act d s mark sig any=0
+  local act d s mark sig og any=0
   act="$(active_slug || true)"
   for d in "$ROOT"/*/; do
     [ -d "$d" ] || continue
     d="${d%/}"; s="$(basename "$d")"; DIR="$d"; any=1
     mark=" "; [ "$s" = "$act" ] && mark="*"
     if verify_state "$d"; then sig="ok"; else sig="INVALID"; fi
-    printf '%s %-32s %-10s %6s  sig:%s  %s\n' "$mark" "$s" \
+    og=""; og_marked "$s" "$d" && og="  $OG_LABEL"
+    printf '%s %-32s %-10s %6s  sig:%s  %s%s\n' "$mark" "$s" \
       "$(jq -r '.status // "?"' "$d/campaign.json" 2>/dev/null)" "$(counts 2>/dev/null || echo '?')" "$sig" \
-      "$(jq -r '.updated // ""' "$d/campaign.json" 2>/dev/null)"
+      "$(jq -r '.updated // ""' "$d/campaign.json" 2>/dev/null)" "$og"
   done
   [ "$any" -eq 1 ] || echo "no campaigns"
 }
@@ -332,13 +345,15 @@ cmd_show() {
   while [ $# -gt 0 ]; do case "$1" in --json) json=1; shift ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
   resolve "$slug"; load_key
   local sig=true; verify_state "$DIR" || sig=false
+  local og=false; og_marked "$SLUG" "$DIR" && og=true
   if [ "$json" -eq 1 ]; then
     jq -n --slurpfile c "$DIR/campaign.json" --slurpfile f "$DIR/features.json" \
-      --arg p "$(tail -n 20 "$DIR/progress.md")" --argjson sig "$sig" \
-      '{campaign: $c[0], features: $f[0].features, progress_tail: $p, signature_valid: $sig}'
+      --arg p "$(tail -n 20 "$DIR/progress.md")" --argjson sig "$sig" --argjson og "$og" \
+      '{campaign: $c[0], features: $f[0].features, progress_tail: $p, signature_valid: $sig, evidence_outside_guard: $og}'
     return 0
   fi
   echo "campaign: $SLUG  status: $(jq -r .status "$DIR/campaign.json")  passing: $(counts)  signature: $([ "$sig" = true ] && echo ok || echo INVALID)"
+  [ "$og" = true ] && echo "label: $OG_LABEL. A pass here is never plain Verified."
   echo "goal: $(jq -r .goal "$DIR/campaign.json")"
   echo "features:"
   jq -r '.features[] | "  [\(if .passes then "x" else " " end)] \(.id)  \(.description)"' "$DIR/features.json"

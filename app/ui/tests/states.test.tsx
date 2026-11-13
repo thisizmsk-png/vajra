@@ -5,7 +5,7 @@ import { Crew } from "../src/screens/crew/Crew";
 import { History } from "../src/screens/history/History";
 import { Settings } from "../src/screens/settings/Settings";
 import { REGISTRY } from "../src/screens/registry";
-import { problemDetail } from "../src/screens/states";
+import { clock, problemDetail } from "../src/screens/states";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
 
@@ -75,6 +75,13 @@ describe("History states", () => {
 });
 
 describe("Check again", () => {
+  it("writes the time without a padded hour, and with seconds so two checks in one minute read differently", () => {
+    const a = clock(new Date(2026, 10, 12, 2, 3, 34));
+    expect(a).toContain("2:03:34");
+    expect(a.startsWith("0")).toBe(false);
+    expect(clock(new Date(2026, 10, 12, 2, 3, 35))).not.toBe(a);
+  });
+
   it("says when the check finished, so a re-check that finds nothing new is not a dead click", async () => {
     let calls = 0;
     setTransport(fakeIpc({ preflight: () => { calls++; return { start_enabled: true, rows: [] }; }, provider_list: { schema: "vajra.providers/1", providers: [] }, setup_list: { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } } }).transport);
@@ -83,6 +90,17 @@ describe("Check again", () => {
     fireEvent.click(screen.getAllByRole("button", { name: S.settings.recheck })[0]);
     await waitFor(() => expect(calls).toBe(2));
     expect(screen.getByRole("status").textContent).toMatch(/^Checked at /);
+  });
+});
+
+describe("Settings way back", () => {
+  it("offers a link out, since Settings shows no view tabs and selects no project tab", async () => {
+    window.location.hash = "#/settings";
+    setTransport(fakeIpc({ preflight: { start_enabled: true, rows: [] }, provider_list: { schema: "vajra.providers/1", providers: [] }, setup_list: { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } } }).transport);
+    render(<Settings />);
+    const back = await screen.findByRole("link", { name: S.settings.back });
+    expect(back.getAttribute("href")).toBe("#/orch");
+    expect(back.closest("nav")).toBeNull();
   });
 });
 

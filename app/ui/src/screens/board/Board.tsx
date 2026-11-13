@@ -5,12 +5,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { Badge, Button, StatusDot } from "../../../components/ui/base";
 import { S } from "../../../strings";
-import { api, onChanged } from "../../ipc";
+import { api } from "../../ipc";
+import { onChangedPaced } from "../../projects/poll";
 import type { RunOverview } from "../../ipc";
 import { boardCards } from "../../projects/adapter";
 import type { BoardCard, Lane } from "../../projects/contract";
 import { useCurrentProject } from "../../projects/current";
 import { useProjectState } from "../../projects/state";
+import { useProjects } from "../../projects/store";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { Empty, LoadingRows, Problem, problemDetail } from "../states";
@@ -22,15 +24,15 @@ const EVENT_MIN_GAP_MS = 500;
 export function Board() {
   const { focus, project } = useCurrentProject();
   const { rev, failed: noRevision } = useProjectState(project?.id ?? null);
+  const P = useProjects();
   const [, go] = useRoute();
-  const [cards, setCards] = useState<BoardCard[] | null>(null);
+  const [rows, setRows] = useState<Parameters<typeof boardCards>[1] | null>(null);
   const [run, setRun] = useState<RunOverview | null>(null);
   const [err, setErr] = useState("");
   const [onlyYou, setOnlyYou] = useState(false);
   // Every load takes a number; only the newest may set state. A slug check is not enough: two loads of the same
   // campaign overlap when events arrive while one is out, and the older answer must not land last.
   const seq = useRef(0);
-  const last = useRef(0);
   const seenRev = useRef<number | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const refs = useRef(new Map<string, HTMLButtonElement>());
@@ -38,21 +40,24 @@ export function Board() {
   const load = useCallback(() => {
     if (!focus) return;
     const mine = ++seq.current;
-    last.current = Date.now();
     const slug = focus;
-    void Promise.allSettled([api.runOverview(slug), api.evidenceList(slug), api.inbox()]).then(([o, e, i]) => {
+    void Promise.allSettled([api.runOverview(slug), api.evidenceList(slug)]).then(([o, e]) => {
       if (mine !== seq.current) return;
       if (o.status === "rejected") { setErr(problemDetail(o.reason)); return; }
-      const rows = e.status === "fulfilled" && Array.isArray(e.value?.rows) ? e.value.rows : [];
-      const items = i.status === "fulfilled" && Array.isArray(i.value?.items) ? i.value.items : [];
       setRun(o.value);
-      setCards(boardCards(o.value, rows, items));
+      setRows(e.status === "fulfilled" && Array.isArray(e.value?.rows) ? e.value.rows : []);
       setErr("");
     });
   }, [focus]);
+  // The inbox is the store's copy: the store reads it on every change, so a second scan here bought nothing. Until the
+  // store's first read lands the board waits, so the needs-you cards never appear late. A failed read is an empty list.
+  const cards = useMemo<BoardCard[] | null>(
+    () => (run && rows && P.state !== "loading" ? boardCards(run, rows, P.inbox) : null),
+    [run, rows, P.state, P.inbox],
+  );
 
   // A new campaign, or leaving the board, retires whatever is still out.
-  useEffect(() => { setCards(null); setRun(null); setErr(""); return () => { seq.current++; }; }, [focus]);
+  useEffect(() => { setRows(null); setRun(null); setErr(""); return () => { seq.current++; }; }, [focus]);
   useEffect(load, [load]);
   // The project's revision is the one authority: heavy reads happen only when it moves (ADR-15 §4). Without a
   // revision (an older core) the raw change events drive the reload, as before.
@@ -62,16 +67,8 @@ export function Board() {
     if (seenRev.current === null) { seenRev.current = rev; return; }
     if (rev !== seenRev.current) { seenRev.current = rev; load(); }
   }, [rev, load]);
-  useEffect(() => {
-    if (!focus || !noRevision) return;
-    let later: ReturnType<typeof setTimeout> | undefined;
-    const off = onChanged(() => {
-      const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
-      if (wait <= 0) load();
-      else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);
-    });
-    return () => { off(); clearTimeout(later); };
-  }, [focus, load, noRevision]);
+  // Paced; hidden: held back, one read on showing.
+  useEffect(() => (focus && noRevision ? onChangedPaced(EVENT_MIN_GAP_MS, load) : undefined), [focus, load, noRevision]);
 
   const open = (c: BoardCard) => {
     if (!focus) return;
@@ -102,6 +99,14 @@ export function Board() {
   };
   useCommands(focus ? [{ id: "needs-you", label: S.board.needsYouFilter, run: () => setOnlyYou((x) => !x) }] : []);
 
+  // With no project list there is no project to have a campaign: "none yet" would be a guess, so say what failed.
+  if (!focus && P.state === "error") {
+    return (
+      <div className="v-board__state">
+        <Problem title={S.frame.loadFailed} detail={P.error} retry={P.reload} />
+      </div>
+    );
+  }
   if (!focus) {
     return (
       <div className="v-board__state">

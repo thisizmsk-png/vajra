@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button, StatusDot, Text } from "../../components/ui/base";
 import { api, errorText } from "../ipc";
 import type { Preflight, PreflightRow } from "../ipc";
+import { S } from "../../strings";
 
 /** One row per check: a status dot, the name, the detail and, when it fails, the command or the one-click action that fixes it. */
 export function PreflightList({ rows }: { rows: Preflight["rows"] }) {
@@ -10,7 +11,7 @@ export function PreflightList({ rows }: { rows: Preflight["rows"] }) {
       {rows.map((r) => (
         <li key={r.name}>
           <StatusDot status={r.ok ? "pass" : "fail"} />
-          <span>{r.name}</span>
+          <span>{Object.prototype.hasOwnProperty.call(S.home.checkNames, r.name) ? S.home.checkNames[r.name] : r.name}</span>
           <Text variant="body-sm" muted>{r.detail}</Text>
           {!r.ok && r.fix && <code className="v-home__fix">{r.fix}</code>}
           {!r.ok && r.action && <RowAction row={r} />}

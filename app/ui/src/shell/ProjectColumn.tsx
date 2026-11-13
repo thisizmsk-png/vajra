@@ -46,9 +46,11 @@ export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorke
 
   return (
     <aside className="v-pcol" aria-label={S.column.label(project.name)}>
-      <div className="v-pcol__meta" title={project.root ?? undefined}>
-        <span className="v-pcol__path">{project.root ?? S.projects.unsortedHint}</span>
-      </div>
+      {/* A folder path stays on one line, cut with its full text as the tooltip. A project with no folder shows a
+          sentence there, and a sentence wraps. */}
+      {project.root
+        ? <div className="v-pcol__meta" title={project.root}><span className="v-pcol__path">{project.root}</span></div>
+        : <p className="v-pcol__meta v-pcol__meta--hint">{S.projects.unsortedHint}</p>}
       {!project.bucket && (
         <button type="button" className={onOrchView ? "v-dg is-active" : "v-dg"} onClick={onOrch} aria-current={onOrchView ? "page" : undefined}>
           <span className="v-dg__t">

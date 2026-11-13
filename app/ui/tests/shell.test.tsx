@@ -1,4 +1,6 @@
 // Shell B (FG-03): project tabs in the title bar, the project column, view tabs, the inspector, the status bar.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
@@ -57,6 +59,9 @@ function memoryStorage(): Storage {
   };
 }
 beforeEach(() => {
+  // jsdom has no modal dialog: model showModal/close the way browsers do.
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) { this.setAttribute("open", ""); };
+  HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) { this.removeAttribute("open"); };
   Object.defineProperty(window, "localStorage", { configurable: true, value: memoryStorage() });
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
 });
@@ -101,6 +106,28 @@ describe("Shell B frame (FG-03)", () => {
     expect(within(web).getAllByText("Fix the login loop").length).toBeGreaterThan(0);
     expect(within(web).queryAllByText("Add rate limits")).toHaveLength(0);
     expect(within(web).getByText(S.column.noRun)).toBeTruthy();
+  });
+
+  it("shows a folder path on one line with a tooltip, and the Unsorted sentence as a paragraph that wraps", async () => {
+    boot();
+    const col = await screen.findByRole("complementary", { name: S.column.label("api") });
+    const path = within(col).getByText("/src/api");
+    expect(path.className).toBe("v-pcol__path");
+    expect(path.parentElement?.getAttribute("title")).toBe("/src/api");
+    fireEvent.click(tabs().getByRole("link", { name: new RegExp(`^${S.projects.unsorted}`) }));
+    const loose = await screen.findByRole("complementary", { name: S.column.label(S.projects.unsorted) });
+    const hint = within(loose).getByText(S.projects.unsortedHint);
+    expect(hint.tagName).toBe("P");
+    expect(hint.className).toContain("v-pcol__meta--hint");
+    expect(loose.querySelector(".v-pcol__path")).toBeNull();
+  });
+
+  it("lets the Unsorted sentence wrap: its rule undoes the one-line row and never cuts the text", () => {
+    const css = readFileSync(resolve(__dirname, "../src/shell/frame.css"), "utf8");
+    const rule = /\.v-pcol__meta--hint\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(rule).toMatch(/height:\s*auto/);
+    expect(rule).toMatch(/display:\s*block/);
+    expect(rule).not.toMatch(/nowrap|ellipsis|overflow:\s*hidden/);
   });
 
   it("Cmd+1..n switch projects in tab order", async () => {
@@ -193,12 +220,11 @@ describe("Shell B frame (FG-03)", () => {
     expect(within(screen.getByRole("navigation", { name: S.frame.views })).getByRole("link", { name: S.views.review }).getAttribute("aria-current")).toBe("page");
   });
 
-  it("has a status bar with the live runs, the phone and Settings; the phone goes to Settings > Mobile", async () => {
+  it("has a status bar with the live runs and Settings, and no phone button while pairing is not built", async () => {
     boot();
     const bar = screen.getByRole("contentinfo", { name: S.frame.status });
     await waitFor(() => expect(within(bar).getByText(S.frame.runs(1))).toBeTruthy());
-    fireEvent.click(within(bar).getByRole("button", { name: S.frame.phone }));
-    expect(window.location.hash).toContain("settings?section=mobile");
+    expect(within(bar).queryByRole("button", { name: /phone/i })).toBeNull();
     fireEvent.click(within(bar).getByRole("button", { name: S.views.settings }));
     expect(window.location.hash).toMatch(/\/settings$/);
   });
@@ -208,6 +234,68 @@ describe("Shell B frame (FG-03)", () => {
     expect(await screen.findByRole("heading", { name: S.home.start })).toBeTruthy();
     expect(screen.getByRole("button", { name: S.frame.addProject })).toBeTruthy();
     expect(screen.queryByRole("complementary", { name: /project$/ })).toBeNull();
+  });
+
+  it("offers to add repositories found on this Mac, and adds only the ones picked", async () => {
+    const found = [{ root: "/src/alpha", name: "alpha", worktrees: 2 }, { root: "/src/beta", name: "beta", worktrees: 0 }];
+    boot("", {
+      list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] },
+      project_discover: { found, truncated: false },
+      project_add: { outcome: "created", project: {} },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.frame.welcome.offerShort(2) }));
+    expect(await screen.findByText(S.frame.welcome.offer(2))).toBeTruthy();
+    expect(screen.getByText(S.frame.welcome.worktrees(2))).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta/ })); // untick beta
+    fireEvent.click(screen.getByRole("button", { name: S.frame.welcome.add(1) }));
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "project_add")).toHaveLength(1));
+    expect(ipc.calls.find((c) => c.cmd === "project_add")?.args).toMatchObject({ path: "/src/alpha" });
+  });
+
+  it("keeps the sheet and the failure notice when the reload fills the project list after a mixed batch", async () => {
+    const found = [{ root: "/src/alpha", name: "alpha", worktrees: 0 }, { root: "/src/beta", name: "beta", worktrees: 0 }];
+    let listed = false;
+    boot("", {
+      list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] },
+      project_discover: { found, truncated: false },
+      project_list: () => ({ projects: listed ? [{ id: "p_alpha", name: "alpha", root: "/src/alpha", rev: 1 }] : [], skipped: 0, truncated: false }),
+      project_add: (a: { path: string }) => { if (a.path === "/src/beta") throw { error: "not_a_project" }; listed = true; return { outcome: "created", project: {} }; },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.frame.welcome.offerShort(2) }));
+    fireEvent.click(await screen.findByRole("button", { name: S.frame.welcome.add(2) }));
+    expect(await screen.findByText(S.frame.welcome.partial(1, 1))).toBeTruthy();
+    expect(screen.getByRole("button", { name: S.frame.welcome.add(1) })).toBeTruthy(); // retry stays available
+    expect(ipc.calls.filter((c) => c.cmd === "project_list")).toHaveLength(1); // no reload until dismissed
+    fireEvent.click(screen.getByRole("button", { name: S.frame.welcome.cancel }));
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "project_list").length).toBeGreaterThan(1));
+  });
+
+  it("shows no offer when nothing is found", async () => {
+    boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, project_discover: { found: [], truncated: false } });
+    await screen.findByRole("heading", { name: S.home.start });
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "project_discover")).toBe(true));
+    expect(screen.queryByRole("button", { name: /found here/ })).toBeNull();
+  });
+
+  it("with no projects yet, Add project puts the cursor in the Repository folder field", async () => {
+    boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] } });
+    await screen.findByRole("heading", { name: S.home.start });
+    const repo = screen.getByLabelText(S.home.repo);
+    expect(document.activeElement).not.toBe(repo);
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
+    // Pressed again from the same place, it still lands there.
+    (document.activeElement as HTMLElement).blur();
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
+  });
+
+  it("from inside a project, Add project opens the launcher with the cursor in the Repository folder field", async () => {
+    boot();
+    await screen.findByRole("navigation", { name: S.frame.projects });
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(window.location.hash).toContain("new=1"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
   });
 
   it("does not poll while nothing runs (idle cost)", async () => {

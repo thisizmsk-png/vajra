@@ -5,6 +5,7 @@ import { Home } from "../src/screens/home/Home";
 import { CurrentProject } from "../src/projects/current";
 import { validate } from "../src/screens/home/validate";
 import { ProjectsProvider } from "../src/projects/store";
+import { PreferencesProvider } from "../src/preferences";
 import { UNSORTED_ID } from "../src/projects/adapter";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -101,10 +102,49 @@ describe("Home start envelope: the core's identity", () => {
 });
 
 describe("Home", () => {
+  it("names the checks in plain words, and shows a check it has no name for as the core sent it", async () => {
+    const pre = { rows: [
+      { name: "vajra doctor", ok: true, detail: "PASS", fix: "" },
+      { name: "hooks registered", ok: true, detail: "yes (6 events)", fix: "" },
+      { name: "workflow", ok: true, detail: "installed", fix: "" },
+      { name: "jq", ok: true, detail: "/usr/bin/jq", fix: "" },
+      { name: "constructor", ok: true, detail: "an odd id", fix: "" },
+    ], start_enabled: true };
+    const f = fakeIpc({ preflight: pre, list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } });
+    setTransport(f.transport);
+    render(<Home />);
+    expect(await screen.findByText("Engine self-check")).toBeTruthy();
+    expect(screen.getByText("Safety hooks")).toBeTruthy();
+    expect(screen.getByText("Run workflow")).toBeTruthy();
+    expect(screen.getByText("jq")).toBeTruthy();
+    expect(screen.getByText("constructor")).toBeTruthy();
+    expect(screen.queryByText("vajra doctor")).toBeNull();
+    expect(screen.queryByText("hooks registered")).toBeNull();
+  });
+
   it("shows every check, and a failing one with its fix command; Start is disabled (AC-1.3.2)", async () => {
     await open({ preflight: rows(false), list_campaigns: { campaigns: [] } });
     expect(await screen.findByText("bash install.sh")).toBeTruthy();
     expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("says next to the disabled Start button that the failing check blocks it, and the button points at that reason", async () => {
+    await open({ preflight: rows(false), list_campaigns: { campaigns: [] } });
+    const why = await screen.findByText(S.home.startNeedsChecks(1));
+    const start = screen.getByRole("button", { name: S.home.startButton });
+    expect(start.getAttribute("aria-describedby")).toBe(why.id);
+    expect(why.closest("form")).toBe(start.closest("form"));
+  });
+
+  it("gives no such reason when the checks pass, or when a failing check does not block a start", async () => {
+    await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
+    await screen.findByText(S.home.checksSummary(2, 2));
+    expect(screen.queryByText(S.home.startNeedsChecks(1))).toBeNull();
+    expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-describedby")).toBeNull();
+    cleanup();
+    await open({ preflight: { ...rows(false), start_enabled: true }, list_campaigns: { campaigns: [] } });
+    await screen.findByText("bash install.sh");
+    expect(screen.queryByText(S.home.startNeedsChecks(1))).toBeNull();
   });
 
   it("does not start with an empty ask: names the field, calls nothing (AC-1.1.2)", async () => {
@@ -227,6 +267,36 @@ describe("Home", () => {
     list = [camp(), camp({ slug: "c2", goal: "other" })];
     act(() => f.emit("changed", ["c2"]));
     expect(await screen.findByText(/c2/)).toBeTruthy();
+  });
+
+  it("says once that the core did not answer, and why Start is off, instead of one message per failed read", async () => {
+    const down = () => new Error("no answer");
+    const f = fakeIpc({ preflight: down, preferences_read: down, list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } });
+    setTransport(f.transport);
+    render(<PreferencesProvider projectId={null}><Home /></PreferencesProvider>);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(S.home.preflightFailed);
+    expect(alert.textContent).toContain(S.states.noAnswer);
+    await waitFor(() => expect(f.calls.map((c) => c.cmd)).toContain("preferences_read"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.queryByText(S.preferences.readFailed)).toBeNull();
+    const why = screen.getByText(S.home.startNeedsAnswer);
+    expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-describedby")).toBe(why.id);
+  });
+
+  it("still says the preferences could not be read when the core does answer", async () => {
+    const f = fakeIpc({ preflight: rows(true), preferences_read: () => { throw { error: "io_error", detail: "no" }; }, list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } });
+    setTransport(f.transport);
+    render(<PreferencesProvider projectId={null}><Home /></PreferencesProvider>);
+    expect(await screen.findByText(S.preferences.readFailed)).toBeTruthy();
+    cleanup();
+    // The checks failed with the core's own answer: that is a second, different problem, so both are said.
+    const g = fakeIpc({ preflight: () => { throw { error: "io_error", detail: "no" }; }, preferences_read: () => { throw { error: "io_error", detail: "no" }; }, list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } });
+    setTransport(g.transport);
+    render(<PreferencesProvider projectId={null}><Home /></PreferencesProvider>);
+    expect(await screen.findByText(S.preferences.readFailed)).toBeTruthy();
+    expect(await screen.findByText(S.home.preflightFailed)).toBeTruthy();
   });
 
   it("shows a message, not a blank, when the checks cannot run", async () => {
