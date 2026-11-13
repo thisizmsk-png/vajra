@@ -55,7 +55,14 @@ impl App {
         // `checking`, which is not a pass, so the label can only come out weaker, never stronger.
         let list = self.evidence_list(slug).unwrap_or_else(|_| json!({"rows": []}));
         let rows_json = list["rows"].as_array().cloned().unwrap_or_default();
-        let (trust, checker, approval) = self.trust_of(slug);
+        let (trust, checker, consumed) = self.trust_of(slug);
+        // N20 (bhishma M1, Opus on #226): the consume this app holds in memory names the list, the core's record agrees
+        // (`evidence_approval_consumed`), and a signed progress line is exactly the approval line for that list (the
+        // whole line text after its timestamp, no prefix). Neither the file nor the line counts alone.
+        let approval = consumed.is_some_and(|sha| {
+            let line = super::evidence_approval::progress_line(&sha);
+            progress.lines().filter_map(|l| l.strip_prefix("- ")).any(|l| l.split_once(' ').is_some_and(|(_, text)| text.trim_end() == line))
+        });
         let statuses: Vec<&str> = rows_json.iter().map(|r| r["status"].as_str().unwrap_or("not_run")).collect();
         let (label, reason) = proof::label(&Input {
             slug,
@@ -101,17 +108,17 @@ impl App {
     /// The core's own trust record for the campaign's run: `seats.json`'s trust, who checked (harness and account of the
     /// evidence seat) and whether a single-use approval was consumed. A campaign no run of this app started has none; one
     /// whose record can't be read answers `"?"`, so the label fails closed.
-    fn trust_of(&self, slug: &str) -> (Option<String>, Option<String>, bool) {
+    fn trust_of(&self, slug: &str) -> (Option<String>, Option<String>, Option<String>) {
         let run = slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r));
-        let Some(run) = run.filter(|r| crate::ids::valid_run_id(r)) else { return (None, None, false) };
+        let Some(run) = run.filter(|r| crate::ids::valid_run_id(r)) else { return (None, None, None) };
         let seats = match self.read_run_seats(run) {
             Ok(Some(s)) => s,
-            Ok(None) => return (None, None, false),
-            Err(_) => return (Some("?".into()), None, false),
+            Ok(None) => return (None, None, None),
+            Err(_) => return (Some("?".into()), None, None),
         };
         // The record must name this campaign; one that names another is not this run's.
         if seats["campaign_slug"].as_str() != Some(slug) {
-            return (Some("?".into()), None, false);
+            return (Some("?".into()), None, None);
         }
         let trust = seats["evidence_trust"].as_str().unwrap_or("?").to_string();
         let seat = seats["evidence_seat"].as_str();
@@ -119,7 +126,8 @@ impl App {
             let harness = s["harness"].as_str().unwrap_or("unknown harness");
             format!("{harness} ({})", s["account"].as_str().unwrap_or(""))
         });
-        // N20: the core's own approval record, consumed by this run's evidence ticket (never a `seats.json` field).
+        // N20: the list the core's own approval record says this run consumed (never a `seats.json` field); the caller
+        // also needs the signed progress line.
         (Some(trust), checker, self.evidence_approval_consumed(run))
     }
 

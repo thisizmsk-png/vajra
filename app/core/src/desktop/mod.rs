@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -242,6 +242,9 @@ pub struct App {
     /// Tests only: the write-ledger answer for the proof label, until 6h's ledger is wired (`proof_app::ledger_of`).
     #[cfg(test)]
     proof_ledger: Option<proof::Ledger>,
+    /// N20 (bhishma M1 on #226): the asks this app made and the answers a person gave, per run, for the app's lifetime
+    /// only. The file is display; a consume needs this too, so a record written by hand (or kept over a restart) is void.
+    approvals: Mutex<HashMap<String, evidence_approval::Held>>,
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
@@ -406,6 +409,7 @@ impl App {
             provider_dirs: None,
             #[cfg(test)]
             proof_ledger: None,
+            approvals: Mutex::new(HashMap::new()),
             provider_cache: Mutex::new(None),
             keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
@@ -849,6 +853,8 @@ impl App {
             stream.clone(),
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
+        // The app's loop may be at rest, waiting on the bus with no timer: tell it a run is live now.
+        self.bus.wake();
         // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
         let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: Some(engine.id().to_string()) };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
@@ -2496,6 +2502,10 @@ fn node_json(n: &Node, diff_of: &dyn Fn(&str) -> Option<Value>) -> Value {
 /// `changed` payload, or `None` when nothing happened.
 pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     let first = sub.recv_timeout(wait)?;
+    // A bare wake changes nothing the UI shows: the loop just looks again, at once.
+    if first == Event::Wake && sub.is_empty() {
+        return None;
+    }
     std::thread::sleep(COALESCE);
     let mut streams = BTreeSet::new();
     let mut snapshot_needed = false;
@@ -2504,12 +2514,46 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
             streams.insert(stream.to_string());
         }
         Event::SnapshotNeeded => snapshot_needed = true,
+        Event::Wake => {}
     };
     add(first);
     while let Some(e) = sub.try_recv() {
         add(e);
     }
+    if streams.is_empty() && !snapshot_needed {
+        return None;
+    }
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
+}
+
+/// How often the app's loop looks at live runs (worker refresh, run reaping, App Nap).
+pub const LIVE_WAIT: Duration = Duration::from_secs(1);
+/// With nothing running the loop waits on the bus, waking on its own only this often: one housekeeping turn (a finished
+/// worker that became safe to close, say its branch was pushed, is closed then), never a per-second timer.
+pub const IDLE_WAIT: Duration = Duration::from_secs(5 * 60);
+/// After the last run ends, housekeeping (automatic close of finished workers, reaping) goes on this long.
+pub const AFTER_RUN: Duration = Duration::from_secs(120);
+
+/// The app loop's pace: busy while a run is live and for `AFTER_RUN` after the last one ended, else at rest.
+pub struct Pace {
+    last_live: Option<Instant>,
+}
+
+impl Pace {
+    /// A fresh pace starts busy: launch gets one `AFTER_RUN` window of housekeeping, so finished workers left from the
+    /// last session are closed without waiting for a run.
+    pub fn new(now: Instant) -> Self {
+        Pace { last_live: Some(now) }
+    }
+
+    /// Whether this turn does housekeeping, and how long the next wait is.
+    pub fn next(&mut self, live: bool, now: Instant) -> (bool, Duration) {
+        if live {
+            self.last_live = Some(now);
+        }
+        let busy = self.last_live.is_some_and(|t| now.saturating_duration_since(t) < AFTER_RUN);
+        (busy, if busy { LIVE_WAIT } else { IDLE_WAIT })
+    }
 }
 
 mod worker_diff;
