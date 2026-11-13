@@ -56,14 +56,24 @@ fn seats(t: &Tmp, trust: &str, slug: &str, consumed: bool) {
     });
     fs::write(dir.join("seats.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
     if consumed {
-        // The N20 flow: asked, approved by a person, consumed by the evidence ticket.
-        use crate::desktop::evidence_approval::Ask;
-        let app = t.app();
-        let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()] };
-        let now = std::time::SystemTime::now();
-        let sha = app.request_evidence_approval(&ask, now).unwrap();
-        app.answer_evidence_approval_at(RUN, &sha, true, now).unwrap();
-        app.consume_evidence_approval(&ask, now).unwrap();
+        approve_and_consume(t, slug, true);
+    }
+}
+
+/// The N20 flow: asked, approved by a person, consumed by the evidence ticket, which then writes the signed progress
+/// line (`signed`) naming the list.
+fn approve_and_consume(t: &Tmp, slug: &str, signed: bool) {
+    use crate::desktop::evidence_approval::{progress_line, Ask};
+    let app = t.app();
+    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()] };
+    let now = std::time::SystemTime::now();
+    let sha = app.request_evidence_approval(&ask, now).unwrap();
+    app.answer_evidence_approval_at(RUN, &sha, true, now).unwrap();
+    app.consume_evidence_approval(&ask, now).unwrap();
+    if signed {
+        let script = t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh");
+        let out = std::process::Command::new("bash").arg(script).args(["progress", &progress_line(&sha), "--campaign", slug]).env("HOME", t.home()).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     }
 }
 
@@ -173,6 +183,18 @@ fn an_unconsumed_approval_is_not_verified_and_a_consumed_one_is() {
     assert_eq!(app.run_proof(&slug).unwrap()["label"], "not_verified");
     seats(&t, "guarded_by_approval", &slug, true);
     assert_eq!(app.run_proof(&slug).unwrap()["label"], "verified_approved");
+}
+
+#[test]
+fn a_consumed_approval_without_its_signed_progress_line_is_not_verified() {
+    let slug = format!("deliver-{RUN}");
+    let Some((t, app)) = signed_run(&slug, "g", "active", vec![green("t1", "c")]) else { return };
+    seats(&t, "guarded_by_approval", &slug, false);
+    approve_and_consume(&t, &slug, false);
+    let out = std::process::Command::new("bash").arg(t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh")).args(["close", &slug, "--status", "done"]).env("HOME", t.home()).output().unwrap();
+    assert!(out.status.success());
+    // The record says consumed, but no signed line names the list: the file alone never reads approved.
+    assert_eq!(app.run_proof(&slug).unwrap()["label"], "not_verified");
 }
 
 #[test]

@@ -62,9 +62,9 @@ fn approve_then_consume_once_gives_the_consumed_state_and_an_audit_line() {
     assert_eq!(shown["ask"]["commit"], ask().commit);
     assert_eq!(shown["ask"]["seat"], "verifier");
     app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 60)).unwrap();
-    assert!(!app.evidence_approval_consumed(RUN), "approved is not consumed yet");
+    assert!(app.evidence_approval_consumed(RUN).is_none(), "approved is not consumed yet");
     assert_eq!(app.consume_evidence_approval(&ask(), at(T0 + 120)).unwrap(), sha);
-    assert!(app.evidence_approval_consumed(RUN));
+    assert_eq!(app.evidence_approval_consumed(RUN).as_deref(), Some(sha.as_str()));
     // Single use.
     assert!(app.consume_evidence_approval(&ask(), at(T0 + 130)).is_err());
     let log = t.audit();
@@ -80,7 +80,7 @@ fn decline_ends_it_and_nothing_can_consume_it() {
     let sha = app.request_evidence_approval(&ask(), at(T0)).unwrap();
     assert_eq!(app.answer_evidence_approval_at(RUN, &sha, false, at(T0 + 5)).unwrap()["state"], "declined");
     assert!(app.consume_evidence_approval(&ask(), at(T0 + 10)).is_err());
-    assert!(!app.evidence_approval_consumed(RUN));
+    assert!(app.evidence_approval_consumed(RUN).is_none());
     assert!(t.audit().contains("DENY desktop-control reason=\"evidence-approval declined"));
     // A declined list can't be approved afterwards.
     assert!(app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 20)).is_err());
@@ -154,13 +154,13 @@ fn a_resume_or_another_run_cannot_reuse_an_approval() {
     let mut resumed = ask();
     resumed.run_id = "20261113-0700".into();
     assert!(app.consume_evidence_approval(&resumed, at(T0 + 2)).is_err());
-    assert!(!app.evidence_approval_consumed("20261113-0700"));
+    assert!(app.evidence_approval_consumed("20261113-0700").is_none());
     // A record copied under another run's folder names its own run: it is never that run's.
     let other = t.0.join("data/control/lead/20261113-0700");
     fs::create_dir_all(&other).unwrap();
     fs::copy(t.0.join("data/control/lead").join(RUN).join("approval.json"), other.join("approval.json")).unwrap();
     assert!(app.consume_evidence_approval(&resumed, at(T0 + 3)).is_err());
-    assert!(!app.evidence_approval_consumed("20261113-0700"));
+    assert!(app.evidence_approval_consumed("20261113-0700").is_none());
     // The original is untouched by the attempts.
     assert!(app.consume_evidence_approval(&ask(), at(T0 + 4)).is_ok());
 }
@@ -209,6 +209,106 @@ fn snapshot(root: &std::path::Path) -> std::collections::BTreeSet<String> {
         }
     }
     out
+}
+
+#[test]
+fn a_hand_written_approved_record_is_refused() {
+    // bhishma M1: an agent that can write the data folder writes "approved" for the current ask itself.
+    let t = Tmp::new();
+    let app = t.app();
+    let dir = t.0.join("data/control/lead").join(RUN);
+    fs::create_dir_all(&dir).unwrap();
+    let a = ask();
+    let forged = json!({"state": "approved", "ask": a.to_json(), "sha256": a.sha256(), "asked_at": T0, "answered_at": T0 + 1});
+    fs::write(dir.join("approval.json"), forged.to_string()).unwrap();
+    assert_eq!(app.evidence_approval_read_at(RUN, at(T0 + 2)).unwrap()["state"], "void", "the UI never shows it approved");
+    assert!(app.consume_evidence_approval(&a, at(T0 + 2)).is_err());
+    assert!(app.evidence_approval_consumed(RUN).is_none());
+    // Nor can it be answered: this app never asked.
+    assert!(app.answer_evidence_approval_at(RUN, &a.sha256(), true, at(T0 + 3)).is_err());
+    // A forged pending record where the app did ask, approved by writing the file, is refused too.
+    let sha = app.request_evidence_approval(&a, at(T0)).unwrap();
+    let mut rec: Value = serde_json::from_slice(&fs::read(dir.join("approval.json")).unwrap()).unwrap();
+    rec["state"] = json!("approved");
+    fs::write(dir.join("approval.json"), rec.to_string()).unwrap();
+    assert!(app.consume_evidence_approval(&a, at(T0 + 4)).is_err(), "no person answered {sha}");
+}
+
+#[test]
+fn after_a_restart_an_open_or_approved_ask_is_void_and_the_core_asks_again() {
+    let t = Tmp::new();
+    let sha = {
+        let app = t.app();
+        let sha = app.request_evidence_approval(&ask(), at(T0)).unwrap();
+        app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 1)).unwrap();
+        sha
+    };
+    let app = t.app(); // a new app: nothing held
+    assert_eq!(app.evidence_approval_read_at(RUN, at(T0 + 2)).unwrap()["state"], "void");
+    assert!(app.consume_evidence_approval(&ask(), at(T0 + 2)).is_err());
+    // It asks again, and the new ask works as usual.
+    let again = app.request_evidence_approval(&ask(), at(T0 + 3)).unwrap();
+    assert_eq!(again, sha, "same list, same sha");
+    app.answer_evidence_approval_at(RUN, &again, true, at(T0 + 4)).unwrap();
+    assert!(app.consume_evidence_approval(&ask(), at(T0 + 5)).is_ok());
+}
+
+#[test]
+fn an_approval_past_the_hold_cant_be_consumed_and_reads_expired() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = app.request_evidence_approval(&ask(), at(T0)).unwrap();
+    app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 10)).unwrap();
+    let late = T0 + HOLD_MAX.as_secs() + 1;
+    assert_eq!(app.evidence_approval_read_at(RUN, at(late)).unwrap()["state"], "expired");
+    assert!(app.consume_evidence_approval(&ask(), at(late)).is_err());
+    // A pending ask past the hold reads expired too, so the dialog offers no Approve.
+    let t = Tmp::new();
+    let app = t.app();
+    app.request_evidence_approval(&ask(), at(T0)).unwrap();
+    assert_eq!(app.evidence_approval_read_at(RUN, at(late)).unwrap()["state"], "expired");
+}
+
+#[test]
+fn if_the_audit_line_cant_be_written_nothing_changes_and_the_person_sees_why() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = app.request_evidence_approval(&ask(), at(T0)).unwrap();
+    // The audit log can't be appended (made a directory: no write ever lands there).
+    let log = t.0.join("home/.claude/vajra/audit.log");
+    let _ = fs::remove_file(&log);
+    fs::create_dir_all(&log).unwrap();
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o500)).unwrap();
+    let err = app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 1)).unwrap_err();
+    assert_eq!(err["error"], "audit_failed", "{err}");
+    assert!(err["detail"].as_str().unwrap().contains("audit log"), "{err}");
+    assert_eq!(app.evidence_approval_read_at(RUN, at(T0 + 1)).unwrap()["state"], "pending", "nothing changed");
+    assert!(app.consume_evidence_approval(&ask(), at(T0 + 2)).is_err());
+    // A new ask fails closed too.
+    let mut next = ask();
+    next.round = 2;
+    assert!(app.request_evidence_approval(&next, at(T0 + 3)).is_err());
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn a_command_that_would_show_differently_from_what_runs_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    for bad in ["echo ok\rrm -rf ~", "echo ok\u{1b}[2Krm -rf ~", "echo \u{202E}fr- mr", "npm\u{200B} test", "a\u{2066}b", "x\u{FEFF}", "a\u{85}b", "a\nb"] {
+        let mut a = ask();
+        a.commands = vec![bad.into()];
+        assert!(app.request_evidence_approval(&a, at(T0)).is_err(), "{bad:?}");
+    }
+    let mut a = ask();
+    a.account = "codex\u{202E}krow".into();
+    assert!(app.request_evidence_approval(&a, at(T0)).is_err());
+    assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "none", "nothing was written");
+    // A tab is fine, and so is ordinary non-ASCII text.
+    let mut a = ask();
+    a.commands = vec!["printf 'a\\tb'\tdone".into(), "echo café".into()];
+    assert!(app.request_evidence_approval(&a, at(T0)).is_ok());
 }
 
 #[test]

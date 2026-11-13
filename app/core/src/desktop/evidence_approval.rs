@@ -8,9 +8,17 @@
 //! - Only a human click in the app approves (`act` with `human_only`): never MCP, a socket or an agent.
 //! - Decline, or no answer within `HOLD_MAX`, ends `not_verified`. Approve, once consumed by this run's evidence ticket,
 //!   reads plain Verified with the note "check commands approved by you".
-//! - Each answer is an `audit.log` line; the evidence ticket writes the signed `progress` line (`progress_line`).
+//! - The ask, each answer and the consume are `audit.log` lines, and fail closed: an answer whose line can't be written
+//!   is refused, and the person sees why (bhishma L2 on #226). The evidence ticket writes the signed `progress` line
+//!   (`progress_line`).
 //!
-//! The record is `<data>/control/lead/<run>/approval.json`, the core's own (private dir, atomic writes).
+//! bhishma M1 on #226: until agents can't write the app's data folder (key A), the file can't be trusted on its own.
+//! The asks and a person's answers are held in memory (`App::approvals`) for the app's lifetime; a consume needs the
+//! held answer and the file to agree. After a restart nothing is held, so a pending or approved record is void and the
+//! core asks again. The proof's `approval_consumed` needs the signed progress line as well (`proof_app`).
+//!
+//! The record is `<data>/control/lead/<run>/approval.json`, the core's own (private dir, atomic writes); it is what the
+//! UI shows.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -21,14 +29,14 @@ use serde_json::{json, Value};
 use super::{fail, invalid, App, Res};
 use crate::control::{audit, fsx, sha256::hex_digest};
 
-/// `evidence_hold_max_s`: how long an ask waits for its answer.
+/// `evidence_hold_max_s`: how long an ask waits for its answer, and how long an approval stays usable.
 pub const HOLD_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 const FILE: &str = "approval.json";
 /// At most this many commands, each at most this long (the list is shown whole, so it must fit on screen).
 const MAX_COMMANDS: usize = 64;
 const MAX_COMMAND: usize = 4096;
 
-/// Read-modify-write of every approval record runs under this lock, so a consume can't race an answer.
+/// File read-modify-writes run under this lock, so a consume can't race an answer.
 static LOCK: Mutex<()> = Mutex::new(());
 
 /// What the human is asked to approve: everything the approval is bound to.
@@ -44,6 +52,22 @@ pub struct Ask {
     pub commands: Vec<String>,
 }
 
+/// An ask this app made, and a person's answer to it (held in memory only).
+#[derive(Clone, Debug)]
+pub(crate) struct Held {
+    ask: Ask,
+    sha: String,
+    asked_at: u64,
+    answer: Option<bool>,
+}
+
+/// A character that can make a command show differently from what runs: any control character but tab (CR, ESC and
+/// the other C0 and C1 codes), and the Unicode bidi and invisible format characters (Opus on #226).
+fn hides_text(c: char) -> bool {
+    (c.is_control() && c != '\t')
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
+}
+
 impl Ask {
     fn check(&self) -> Result<(), String> {
         if !crate::ids::valid_run_id(&self.run_id) {
@@ -52,14 +76,17 @@ impl Ask {
         if !(self.commit.len() == 40 && self.commit.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())) {
             return Err("the commit must be a full sha".into());
         }
-        if self.seat.is_empty() || self.account.is_empty() {
-            return Err("the evidence seat and account are required".into());
+        if self.seat.is_empty() || self.account.is_empty() || [&self.seat, &self.account].iter().any(|s| s.chars().any(hides_text)) {
+            return Err("the evidence seat and account are required, as plain text".into());
         }
         if self.commands.is_empty() || self.commands.len() > MAX_COMMANDS {
             return Err(format!("1 to {MAX_COMMANDS} commands"));
         }
-        if self.commands.iter().any(|c| c.trim().is_empty() || c.len() > MAX_COMMAND || c.contains('\0')) {
-            return Err("a command is empty, too long or has a NUL".into());
+        if self.commands.iter().any(|c| c.trim().is_empty() || c.len() > MAX_COMMAND) {
+            return Err("a command is empty or too long".into());
+        }
+        if self.commands.iter().any(|c| c.chars().any(hides_text)) {
+            return Err("a command has a control or invisible character, so it can't be shown exactly as it runs".into());
         }
         Ok(())
     }
@@ -73,27 +100,19 @@ impl Ask {
     pub fn sha256(&self) -> String {
         hex_digest(self.to_json().to_string().as_bytes())
     }
-
-    fn from_json(v: &Value) -> Option<Self> {
-        Some(Ask {
-            run_id: v["run_id"].as_str()?.into(),
-            round: u32::try_from(v["round"].as_u64()?).ok()?,
-            commit: v["commit"].as_str()?.into(),
-            seat: v["seat"].as_str()?.into(),
-            account: v["account"].as_str()?.into(),
-            commands: v["commands"].as_array()?.iter().map(|c| c.as_str().map(str::to_string)).collect::<Option<_>>()?,
-        })
-    }
 }
 
 /// The signed `progress` line the evidence ticket writes once it consumed the approval.
-#[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
 pub fn progress_line(sha: &str) -> String {
     format!("check commands approved by the user (sha {})", &sha[..sha.len().min(12)])
 }
 
 fn secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+fn expired(asked_at: u64, now: SystemTime) -> bool {
+    secs(now).saturating_sub(asked_at) > HOLD_MAX.as_secs()
 }
 
 impl App {
@@ -115,10 +134,10 @@ impl App {
         fsx::write_atomic(&dir, FILE, v.to_string().as_bytes()).map(drop).map_err(|e| e.to_string())
     }
 
-    fn audit_approval(&self, verdict: &str, what: &str, run_id: &str, sha: &str, now: SystemTime) {
+    /// The audit line, before the state it records changes: no line, no change (fail closed).
+    fn audit_approval(&self, verdict: &str, what: &str, run_id: &str, sha: &str, now: SystemTime) -> Result<(), String> {
         let line = format!("evidence-approval {what} run={run_id} sha={sha}");
-        // The answer stands even if the log can't be appended (the record and the signed progress line carry it).
-        let _ = audit::append_line(&self.home.join(".claude/vajra/audit.log"), verdict, &line, now);
+        audit::append_line(&self.home.join(".claude/vajra/audit.log"), verdict, &line, now).map_err(|_| "Vajra couldn't write this to its audit log, so nothing was changed. Check that the Vajra folder is writable, then try again.".to_string())
     }
 
     /// The core asks (after the gate passes). Any earlier ask of this run, answered or not, is void: a redo or a new
@@ -128,6 +147,8 @@ impl App {
         ask.check()?;
         let _g = crate::lock(&LOCK);
         let sha = ask.sha256();
+        self.audit_approval("ALLOW", "asked", &ask.run_id, &sha, now)?;
+        crate::lock(&self.approvals).insert(ask.run_id.clone(), Held { ask: ask.clone(), sha: sha.clone(), asked_at: secs(now), answer: None });
         self.write_approval(&ask.run_id, &json!({"state": "pending", "ask": ask.to_json(), "sha256": sha, "asked_at": secs(now)}))?;
         Ok(sha)
     }
@@ -136,6 +157,7 @@ impl App {
     #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
     pub(crate) fn void_evidence_approval(&self, run_id: &str, why: &str) -> Result<(), String> {
         let _g = crate::lock(&LOCK);
+        crate::lock(&self.approvals).remove(run_id);
         let Some(mut rec) = self.read_approval(run_id)? else { return Ok(()) };
         if rec["state"] != "consumed" {
             rec["state"] = json!("void");
@@ -145,73 +167,112 @@ impl App {
         Ok(())
     }
 
-    /// The human's answer. `sha` is the list the dialog showed: an answer to an older list is refused.
+    /// The human's answer. `sha` is the list the dialog showed: an answer to an older list is refused. Only an ask this
+    /// app made and still holds can be answered.
     fn answer_evidence_approval(&self, run_id: &str, sha: &str, approve: bool, now: SystemTime) -> Res {
         if !crate::ids::valid_run_id(run_id) {
             return Err(invalid("run_id", "not a run id"));
         }
         let _g = crate::lock(&LOCK);
-        let mut rec = self.read_approval(run_id).map_err(|e| fail("io_error", e))?.ok_or_else(|| fail("not_found", "this run isn't waiting for an approval"))?;
-        if rec["state"] != "pending" {
+        let held = crate::lock(&self.approvals).get(run_id).cloned();
+        let rec = self.read_approval(run_id).map_err(|e| fail("io_error", e))?;
+        let (Some(held), Some(mut rec)) = (held, rec) else { return Err(fail("not_found", "this run isn't waiting for an approval")) };
+        if held.answer.is_some() || rec["state"] != "pending" {
             return Err(fail("not_pending", "this approval was already answered or is void"));
         }
-        if rec["sha256"].as_str() != Some(sha) {
+        if held.sha != sha || rec["sha256"].as_str() != Some(sha) {
             return Err(fail("list_changed", "the command list changed; review the new list"));
         }
-        let asked = rec["asked_at"].as_u64().unwrap_or(0);
-        if secs(now).saturating_sub(asked) > HOLD_MAX.as_secs() {
+        if expired(held.asked_at, now) {
+            crate::lock(&self.approvals).remove(run_id);
             rec["state"] = json!("expired");
             self.write_approval(run_id, &rec).map_err(|e| fail("io_error", e))?;
             return Err(fail("expired", "the approval wait ran out; the run ends not verified"));
         }
-        rec["state"] = json!(if approve { "approved" } else { "declined" });
+        let what = if approve { "approved" } else { "declined" };
+        self.audit_approval(if approve { "ALLOW" } else { "DENY" }, what, run_id, sha, now).map_err(|e| fail("audit_failed", e))?;
+        if let Some(h) = crate::lock(&self.approvals).get_mut(run_id) {
+            h.answer = Some(approve);
+        }
+        rec["state"] = json!(what);
         rec["answered_at"] = json!(secs(now));
         self.write_approval(run_id, &rec).map_err(|e| fail("io_error", e))?;
-        self.audit_approval(if approve { "ALLOW" } else { "DENY" }, if approve { "approved" } else { "declined" }, run_id, sha, now);
-        Ok(json!({"run_id": run_id, "state": rec["state"], "sha256": sha}))
+        Ok(json!({"run_id": run_id, "state": what, "sha256": sha}))
     }
 
-    /// The evidence ticket uses the approval: only an approved record whose binding equals `ask` exactly, once. Any
-    /// other state, or a different run, round, commit, seat, account or command, is refused (and voids it).
+    /// The evidence ticket uses the approval: only an answer a person gave in this app's lifetime, for exactly `ask`,
+    /// within the hold, with the file agreeing, once. Anything else is refused (and voids it).
     #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
     pub(crate) fn consume_evidence_approval(&self, ask: &Ask, now: SystemTime) -> Result<String, String> {
         ask.check()?;
         let _g = crate::lock(&LOCK);
-        let mut rec = self.read_approval(&ask.run_id)?.ok_or("no approval for this run")?;
-        let state = rec["state"].as_str().unwrap_or("").to_string();
-        if state != "approved" {
-            return Err(format!("the approval is {}", if state.is_empty() { "unreadable" } else { &state }));
-        }
         let sha = ask.sha256();
-        let bound = Ask::from_json(&rec["ask"]);
-        if bound.as_ref() != Some(ask) || rec["sha256"].as_str() != Some(sha.as_str()) {
-            rec["state"] = json!("void");
-            rec["why"] = json!("the commands, commit, round or seat changed after approval");
-            self.write_approval(&ask.run_id, &rec)?;
-            return Err("the approval was for a different list".into());
+        let held = crate::lock(&self.approvals).get(&ask.run_id).cloned();
+        let rec = self.read_approval(&ask.run_id)?;
+        let refuse = |why: &str| -> Result<String, String> {
+            crate::lock(&self.approvals).remove(&ask.run_id);
+            if let Ok(Some(mut r)) = self.read_approval(&ask.run_id) {
+                if r["state"] != "consumed" {
+                    r["state"] = json!("void");
+                    r["why"] = json!(why);
+                    let _ = self.write_approval(&ask.run_id, &r);
+                }
+            }
+            Err(why.to_string())
+        };
+        let Some(held) = held else { return refuse("no approval this app asked for and a person gave") };
+        if held.answer != Some(true) {
+            return Err(format!("the approval is {}", if held.answer == Some(false) { "declined" } else { "not answered" }));
         }
+        if held.ask != *ask || held.sha != sha {
+            return refuse("the commands, commit, round or seat changed after approval");
+        }
+        if expired(held.asked_at, now) {
+            return refuse("the approval is older than the hold");
+        }
+        let Some(mut rec) = rec.filter(|r| r["state"] == "approved" && r["sha256"].as_str() == Some(sha.as_str())) else {
+            return refuse("the approval record doesn't match the answer given");
+        };
+        self.audit_approval("ALLOW", "consumed", &ask.run_id, &sha, now)?;
+        crate::lock(&self.approvals).remove(&ask.run_id);
         rec["state"] = json!("consumed");
         rec["consumed_at"] = json!(secs(now));
         self.write_approval(&ask.run_id, &rec)?;
-        self.audit_approval("ALLOW", "consumed", &ask.run_id, &sha, now);
         Ok(sha)
     }
 
-    /// The run's approval, for the UI: the state, and while pending the exact list to show.
+    /// The run's approval, for the UI: the state, and while pending the exact list to show. A pending or approved
+    /// record this app isn't holding (written by hand, or kept over a restart) reads `void`; past the hold, `expired`.
     pub fn evidence_approval(&self, run_id: &str) -> Res {
+        self.evidence_approval_at(run_id, SystemTime::now())
+    }
+
+    fn evidence_approval_at(&self, run_id: &str, now: SystemTime) -> Res {
         if !crate::ids::valid_run_id(run_id) {
             return Err(invalid("run_id", "not a run id"));
         }
         let rec = self.read_approval(run_id).map_err(|e| fail("io_error", e))?;
-        Ok(match rec {
-            None => json!({"run_id": run_id, "state": "none"}),
-            Some(r) => json!({"run_id": run_id, "state": r["state"], "sha256": r["sha256"], "ask": r["ask"], "asked_at": r["asked_at"], "hold_max_s": HOLD_MAX.as_secs()}),
-        })
+        let Some(r) = rec else { return Ok(json!({"run_id": run_id, "state": "none"})) };
+        let mut state = r["state"].as_str().unwrap_or("void").to_string();
+        if state == "pending" || state == "approved" {
+            let held = crate::lock(&self.approvals).get(run_id).cloned();
+            match held {
+                Some(h) if r["sha256"].as_str() == Some(h.sha.as_str()) => {
+                    if expired(h.asked_at, now) {
+                        state = "expired".into();
+                    }
+                }
+                _ => state = "void".into(),
+            }
+        }
+        Ok(json!({"run_id": run_id, "state": state, "sha256": r["sha256"], "ask": r["ask"], "asked_at": r["asked_at"], "hold_max_s": HOLD_MAX.as_secs()}))
     }
 
-    /// Whether this run's evidence ticket consumed its approval (the proof's `approval_consumed`).
-    pub(crate) fn evidence_approval_consumed(&self, run_id: &str) -> bool {
-        matches!(self.read_approval(run_id), Ok(Some(r)) if r["state"] == "consumed" && r["ask"]["run_id"] == run_id)
+    /// The sha of the list this run's evidence ticket consumed, from the core's record. The proof also needs the
+    /// signed progress line naming it (`progress_line`), so the file alone never makes a run read approved.
+    pub(crate) fn evidence_approval_consumed(&self, run_id: &str) -> Option<String> {
+        let r = self.read_approval(run_id).ok()??;
+        (r["state"] == "consumed" && r["ask"]["run_id"] == run_id).then(|| r["sha256"].as_str().map(str::to_string)).flatten()
     }
 
     /// Approve or decline: a person's click in the app only.
@@ -224,6 +285,11 @@ impl App {
     #[cfg(test)]
     pub(crate) fn answer_evidence_approval_at(&self, run_id: &str, sha: &str, approve: bool, now: SystemTime) -> Res {
         self.answer_evidence_approval(run_id, sha, approve, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evidence_approval_read_at(&self, run_id: &str, now: SystemTime) -> Res {
+        self.evidence_approval_at(run_id, now)
     }
 }
 

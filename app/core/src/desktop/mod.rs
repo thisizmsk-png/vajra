@@ -242,6 +242,9 @@ pub struct App {
     /// Tests only: the write-ledger answer for the proof label, until 6h's ledger is wired (`proof_app::ledger_of`).
     #[cfg(test)]
     proof_ledger: Option<proof::Ledger>,
+    /// N20 (bhishma M1 on #226): the asks this app made and the answers a person gave, per run, for the app's lifetime
+    /// only. The file is display; a consume needs this too, so a record written by hand (or kept over a restart) is void.
+    approvals: Mutex<HashMap<String, evidence_approval::Held>>,
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
@@ -403,6 +406,7 @@ impl App {
             provider_dirs: None,
             #[cfg(test)]
             proof_ledger: None,
+            approvals: Mutex::new(HashMap::new()),
             provider_cache: Mutex::new(None),
             keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
