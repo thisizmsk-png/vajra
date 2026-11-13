@@ -32,6 +32,8 @@ struct FakeWorkers {
     merge_result: Mutex<Option<GitwError>>,
     /// Every dispatch answers this error while it is set.
     dispatch_error: Mutex<Option<DispatchError>>,
+    /// The writer limits the protocol set, in order.
+    limits: Mutex<Vec<(String, u32)>>,
     /// While set, `integrate` says it entered, then blocks until released (#153 review: a stop during the merge).
     integrate_hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
@@ -70,6 +72,9 @@ fn commit_of(id: &str) -> String {
 }
 
 impl Workers for FakeWorkers {
+    fn limit_writers(&self, run: &str, n: u32) {
+        crate::lock(&self.limits).push((run.to_string(), n));
+    }
     fn dispatch(&self, spec: TaskSpec, seat: WorkerSeat) -> Result<String, DispatchError> {
         if let Some(e) = crate::lock(&self.dispatch_error).clone() {
             return Err(e);
@@ -136,6 +141,10 @@ struct FakeGate {
     changed: Condvar,
     /// How many times a round's checks started.
     calls: std::sync::atomic::AtomicUsize,
+    /// While set, the gate says it is about to start a check ticket, then waits to be released before trying.
+    start_hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    /// Each try to start a check ticket through the run: whether the run let it start.
+    starts: Mutex<Vec<bool>>,
 }
 
 impl FakeGate {
@@ -146,8 +155,18 @@ impl FakeGate {
 }
 
 impl RoundGate for FakeGate {
-    fn check(&self, _: &str, _: u32, _: &str, _: &[String]) -> RoundVerdict {
+    fn check(&self, _: &str, _: u32, _: &str, _: &[String], life: &dyn RunLife) -> RoundVerdict {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let hold = crate::lock(&self.start_hold).take();
+        if let Some((about, release)) = hold {
+            about.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(20)).unwrap();
+            let ok = life.start(&mut || {});
+            crate::lock(&self.starts).push(ok);
+            if !ok {
+                return RoundVerdict::Failed { feedback: BTreeMap::new() };
+            }
+        }
         // A test that never answers leaves no thread behind for long.
         let v = crate::lock(&self.verdicts);
         let (mut v, _) = self.changed.wait_timeout_while(v, Duration::from_secs(20), |v| v.is_empty()).unwrap();
@@ -555,6 +574,38 @@ fn two_429s_on_the_lead_restart_it_with_backoff_and_dont_use_up_n9() {
     assert_ne!(r.status(), Some(RunStatus::LeadLost));
 }
 
+/// #153 codex P2: the provider-retry budget (3) and N9's one restart are separate. A fourth retryable exit ends the
+/// run, even with live work: it never spends N9's restart.
+#[test]
+fn a_retryable_exit_past_its_budget_ends_the_run_and_never_spends_n9() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.dispatch("t1");
+    for s in [5, 10, 20] {
+        assert_eq!(r.p.lead_exited(LeadExit::Retryable), LeadAction::Restart { backoff: Duration::from_secs(s) });
+    }
+    assert_eq!(r.p.lead_exited(LeadExit::Retryable), LeadAction::Ended(RunStatus::LeadLost), "no fourth restart");
+    let card = r.p.card();
+    assert!(card.reason.as_deref().unwrap().contains("3 retries"), "{card:?}");
+    assert_eq!(*r.w.kills.lock().unwrap(), [KillReason::Abandoned]);
+    // With no live work, an exhausted retry ends the run the computed way.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    for _ in 0..3 {
+        r.p.lead_exited(LeadExit::Retryable);
+    }
+    assert_eq!(r.p.lead_exited(LeadExit::Retryable), LeadAction::Ended(RunStatus::NotVerified));
+    // N9's restart is its own budget: all three retries used, a plain exit with live work still gets it once.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.dispatch("t1");
+    for _ in 0..3 {
+        r.p.lead_exited(LeadExit::Retryable);
+    }
+    assert_eq!(r.p.lead_exited(LeadExit::Exited), LeadAction::Restart { backoff: Duration::ZERO });
+    assert_eq!(r.p.lead_exited(LeadExit::Exited), LeadAction::Ended(RunStatus::LeadLost));
+}
+
 #[test]
 fn a_lead_that_exits_with_no_live_workers_finalizes_with_no_restart() {
     let r = rig();
@@ -908,4 +959,48 @@ fn a_worker_that_needs_the_human_keeps_the_run_needs_user() {
     let again = r.dispatch("t3");
     r.w.end(&again, Outcome::Done);
     assert_eq!(r.p.finish_run("done").unwrap(), RunStatus::NotVerified);
+}
+
+/// #153 review: a Stop can land after the merge but before the gate starts a check ticket (the gate runs on its own
+/// thread, with no lock held). A check ticket starts only through the run, atomically with the run's end, so one
+/// asked for after the run ended never starts and nothing escapes the run's one kill.
+#[test]
+fn a_check_ticket_asked_for_after_the_run_ended_never_starts() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    let (about_tx, about) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *crate::lock(&r.gate.start_hold) = Some((about_tx, release_rx));
+    r.p.integrate(1).unwrap();
+    about.recv_timeout(Duration::from_secs(20)).expect("the gate is about to start a check");
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    assert_eq!(*crate::lock(&r.w.kills), [KillReason::Stopped], "the run's one kill already ran");
+    release.send(()).unwrap();
+    // The round ticket can answer as soon as the run ends; the gate's refused start is recorded on its own thread.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while crate::lock(&r.gate.starts).is_empty() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(*crate::lock(&r.gate.starts), [false], "the ended run refused the start");
+    // While the run is open, a start goes through.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    let (about_tx, about) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *crate::lock(&r.gate.start_hold) = Some((about_tx, release_rx));
+    r.p.integrate(1).unwrap();
+    about.recv_timeout(Duration::from_secs(20)).unwrap();
+    release.send(()).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(1);
+    assert_eq!(*crate::lock(&r.gate.starts), [true]);
+}
+
+/// #153 codex P2: the run's max_in_flight reaches the runtime, which holds it however the lead calls dispatch.
+#[test]
+fn the_runs_writer_limit_is_handed_to_the_runtime() {
+    let r = rig();
+    assert_eq!(*crate::lock(&r.w.limits), [("r1".to_string(), 4)]);
 }

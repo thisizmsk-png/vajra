@@ -366,3 +366,55 @@ fn a_settings_file_already_on_disk_with_any_role_key_still_loads() {
     s.update(None, v.rev, patch(json!({"theme": "dark"})), false).unwrap();
     assert!(s.read(None).unwrap().agents.roles.contains_key("some_old_role"));
 }
+
+// Given the ping rule, When it is saved globally, Then it reads back and survives a reopen; out-of-range budgets are refused.
+#[test]
+fn the_ping_rule_is_a_bounded_global_preference() {
+    let h = Home::new();
+    let s = h.store();
+    assert_eq!(s.read(None).unwrap().effective.ping, Ping::default());
+    let rule = json!({"ping": {"per_hour": 3, "batch_minutes": 0, "decisions": true, "questions": false, "blocked": true}});
+    s.update(None, 0, patch(rule), false).unwrap();
+    let v = h.store().read(Some(P)).unwrap();
+    assert_eq!((v.effective.ping.per_hour, v.effective.ping.batch_minutes, v.effective.ping.questions), (3, 0, false));
+    assert_eq!(v.sources["ping"], "global");
+    for bad in [
+        json!({"ping": {"per_hour": 0}}),
+        json!({"ping": {"per_hour": 31}}),
+        json!({"ping": {"batch_minutes": 11}}),
+    ] {
+        assert_eq!(s.update(None, 1, patch(bad), false).unwrap_err().code(), "invalid_preferences");
+    }
+    assert!(serde_json::from_value::<Patch>(json!({"ping": {"start_work": true}})).is_err(), "the rule has no field that acts");
+    assert_eq!(s.read(None).unwrap().rev, 1);
+}
+
+// Given a project, When it tries to set or inherit its own ping rule, Then it is refused: one budget for the person.
+#[test]
+fn a_project_cannot_override_the_ping_rule() {
+    let h = Home::new();
+    let s = h.store();
+    let rule = json!({"ping": {"per_hour": 1}});
+    assert_eq!(s.update(Some(P), 0, patch(rule), false).unwrap_err().code(), "global_only");
+    assert_eq!(s.update(Some(P), 0, patch(json!({"inherit": ["ping"]})), false).unwrap_err().code(), "global_only");
+    // A file on disk that carries a project ping override is refused on read, not half-applied.
+    s.update(Some(P), 0, patch(json!({"theme": "dark"})), false).unwrap();
+    let path = h.0.join("preferences/settings.json");
+    let mut doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    doc["overrides"][P]["ping"] = json!({"per_hour": 1});
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_eq!(s.read(None).unwrap_err().code(), "invalid_preferences");
+}
+
+// Given a settings file written before the ping rule existed, Then it loads with the default rule.
+#[test]
+fn a_settings_file_without_a_ping_rule_reads_the_default() {
+    let h = Home::new();
+    let s = h.store();
+    s.update(None, 0, patch(json!({"theme": "dark"})), false).unwrap();
+    let path = h.0.join("preferences/settings.json");
+    let mut doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    doc["global"].as_object_mut().unwrap().remove("ping");
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_eq!(s.read(None).unwrap().effective.ping, Ping::default());
+}

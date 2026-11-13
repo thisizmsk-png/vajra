@@ -144,6 +144,9 @@ pub trait Workers: Send + Sync {
     fn kill_run(&self, run: &str, reason: KillReason);
     /// Merge `commits` in order into the round's integration branch; returns its head.
     fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError>;
+    /// The run's `max_in_flight`: at most `n` of its writers run at once and the rest wait queued (#153 codex P2).
+    /// Check tickets are exempt.
+    fn limit_writers(&self, run: &str, n: u32);
 }
 
 /// The 6c runtime and the core's git writer.
@@ -168,6 +171,9 @@ impl Workers for CoreWorkers {
     fn kill_run(&self, run: &str, reason: KillReason) {
         self.rt.kill_run_workers(run, reason);
     }
+    fn limit_writers(&self, run: &str, n: u32) {
+        self.rt.limit_writers(run, n);
+    }
     fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
         let it = self.gw.integration_tree(at.repo, at.project, at.run, at.round, at.base)?;
         let head = self.gw.integrate(&it, at.base, commits)?;
@@ -187,14 +193,23 @@ pub enum RoundVerdict {
 
 /// The round's checks, run by the core on a clean integration (16.5a). 6g brings the real phases.
 pub trait RoundGate: Send + Sync {
-    fn check(&self, run: &str, round: u32, head: &str, tasks: &[String]) -> RoundVerdict;
+    /// Every check ticket the gate launches is started through `life.start`; one it refuses must not be launched.
+    fn check(&self, run: &str, round: u32, head: &str, tasks: &[String], life: &dyn RunLife) -> RoundVerdict;
+}
+
+/// The run's lifetime, as the gate sees it (#153 review). The round's checks run on their own thread with no lock held,
+/// so a Stop, a timeout or the lead's loss can end the run (and make its one kill) at any point between them.
+pub trait RunLife: Send + Sync {
+    /// Runs `launch` (one check ticket's dispatch) under the run's lock, so it is atomic with the run's end: `false`,
+    /// and `launch` not run, when the run has ended. A ticket launched here is the run's, so the run's kill takes it.
+    fn start(&self, launch: &mut dyn FnMut()) -> bool;
 }
 
 /// Until 6g: every round answers "not verified", with feedback to every task.
 pub struct StubGate;
 
 impl RoundGate for StubGate {
-    fn check(&self, _: &str, _: u32, _: &str, tasks: &[String]) -> RoundVerdict {
+    fn check(&self, _: &str, _: u32, _: &str, tasks: &[String], _: &dyn RunLife) -> RoundVerdict {
         let note = json!({"not_verified": "this version of Vajra can't check a round yet"});
         RoundVerdict::Failed { feedback: tasks.iter().map(|t| (t.clone(), note.clone())).collect() }
     }
@@ -475,10 +490,26 @@ fn neutralise_tags(s: &str) -> String {
     out
 }
 
+impl RunLife for RunProtocol {
+    fn start(&self, launch: &mut dyn FnMut()) -> bool {
+        // The run's end (finalize) takes this same lock and its kill runs after it, so a launch here either happens
+        // before the end, and the kill takes its ticket, or is refused.
+        let st = self.lock();
+        let open = st.status.is_none();
+        if open {
+            launch();
+        }
+        drop(st);
+        open
+    }
+}
+
 impl RunProtocol {
     pub fn new(cfg: RunConfig, workers: Arc<dyn Workers>, gate: Arc<dyn RoundGate>, clock: Arc<dyn RunClock>) -> Self {
         let now = clock.now();
         let st = St { last_call: now, started: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
+        // The waves the lead is given are only advice; the runtime holds the limit however dispatch is called.
+        workers.limit_writers(&cfg.run, cfg.max_in_flight);
         RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new() }))
     }
 
@@ -1026,7 +1057,7 @@ impl RunProtocol {
                 drop(st);
                 let (p, tasks) = (self.clone(), order.clone());
                 let spawned = std::thread::Builder::new().name(format!("vajra-round-{r}")).spawn(move || {
-                    let v = p.0.gate.check(&p.0.cfg.run, r, &head, &tasks);
+                    let v = p.0.gate.check(&p.0.cfg.run, r, &head, &tasks, &p);
                     p.round_checked(r, v);
                 });
                 if spawned.is_err() {
@@ -1153,6 +1184,17 @@ impl RunProtocol {
             _ if exit == LeadExit::Retryable && st.retries < self.0.cfg.limits.lead_retries => {
                 st.retries += 1;
                 LeadAction::Restart { backoff: LEAD_BACKOFF * 2u32.pow(st.retries - 1) }
+            }
+            // The provider-retry budget is spent: the run ends here and never falls through to N9's restart, which is a
+            // separate budget for a plain exit (#153 codex P2).
+            _ if exit == LeadExit::Retryable => {
+                let n = self.0.cfg.limits.lead_retries;
+                if self.any_live(&st) || st.checks_running() {
+                    Self::finalize(&mut st, RunStatus::LeadLost, format!("the lead's provider kept failing after {n} retries while workers ran"));
+                    LeadAction::Ended(RunStatus::LeadLost)
+                } else {
+                    LeadAction::Ended(self.finalize_computed(&mut st, format!("the lead's provider kept failing after {n} retries")))
+                }
             }
             _ if self.any_live(&st) || st.checks_running() => {
                 if st.n9_restarted {
