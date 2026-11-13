@@ -174,14 +174,23 @@ pub enum RoundVerdict {
 
 /// The round's checks, run by the core on a clean integration (16.5a). 6g brings the real phases.
 pub trait RoundGate: Send + Sync {
-    fn check(&self, run: &str, round: u32, head: &str, tasks: &[String]) -> RoundVerdict;
+    /// Every check ticket the gate launches is started through `life.start`; one it refuses must not be launched.
+    fn check(&self, run: &str, round: u32, head: &str, tasks: &[String], life: &dyn RunLife) -> RoundVerdict;
+}
+
+/// The run's lifetime, as the gate sees it (#153 review). The round's checks run on their own thread with no lock held,
+/// so a Stop, a timeout or the lead's loss can end the run (and make its one kill) at any point between them.
+pub trait RunLife: Send + Sync {
+    /// Runs `launch` (one check ticket's dispatch) under the run's lock, so it is atomic with the run's end: `false`,
+    /// and `launch` not run, when the run has ended. A ticket launched here is the run's, so the run's kill takes it.
+    fn start(&self, launch: &mut dyn FnMut()) -> bool;
 }
 
 /// Until 6g: every round answers "not verified", with feedback to every task.
 pub struct StubGate;
 
 impl RoundGate for StubGate {
-    fn check(&self, _: &str, _: u32, _: &str, tasks: &[String]) -> RoundVerdict {
+    fn check(&self, _: &str, _: u32, _: &str, tasks: &[String], _: &dyn RunLife) -> RoundVerdict {
         let note = json!({"not_verified": "this version of Vajra can't check a round yet"});
         RoundVerdict::Failed { feedback: tasks.iter().map(|t| (t.clone(), note.clone())).collect() }
     }
@@ -460,6 +469,20 @@ fn neutralise_tags(s: &str) -> String {
         i += len;
     }
     out
+}
+
+impl RunLife for RunProtocol {
+    fn start(&self, launch: &mut dyn FnMut()) -> bool {
+        // The run's end (finalize) takes this same lock and its kill runs after it, so a launch here either happens
+        // before the end, and the kill takes its ticket, or is refused.
+        let st = self.lock();
+        let open = st.status.is_none();
+        if open {
+            launch();
+        }
+        drop(st);
+        open
+    }
 }
 
 impl RunProtocol {
@@ -1013,7 +1036,7 @@ impl RunProtocol {
                 drop(st);
                 let (p, tasks) = (self.clone(), order.clone());
                 let spawned = std::thread::Builder::new().name(format!("vajra-round-{r}")).spawn(move || {
-                    let v = p.0.gate.check(&p.0.cfg.run, r, &head, &tasks);
+                    let v = p.0.gate.check(&p.0.cfg.run, r, &head, &tasks, &p);
                     p.round_checked(r, v);
                 });
                 if spawned.is_err() {

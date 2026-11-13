@@ -136,6 +136,10 @@ struct FakeGate {
     changed: Condvar,
     /// How many times a round's checks started.
     calls: std::sync::atomic::AtomicUsize,
+    /// While set, the gate says it is about to start a check ticket, then waits to be released before trying.
+    start_hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    /// Each try to start a check ticket through the run: whether the run let it start.
+    starts: Mutex<Vec<bool>>,
 }
 
 impl FakeGate {
@@ -146,8 +150,18 @@ impl FakeGate {
 }
 
 impl RoundGate for FakeGate {
-    fn check(&self, _: &str, _: u32, _: &str, _: &[String]) -> RoundVerdict {
+    fn check(&self, _: &str, _: u32, _: &str, _: &[String], life: &dyn RunLife) -> RoundVerdict {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let hold = crate::lock(&self.start_hold).take();
+        if let Some((about, release)) = hold {
+            about.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(20)).unwrap();
+            let ok = life.start(&mut || {});
+            crate::lock(&self.starts).push(ok);
+            if !ok {
+                return RoundVerdict::Failed { feedback: BTreeMap::new() };
+            }
+        }
         // A test that never answers leaves no thread behind for long.
         let v = crate::lock(&self.verdicts);
         let (mut v, _) = self.changed.wait_timeout_while(v, Duration::from_secs(20), |v| v.is_empty()).unwrap();
@@ -860,4 +874,37 @@ fn a_worker_that_needs_the_human_keeps_the_run_needs_user() {
     let again = r.dispatch("t3");
     r.w.end(&again, Outcome::Done);
     assert_eq!(r.p.finish_run("done").unwrap(), RunStatus::NotVerified);
+}
+
+/// #153 review: a Stop can land after the merge but before the gate starts a check ticket (the gate runs on its own
+/// thread, with no lock held). A check ticket starts only through the run, atomically with the run's end, so one
+/// asked for after the run ended never starts and nothing escapes the run's one kill.
+#[test]
+fn a_check_ticket_asked_for_after_the_run_ended_never_starts() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    let (about_tx, about) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *crate::lock(&r.gate.start_hold) = Some((about_tx, release_rx));
+    r.p.integrate(1).unwrap();
+    about.recv_timeout(Duration::from_secs(20)).expect("the gate is about to start a check");
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    assert_eq!(*crate::lock(&r.w.kills), [KillReason::Stopped], "the run's one kill already ran");
+    release.send(()).unwrap();
+    r.await_round(1);
+    assert_eq!(*crate::lock(&r.gate.starts), [false], "the ended run refused the start");
+    // While the run is open, a start goes through.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    let (about_tx, about) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *crate::lock(&r.gate.start_hold) = Some((about_tx, release_rx));
+    r.p.integrate(1).unwrap();
+    about.recv_timeout(Duration::from_secs(20)).unwrap();
+    release.send(()).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(1);
+    assert_eq!(*crate::lock(&r.gate.starts), [true]);
 }
