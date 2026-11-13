@@ -312,6 +312,16 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(rule).toContain("white-space: nowrap");
   });
 
+  it("sets the page title clear of the Progress heading, so the two do not read as one title", async () => {
+    await openOverview(overview());
+    const title = screen.getByRole("heading", { level: 1, name: S.run.title });
+    expect(title.className).toContain("v-run__name");
+    expect(screen.getByRole("heading", { level: 2, name: S.run.timeline })).toBeTruthy();
+    const css = readFileSync(resolve(__dirname, "../src/shell.css"), "utf8");
+    const rule = css.split("\n").find((l) => l.includes(".v-run__name {")) ?? "";
+    expect(rule).toContain("margin-bottom: var(--space-lg)");
+  });
+
   it("renders only the rows in view for 200 tasks (AC-4.2.2)", async () => {
     const tasks = Array.from({ length: 200 }, (_, i) => gtask(`t${i}`, i, "pending", i ? [`r1.t${i - 1}`] : []));
     await openOverview(overview({ graph: { tasks, waves: 200 } }));

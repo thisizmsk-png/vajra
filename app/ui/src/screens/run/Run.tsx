@@ -120,7 +120,7 @@ export function Run() {
   }
   return (
     <div className="v-home">
-      <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+      <Text as="h1" variant="headline-lg" className="v-run__name">{S.run.title}</Text>
       <RunProvider slug={slug} />
       <Section title={S.run.timeline}>
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
