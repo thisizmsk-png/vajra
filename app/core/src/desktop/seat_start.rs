@@ -23,7 +23,7 @@ pub struct StartOptions {
 
 /// Every Codex seat's card note (owner 2026-11-13, "keep my extras, no key claim"): Codex runs with the user's own
 /// settings and tools, and Vajra makes no claim that it is kept from the signing key.
-pub const CODEX_WARNING: &str = "Runs outside the Vajra guard, with your own Codex settings. Your Codex tools (MCP servers, hooks, plugins, notify) run with it, outside its sandbox. It isn't guarded against reading Vajra's signing key, and with that key it could fake Vajra's records and approvals, not only test results.";
+pub const CODEX_WARNING: &str = "Runs outside the Vajra guard, with your own Codex settings. Your Codex tools (MCP servers, hooks, plugins, notify) run with it, outside its sandbox. Its internet follows this seat's switch. It isn't guarded against reading Vajra's signing key, and with that key it could fake Vajra's records and approvals, not only test results.";
 
 /// bhishma #216 M-Lead: the Codex Lead row also names why its run is never counted guarded.
 fn codex_lead_note() -> String {

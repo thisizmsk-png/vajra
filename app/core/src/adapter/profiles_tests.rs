@@ -66,20 +66,20 @@ fn profile_kv(network: bool) -> [String; 3] {
 }
 
 /// bhishma #216 H1 and M-Lead: the plain Codex run Lead gets a worker's profile and approvals, with the project and
-/// temp dir writable and the user's own network (vajra-1 2026-11-13).
+/// temp dir writable and no network; web search is the user's own setting (vajra-1 2026-11-13).
 #[test]
 fn the_codex_run_lead_runs_like_a_worker_with_no_approvals() {
     let bin = Path::new("/opt/tools/bin/codex");
     let a = codex_run_lead_argv(bin, "exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP)).unwrap();
     // bhishma #216 Low 1: the binary Vajra found, by its absolute path.
     let mut want: Vec<String> = vec!["/opt/tools/bin/codex".into(), "-c".into(), "approval_policy=\"never\"".into()];
-    for o in codex_profile_overrides(PROFILE, deny(), &[Path::new(WT), Path::new(TMP)], true).unwrap() {
+    for o in codex_profile_overrides(PROFILE, deny(), &[Path::new(WT), Path::new(TMP)], false).unwrap() {
         want.extend(["-c".into(), o]);
     }
     want.extend(["--".into(), "exec this --flag".into()]);
     assert_eq!(a, want);
     assert!(a.iter().any(|x| x.contains(&format!("\"{}\"=\"none\"", DENY[0]))), "{a:?}");
-    assert!(a.iter().any(|x| x.ends_with(".network={enabled=true}")), "{a:?}");
+    assert!(a.iter().any(|x| x.ends_with(".network={enabled=false}")), "{a:?}");
     assert!(!a.iter().any(|x| x.starts_with("web_search")), "{a:?}");
     assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
     assert!(codex_run_lead_argv(bin, "x", PROFILE, &[], Path::new(WT), Path::new(TMP)).is_err(), "never without the deny set");
@@ -116,7 +116,7 @@ fn pairs(a: &[String]) -> Vec<&str> {
 fn codex_gateway_worker_argv_snapshot() {
     let a = codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap();
     let id = crate::providers::codex_home::PROVIDER_ID;
-    let [fs, net, dp] = profile_kv(true);
+    let [fs, net, dp] = profile_kv(false);
     let want: Vec<String> = [
         "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
@@ -130,7 +130,7 @@ fn codex_gateway_worker_argv_snapshot() {
 #[test]
 fn codex_login_worker_argv_snapshot_has_no_builtin_provider_override() {
     let a = codex_login_worker_argv(&launch(RoleKind::Verifier, false)).unwrap();
-    let [fs, net, dp] = profile_kv(true);
+    let [fs, net, dp] = profile_kv(false);
     let want: Vec<String> = [
         "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
@@ -142,14 +142,15 @@ fn codex_login_worker_argv_snapshot_has_no_builtin_provider_override() {
     assert!(!a.iter().any(|x| x.contains("model_providers.openai")));
 }
 
-/// vajra-1 2026-11-13: every Codex seat keeps the user's own network and web search, whatever the seat asks. A
-/// profile with no network key would turn it off.
+/// vajra-1 2026-11-13: network follows the seat's switch, and web search is always left to the user's own Codex
+/// setting (no `web_search` override, on or off).
 #[test]
-fn every_codex_seat_keeps_network_on_and_leaves_web_search_to_the_user() {
+fn network_follows_the_seat_and_web_search_is_left_to_the_user() {
     for net in [false, true] {
         for a in [codex_login_worker_argv(&launch(RoleKind::Worker, net)).unwrap(), codex_worker_argv(&launch(RoleKind::Verifier, net)).unwrap()] {
             let c = pairs(&a);
-            assert!(c.contains(&"permissions.vajra-0123456789abcdef.network={enabled=true}"), "{c:?}");
+            let want = format!("permissions.vajra-0123456789abcdef.network={{enabled={net}}}");
+            assert!(c.contains(&want.as_str()), "{c:?}");
             assert!(!c.iter().any(|x| x.starts_with("web_search")), "{c:?}");
         }
     }
@@ -163,7 +164,7 @@ fn every_codex_seat_keeps_network_on_and_leaves_web_search_to_the_user() {
 fn codex_worker_forces_every_always_setting() {
     for a in [codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), codex_login_worker_argv(&launch(RoleKind::Worker, false)).unwrap()] {
         let c = pairs(&a);
-        let [fs, net, dp] = profile_kv(true);
+        let [fs, net, dp] = profile_kv(false);
         for want in ["approval_policy=\"never\"", fs.as_str(), net.as_str(), dp.as_str()] {
             assert!(c.contains(&want), "{want} missing from {c:?}");
         }

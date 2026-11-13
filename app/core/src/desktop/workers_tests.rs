@@ -100,7 +100,8 @@ case "$1" in
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
     mkdir -p "$D"
-    NET=true
+    NET=false
+    [ "$MODE" = net ] && NET=true
     ROOTS="\"$TMPDIR\""
     [ "$MODE" = wide ] && ROOTS="\"$TMPDIR\",\"/\""
     # 6k: like codex 0.166, report each `"<dir>"="none"` of the launch's permission profile as a `deny` entry.
@@ -121,7 +122,7 @@ edit() {{ echo "worker line" >> src/lib.rs; }}
 [ -n "$SLOW" ] || SLOW=0
 echo "start $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
 case "$MODE" in
-  edit|wide|nodeny) edit ;;
+  edit|wide|net|nodeny) edit ;;
   flood) perl -e 'print "x" x 1000, "\n" for 1..400'; edit ;;
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
@@ -536,6 +537,12 @@ fn no_changes_fail_and_a_wider_sandbox_is_killed() {
     let r = rig("wide", Opts { mode: "wide", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "a writable root outside the worktree");
+    assert!(v.commit.is_none());
+    // vajra-1 2026-11-13: network follows the seat's switch, so a session with network on under a seat with it off
+    // is killed.
+    let r = rig("net", Opts { mode: "net", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "network on, asked off");
     assert!(v.commit.is_none());
 }
 

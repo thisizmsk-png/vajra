@@ -6,7 +6,7 @@
 //! `CODEX_HOME` holding hostile settings, a real `codex exec` against a loopback stub) decided the Codex keys:
 //! - `--sandbox`, `approval_policy`, `sandbox_workspace_write.*`, `notify` and `model_provider` given with `-c` win over
 //!   the user's `config.toml`; `writable_roots` replaces the user's list;
-//! - `tools.web_search=false` does NOT hold (the tool is still offered); `web_search="disabled"` does (no longer passed: a Codex seat keeps the user's own network and web search, vajra-1 2026-11-13);
+//! - `tools.web_search=false` does NOT hold (the tool is still offered); `web_search="disabled"` does (no longer passed: the user's own web search setting applies, and network follows the seat's switch, vajra-1 2026-11-13);
 //! - the built-in `openai` provider cannot be overridden at all (codex refuses to load), so the login route passes no
 //!   retry keys; Codex's own retry default stays, and the card does not claim otherwise;
 //! - a legacy `profile = ...` key makes codex refuse to start (fails closed); a `<name>.config.toml` profile loads only
@@ -76,7 +76,8 @@ const CODEX_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "sandbox", how: "a fresh `vajra-<16 hex>` permission profile per launch (`-c default_permissions=...`), replacing the user's sandbox" },
     Always { setting: "vajra_dirs", how: "the Vajra state dir and the app data dir are `none` in the profile, as defense in depth; the user's own Codex tools run outside it, so nothing is claimed about the key (owner 2026-11-13)" },
     Always { setting: "writable_roots", how: "only the worktree and the ticket tmp are `write`; `/tmp` and `$TMPDIR` aren't" },
-    Always { setting: "network", how: "`-c permissions.vajra-<16 hex>.network={enabled=true}`: the user's own network and web search stay on (vajra-1 2026-11-13)" },
+    Always { setting: "network", how: "`-c permissions.vajra-<16 hex>.network={enabled=<seat.network>}`: network follows the seat's switch (vajra-1 2026-11-13)" },
+    Always { setting: "web_search", how: "not overridden: the user's own Codex web search setting applies (vajra-1 2026-11-13)" },
     Always { setting: "approval", how: "`-c approval_policy=\"never\"`" },
     Always { setting: "working_dir", how: "the core's worktree under <work>" },
     Always { setting: "model_and_effort", how: "`-m`, `-c model_reasoning_effort` when the seat names them" },
@@ -230,7 +231,7 @@ pub fn codex_profile_overrides(name: &str, deny: &[PathBuf], write: &[&Path], ne
 
 /// bhishma #216 H1: the plain Codex run Lead (`start_run` with provider `codex`), `codex -c ... -- <ask>`. It runs under
 /// a fresh permission profile like a worker's: the Vajra dirs unreadable, writes only in the project folder and the
-/// system temp dir, the user's own network and no approvals. The user's own Codex tools stay on (owner 2026-11-13). A Codex Lead's
+/// system temp dir, no network (a Lead has no seat switch) and no approvals; web search is the user's own setting. The user's own Codex tools stay on (owner 2026-11-13). A Codex Lead's
 /// run is never counted guarded (`evidence_of`): it is the user's own interactive session.
 pub fn codex_run_lead_argv(codex: &Path, ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path) -> Result<Vec<String>, InvalidInput> {
     argv::check_ask(ask)?;
@@ -240,7 +241,7 @@ pub fn codex_run_lead_argv(codex: &Path, ask: &str, profile: &str, deny: &[PathB
     // bhishma #216 M-Lead (vajra-1's decision): the Lead gets a worker's approvals and sandbox, with no way to run a
     // command outside it.
     let mut kv = vec!["approval_policy=\"never\"".to_string()];
-    kv.extend(codex_profile_overrides(profile, deny, &[project, tmp], true)?);
+    kv.extend(codex_profile_overrides(profile, deny, &[project, tmp], false)?);
     for o in kv {
         a.extend(["-c".to_string(), o]);
     }
@@ -279,8 +280,8 @@ fn codex_confinement(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> 
     toml_path(l.ticket_tmp, "ticket_tmp")?;
     toml_path(l.worktree, "worktree")?;
     let mut kv = vec!["approval_policy=\"never\"".to_string()];
-    // vajra-1 2026-11-13: the user's own network, so the profile's network is on and web search is left as they set it.
-    kv.extend(codex_profile_overrides(l.profile, l.deny, &[l.worktree, l.ticket_tmp], true)?);
+    // vajra-1 2026-11-13: network follows the seat's switch; web search is left to the user's own Codex setting.
+    kv.extend(codex_profile_overrides(l.profile, l.deny, &[l.worktree, l.ticket_tmp], l.network)?);
     Ok(kv.into_iter().flat_map(|v| ["-c".to_string(), v]).collect())
 }
 

@@ -1308,9 +1308,8 @@ impl Launch {
         if engine == Engine::Codex && profiles::codex_project_outside(&t.wt).is_some() {
             return Err("profile_not_applied");
         }
-        // vajra-1 2026-11-13: a Codex seat keeps the user's own network, so its profile has network on (a profile with
-        // no network key would turn it off, whatever the user's own setting says).
-        let network = seat.network || engine == Engine::Codex;
+        // vajra-1 2026-11-13: network follows the seat's switch, for Codex too (its profile has no other network source).
+        let network = seat.network;
         let wl = WorkerLaunch {
             kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network, ticket_tmp: &t.tmp,
             worktree: &t.wt, deny: &deny, profile: &profile,
