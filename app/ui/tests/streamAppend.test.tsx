@@ -36,6 +36,13 @@ describe("appendTail", () => {
     expect(appendTail(win(1, 3, { gap: true }), tail([line(4)], 4), 100)).toBeNull();
   });
 
+  it("asks for a whole window when a byte-limited tail stops before the head, instead of publishing blank rows", () => {
+    // The core returned lines 4 and 5 within its byte budget; the stream is at 9.
+    expect(appendTail(win(1, 3), tail([line(4), line(5)], 9), 100)).toBeNull();
+    // The same lines are fine when they do reach the head.
+    expect(appendTail(win(1, 3), tail([line(4), line(5)], 5), 100)?.head_seq).toBe(5);
+  });
+
   it("caps the pane by rows: the oldest rows drop and the pane is no longer at the start", () => {
     const next = appendTail(win(1, 5), tail([line(6), line(7), line(8)], 8), 5)!;
     expect(next.lines.map((l) => l.seq)).toEqual([4, 5, 6, 7, 8]);

@@ -23,6 +23,9 @@ export function appendTail(held: StreamWindow, tail: Tail, rows: number, maxByte
     if (l.seq <= prev) return null;
     prev = l.seq;
   }
+  // The core stops a tail at its byte budget but still reports the stream's real head: lines that stop short of it are a
+  // partial answer, and publishing the head over them would leave the newest rows blank. Read a whole window instead.
+  if (prev < tail.head_seq) return null;
   const lines = held.lines.concat(tail.lines);
   let drop = Math.max(0, lines.length - rows);
   let bytes = size(lines.slice(drop));
