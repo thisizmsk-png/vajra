@@ -372,6 +372,16 @@ fn a_command_that_would_show_differently_from_what_runs_is_refused() {
         a.commands = vec![bad.into()];
         assert!(app.request_evidence_approval(&a, at(T0)).is_err(), "{bad:?}");
     }
+    // Every Default_Ignorable_Code_Point range (Opus on #226): soft hyphen and the combining grapheme joiner, then one
+    // from each other range, both ends where it is a range.
+    for c in [
+        '\u{00AD}', '\u{034F}', '\u{061C}', '\u{115F}', '\u{1160}', '\u{17B4}', '\u{17B5}', '\u{180B}', '\u{180F}', '\u{200B}', '\u{200F}', '\u{202A}', '\u{202E}', '\u{2060}', '\u{206F}', '\u{3164}', '\u{FE00}', '\u{FE0F}', '\u{FEFF}', '\u{FFA0}', '\u{FFF0}', '\u{FFF8}', '\u{1BCA0}',
+        '\u{1BCA3}', '\u{1D173}', '\u{1D17A}', '\u{E0000}', '\u{E0041}', '\u{E0FFF}',
+    ] {
+        let mut a = ask();
+        a.commands = vec![format!("rm{c} -rf build")];
+        assert!(app.request_evidence_approval(&a, at(T0)).is_err(), "U+{:04X}", c as u32);
+    }
     let mut a = ask();
     a.account = "codex\u{202E}krow".into();
     assert!(app.request_evidence_approval(&a, at(T0)).is_err());

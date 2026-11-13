@@ -69,11 +69,37 @@ pub(crate) struct Held {
     consumed: bool,
 }
 
-/// A character that can make a command show differently from what runs: any control character but tab (CR, ESC and
-/// the other C0 and C1 codes), and the Unicode bidi and invisible format characters (Opus on #226).
+/// A character that can make a command show differently from what runs (Opus on #226): any control character but tab
+/// (CR, ESC and the other C0 and C1 codes), and every Unicode Default_Ignorable_Code_Point (DerivedCoreProperties.txt,
+/// Unicode 16): the bidi controls, zero-width and joiner characters, soft hyphen, the combining grapheme joiner,
+/// variation selectors, Hangul fillers, tag characters and the reserved ignorable ranges. A renderer may draw none of
+/// these, so none can reach the dialog.
 fn hides_text(c: char) -> bool {
-    (c.is_control() && c != '\t')
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
+    (c.is_control() && c != '\t') || default_ignorable(c)
+}
+
+/// Unicode's Default_Ignorable_Code_Point property, in full (Unicode 16.0 DerivedCoreProperties.txt).
+fn default_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
 }
 
 impl Ask {
