@@ -383,7 +383,7 @@ export const S = {
     preflightFailed: "Could not run the checks.",
     start: "Start a run",
     repo: "Repository folder",
-    repoHint: "The absolute path of a git repository.",
+    repoHint: "A git repository. Choose it, or paste its path.",
     ask: "What should the workers do?",
     base: "Base branch or commit",
     baseHint: "Branch name or commit. The run builds on it.",
@@ -589,6 +589,13 @@ export const S = {
       notFinished: "Export and posting open once the run has finished.",
       exportOff: "Exporting the proof is not available in this build.",
     },
+  },
+  /** The system folder picker beside a repository field (D5). */
+  folder: {
+    choose: "Choose…",
+    chooseLabel: "Choose the repository folder",
+    title: "Choose the repository folder",
+    failed: "The folder picker did not open. Paste the folder's path instead.",
   },
   history: {
     title: "History",

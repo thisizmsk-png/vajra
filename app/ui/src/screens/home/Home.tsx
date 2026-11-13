@@ -13,6 +13,7 @@ import { preferenceScope, usePreferences } from "../../preferences";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { useCurrentProject } from "../../projects/current";
+import { FolderField } from "../FolderField";
 import { PreflightList } from "../PreflightList";
 import { ProviderControls, limitText, useProviders } from "../ProviderControls";
 import { toInput, validate } from "./validate";
@@ -188,7 +189,7 @@ export function Home() {
               <Input type="textarea" rows={3} label={S.home.ask} placeholder={S.home.ask} value={d.ask} onChange={set("ask")} error={err("ask")} />
             </div>
             <div className="v-launch__row">
-              <div className="v-launch__repo"><Input label={S.home.repo} hint={S.home.repoHint} value={d.repo} onChange={set("repo")} error={err("repo")} /></div>
+              <div className="v-launch__repo"><FolderField label={S.home.repo} hint={S.home.repoHint} value={d.repo} onChange={set("repo")} error={err("repo")} /></div>
               <div className="v-launch__base"><Input label={S.home.base} hint={S.home.baseHint} value={d.base} onChange={set("base")} error={err("base")} /></div>
               <div className="v-launch__rounds">
                 {/* The fieldset's legend names the group for screen readers; this is the same word for the eye. */}
