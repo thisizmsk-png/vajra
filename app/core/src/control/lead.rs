@@ -191,9 +191,12 @@ pub fn sanitise(text: &str, red: &Redactor) -> String {
     red.redact(kept)
 }
 
-const HEADER_START: &str = "[Vajra Desktop: question from the human, ask ";
-const HEADER_MID: &str = ", run ";
-const HEADER_END: &str = ". Answer with the read and control tools only.]\n";
+/// The fixed first line of every Lead turn. It carries no ids: the ask and run ids are in the ledger, and nothing reads them
+/// back from the model's context, so a changing id here was ~25 tokens of Vajra text per turn that told the model nothing.
+/// Being one constant, it is also the same bytes on every turn. It must start with `[` (never `/`, see `frame`), and keep the
+/// `[Vajra Desktop: question from the human` prefix, which `strip_header` in `desktop/lead.rs` uses to hide it in the transcript
+/// (and which transcripts written by older headers also match).
+pub(crate) const HEADER: &str = "[Vajra Desktop: question from the human. Answer with the read and control tools only.]\n";
 
 /// The exact stdin body of one Lead turn: a fixed header line, then the sanitised text. The field is private and
 /// the spawn function takes only this type, so no code path can write a raw `&str` to the Lead's stdin.
@@ -237,9 +240,7 @@ pub fn frame(ask_id: &str, run_id: &str, text: &str, red: &Redactor) -> Result<F
     if clean.trim().is_empty() {
         return Err(LeadError::Invalid("text: must not be empty".into()));
     }
-    let header = format!("{HEADER_START}{ask_id}{HEADER_MID}{run_id}{HEADER_END}");
-    let header_len = header.len();
-    Ok(FramedAsk { body: header + &clean, header_len })
+    Ok(FramedAsk { body: format!("{HEADER}{clean}"), header_len: HEADER.len() })
 }
 
 #[cfg(test)]

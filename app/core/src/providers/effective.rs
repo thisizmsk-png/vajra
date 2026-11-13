@@ -91,7 +91,7 @@ impl Effective {
 
 /// What a surface draws beside a worker: the `provider` object of the UI contract (`app/ui/src/workerProvider.ts`,
 /// `parseWorkerProvider`). Every field the UI requires is here, under the UI's own names.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ProviderTag {
     pub account: String,
     /// The provider's name as people know it ("Claude Code", "OpenRouter"): shown beside every model.
@@ -109,7 +109,7 @@ pub struct ProviderTag {
     pub error: Option<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TagRequested {
     pub model: Option<String>,
     pub model_name: Option<String>,

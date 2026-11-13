@@ -15,7 +15,8 @@
 // Reloads follow useDgReload, a thin wrapper over the shared useProjectState once it lands (vajra-11).
 import { useEffect, useRef } from "react";
 import { S } from "../../../strings";
-import { api, errorText, isIpcError, onChanged } from "../../ipc";
+import { api, errorText, isIpcError } from "../../ipc";
+import { onChangedPaced } from "../../projects/poll";
 import type { AskStarted, InboxItem, LeadStatus, NewConversation } from "../../ipc";
 import { normRoot } from "../../projects/adapter";
 import type { ProposalOverride } from "../../accountsContract";
@@ -109,18 +110,9 @@ export function proposalsFor(inbox: InboxItem[], projectId: string | null, root:
 export function useDgReload(stream: string | null, reload: () => void, gapMs = 500) {
   const fn = useRef(reload);
   fn.current = reload;
-  useEffect(() => {
-    if (!stream) return;
-    let last = 0;
-    let later: ReturnType<typeof setTimeout> | undefined;
-    const off = onChanged((payload) => {
-      const p = payload as { streams?: unknown } | null;
-      if (!Array.isArray(p?.streams) || !p.streams.includes(stream)) return;
-      const wait = gapMs - (Date.now() - last);
-      const go = () => { last = Date.now(); fn.current(); };
-      if (wait <= 0) go();
-      else if (later === undefined) later = setTimeout(() => { later = undefined; go(); }, wait);
-    });
-    return () => { off(); clearTimeout(later); };
-  }, [stream, gapMs]);
+  // Hidden: held back, one reload on showing.
+  useEffect(() => (stream ? onChangedPaced(gapMs, () => fn.current(), (payload) => {
+    const p = payload as { streams?: unknown } | null;
+    return Array.isArray(p?.streams) && p.streams.includes(stream);
+  }) : undefined), [stream, gapMs]);
 }

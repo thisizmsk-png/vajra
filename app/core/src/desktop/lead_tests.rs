@@ -292,7 +292,7 @@ fn ask_round_trip_streams_records_and_resumes() {
     assert!(argv.contains("--setting-sources\n\n--settings\n") && argv.contains("--setting-sources\n\n--settings\n"), "{argv}");
     assert!(!argv.contains("bhima"), "ask text is never an argv element");
     let stdin = std::fs::read_to_string(t.files("stdin.").iter().find(|p| std::fs::read_to_string(p).unwrap().contains("what is bhima")).unwrap()).unwrap();
-    assert!(stdin.starts_with("[Vajra Desktop: question from the human, ask "), "{stdin}");
+    assert!(stdin.starts_with("[Vajra Desktop: question from the human. Answer with the read and control tools only.]\n"), "{stdin}");
     assert!(stdin.ends_with("what is bhima doing? [redacted]") && !stdin.contains(NONCE));
 
     // The ledger holds the redacted text once, and the Lead session was remembered after `init`.
