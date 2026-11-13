@@ -1151,6 +1151,60 @@ core_expands() {
     exit 1
   }'
 }
+# The guard's word split for core_campaign_guard: every separator becomes " ; " and every redirect its own word.
+core_words() {
+  local X="${1//&>/ > }"; X="${X//>&/ > }"
+  X="${X//;/ ; }"; X="${X//|/ ; }"; X="${X//&/ ; }"; X="${X//(/ ; }"; X="${X//)/ ; }"; X="${X//\`/ ; }"
+  X="${X//>/ > }"; X="${X//</ < }"
+  printf '%s' "$X"
+}
+# 0 when word $1 expands: a $ (but $PWD and $HOME), a backtick, or a brace or glob character, unless every place it
+# appears in the raw command is inside quotes, where a glob stays literal (and a quoted $ is one argument; the
+# operand rule judges that). Uses SCAN, which keeps the quotes.
+core_word_expands() {
+  local w="$1" v
+  v="${w//\$\{PWD\}/}"; v="${v//\$\{HOME\}/}"; v="${v//\$PWD/}"; v="${v//\$HOME/}"
+  case "$v" in *[\$\`\{\}\*\?\[\]]*) ;; *) return 1 ;; esac
+  [ "${2:-}" = raw ] && return 0                         # the operand: quoted or not, its name isn't the text's
+  core_all_quoted "$w" && return 1
+  return 0
+}
+# 0 when every occurrence of $1 in SCAN is a whole double- or single-quoted word ("$f", 'test_*').
+core_all_quoted() {
+  local w="$1" s="$SCAN" r all q1 q2 n1 n2
+  [ -n "$w" ] || return 1
+  r="${s//"$w"/}"; all=$(( (${#s} - ${#r}) / ${#w} ))
+  q1="\"$w\""; q2="'$w'"
+  r="${s//"$q1"/}"; n1=$(( (${#s} - ${#r}) / ${#q1} ))
+  r="${s//"$q2"/}"; n2=$(( (${#s} - ${#r}) / ${#q2} ))
+  [ "$all" -gt 0 ] && [ $((n1 + n2)) -eq "$all" ]
+}
+# bhishma #194 M1: 0 when the interpreter operand at word $1 (W/WO index) expands and could reach a core campaign.
+core_hidden_operand() {
+  local k="$1" to="${WO[$1]}" m s
+  core_word_expands "$to" raw || return 1
+  core_all_quoted "$to" || return 0                       # unquoted: it may split into a script and its arguments
+  for ((m = k + 1; m < nw; m++)); do
+    [ "${W[$m]}" = ";" ] && break
+    core_word_expands "${WO[$m]}" && return 0             # an argument the command text doesn't show
+  done
+  [[ "$lc" == *campaign* || "$lc" == *deliver-* ]] && return 0
+  local NS; NS="$(printf '%s' "$lc" | tr -c 'a-z0-9-' '-' | tr -s '-')"
+  for s in $CORE_SLUGS; do [[ "$NS" == *"$s"* ]] && return 0; done
+  core_ptr_reach && return 0
+  return 1
+}
+# 0 when a command with no slug may run where the app's own campaign is the active one: the core's active pointer
+# exists, and the cwd is in the app data dir or the command changes directory or git repository.
+core_ptr_reach() {
+  [ "$CORE_PTR" = 1 ] || return 1
+  local d inapp=0 NS
+  canon "${CWD_IN:-/}" /
+  for d in "${CORE_DATA[@]}"; do inside "$CANON" "$d" && inapp=1; done
+  NS="$(printf '%s' "$lc" | tr -c 'a-z0-9-' '-' | tr -s '-')"
+  [ "$inapp" = 1 ] || [[ "$NS" == *vajradesktop* || "$NS" == *git-dir* || "$NS" == *git-common-dir* || "$NS" == *git-work-tree* ]] \
+    || [[ " $X " == *" cd "* || " $X " == *" pushd "* || " $X " == *" -c "* || " $X " == *" --chdir"* ]]
+}
 # #194 (bhishma F1-F4, claude thread): one check over the whole command, before it is split into segments.
 # Either script is found by file name wherever its copy lives, nested shells and xargs included. A use counts as a
 # read only when the word after it (redirects skipped) is a literal read subcommand; anything else is a write.
@@ -1164,25 +1218,30 @@ core_campaign_guard() {
   # Wide on purpose (#194 H1): a name built by a glob or variable may not spell the script out.
   [[ "$N" == *vajra* || "$N" == *campaign* || "$N" == *task* || "$N" == *scripts* || "$N" == *.claude* ]] && hit=1
   # H1-b, by position: an interpreter whose script operand expands, whatever its letters.
-  local RE_IOP='(^|[ ;|&(])(python[0-9.]*|perl|ruby|node|bash|sh|zsh|dash|ksh)( +[-+][^ ]*)* +([^ ;|&-][^ ;|&]*)?[][$*?{}]'
+  # Any later word of the same segment that expands (bhishma #194 M3: an option value such as -X dev comes first).
+  local RE_IOP='(^|[ ;|&(])(python[0-9.]*|perl|ruby|node|bash|sh|zsh|dash|ksh)( +[^ ;|&]+)* +[^ ;|&]*[][$*?{}]'
   [[ "$N" =~ $RE_IOP ]] && hit=1
   [ "$was" = 1 ] || shopt -u nocasematch
   [ "$hit" = 1 ] || return 0
   lc="$(printf '%s' "$N" | tr '[:upper:]' '[:lower:]')"
   core_slugs_load
   [ "$CORE_ANY" = 1 ] || [ "$CORE_UNKNOWN" = 1 ] || return 0
-  X="${lc//&>/ > }"; X="${X//>&/ > }"
-  X="${X//;/ ; }"; X="${X//|/ ; }"; X="${X//&/ ; }"; X="${X//(/ ; }"; X="${X//)/ ; }"; X="${X//\`/ ; }"
-  X="${X//>/ > }"; X="${X//</ < }"
-  local W=() i j nw t sub write=0 cwrite=0 name nested=0 feeder=0 lit
+  X="$(core_words "$lc")"
+  # The same words in their own case (bhishma #194 M3): options are matched as typed (python -X and -W take a value,
+  # bash -O does, -E is a python flag but perl code). Lowercasing changes no spacing, so the indexes line up.
+  local XO; XO="$(core_words "$N")"
+  local W=() WO=() i j nw t to sub write=0 cwrite=0 name nested=0 feeder=0 lit
   local why="a write through vajra-campaign.sh or vajra_tasks.py while Vajra Desktop runs a campaign"
-  set -f; W=( $X ); set +f
+  set -f; W=( $X ); WO=( $XO ); set +f
   nw=${#W[@]}
+  [ "${#WO[@]}" = "$nw" ] || block "$why: the guard could not read this command's words"
   for ((i = 0; i < nw; i++)); do
     name="${W[$i]##*/}"
     # H1: a command word that may expand to either script's name is refused before any write is looked for. Only in
     # command position (#194 LOW: a for-list of test files isn't run by its name; an interpreter operand is H1-b's).
-    local prev="${W[$((i - 1))]:-;}"
+    # The first word is in command position (bhishma #194 M2: index -1 is an error in bash 3.2, the last word in 4.3+).
+    local prev=";"
+    [ "$i" -gt 0 ] && prev="${W[$((i - 1))]}"
     case "$prev" in ";"|exec|command|env|nohup|time|nice|sudo|then|do|else) ;; *) prev="" ;; esac
     [ -n "$prev" ] && case "$name" in
       *[\$\{\}\*\?\[\]]*)
@@ -1195,23 +1254,34 @@ core_campaign_guard() {
           block "while Vajra Desktop runs a campaign, name vajra-campaign.sh and vajra_tasks.py literally (no globs, variables or \$'...'): ${W[$i]}"
         fi ;;
     esac
-    # H1-b: an interpreter's script operand (the first word after its options) is judged by position: while the app
-    # runs a campaign, it may hold no expansion or glob at all, whatever its letters (cd scripts; python3 $v).
+    # H1-b: an interpreter's script operand (the first word after its options) is judged by position, whatever its
+    # letters (cd scripts; python3 $v). bhishma #194 M1: an operand that expands is refused only when it could reach a
+    # core campaign: it isn't quoted (it may split into more arguments), a later argument expands, the command names a
+    # core slug, deliver- or campaign, or the app's active pointer is in reach. A quoted one is one argument, and with
+    # every later argument literal the script's arguments are what the command shows. $PWD and $HOME are literal.
     case "$name" in
       sh|bash|zsh|dash|ksh|python|python2|python3|python3.[0-9]|python3.[0-9][0-9]|perl|ruby|node)
-        local shell=0; case "$name" in sh|bash|zsh|dash|ksh) shell=1 ;; esac
+        local ik=py; case "$name" in sh|bash|zsh|dash|ksh) ik=sh ;; perl) ik=pl ;; ruby) ik=rb ;; node) ik=js ;; esac
         for ((j = i + 1; j < nw; j++)); do
-          t="${W[$j]}"
-          case "$t" in ">"|"<") j=$((j + 1)); continue ;; esac
-          # Inline code, a module or stdin: no script operand (H2-b judges a shell's body).
-          if [ "$shell" = 1 ]; then
-            case "$t" in -*c*|-*s*) break ;; -o|+o|-O|+O) j=$((j + 1)); continue ;; -*|+*) continue ;; esac
-          else
-            case "$t" in -c|-m|-e|-E|-p|-*c|-*e) break ;; -W|-X) j=$((j + 1)); continue ;; -*) continue ;; esac
-          fi
-          case "$t" in *[\$\{\}\*\?\[\]]*)
-            block "while Vajra Desktop runs a campaign, an interpreter's script must be named literally (no globs or variables): $t" ;;
+          t="${W[$j]}"; to="${WO[$j]}"
+          case "$t" in ">"|"<") j=$((j + 1)); continue ;; ";") break ;; esac
+          # Inline code, a module or stdin: no script operand (H2-b judges a shell's body). Long options are flags.
+          case "$ik:$to" in
+            sh:--rcfile|sh:--init-file) j=$((j + 1)); continue ;;
+            sh:--*) continue ;;
+            sh:-*c*|sh:-*s*) break ;;
+            sh:-o|sh:+o|sh:-O|sh:+O) j=$((j + 1)); continue ;;
+            sh:-*|sh:+*) continue ;;
+            py:-c|py:-m|py:-*c|py:-*m) break ;;
+            py:-W|py:-X|py:--check-hash-based-pycs) j=$((j + 1)); continue ;;
+            pl:-e|pl:-E|pl:-*e|pl:-*E) break ;;
+            rb:-e|rb:-*e) break ;;
+            rb:-I|rb:-r) j=$((j + 1)); continue ;;
+            js:-e|js:-p|js:--eval|js:--print|js:-*e|js:-*p) break ;;
+            js:-r|js:--require) j=$((j + 1)); continue ;;
+            *:-*) continue ;;
           esac
+          core_hidden_operand "$j" && block "while Vajra Desktop runs a campaign, an interpreter's script that a variable or glob names must be quoted (\"\$f\"), with literal arguments, and the command may not name a campaign: $to"
           break
         done ;;
     esac
@@ -1221,10 +1291,12 @@ core_campaign_guard() {
     case "$name" in
       sh|bash|zsh|dash|ksh)
         for ((j = i + 1; j < nw; j++)); do
-          t="${W[$j]}"
+          t="${WO[$j]}"
           case "$t" in
+            --rcfile|--init-file) j=$((j + 1)) ;;   # long options are flags (bhishma #194 M3: --norc isn't -c)
+            --*) ;;
             -*c*|-*s*|"<") nested=1; break ;;
-            -o|+o) j=$((j + 1)) ;;
+            -o|+o|-O|+O) j=$((j + 1)) ;;
             -*|+*) ;;
             ";") nested=1; break ;;               # a shell with no script reads its commands from stdin
             *) break ;;
@@ -1266,14 +1338,8 @@ core_campaign_guard() {
   [ "$CORE_UNKNOWN" = 1 ] && [[ "$NS" == *deliver-* ]] && block "$why can't name a deliver- campaign: the app's run folders can't be read, so any of them may be the app's"
   # No slug named: vajra-campaign.sh writes the active campaign of the cwd's repository. Only the core's record repo,
   # inside the app data dir, has a pointer that names a core slug: refuse a campaign write that may run there.
-  if [ "$cwrite" = 1 ] && [ "$CORE_PTR" = 1 ]; then
-    local d inapp=0
-    canon "${CWD_IN:-/}" /
-    for d in "${CORE_DATA[@]}"; do inside "$CANON" "$d" && inapp=1; done
-    if [ "$inapp" = 1 ] || [[ "$NS" == *vajradesktop* || "$NS" == *git-dir* || "$NS" == *git-common-dir* || "$NS" == *git-work-tree* ]] \
-       || [[ " $X " == *" cd "* || " $X " == *" pushd "* || " $X " == *" -c "* || " $X " == *" --chdir"* ]]; then
-      block "$why may not change directory or git repository: the app's own campaign is the active one there"
-    fi
+  if [ "$cwrite" = 1 ] && core_ptr_reach; then
+    block "$why may not change directory or git repository: the app's own campaign is the active one there"
   fi
   return 0
 }
