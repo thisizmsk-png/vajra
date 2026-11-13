@@ -46,5 +46,13 @@ skips with a one-line summary note. The per-PR idle gate (`memory` job) is uncha
 To start gating it, record a baseline with the bump procedure below: set `post_load_mib` on the flavour from the median
 `plus10_mib` of at least 3 green runs. Until then a run over the 200 MiB budget or over that baseline only warns.
 
+## No waiting calls
+`waiting_calls.py` (run by the `ci` workflow on every OS, with its tests) counts what can block the window and compares it with `waiting-calls.json`:
+- **Main-thread commands.** A Tauri command written as a plain `fn` with `#[tauri::command]` runs on the main thread; `#[tauri::command(async)]` and `async fn` do not. The allowance lists them by name, so swapping one for another fails as well. The terminal's input, resize, ack, visible, attach and list commands are on the list on purpose (input must keep its order and each only takes a short lock), and so are the two on-demand reports.
+- **Blocking calls written in those commands' bodies** (file reads, sleeps, child processes, channel waits). Only the body is read, so a callee in another module is not followed: this is a floor, not a proof.
+- **Synchronous calls in the UI source** (`XMLHttpRequest`, `Atomics.wait`, anything named `...Sync(`), test files left out. Tauri's `invoke` is a promise, so the allowance is 0.
+
+The number only goes down, in both directions: above the allowance fails, and so does below it, with the line to write, so an earlier PR's saving cannot be spent by a later one. A new command should be `#[tauri::command(async)]`. To move the allowance, run `python3 app/bench/ci/waiting_calls.py --write` and review the diff of `waiting-calls.json`.
+
 ## Updating the baseline
 `baseline.json` is never written by CI. To add or move an entry: open a PR that sets `identities["<identity>"].flavours["<flavour key>"] = {"idle_mib": X, "provisional": false, "measured": "..."}`, where `N` is the flavour key (the helper type set, e.g. `GPU+Networking+WebContent`) and `X` is the median of `median_of_medians_mib` over at least 3 green runs that reported that identity and flavour (list the run IDs in `measured`). With fewer runs, set `"provisional": true` and say so. Say why in the PR. The owner reviews it, because it moves the regression line.
