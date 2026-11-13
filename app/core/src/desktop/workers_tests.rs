@@ -1103,6 +1103,17 @@ fn a_rejected_history_line_refuses_dispatch_but_a_torn_last_line_does_not() {
     assert_eq!(life2.view("r2.t1.r1").map(|v| v.outcome), Some(Some(Outcome::Done)), "its good lines still replay");
     let life3 = next_life(&r);
     assert!(matches!(life3.dispatch(r.task("r2", "t2"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)), "and on every later start");
+    // #178 review: the tear life2 ended (newline, torn marker) is a gap only, so `r1` stays dispatchable on every
+    // later start and the ticket life2 dispatched after the tear replays.
+    assert_eq!(life3.view(&v.id).map(|t| t.outcome), Some(Some(Outcome::Done)), "r1.t2 replays");
+    let t3 = r.done_on(&life3, &life3.dispatch(r.task("r1", "t3"), seat("w1", "codex")).unwrap());
+    assert_eq!(t3.outcome, Some(Outcome::Done), "r1 still dispatches on the third start");
+    let life4 = next_life(&r);
+    assert!(life4.view(&t3.id).is_some());
+    let t4 = r.done_on(&life4, &life4.dispatch(r.task("r1", "t4"), seat("w1", "codex")).unwrap());
+    assert_eq!(t4.outcome, Some(Outcome::Done), "and on the fourth");
+    let text = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap();
+    assert_eq!(text.matches(r#"{"v":1,"event":"torn"}"#).count(), 1, "the tear is ended once: {text}");
 }
 
 /// #178 codex P1: a FIFO planted at a run's `tickets.jsonl` with no writer does not block the start. It is refused
@@ -1173,6 +1184,11 @@ fn a_recovery_line_after_a_partial_tail_starts_fresh_and_is_written_once() {
     let life3 = next_life(&r);
     assert_eq!(life3.view(&id).unwrap().detail.as_deref(), Some("app_restarted"));
     assert_eq!(std::fs::read_to_string(tickets_file(&r, "r1")).unwrap(), after2, "a third life appends nothing");
+    // #178 review: the fragment the recovery followed is a gap only, so the run still takes a dispatch.
+    // (The fake harness hangs here, so the ticket is accepted and then stopped by quit.)
+    let t2 = life3.dispatch(r.task("r1", "t2"), seat("w1", "codex"));
+    assert!(t2.is_ok(), "the run is not left HistoryIncomplete: {t2:?}");
+    life3.quit(WAIT);
     r.rt.quit(WAIT);
 }
 

@@ -465,8 +465,19 @@ impl WorkerRuntime {
         let mut past = BTreeMap::new();
         let mut incomplete: std::collections::BTreeSet<String> = past_cap.into_iter().collect();
         for run in &runs {
-            let r = replay_run(data, run);
+            let mut r = replay_run(data, run);
             gaps += r.gaps;
+            // A torn tail (a crash mid-write) is ended here, once, with a newline and the torn marker (#178 review), so
+            // no later line joins the fragment and the next start can tell the fragment apart from a damaged line: a
+            // rejected line followed by the marker is the tear replay ended, a gap only. If the repair can't be
+            // written, any later line would join the fragment, so the run takes no dispatch this life.
+            if r.torn && !r.incomplete {
+                let ended = open_record(data, run).and_then(|mut f| f.write_all(format!("\n{TORN_MARKER}\n").as_bytes()));
+                if ended.is_err() {
+                    self.0.record_failures.fetch_add(1, AtomicOrdering::Relaxed);
+                    r.incomplete = true;
+                }
+            }
             // A history too large to read whole is not authoritative (#178 codex P2): a ticket that looks unended in
             // the prefix may have ended past it. Its tickets end in memory only (`history_incomplete`), nothing is
             // written for them (a write past the read budget would repeat every start), and the run takes no new
@@ -480,7 +491,8 @@ impl WorkerRuntime {
                     v.detail = Some(if r.incomplete { "history_incomplete" } else { "app_restarted" }.into());
                     v.summary = Some(summary(&v, &self.0.cfg.redact));
                     if !r.incomplete {
-                        self.record_after_tail(&v, "outcome");
+                        // The tail was ended above, so the recovery line starts on a fresh line.
+                        self.record(&v, "outcome");
                     }
                 }
                 past.insert(v.id.clone(), v);
@@ -1265,33 +1277,11 @@ impl WorkerRuntime {
             self.0.record_failures.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
-
-    /// `record`, for replay's recovery lines (#178 codex P2): a crash mid-write leaves a partial last line, and a line
-    /// appended to it would join the fragment and be unreadable, so the next start would end the same ticket again. A
-    /// newline is written first when the file does not end in one. The file stays append-only.
-    fn record_after_tail(&self, v: &TicketView, event: &str) {
-        let line = json!({"v": 1, "event": event, "ticket": v});
-        let wrote = open_record(&self.0.cfg.data, &v.run).and_then(|mut f| {
-            let sep = if ends_without_newline(&self.0.cfg.data, &v.run) { "\n" } else { "" };
-            f.write_all(format!("{sep}{line}\n").as_bytes())
-        });
-        if wrote.is_err() {
-            self.0.record_failures.fetch_add(1, AtomicOrdering::Relaxed);
-        }
-    }
 }
 
-/// The run's `tickets.jsonl` is non-empty and its last byte is not a newline (a partial line). Read by the same
-/// no-follow, non-blocking descent as replay; a file that can't be read counts as ending cleanly.
-fn ends_without_newline(data: &std::path::Path, run: &str) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = open_record_read(data, run) else { return false };
-    if f.seek(SeekFrom::End(-1)).is_err() {
-        return false;
-    }
-    let mut last = [0u8; 1];
-    f.read_exact(&mut last).is_ok() && last[0] != b'\n'
-}
+/// The line replay writes after a torn tail it ended (`replay`): the rejected line just before it is that fragment, a
+/// gap only, not a damaged record (#178 review). Never written anywhere else.
+const TORN_MARKER: &str = r#"{"v":1,"event":"torn"}"#;
 
 /// `<data>/runs/<run>/tickets.jsonl`, opened for append. `<data>` is the core's own canonical dir; `runs` and `<run>`
 /// are made (0700) and opened relative to their parent's descriptor with `O_NOFOLLOW | O_DIRECTORY`, and the file
@@ -1431,13 +1421,16 @@ struct Replayed {
     /// opened or read, or a whole line in it was rejected (#178 codex: that line may be the only copy of a ticket's id).
     /// No unended ticket in it may be taken as crashed, and the run's used ids are unknown, so it takes no dispatch. A
     /// partial last line alone does not make it incomplete: that is the crash's own torn write, whose `add` never
-    /// returned, so no caller holds its id and no worktree was made for it.
+    /// returned, so no caller holds its id and no worktree was made for it. Nor does a rejected line followed by the
+    /// torn marker: that is such a fragment, ended by an earlier start's replay.
     incomplete: bool,
+    /// The file ends in a partial line, which `replay` ends with the torn marker before anything else is written.
+    torn: bool,
 }
 
 fn replay_run(data: &std::path::Path, run: &str) -> Replayed {
     use std::io::Read;
-    let mut out = Replayed { views: BTreeMap::new(), gaps: 0, incomplete: false };
+    let mut out = Replayed { views: BTreeMap::new(), gaps: 0, incomplete: false, torn: false };
     let f = match open_record_read(data, run) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
@@ -1464,8 +1457,13 @@ fn replay_run(data: &std::path::Path, run: &str) -> Replayed {
     let whole = raw.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     if whole < raw.len() {
         gaps += 1;
+        out.torn = true;
     }
-    for line in raw[..whole].split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+    let lines: Vec<&[u8]> = raw[..whole].split(|&b| b == b'\n').filter(|l| !l.is_empty()).collect();
+    for (i, line) in lines.iter().enumerate() {
+        if *line == TORN_MARKER.as_bytes() {
+            continue;
+        }
         let parsed = (line.len() <= REPLAY_MAX_LINE)
             .then(|| serde_json::from_slice::<StoredLine>(line).ok())
             .flatten()
@@ -1477,7 +1475,10 @@ fn replay_run(data: &std::path::Path, run: &str) -> Replayed {
             }
             None => {
                 gaps += 1;
-                out.incomplete = true;
+                // A fragment an earlier replay ended (the marker follows it) is no lost record.
+                if lines.get(i + 1) != Some(&TORN_MARKER.as_bytes()) {
+                    out.incomplete = true;
+                }
             }
         }
     }
