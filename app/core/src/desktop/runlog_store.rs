@@ -47,6 +47,9 @@ pub struct Notice {
     pub seq: u64,
     pub after: u64,
     pub entries: Vec<Entry>,
+    /// The log's state as of this notice, so a caught-up view that makes no call still learns the log stopped (#233).
+    pub io_error: Option<String>,
+    pub broken: Option<runlog::Break>,
 }
 
 /// Tells the UI about newly written entries.
@@ -451,6 +454,7 @@ impl Shared {
     fn handle(&self, file: &mut Option<std::fs::File>, due: &mut Option<Instant>, m: Msg) {
         match m {
             Msg::Write { entry, critical } => {
+                let had_error = crate::lock(&self.io_error).is_some();
                 if self.write(file, &entry, critical) {
                     if critical {
                         *due = None;
@@ -458,6 +462,10 @@ impl Shared {
                     } else {
                         due.get_or_insert_with(|| Instant::now() + COALESCE);
                     }
+                } else if !had_error {
+                    // The log just stopped: tell it now, with whatever was written before, so the UI shows it.
+                    *due = None;
+                    self.tell_state(true);
                 }
             }
             Msg::Anchor => self.anchor(file),
@@ -496,19 +504,26 @@ impl Shared {
     }
 
     fn tell(&self) {
+        self.tell_state(false);
+    }
+
+    /// Tell the UI what is newly written. `state_changed`: also tell when nothing new is written (the log just
+    /// stopped), so a caught-up view hears it even if no later entry is ever written.
+    fn tell_state(&self, state_changed: bool) {
         let seq = *crate::lock(&self.written);
         let mut told = crate::lock(&self.told);
-        if seq <= *told {
+        if seq <= *told && !state_changed {
             return;
         }
+        let io_error = crate::lock(&self.io_error).clone();
         let notice = {
             let log = crate::lock(&self.log);
             // Only written entries: the log in memory may already hold later ones the writer hasn't reached.
-            let room = usize::try_from(seq - *told).unwrap_or(usize::MAX);
+            let room = usize::try_from(seq.saturating_sub(*told)).unwrap_or(usize::MAX);
             let entries = log.since(*told, NOTICE_MAX.min(room)).to_vec();
-            Notice { run_id: log.run_id().to_string(), seq, after: *told, entries }
+            Notice { run_id: log.run_id().to_string(), seq, after: *told, entries, io_error, broken: log.broken().cloned() }
         };
-        *told = seq;
+        *told = (*told).max(seq);
         drop(told);
         if let Some(n) = crate::lock(&self.notify).as_ref() {
             n(&notice);
@@ -538,6 +553,7 @@ impl Shared {
             let written = *crate::lock(&self.written);
             *crate::lock(&self.io_error) = Some(format!("the run log couldn't be synced to anchor seq {written}: {e}"));
             *crate::lock(&self.skipped_anchors) += 1;
+            self.tell_state(true);
             return;
         }
         let written = *crate::lock(&self.written);

@@ -36,7 +36,8 @@ export function applyPage(v: RunLogView, page: { entries: RunLogEntry[]; head_se
 /** Apply one notice with no call. Returns the new view, and whether the view still lags the notice's head (a gap that
  *  only a `run_log_since` read can fill). */
 export function applyNotice(v: RunLogView, n: RunLogNotice): { view: RunLogView; gap: boolean } {
-  const view = extend(v, n.entries, n.seq);
+  // The log's state comes with every notice, so a caught-up view that makes no call still learns the log stopped.
+  const view = applyPage(v, { entries: n.entries, head_seq: n.seq, broken: n.broken ?? null, io_error: n.io_error ?? null });
   return { view, gap: lastSeq(view) < n.seq };
 }
 
@@ -86,7 +87,7 @@ export function followRunLog(
   const off = onRunLog((n) => {
     if (stopped || n.run_id !== runId) return;
     stats.notices++;
-    if (n.seq <= lastSeq(view)) return;
+    // Even a notice with nothing new is applied: it may carry the log's stop (an error or a break).
     const { view: next, gap } = applyNotice(view, n);
     show(next);
     if (gap) void read();

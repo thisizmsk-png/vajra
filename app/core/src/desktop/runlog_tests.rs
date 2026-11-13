@@ -915,12 +915,58 @@ fn a_blank_line_inside_the_log_breaks_it_there() {
 #[test]
 fn a_notice_serialises_to_the_shape_the_ui_reads() {
     let e = entries(1).remove(0);
-    let n = runlog_store::Notice { run_id: RUN.into(), seq: 1, after: 0, entries: vec![e.clone()] };
+    let n = runlog_store::Notice { run_id: RUN.into(), seq: 1, after: 0, entries: vec![e.clone()], io_error: None, broken: None };
     let v = serde_json::to_value(&n).unwrap();
     let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(keys, ["after", "entries", "run_id", "seq"]);
+    assert_eq!(keys, ["after", "broken", "entries", "io_error", "run_id", "seq"]);
     assert_eq!(v["entries"][0]["seq"], 1);
     assert_eq!(v["entries"][0]["kind"], "dispatched");
     assert_eq!(v["entries"][0]["hash"], e.hash);
+}
+
+#[test]
+fn a_sync_failure_is_told_to_a_caught_up_view_at_once() {
+    // Before an anchor.
+    let d = scratch();
+    let l = RunLog::open(&d, RUN).unwrap();
+    l.set_record(Arc::new(FakeRecord::default()));
+    let got = notices(&l);
+    l.append(Source::Core, dispatched(1)).unwrap();
+    l.flush();
+    let before = got.lock().unwrap().len();
+    l.fail_syncs();
+    l.anchor();
+    l.flush();
+    let ns = got.lock().unwrap().clone();
+    assert_eq!(ns.len(), before + 1, "one notice for the stop, with nothing new written");
+    let last = ns.last().unwrap();
+    assert!(last.io_error.as_deref().is_some_and(|e| e.contains("synced")), "{last:?}");
+    assert!(last.entries.is_empty() && last.after == last.seq);
+
+    // On a critical write.
+    let d = scratch();
+    let l = RunLog::open(&d, RUN).unwrap();
+    let got = notices(&l);
+    l.append(Source::Core, dispatched(1)).unwrap();
+    l.flush();
+    l.fail_syncs();
+    l.append(Source::Lead, Kind::Question { id: "q".into(), text: "?".into() }).unwrap();
+    l.append(Source::Lead, Kind::Question { id: "q2".into(), text: "?".into() }).unwrap();
+    l.flush();
+    let ns = got.lock().unwrap().clone();
+    let stopped: Vec<_> = ns.iter().filter(|n| n.io_error.is_some()).collect();
+    assert_eq!(stopped.len(), 1, "told once when it stops, not once per refused write: {ns:?}");
+    assert!(stopped[0].io_error.as_deref().unwrap().contains("stopped at seq"));
+}
+
+#[test]
+fn a_healthy_notice_carries_no_error_or_break() {
+    let d = scratch();
+    let l = RunLog::open(&d, RUN).unwrap();
+    let got = notices(&l);
+    l.append(Source::Lead, Kind::Question { id: "q".into(), text: "?".into() }).unwrap();
+    l.flush();
+    let n = got.lock().unwrap()[0].clone();
+    assert_eq!((n.io_error, n.broken), (None, None));
 }

@@ -11,6 +11,8 @@ const NOTICE_MAX = 64;
 const entry = (seq: number, worker = 0): RunLogEntry => ({ v: 1, seq, prev: `h${seq - 1}`, at_ms: seq, source: { worker: `k${worker}` }, kind: "ticket_ended", body: {}, hash: `h${seq}` });
 const page = (seqs: number[], head = Math.max(0, ...seqs)) => ({ run_id: "r", entries: seqs.map((s) => entry(s)), head_seq: head, broken: null, io_error: null });
 const seqs = (v: RunLogView) => v.entries.map((e) => e.seq);
+const notice = (seq: number, after: number, entries: RunLogEntry[], state: Partial<Pick<RunLogNotice, "io_error" | "broken">> = {}): RunLogNotice =>
+  ({ run_id: "r", seq, after, entries, io_error: null, broken: null, ...state });
 const tick = () => new Promise((r) => setTimeout(r, 0));
 const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
 
@@ -30,8 +32,8 @@ function core(cap = 500) {
     for (let i = 0; i < count; i++) entries.push(entry(entries.length + 1, entries.length % workers));
   };
   /** Tell what is written since the last notice, as the core does. `drop`: the notice is lost on the way. */
-  const tell = (drop = false) => {
-    const n: RunLogNotice = { run_id: "r", seq: entries.length, after: told, entries: entries.slice(told, told + NOTICE_MAX) };
+  const tell = (drop = false, state: Partial<Pick<RunLogNotice, "io_error" | "broken">> = {}) => {
+    const n = notice(entries.length, told, entries.slice(told, told + NOTICE_MAX), state);
     told = entries.length;
     if (!drop) ipc.emit("run_log", n);
   };
@@ -42,21 +44,29 @@ function core(cap = 500) {
 describe("applyNotice", () => {
   it("applies a notice that follows the view, with no gap", () => {
     const v = applyPage(emptyRunLog, page([1, 2]));
-    const { view, gap } = applyNotice(v, { run_id: "r", seq: 4, after: 2, entries: [entry(3), entry(4)] });
+    const { view, gap } = applyNotice(v, notice(4, 2, [entry(3), entry(4)]));
     expect([seqs(view), gap]).toEqual([[1, 2, 3, 4], false]);
   });
   it("reports a gap when the notice starts past the view", () => {
     const v = applyPage(emptyRunLog, page([1, 2]));
-    const { view, gap } = applyNotice(v, { run_id: "r", seq: 6, after: 4, entries: [entry(5), entry(6)] });
+    const { view, gap } = applyNotice(v, notice(6, 4, [entry(5), entry(6)]));
     expect([seqs(view), gap]).toEqual([[1, 2], true]);
   });
   it("reports a gap when a notice was cut at the cap", () => {
-    const { view, gap } = applyNotice(emptyRunLog, { run_id: "r", seq: 70, after: 0, entries: [1, 2, 3].map((s) => entry(s)) });
+    const { view, gap } = applyNotice(emptyRunLog, notice(70, 0, [1, 2, 3].map((s) => entry(s))));
     expect([seqs(view), gap]).toEqual([[1, 2, 3], true]);
   });
   it("drops entries it already holds", () => {
     const v = applyPage(emptyRunLog, page([1, 2, 3]));
-    expect(seqs(applyNotice(v, { run_id: "r", seq: 4, after: 1, entries: [2, 3, 4].map((s) => entry(s)) }).view)).toEqual([1, 2, 3, 4]);
+    expect(seqs(applyNotice(v, notice(4, 1, [2, 3, 4].map((s) => entry(s)))).view)).toEqual([1, 2, 3, 4]);
+  });
+  it("copies the log's stop into the view, even from a notice with no entries", () => {
+    const v = applyPage(emptyRunLog, page([1, 2]));
+    const stopped = applyNotice(v, notice(2, 2, [], { io_error: "the run log stopped at seq 2: disk full" })).view;
+    expect([seqs(stopped), stopped.ioError, stopped.broken]).toEqual([[1, 2], "the run log stopped at seq 2: disk full", null]);
+    const broken = applyNotice(v, notice(3, 2, [entry(3)], { broken: { seq: 4, why: "unanchored" } })).view;
+    expect([seqs(broken), broken.broken]).toEqual([[1, 2, 3], { seq: 4, why: "unanchored" }]);
+    expect(applyNotice(v, notice(2, 2, [])).view).toBe(v); // nothing new, nothing changed: same view
   });
 });
 
@@ -134,11 +144,25 @@ describe("followRunLog in a 4-worker run", () => {
     stop();
   });
 
+  it("a caught-up view shows the log stopped, with no call", async () => {
+    const c = core();
+    let view = emptyRunLog;
+    const stop = followRunLog("r", (v) => (view = v));
+    await settle();
+    c.write(3); c.tell();
+    await settle();
+    c.tell(false, { io_error: "the run log couldn't be synced to anchor seq 3: disk full" }); // nothing new written
+    await settle();
+    expect([seqs(view), view.ioError]).toEqual([[1, 2, 3], "the run log couldn't be synced to anchor seq 3: disk full"]);
+    expect(c.calls()).toBe(1);
+    stop();
+  });
+
   it("ignores other runs and stops listening when stopped", async () => {
     const c = core();
     const stop = followRunLog("r", () => {});
     await settle();
-    c.ipc.emit("run_log", { run_id: "other", seq: 9, after: 0, entries: [] });
+    c.ipc.emit("run_log", { ...notice(9, 0, []), run_id: "other" });
     await settle();
     expect(c.calls()).toBe(1);
     stop();
