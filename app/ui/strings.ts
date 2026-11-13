@@ -1,5 +1,9 @@
 // User-visible wording of the kit. Screens add their own strings next to these.
 // Log every wording change in docs/design/changed-strings.md for the owner's approval.
+type PingGroupKey = "decisions" | "questions" | "blocked";
+const PING_GROUP: Record<PingGroupKey, [one: string, many: string]> = { decisions: ["decision", "decisions"], questions: ["question", "questions"], blocked: ["blocked task", "blocked tasks"] };
+/** "a", "a and b", "a, b and c". */
+const andList = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
 export const S = {
   dismiss: "Dismiss",
   cancel: "Cancel",
@@ -170,7 +174,9 @@ export const S = {
     proposal: "Run proposal",
     proposals: "Proposed runs",
     proposalLede: "The Director-General proposes; nothing runs until you start it.",
-    exactAsk: "What the workers will be asked",
+    exactAsk: "Goal, as the workers will be asked",
+    threads: "Threads",
+    threadCount: (n: number, owners: string) => `${n} ${n === 1 ? "thread" : "threads"}: ${owners}`,
     base: "Base",
     rounds: "Fix rounds",
     fromGeneration: (n: number) => `From conversation ${n}`,
@@ -185,8 +191,57 @@ export const S = {
       refused: (why: string) => `Not done: ${why}`,
     },
   },
+  /** What a ping says, and why it pinged (or did not). Counts and project names only, never an item's own text. */
+  ping: {
+    one: {
+      decisions: (p: string) => `A decision needs you in ${p}`,
+      questions: (p: string) => `A worker has a question in ${p}`,
+      blocked: (p: string) => `A task is blocked in ${p}`,
+    } as Record<PingGroupKey, (p: string) => string>,
+    /** One project's share of a grouped ping: "2 blocked tasks and 1 decision in harbor-api". */
+    inProject: (counts: [PingGroupKey, number][], p: string) => `${andList(counts.map(([g, n]) => `${n} ${PING_GROUP[g][n === 1 ? 0 : 1]}`))} in ${p}`,
+    many: (total: number, parts: string[]) => `${total} things need you: ${parts.join("; ")}`,
+    group: (g: PingGroupKey) => PING_GROUP[g][1],
+    groupLabels: { decisions: "Decisions", questions: "Questions", blocked: "Blocked tasks" } as Record<PingGroupKey, string>,
+    groupHints: {
+      decisions: "Plans to approve, and runs the Director-General proposes",
+      questions: "A worker asks you something",
+      blocked: "A task is blocked, or failed a check its worker could not fix",
+    } as Record<PingGroupKey, string>,
+    why: {
+      rule: (groups: PingGroupKey[]) => `Pinged because your rule is on for ${andList(groups.map((g) => PING_GROUP[g][1]))}.`,
+      grouped: (m: number) => `Grouped: they arrived within ${m} min of the first.`,
+      held: (n: number) => `Held until now: you allow ${n} ${n === 1 ? "ping" : "pings"} an hour.`,
+      off: "Not pinged: notifications are off.",
+      muted: (g: PingGroupKey) => `Not pinged: your rule is off for ${PING_GROUP[g][1]}.`,
+    },
+  },
   inbox: {
     title: "Inbox",
+    rule: {
+      title: "Ping rule",
+      summary: (perHour: number, batch: number, on: PingGroupKey[]) => {
+        const budget = `At most ${perHour} ${perHour === 1 ? "ping" : "pings"} an hour.`;
+        const group = batch === 0 ? "Each arrival pings on its own." : `Arrivals within ${batch} min are one ping.`;
+        const list = on.length === 0 ? "Nothing pings; everything waits here quietly." : `On for ${andList(on.map((g) => PING_GROUP[g][1]))}.`;
+        return `${budget} ${group} ${list}`;
+      },
+      edit: "Change",
+      save: "Save rule",
+      saved: "Saved. New arrivals follow this rule.",
+      perHour: "Pings an hour, at most",
+      batch: "Group arrivals within",
+      batchOption: (m: number) => (m === 0 ? "Don't group" : `${m} min`),
+      kinds: "Ping me for",
+      note: "The rule only decides when you are pinged. Everything still lands in this list, and the rule cannot start or approve anything.",
+      unavailable: "The ping rule could not be read. Pings use the default until it can.",
+    },
+    recent: "Recent pings",
+    recentEmpty: "No pings since Vajra opened.",
+    pinged: "Pinged",
+    quiet: "Not pinged",
+    proposalKind: "Run to start",
+    openProposal: "Review in Director-General",
     empty: "Nothing needs you",
     failed: "Could not read your inbox.",
     emptyHint: "Questions, plans to approve and failures from every project appear here.",

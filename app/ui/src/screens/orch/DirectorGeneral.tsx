@@ -309,6 +309,21 @@ function Proposals({ items, target }: { items: InboxItem[]; target: Target }) {
   );
 }
 
+/** The plan's threads at a glance, by owner: "4 threads: 2 Backend, 1 Docs, 1 Tests". The table below has each one's
+ *  model, effort and why. A light read of the raw list, so the pickers' chunk still loads only when there are workers. */
+function threadLine(workers: unknown): string | null {
+  if (!Array.isArray(workers) || workers.length === 0) return null;
+  const by = new Map<string, number>();
+  for (const w of workers.slice(0, 16)) {
+    const role = (w as { role?: unknown } | null)?.role;
+    if (typeof role !== "string" || !role) continue;
+    const label = S.agents.role[role] ?? role;
+    by.set(label, (by.get(label) ?? 0) + 1);
+  }
+  const n = [...by.values()].reduce((a, b) => a + b, 0);
+  return n === 0 ? null : S.dg.threadCount(n, [...by].map(([r, c]) => `${c} ${r}`).join(", "));
+}
+
 function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
   const [out, setOut] = useState<Outcome | null>(null);
   // One action id per click. After an unknown outcome the same click is retried with the same id, so the core answers
@@ -317,6 +332,7 @@ function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
   // The picks the user changed on the workers, to be carried by Start (nothing is sent before).
   const [overrides, setOverrides] = useState<ProposalOverride[]>([]);
   const hasWorkers = Array.isArray((item as { workers?: unknown }).workers) && ((item as { workers?: unknown[] }).workers?.length ?? 0) > 0;
+  const threads = threadLine((item as { workers?: unknown }).workers);
   const pending = out?.kind === "pending";
   const settled = out?.kind === "done";
   const act = async (what: "start" | "dismiss") => {
@@ -340,6 +356,7 @@ function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
       <p className="v-prop__label">{S.dg.exactAsk}</p>
       <p className="v-prop__ask">{item.ask ?? item.body}</p>
       <dl className="v-prop__kv">
+        {threads && <><dt>{S.dg.threads}</dt><dd>{threads}</dd></>}
         {item.base && <><dt>{S.dg.base}</dt><dd>{item.base}</dd></>}
         {typeof item.rounds === "number" && <><dt>{S.dg.rounds}</dt><dd>{item.rounds}</dd></>}
         {typeof item.generation === "number" && <><dt>{S.views.orch}</dt><dd>{S.dg.fromGeneration(item.generation)}</dd></>}
