@@ -829,7 +829,12 @@ impl App {
         let dirs = self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs);
         let off = {
             let run = p::codex_check_runner(&codex, project, &[], &dirs);
-            p::codex_tools_off(&run).map_err(|why| fail("codex_tools_on", why))?
+            let off = p::codex_tools_off(&run).map_err(|why| fail("codex_tools_on", why))?;
+            // The Lead is never guarded, so decision B changes nothing here; option A refuses it.
+            if p::CODEX_CLOUD_REFUSES_LAUNCH && p::codex_cloud_login(&run) {
+                return Err(fail("codex_tools_on", p::CODEX_CLOUD));
+            }
+            off
         };
         Ok((codex, off))
     }

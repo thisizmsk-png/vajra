@@ -201,6 +201,21 @@ pub const CODEX_NOT_PROVEN: &str = "Vajra couldn't confirm on this Mac that Code
 pub const CODEX_MANAGED: &str = "Codex on this Mac has a managed config, which can turn on tools that run outside Codex's sandbox and could read Vajra's signing key.";
 pub const CODEX_TOOLS_ON: &str = "Vajra couldn't confirm that your Codex hooks, plugins, MCP servers and notify are off for this session. They run outside Codex's sandbox and could read Vajra's signing key.";
 pub const CODEX_PROJECT_TOOLS: &str = "The worktree has its own .codex or .agents folder, which Codex would load outside its sandbox.";
+pub const CODEX_CLOUD: &str = "ChatGPT login: cloud-managed settings can't be checked, so Vajra can't prove the key is out of reach.";
+
+/// bhishma #216 (vajra-1's interim decision B, the owner's call): a Codex seat on a ChatGPT login (or one whose login
+/// can't be told) is not guarded, with `CODEX_CLOUD` as the cause, but still launches. `true` is option A: it is
+/// refused like any failed proof. An API-key login and the gateway route stay provable.
+pub const CODEX_CLOUD_REFUSES_LAUNCH: bool = false;
+
+/// Whether Codex's own `login status` (never a token) could bring cloud-managed settings: a ChatGPT login, or an answer
+/// that can't be read. Run with the launch's binary, folder and env, so a gateway's own CODEX_HOME is the one asked.
+pub fn codex_cloud_login(run: CodexRun<'_>) -> bool {
+    match run(&["login".to_string(), "status".to_string()]) {
+        Some(o) if o.code.is_some() => format!("{}\n{}", o.stdout, o.stderr).to_ascii_lowercase().contains("chatgpt"),
+        _ => true,
+    }
+}
 
 /// bhishma #216 H2-b (vajra-1's decision): every Codex seat, the Lead included, runs with these switched off: hooks
 /// (config tables, hooks.json, plugin hooks), plugins (and the MCP servers and hooks they bring), apps (connectors) and
@@ -314,7 +329,11 @@ pub fn codex_lock(probe: &dyn crate::providers::detect::Probe, home: &Path, data
     if codex_managed_layer(user) {
         return Err(CODEX_MANAGED.into());
     }
-    codex_tools_off(run).map(|_| ())
+    codex_tools_off(run)?;
+    if codex_cloud_login(run) {
+        return Err(CODEX_CLOUD.into());
+    }
+    Ok(())
 }
 
 /// A fresh name for one launch's Codex permission profile: `vajra-` and 16 random hex digits. A user's `config.toml`

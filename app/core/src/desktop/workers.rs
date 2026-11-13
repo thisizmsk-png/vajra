@@ -1318,7 +1318,12 @@ impl Launch {
             if profiles::codex_managed_layer(&std::env::var("USER").unwrap_or_default()) {
                 return Err("profile_not_applied");
             }
-            profiles::codex_tools_off(&run).map_err(|_| "profile_not_applied")?
+            let off = profiles::codex_tools_off(&run).map_err(|_| "profile_not_applied")?;
+            // Decision B launches a ChatGPT-login seat unguarded (its card names `CODEX_CLOUD`); option A refuses it.
+            if profiles::CODEX_CLOUD_REFUSES_LAUNCH && profiles::codex_cloud_login(&run) {
+                return Err("profile_not_applied");
+            }
+            off
         } else {
             Vec::new()
         };

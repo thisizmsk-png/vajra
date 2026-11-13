@@ -51,6 +51,24 @@ fn fake_codex<'a>(servers: &'static [&'static str], stuck: Option<&'static str>,
     }
 }
 
+/// bhishma #216 cloud-managed config (vajra-1's interim decision B): Codex's own `login status` saying ChatGPT, or an
+/// answer that can't be read, means cloud-managed settings could apply. Spike (stand-in CODEX_HOME, fake token): on a
+/// workspace plan `features list`, `mcp list` and `exec` all load the cloud config the same way; on plus, pro and team
+/// none of them do. The login status never names the plan, so every ChatGPT login is treated alike.
+#[test]
+fn a_chatgpt_login_or_an_unreadable_one_could_bring_cloud_settings_and_an_api_key_login_cannot() {
+    let say = |code: Option<i32>, out: &'static str| move |a: &[String]| {
+        assert_eq!(a, ["login", "status"]);
+        Some(crate::providers::detect::Out { code, stdout: out.into(), stderr: String::new() })
+    };
+    assert!(codex_cloud_login(&say(Some(0), "Logged in using ChatGPT\n")));
+    assert!(!codex_cloud_login(&say(Some(0), "Logged in using an API key - sk-***\n")));
+    assert!(!codex_cloud_login(&say(Some(1), "Not logged in\n")));
+    assert!(codex_cloud_login(&say(None, "")), "killed: can't tell");
+    assert!(codex_cloud_login(&|_: &[String]| None), "didn't run: can't tell");
+    assert!(!CODEX_CLOUD_REFUSES_LAUNCH, "interim decision B: it launches, unguarded, with the cause named");
+}
+
 /// bhishma #216 H2-b (vajra-1's decision): hooks, plugins, apps, notify and each MCP server are switched off in the
 /// argv and proven off under exactly those values; anything the proof can't show fails closed.
 #[test]
