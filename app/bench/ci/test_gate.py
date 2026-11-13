@@ -249,7 +249,10 @@ class WarmupAndMedian(unittest.TestCase):
         # the shape of a real CI run: a high first launch, then a mix of settled and high ones (#166 read 201.6 first)
         rep = idle_report(launches([201.6, 184.8, 191.6, 185.7, 191.2, 185.0]), IDENT)
         self.assertEqual((rep["gated_launches"], rep["warmup_launches"], rep["median_of_medians_mib"]), (5, 1, 185.7))
-        self.assertEqual(rep["spread_mib"], [184.8, 191.6])
+        self.assertEqual(rep["gated_spread_mib"], [184.8, 191.6])
+        # the reference fields keep describing every usable launch, warm-up included
+        self.assertEqual(rep["spread_mib"], [184.8, 201.6])
+        self.assertEqual(rep["all_launches_median_mib"], 188.45)
 
     def test_the_median_of_the_launches_after_the_warmup_is_what_is_gated(self):
         rep = idle_report(launches([201.6, 184.8, 191.6, 185.7, 191.2, 185.0]), IDENT)

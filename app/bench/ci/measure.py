@@ -270,7 +270,8 @@ def idle_report(runs, ident):
     never hide a failure."""
     gated = [r for r in runs if not r["warmup"]]
     flavour, flavour_median, in_flavour, excluded = flavour_summary(gated)
-    meds = [r["median_mib"] for r in gated if r["median_mib"] is not None]
+    meds = [r["median_mib"] for r in runs if r["median_mib"] is not None]  # every usable launch, warm-up included
+    gated_meds = [r["median_mib"] for r in gated if r["median_mib"] is not None]
     feet = [r["footprint_mib"] for r in gated if r["footprint_mib"] is not None]
     return {"identity": ident["key"], "runner": ident, "flavour": flavour, "launch_flavours": launch_flavours(runs),
             "warmup_launches": len(runs) - len(gated), "gated_launches": len(gated),
@@ -279,7 +280,8 @@ def idle_report(runs, ident):
             "median_of_medians_mib": flavour_median,
             "all_launches_median_mib": statistics.median(meds) if meds else None,
             "footprint_median_mib": statistics.median(feet) if feet else None,
-            "spread_mib": [min(meds), max(meds)] if meds else None}
+            "spread_mib": [min(meds), max(meds)] if meds else None,
+            "gated_spread_mib": [min(gated_meds), max(gated_meds)] if gated_meds else None}
 
 
 def slope(points):  # least squares, MiB per minute
