@@ -3,7 +3,10 @@ import type { StreamWindow, Tail } from "../../ipc";
 /** The most text one pane keeps while it follows the live end. Same as the core's default for a window. */
 export const PANE_BYTES = 1024 * 1024;
 
-const size = (lines: { text: string }[]) => lines.reduce((n, l) => n + l.text.length, 0);
+const encoder = new TextEncoder();
+/** UTF-8 bytes, which is what the core's budgets count. `string.length` counts UTF-16 code units, and would undercount emoji by half. */
+const bytesOf = (text: string) => encoder.encode(text).length;
+const size = (lines: { text: string }[]) => lines.reduce((n, l) => n + bytesOf(l.text), 0);
 
 /**
  * A pane that follows the live end holds its window and asks only for the lines after the last one it has, then appends
@@ -29,7 +32,7 @@ export function appendTail(held: StreamWindow, tail: Tail, rows: number, maxByte
   const lines = held.lines.concat(tail.lines);
   let drop = Math.max(0, lines.length - rows);
   let bytes = size(lines.slice(drop));
-  while (bytes > maxBytes && drop < lines.length - 1) bytes -= lines[drop++].text.length;
+  while (bytes > maxBytes && drop < lines.length - 1) bytes -= bytesOf(lines[drop++].text);
   const kept = drop ? lines.slice(drop) : lines;
   return {
     lines: kept,

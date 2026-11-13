@@ -57,6 +57,18 @@ describe("appendTail", () => {
     expect(one.lines.map((l) => l.seq)).toEqual([2]);
   });
 
+  it("counts UTF-8 bytes, not UTF-16 code units: emoji and accents are not undercounted", () => {
+    // "😀" is 2 code units and 4 bytes; 200 of them is 400 code units but 800 bytes, over a 600-byte cap.
+    const emoji = "😀".repeat(200);
+    const next = appendTail(win(1, 1), tail([line(2, emoji), line(3, emoji)], 3), 100, 1000)!;
+    expect(next.lines.map((l) => l.seq)).toEqual([3]);
+    // "é" is 1 code unit and 2 bytes: 400 of them is 800 bytes, so only one fits under 1000.
+    const accents = "é".repeat(400);
+    expect(appendTail(win(1, 1), tail([line(2, accents), line(3, accents)], 3), 100, 1000)!.lines.map((l) => l.seq)).toEqual([3]);
+    // Plain ASCII is unchanged: 1 byte per character, two 400-byte rows fit.
+    expect(appendTail(win(1, 1), tail([line(2, "a".repeat(400)), line(3, "a".repeat(400))], 3), 100, 1000)!.lines.map((l) => l.seq)).toEqual([1, 2, 3]);
+  });
+
   it("the default byte cap is 1 MiB, the size of a whole window", () => {
     expect(PANE_BYTES).toBe(1024 * 1024);
   });
