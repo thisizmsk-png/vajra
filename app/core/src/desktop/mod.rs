@@ -251,7 +251,7 @@ pub struct App {
     pub sup: Arc<Supervisor>,
     pub control: Arc<Mutex<Service>>,
     /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
-    _instance: Option<(std::fs::File, std::fs::File)>,
+    _instance: Option<(instance::Held, instance::Held)>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
