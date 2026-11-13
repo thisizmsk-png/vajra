@@ -1041,6 +1041,9 @@ impl RunProtocol {
             Ok(tk) => tk,
             Err(DispatchError::Exists) => return refuse(NOT_READY, format!("task {id} already ran in round {r}")),
             Err(DispatchError::Invalid(w)) => return refuse(INVALID, format!("the core can't dispatch this {w}")),
+            // Local compile shim only (batch-3's #178 added these; the run-protocol stack's own fix replaces this).
+            Err(DispatchError::Closed) => return refuse(NOT_READY, "the app is quitting; nothing new is dispatched".to_string()),
+            Err(DispatchError::HistoryIncomplete) => return refuse(NOT_READY, "this run's history wasn't read whole; nothing new is dispatched".to_string()),
         };
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));
