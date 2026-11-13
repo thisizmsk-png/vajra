@@ -229,7 +229,7 @@ export const S = {
       edit: "Change",
       save: "Save rule",
       saved: "Saved. New arrivals follow this rule.",
-      perHour: "Pings an hour, at most",
+      perHour: "Most pings in an hour",
       batch: "Group arrivals within",
       batchOption: (m: number) => (m === 0 ? "Don't group" : `${m} min`),
       kinds: "Ping me for",

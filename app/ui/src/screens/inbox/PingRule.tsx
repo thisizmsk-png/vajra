@@ -12,7 +12,7 @@ import { usePingLog } from "../../projects/PingHost";
 import "./pingRule.css";
 
 const R = S.inbox.rule;
-const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 /** A stored value the list does not offer stays visible, never silently swapped. */
 const withValue = (list: readonly number[], v: number) => (list.includes(v) ? [...list] : [...list, v].sort((a, b) => a - b));
 
