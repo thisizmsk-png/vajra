@@ -1351,3 +1351,37 @@ fn an_ended_ticket_becomes_a_core_node_with_its_profile_controls_diff_and_provid
     assert_eq!(c.diff.unwrap()["added"], 1);
     assert_eq!(c.provider.unwrap().model, "model-fake-1");
 }
+
+// ---------------------------------------------------------------- the run protocol over the real runtime (6d1)
+
+#[test]
+fn the_run_protocol_drives_a_real_worker_through_integration_to_the_stub_gate() {
+    use crate::desktop::plan::{Criterion, PlanTask};
+    use crate::desktop::runproto::*;
+    let r = rig("runproto", Opts::default());
+    let cfg = RunConfig {
+        project: "p".into(), run: "r1".into(), repo: r.repo.clone(), base: r.base.clone(), ask: "add a worker line".into(),
+        seats: vec![seat("w1", "codex")], max_in_flight: 4, limits: Limits { rounds: 1, ..Limits::default() }, redact: Redactor::default(),
+    };
+    let workers = Arc::new(CoreWorkers { rt: r.rt.clone(), gw: r.gw.clone() });
+    let p = RunProtocol::new(cfg, workers, Arc::new(StubGate), Arc::new(SystemClock::default()));
+    let task = PlanTask {
+        id: "t1".into(), title: "add the line".into(), owner_role: "backend".into(), files: vec!["src/**".into()], deps: vec![], criteria: vec!["ac-1".into()],
+        brief: "Add a line to src/lib.rs.".into(), touches_security: false,
+    };
+    let crit = vec![Criterion { id: "ac-1".into(), criterion: "the line is there".into(), check: "grep -q worker src/lib.rs".into() }];
+    p.plan_tasks(PlanInput { round: 1, criteria: Some(crit), tasks: vec![task], ..PlanInput::default() }).unwrap();
+    let Dispatched::Ticket { ticket, slot } = p.dispatch_worker("t1").unwrap() else { panic!("held") };
+    assert_eq!(slot, "w1");
+    let ended = p.await_any(std::slice::from_ref(&ticket), Duration::from_secs(20)).unwrap().ended.expect("the worker ended");
+    assert_eq!(ended.outcome.as_deref(), Some("done"), "{ended:?}");
+    let wt = r.rt.view(&ticket).unwrap().worktree.unwrap();
+    let round = p.integrate(1).unwrap();
+    let rt = p.await_any(&[round], Duration::from_secs(20)).unwrap().ended.expect("the round ended");
+    assert_eq!(rt.outcome.as_deref(), Some("failed"), "the stub gate never passes a round");
+    assert_eq!(p.card().status, Some(RunStatus::NotVerified));
+    let head = ugit(&r.home, &r.repo, &["rev-parse", "refs/heads/vajra/r1/integration"]);
+    let lib = ugit(&r.home, &r.repo, &["show", &format!("{head}:src/lib.rs")]);
+    assert!(lib.contains("worker line"), "the worker's change is on the integration branch: {lib}");
+    assert!(!wt.exists(), "the merged ticket's worktree is cleaned up after integrate");
+}
