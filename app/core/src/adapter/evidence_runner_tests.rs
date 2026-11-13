@@ -918,6 +918,53 @@ fn a_run_sees_a_clean_worktree_as_clean_in_git() {
     assert!(matches!(go(&t2, &evidence_run(&script2, &base2, &["true".to_string()], &t2.0.join("none.git"), &home2)), RunOutcome::Ran { passed: true, .. }));
 }
 
+/// The index the core copies comes only from the run's repository (bhishma F1 on b04316cb): a worktree whose `.git`
+/// file points elsewhere still gets its own admin folder's index, a worktree of another repository is refused, and an
+/// index that is a hard link to a file kept elsewhere is refused.
+#[test]
+fn the_copied_index_is_only_ever_the_run_repositorys_own() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("indexsrc");
+    let git = |dir: &Path, args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(dir).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", t.home()).output().unwrap();
+    let mk_repo = |name: &str| {
+        let repo = t.0.join(name);
+        fs::create_dir_all(&repo).unwrap();
+        assert!(git(&repo, &["init", "-q", "-b", "main"]).status.success());
+        fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert!(git(&repo, &["add", "a.txt"]).status.success());
+        assert!(git(&repo, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "a"]).status.success());
+        repo
+    };
+    let repo = mk_repo("repo");
+    let other = mk_repo("other");
+    let _ = fs::remove_dir_all(t.0.join("work"));
+    assert!(git(&repo, &["worktree", "add", "-q", t.0.join("work").to_str().unwrap()]).status.success());
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    // A fake gitdir elsewhere, holding a marked index, and the worktree's .git file pointed at it.
+    let elsewhere = t.0.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("index"), "PLANTED-INDEX").unwrap();
+    let real_dotgit = fs::read_to_string(t.0.join("work/.git")).unwrap();
+    fs::write(t.0.join("work/.git"), format!("gitdir: {}\n", elsewhere.display())).unwrap();
+    let cmds = vec!["! grep -q PLANTED-INDEX \"$GIT_INDEX_FILE\" && test -s \"$GIT_INDEX_FILE\"".to_string()];
+    let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
+    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "the planted index was copied: {out:?}");
+    fs::write(t.0.join("work/.git"), real_dotgit).unwrap();
+    // The run's repository isn't the worktree's: refused, nothing runs.
+    let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &other.join(".git"), &home));
+    assert_eq!(out, RunOutcome::Failed("the worktree's git folder isn't the run's repository".into()));
+    // The admin folder's index replaced by a hard link to a file kept elsewhere: refused.
+    let admin_index = common.join("worktrees/work/index");
+    fs::remove_file(&admin_index).unwrap();
+    fs::hard_link(elsewhere.join("index"), &admin_index).unwrap();
+    let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
+    assert_eq!(out, RunOutcome::Failed("the worktree's git index isn't a plain file with one link".into()));
+}
+
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
 #[test]
 fn a_run_refuses_a_tmp_that_already_exists() {

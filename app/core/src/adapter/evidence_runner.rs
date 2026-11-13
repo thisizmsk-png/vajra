@@ -386,7 +386,7 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     if !crate::vajra::allowlist::key_has_one_link(r.state_dir) {
         return RunOutcome::Failed("Vajra's signing key has a second name somewhere, so the runner can't keep it out of reach".into());
     }
-    if let Err(why) = make_tmp(profile) {
+    if let Err(why) = make_tmp(profile, r.git_common) {
         return RunOutcome::Failed(why.into());
     }
     // bash gets the script's text, read here once, never its path: the engine folder is denied inside the profile,
@@ -568,7 +568,7 @@ fn tmp_hook(_stage: &str) {
 /// refuses a link anywhere on the way, and checked to be a plain folder at its resolved path; every folder in it is
 /// made relative to that descriptor. A swap afterwards can't widen anything: the profile names only the literal tmp,
 /// and Seatbelt judges a write by the path it resolves to.
-fn make_tmp(profile: &Profile) -> Result<(), &'static str> {
+fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), &'static str> {
     let resolved = |p: &Path| p.canonicalize().ok().as_deref() == Some(p);
     if !resolved(&profile.worktree) || !profile.tmp.parent().is_some_and(resolved) {
         return Err("the run's folders aren't plain, resolved paths");
@@ -591,49 +591,53 @@ fn make_tmp(profile: &Profile) -> Result<(), &'static str> {
     }
     // git's private index (`git_env`) starts as a copy of the worktree's own (codex P2 on f95df103): a missing one
     // reads as empty, so every tracked file would look deleted and untracked. Written through the pinned tmp.
-    if let Some(index) = worktree_index(&profile.worktree)? {
+    if let Some(index) = worktree_index(&profile.worktree, git_common)? {
         tmp.write_atomic("index", &index).map_err(|_| "couldn't copy the worktree's git index")?;
     }
     Ok(())
 }
 
-/// The evidence worktree's git index, read by the core: its path from the system git (`--git-path index`, which knows
-/// a linked worktree's own), opened without following a link, a plain file of at most 512 MiB. `None` when the
-/// worktree isn't in git or has no index yet (nothing staged ever).
-fn worktree_index(worktree: &Path) -> Result<Option<Vec<u8>>, &'static str> {
-    use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    let bad = "couldn't read the worktree's git index";
-    let out = std::process::Command::new("/usr/bin/git")
-        .args(["-C"])
-        .arg(worktree)
-        .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
-        .env_clear()
-        .env("PATH", SCRIPT_PATH)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map_err(|_| bad)?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    let path = PathBuf::from(String::from_utf8(out.stdout).map_err(|_| bad)?.trim_end_matches('\n'));
-    let f = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(bad),
-    };
+/// The evidence worktree's git index, found from protected data only (bhishma F1 on b04316cb). The worktree's own
+/// `.git` file is writable, so it could point anywhere; its content, and git's answer from it, are never used. The
+/// index is the one in the run's git common dir (`common`, which must be resolved): for a main checkout, `common` is
+/// the worktree's `.git` folder; for a linked worktree, it's the admin folder `<common>/worktrees/<name>` whose own
+/// `gitdir` back-link (kept in `common`, outside the worktree) names exactly this worktree's `.git`. It is read through
+/// a pinned walk that follows no link, and must be a plain file with exactly one link, at most 512 MiB. `None` when
+/// the worktree isn't in git, or nothing was ever staged.
+fn worktree_index(worktree: &Path, common: &Path) -> Result<Option<Vec<u8>>, &'static str> {
     const CAP: u64 = 512 << 20;
-    if !f.metadata().is_ok_and(|m| m.file_type().is_file() && m.len() <= CAP) {
-        return Err(bad);
+    let dotgit = worktree.join(".git");
+    let Ok(kind) = std::fs::symlink_metadata(&dotgit).map(|m| m.file_type()) else { return Ok(None) };
+    let not_ours = "the worktree's git folder isn't the run's repository";
+    if common.canonicalize().ok().as_deref() != Some(common) {
+        return Err(not_ours);
     }
-    let mut bytes = Vec::new();
-    f.take(CAP + 1).read_to_end(&mut bytes).map_err(|_| bad)?;
-    if bytes.len() as u64 > CAP {
-        return Err(bad);
+    let common_dir = walk(None, common, false).map_err(|_| not_ours)?;
+    let admin = if kind.is_dir() && dotgit == common {
+        common_dir
+    } else if kind.is_file() {
+        let worktrees = common_dir.child("worktrees", false).map_err(|_| not_ours)?;
+        let want = dotgit.to_str().ok_or(not_ours)?;
+        let mut found = None;
+        for name in worktrees.names().map_err(|_| not_ours)? {
+            let Ok(dir) = worktrees.child(&name, false) else { continue };
+            let back = dir.read_single_link("gitdir", 4096).ok().and_then(|b| String::from_utf8(b).ok());
+            if back.as_deref().map(|s| s.trim_end_matches('\n')) == Some(want) {
+                if found.is_some() {
+                    return Err(not_ours);
+                }
+                found = Some(dir);
+            }
+        }
+        found.ok_or(not_ours)?
+    } else {
+        return Err(not_ours);
+    };
+    match admin.read_single_link("index", CAP) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("the worktree's git index isn't a plain file with one link"),
     }
-    Ok(Some(bytes))
 }
 
 fn save_evidence(base: &Path, slug: &str, json: &[u8]) -> std::io::Result<()> {
