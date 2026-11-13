@@ -7,7 +7,7 @@ import type { ReactNode } from "react";
 import { S } from "../../strings";
 import type { StatusKey } from "../../strings";
 import { api, onChanged } from "../ipc";
-import { ownedRead } from "../reads";
+import { forgetRead, ownedRead } from "../reads";
 import type { Campaign, CrewNodeDto, InboxItem } from "../ipc";
 import { problemDetail } from "../screens/states";
 import { parseWorkerProvider } from "../workerProvider";
@@ -122,6 +122,8 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let later: ReturnType<typeof setTimeout> | undefined;
     const off = onChanged(() => {
+      // The core says something moved: a read already in flight started before that and must not be joined.
+      forgetRead();
       const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
       if (wait <= 0) load();
       else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);

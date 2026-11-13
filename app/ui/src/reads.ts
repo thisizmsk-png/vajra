@@ -11,11 +11,14 @@ export function ownedRead<T>(key: string, read: () => Promise<T>, freshMs = 0): 
   if (e?.flight) { counts.hits += 1; return e.flight as Promise<T>; }
   if (e && freshMs > 0 && "value" in e && Date.now() - e.at < freshMs) { counts.hits += 1; return Promise.resolve(e.value as T); }
   counts.misses += 1;
-  const flight = read().then(
-    (value) => { entries.set(key, { at: Date.now(), value }); return value; },
-    (err) => { entries.delete(key); throw err; },
+  // A flight that was forgotten or replaced while it ran still answers its own callers, but never becomes the kept value.
+  const mine: Entry = { at: e?.at ?? 0, value: e?.value };
+  const flight: Promise<T> = read().then(
+    (value) => { if (entries.get(key) === mine) entries.set(key, { at: Date.now(), value }); return value; },
+    (err) => { if (entries.get(key) === mine) entries.delete(key); throw err; },
   );
-  entries.set(key, { at: e?.at ?? 0, value: e?.value, flight });
+  mine.flight = flight;
+  entries.set(key, mine);
   return flight;
 }
 
