@@ -4,6 +4,7 @@ import { setTransport } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
+import { Live, liveRun } from "./liveRun";
 
 afterEach(() => {
   cleanup();
@@ -31,9 +32,10 @@ const base = { active_runs: { count: 0, runs: [] }, crew: tree, tail: { lines: [
 
 async function open(replies: Record<string, unknown> = {}) {
   window.location.hash = "#/crew?slug=camp&id=r1";
-  const f = fakeIpc({ ...base, ...replies });
+  // A live run: its worker's task is polled.
+  const f = fakeIpc({ ...base, ...liveRun(), ...replies });
   setTransport(f.transport);
-  render(<Crew />);
+  render(<Live><Crew /></Live>);
   fireEvent.click((await screen.findByText("round 1")).closest("[role=treeitem]") as HTMLElement);
   return f;
 }
@@ -83,6 +85,54 @@ describe("Worker tabs (S2c, US-2.3)", () => {
     expect(await screen.findByText(/second attempt green/)).toBeTruthy();
     expect(screen.queryByText(/all green/)).toBeNull();
     vi.useRealTimers();
+  });
+
+  it("reads the final report when the run ends between task polls, with no event to say so", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let ended = false;
+    // The final report is visible only from the moment the app learns the run ended: no task poll before that sees it,
+    // so only a read on the live-to-finished transition can.
+    let endSeen = false;
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    const f = fakeIpc({
+      ...base, ...liveRun(),
+      active_runs: () => {
+        if (ended) endSeen = true;
+        return ended ? { count: 0, runs: [] } : liveRun().active_runs;
+      },
+      task: () => ({ ...task, task: { ...task.task, attempts: endSeen ? 3 : 2, report: endSeen ? { status: "done", summary: "final report" } : task.task.report } }),
+    });
+    setTransport(f.transport);
+    render(<Live><Crew /></Live>);
+    // The worker is opened a second after the screen, so its task poll ticks between the provider's (no shared tick).
+    const row = (await screen.findByText("round 1")).closest("[role=treeitem]") as HTMLElement;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    fireEvent.click(row);
+    fireEvent.click(await tab(S.crew.tabs.task));
+    expect(await screen.findByText(/all green/)).toBeTruthy();
+    ended = true;
+    for (let i = 0; i < 300 && !endSeen; i++) await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(endSeen).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(await screen.findByText(/final report/)).toBeTruthy();
+    // Then nothing more: the pane is at rest with the run.
+    const reads = f.calls.filter((c) => c.cmd === "task").length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(f.calls.filter((c) => c.cmd === "task").length).toBe(reads);
+    vi.useRealTimers();
+  });
+
+  it("reads the task again on a `changed` event at rest", async () => {
+    let later = false;
+    const f = await open({
+      active_runs: { count: 0, runs: [] },
+      task: () => ({ ...task, task: { ...task.task, report: later ? { status: "done", summary: "after the event" } : task.task.report } }),
+    });
+    fireEvent.click(await tab(S.crew.tabs.task));
+    expect(await screen.findByText(/all green/)).toBeTruthy();
+    later = true;
+    act(() => f.emit("changed", {}));
+    expect(await screen.findByText(/after the event/)).toBeTruthy();
   });
 
   it("Diff says when there is nothing to show, was cut off, or failed", async () => {

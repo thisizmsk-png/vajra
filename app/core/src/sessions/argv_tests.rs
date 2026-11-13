@@ -323,6 +323,29 @@ fn lead_agents_json_is_one_valid_agent() {
     assert_eq!(v.as_object().unwrap().len(), 1);
 }
 
+/// The bench rig's "lead" arm (app/bench/ade/anatomy_arms.json) measures the Director-General's first request. It must be
+/// the production launch minus only what needs the app's own files: the settings file, the MCP config, and the six MCP
+/// tools. So its prompt, agent, permission mode and built-in tool list are pinned to `build_lead_argv`, and a change to
+/// `LEAD_AGENTS` fails here until the arms file follows.
+#[test]
+fn the_bench_rigs_lead_arm_is_the_production_launch_minus_the_apps_own_files() {
+    let arms: serde_json::Value = serde_json::from_str(include_str!("../../../bench/ade/anatomy_arms.json")).unwrap();
+    let arm: Vec<String> = arms["lead"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect();
+    let prod = lead(false);
+    for flag in ["--setting-sources", "--permission-mode", "--agents", "--agent"] {
+        assert_eq!(after(&arm, flag), after(&prod, flag), "{flag}");
+    }
+    assert!(arm.iter().any(|a| a == "--strict-mcp-config"));
+    let builtin: Vec<&str> = LEAD_TOOLS.split(',').filter(|t| !t.starts_with("mcp__")).collect();
+    assert_eq!(after(&arm, "--tools"), builtin.join(","));
+    // Nothing else sneaks in: these flags, and no more.
+    let flags: std::collections::BTreeSet<&str> = arm.iter().filter(|a| a.starts_with("--")).map(String::as_str).collect();
+    assert_eq!(
+        flags.into_iter().collect::<Vec<_>>(),
+        ["--agent", "--agents", "--permission-mode", "--setting-sources", "--strict-mcp-config", "--tools"]
+    );
+}
+
 const KEY: &str = "SENTINEL-sk-or-v1-0123456789";
 
 fn gateway(effort: Option<&str>) -> Vec<String> {

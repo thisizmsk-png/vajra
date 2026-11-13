@@ -1455,6 +1455,19 @@ impl Gitw {
         Ok(d)
     }
 
+    /// The paths an integration changed from `base` to `head`, tree to tree (no worktree file is read, no filter runs).
+    pub fn diff_paths(&self, it: &Ticket, base: &str, head: &str) -> R<Vec<String>> {
+        if !valid_oid(base) || !valid_oid(head) {
+            return Err(GitwError::Invalid("commit ids"));
+        }
+        self.preflight(it)?;
+        let o = self.ok("diff-tree", Call::new(At::Pinned(it), &["diff-tree", "-r", "--name-only", "-z", "--no-renames", base, head]))?;
+        if !o.whole() {
+            return Err(GitwError::Git { step: "diff-tree", first_line: "output too large".into() });
+        }
+        Ok(o.stdout.split('\0').filter(|s| !s.is_empty()).map(String::from).collect())
+    }
+
     /// Fresh private index at `name`, loaded from `dispatch_head`.
     fn fresh_index(&self, t: &Ticket, name: &str) -> R<PathBuf> {
         let idx = t.private.join(name);

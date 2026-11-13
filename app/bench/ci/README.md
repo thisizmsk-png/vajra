@@ -11,7 +11,7 @@
 ## Why the measurement is built this way
 Six CI runs (18 launches) showed two noise sources on the shared macOS runner:
 - **Foreign WebKit helpers.** Other processes start WebKit helpers during a launch; a sample then counts them (helper count 4 or 7 instead of 2) and reads 144 to 260 MiB of WebKit instead of about 80. `measure.py` drops samples whose helper count is above the smallest seen in that launch (`launch_summary`, unit-tested) and records the helper counts in `idle.json`.
-- **Renderer variance.** On clean launches the app process is steady (89 to 94 MiB) but the WebContent process swings 74 to 90 MiB, so a launch total spans 166 to 183 MiB (mean 174.8, sd 4.9). One run is the median of 5 fresh launches (was 3), which cuts the spread of the reported number to about sd 3.
+- **Renderer variance.** On clean launches the app process is steady (89 to 94 MiB) but the WebContent process swings 74 to 90 MiB, so a launch total spans 166 to 183 MiB (mean 174.8, sd 4.9). One run is the median of 5 fresh launches (was 3), which cuts the spread of the reported number to about sd 3. Since the owner's decision of 2026-11-12 a run makes 6 launches: launch 1 is warm-up and is not gated, and the gate judges the median of the other 5. Launch 1 read the highest in almost every CI run (191 to 203 MiB against about 185 for the settled launches). The warm-up launch is still checked for unknown helper types and for an unbaselined flavour, so leaving it out of the median cannot hide a failure. `idle.json` also records each launch's macOS `footprint` (what the app, its PTY children and its WebKit helpers dirty, without shared framework pages) and its median as `footprint_median_mib`; it is shown in the job summary beside the RSS median and is reported only, never gated. The baseline (181.6, so a gate of 187.0 with the 5.45 MiB tolerance) and the tolerance did not change.
 
 The baseline is the pooled clean mean (175.0) and the tolerance stays max(5 MiB, 3%) (5.25 at 175): about 2 sigma of the reported number, so a false failure is rare but not impossible. The 200 MiB budget is the real limit on real machines; CI gets 240 only for the GPU flavour (see the owner ruling below). The runner idles lower than a dev Mac (about 175 vs 190 MiB; 2 helpers vs 3), so compare runner numbers only with runner numbers. If it still flaps on unchanged code, the next lever is more launches, not a wider margin.
 
@@ -45,6 +45,14 @@ skips with a one-line summary note. The per-PR idle gate (`memory` job) is uncha
 
 To start gating it, record a baseline with the bump procedure below: set `post_load_mib` on the flavour from the median
 `plus10_mib` of at least 3 green runs. Until then a run over the 200 MiB budget or over that baseline only warns.
+
+## No waiting calls
+`waiting_calls.py` (run by the `ci` workflow on every OS, with its tests) counts what can block the window and compares it with `waiting-calls.json`:
+- **Main-thread commands.** A Tauri command written as a plain `fn` with `#[tauri::command]` runs on the main thread; `#[tauri::command(async)]` and `async fn` do not. The allowance lists them by name, so swapping one for another fails as well. The terminal's input, resize, ack, visible, attach and list commands are on the list on purpose (input must keep its order and each only takes a short lock), and so are the two on-demand reports.
+- **Blocking calls written in those commands' bodies** (file reads, sleeps, child processes, channel waits). Only the body is read, so a callee in another module is not followed: this is a floor, not a proof.
+- **Synchronous calls in the UI source** (`XMLHttpRequest`, `Atomics.wait`, anything named `...Sync(`), test files left out. Tauri's `invoke` is a promise, so the allowance is 0.
+
+The number only goes down, in both directions: above the allowance fails, and so does below it, with the line to write, so an earlier PR's saving cannot be spent by a later one. A new command should be `#[tauri::command(async)]`. To move the allowance, run `python3 app/bench/ci/waiting_calls.py --write` and review the diff of `waiting-calls.json`.
 
 ## Updating the baseline
 `baseline.json` is never written by CI. To add or move an entry: open a PR that sets `identities["<identity>"].flavours["<flavour key>"] = {"idle_mib": X, "provisional": false, "measured": "..."}`, where `N` is the flavour key (the helper type set, e.g. `GPU+Networking+WebContent`) and `X` is the median of `median_of_medians_mib` over at least 3 green runs that reported that identity and flavour (list the run IDs in `measured`). With fewer runs, set `"provisional": true` and say so. Say why in the PR. The owner reviews it, because it moves the regression line.

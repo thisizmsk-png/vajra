@@ -168,16 +168,16 @@ describe("Settings > Providers > Accounts", () => {
     expect(lines.length).toBeGreaterThanOrEqual(2);
     const ids = FIXTURE_ACCOUNTS.accounts.flatMap((a) => a.models.map((m) => m.id));
     for (const text of lines) {
-      expect(text).toMatch(/^.+ · .+$/);
+      expect(text).toMatch(/^.+ via .+$/);
       expect(ids).not.toContain(text);
       expect(ids.some((id) => text.startsWith(id))).toBe(false);
     }
-    expect(lines).toContain("DeepSeek V3.2 · OpenRouter");
-    // The helper itself: a model the core gave no name for still reads "id · provider", never the id alone.
+    expect(lines).toContain("DeepSeek V3.2 via OpenRouter");
+    // The helper itself: a model the core gave no name for still reads "id via provider", never the id alone.
     const or = parseAccounts(FIXTURE_ACCOUNTS);
     const acc = (or.ok ? or.value.accounts[2] : null) as Account;
-    expect(modelLine(acc, "unlisted/model-1", C.defaultModel)).toBe("unlisted/model-1 · OpenRouter");
-    expect(modelLine(acc, null, C.defaultModel)).toBe(`${C.defaultModel} · OpenRouter`);
+    expect(modelLine(acc, "unlisted/model-1", C.defaultModel)).toBe("unlisted/model-1 via OpenRouter");
+    expect(modelLine(acc, null, C.defaultModel)).toBe(`${C.defaultModel} via OpenRouter`);
   });
 
   it("OpenRouter models are labelled New and carry their tool-use check; other accounts' rows are not", async () => {
@@ -378,22 +378,22 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
     const docs = within(s).getByLabelText(A.pickLabel(A.role.docs)) as HTMLSelectElement;
     expect(docs.value).toBe("openrouter|deepseek/deepseek-v3.2");
     expect(docs.querySelector("option[disabled]")).toBeNull(); // not shown as stale
-    expect(options(docs)).toContain("DeepSeek V3.2 · OpenRouter");
-    expect(options(docs)).toContain("Grok 4 · OpenRouter"); // every model on the account is in the ceiling
+    expect(options(docs)).toContain("DeepSeek V3.2 via OpenRouter");
+    expect(options(docs)).toContain("Grok 4 via OpenRouter"); // every model on the account is in the ceiling
   });
 
-  it("reads the project's agents; every option reads Model · provider; only allowed choices are offered", async () => {
+  it("reads the project's agents; every option reads Model via provider; only allowed choices are offered", async () => {
     settings();
     const s = await section();
     const def = within(s).getByLabelText(A.pickLabel(A.defaultAgent)) as HTMLSelectElement;
     expect(def.value).toBe("claude|");
-    expect(options(def)).toEqual([`${C.defaultModel} · Claude Code`, `${C.defaultModel} · Codex CLI`, "DeepSeek V3.2 · OpenRouter"]);
+    expect(options(def)).toEqual([`${C.defaultModel} via Claude Code`, `${C.defaultModel} via Codex CLI`, "DeepSeek V3.2 via OpenRouter"]);
     for (const sel of within(s).getAllByRole("combobox")) {
-      for (const o of options(sel)) if (o !== A.useDefault && o !== A.effortDefault && !["low", "medium", "high"].includes(o ?? "")) expect(o).toMatch(/^.+ · .+$/);
+      for (const o of options(sel)) if (o !== A.useDefault && o !== A.effortDefault && !["low", "medium", "high"].includes(o ?? "")) expect(o).toMatch(/^.+ via .+$/);
     }
     // Grok 4 is not allowed: no picker offers it, and its checkbox is off.
-    expect(within(s).queryByRole("option", { name: "Grok 4 · OpenRouter" })).toBeNull();
-    expect((within(s).getByRole("checkbox", { name: /Grok 4 · OpenRouter/ }) as HTMLInputElement).checked).toBe(false);
+    expect(within(s).queryByRole("option", { name: "Grok 4 via OpenRouter" })).toBeNull();
+    expect((within(s).getByRole("checkbox", { name: /Grok 4 via OpenRouter/ }) as HTMLInputElement).checked).toBe(false);
     const docs = within(s).getByLabelText(A.pickLabel(A.role.docs)) as HTMLSelectElement;
     expect(docs.value).toBe("openrouter|deepseek/deepseek-v3.2");
     expect((within(s).getByLabelText(A.pickLabel(A.role.backend)) as HTMLSelectElement).value).toBe("");
@@ -402,12 +402,12 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
   it("allowing a model offers it in the pickers; one a default still uses cannot be turned off", async () => {
     settings();
     const s = await section();
-    const claude = within(s).getByRole("checkbox", { name: new RegExp(`${C.defaultModel} · Claude Code`) }) as HTMLInputElement;
+    const claude = within(s).getByRole("checkbox", { name: new RegExp(`${C.defaultModel} via Claude Code`) }) as HTMLInputElement;
     expect(claude.disabled).toBe(true); // the project default
     expect(claude.getAttribute("aria-describedby")).toBeTruthy();
     expect(document.getElementById(claude.getAttribute("aria-describedby") ?? "")?.textContent).toBe(A.inUse);
-    fireEvent.click(within(s).getByRole("checkbox", { name: /Grok 4 · OpenRouter/ }));
-    expect(options(within(s).getByLabelText(A.pickLabel(A.role.backend)))).toContain("Grok 4 · OpenRouter");
+    fireEvent.click(within(s).getByRole("checkbox", { name: /Grok 4 via OpenRouter/ }));
+    expect(options(within(s).getByLabelText(A.pickLabel(A.role.backend)))).toContain("Grok 4 via OpenRouter");
   });
 
   it("a saved pick whose account is gone stays visible as a disabled option, so what is shown is what Save stores", async () => {
@@ -419,7 +419,7 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
     expect(docs.value).toBe("retired|old/model-1");
     const opt = [...docs.options].find((o) => o.value === "retired|old/model-1");
     expect(opt?.disabled).toBe(true);
-    expect(opt?.textContent).toBe("old/model-1 · retired");
+    expect(opt?.textContent).toBe("old/model-1 via retired");
   });
 
   it("effort is offered only where the account has an effort setting", async () => {
@@ -437,11 +437,11 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
     const f = settings({ provider_agents: { ...clone(AGENTS), allowed } });
     const s = await section();
     const box = (name: string) => within(s).getByText(name, { selector: "[data-model-line]" }).closest("label")!.querySelector("input") as HTMLInputElement;
-    expect(box("DeepSeek V3.2 · OpenRouter").disabled).toBe(true); // the Docs role uses it
-    expect(box("Grok 4 · OpenRouter").checked).toBe(true);
-    expect(box("Grok 4 · OpenRouter").disabled).toBe(false);
-    fireEvent.click(box("Grok 4 · OpenRouter"));
-    expect(box("Grok 4 · OpenRouter").checked).toBe(false);
+    expect(box("DeepSeek V3.2 via OpenRouter").disabled).toBe(true); // the Docs role uses it
+    expect(box("Grok 4 via OpenRouter").checked).toBe(true);
+    expect(box("Grok 4 via OpenRouter").disabled).toBe(false);
+    fireEvent.click(box("Grok 4 via OpenRouter"));
+    expect(box("Grok 4 via OpenRouter").checked).toBe(false);
     fireEvent.click(within(s).getByRole("button", { name: A.save }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "provider_agents_save")).toBe(true));
     const sent = f.calls.find((c) => c.cmd === "provider_agents_save")?.args as { agents: { allowed: Array<{ account: string; model: string | null }> } };
@@ -458,13 +458,13 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
     const f = settings({ provider_accounts: accounts, provider_agents: agents });
     const s = await section();
     const box = (name: string) => within(s).getByText(name, { selector: "[data-model-line]" }).closest("label")!.querySelector("input") as HTMLInputElement;
-    expect(box("GPT X · Codex CLI").checked).toBe(true);
-    expect(box("GPT X · Codex CLI").disabled).toBe(true); // under the default row: turn the default off first
-    fireEvent.click(box(`${C.defaultModel} · Codex CLI`));
-    expect(box("GPT X · Codex CLI").disabled).toBe(false);
-    expect(box(`${C.defaultModel} · Codex CLI`).checked).toBe(false);
-    expect(box("GPT X · Codex CLI").checked).toBe(true);
-    expect(box("GPT Y · Codex CLI").checked).toBe(true);
+    expect(box("GPT X via Codex CLI").checked).toBe(true);
+    expect(box("GPT X via Codex CLI").disabled).toBe(true); // under the default row: turn the default off first
+    fireEvent.click(box(`${C.defaultModel} via Codex CLI`));
+    expect(box("GPT X via Codex CLI").disabled).toBe(false);
+    expect(box(`${C.defaultModel} via Codex CLI`).checked).toBe(false);
+    expect(box("GPT X via Codex CLI").checked).toBe(true);
+    expect(box("GPT Y via Codex CLI").checked).toBe(true);
     fireEvent.click(within(s).getByRole("button", { name: A.save }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "provider_agents_save")).toBe(true));
     const sent = f.calls.find((c) => c.cmd === "provider_agents_save")?.args as { agents: { allowed: Array<{ account: string; model: string | null }> } };

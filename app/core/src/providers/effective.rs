@@ -91,7 +91,7 @@ impl Effective {
 
 /// What a surface draws beside a worker: the `provider` object of the UI contract (`app/ui/src/workerProvider.ts`,
 /// `parseWorkerProvider`). Every field the UI requires is here, under the UI's own names.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ProviderTag {
     pub account: String,
     /// The provider's name as people know it ("Claude Code", "OpenRouter"): shown beside every model.
@@ -109,7 +109,7 @@ pub struct ProviderTag {
     pub error: Option<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TagRequested {
     pub model: Option<String>,
     pub model_name: Option<String>,
@@ -170,15 +170,12 @@ fn clean(v: Option<&Value>) -> Option<String> {
         .map(String::from)
 }
 
-/// The `thread_id` of the `thread.started` event in a Codex `--json` stream. Only a plain id is returned, since it is
-/// matched against file names.
+/// The `thread_id` of the first `thread.started` event in a Codex `--json` stream: the harness's own, printed before
+/// anything the session runs. A later one, or a valid one after an invalid first, is never taken (#185 bhishma L1).
+/// Only a plain id is returned, since it is matched against file names.
 pub fn codex_thread_id(events: &str) -> Option<String> {
-    events.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find_map(|e| {
-        (e["type"] == "thread.started")
-            .then(|| e["thread_id"].as_str().map(String::from))
-            .flatten()
-            .filter(|t| (8..=64).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
-    })
+    let first = events.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "thread.started")?;
+    first["thread_id"].as_str().map(String::from).filter(|t| (8..=64).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
 }
 
 /// Entries listed from one directory at most.
@@ -290,6 +287,36 @@ pub fn codex_rollout(events: &str, codex_home: &Path) -> Option<String> {
     let mut text = String::new();
     file.take(MAX_READ).read_to_string(&mut text).ok()?;
     Some(text)
+}
+
+/// A Codex session's final answer, from its own session file: `last_agent_message` of the last `task_complete` event.
+/// The file is written by Codex in its home, outside the session's writable roots; the `--json` stream is the session's
+/// terminal, which anything the session runs can print on (#167 H1, vajra-63's residual). The last `MAX_READ` bytes
+/// are read, so a long session's end is never cut off. `None`: no thread id, no file, or no answered turn.
+pub fn codex_last_message(events: &str, codex_home: &Path) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = codex_thread_id(events).and_then(|t| rollout_file(codex_home, &t))?;
+    let len = file.metadata().ok()?.len();
+    let from = len.saturating_sub(MAX_READ);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_READ).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    // A file Codex is still writing (no final newline) has no answer yet.
+    if !text.ends_with('\n') {
+        return None;
+    }
+    // From the middle of the file, the first line may be cut: it is skipped. Walking back from the end, every line
+    // up to the last `task_complete` must parse: one that doesn't (too long for the window, cut, or garbled) could be
+    // the real answer, so none is taken, never an earlier turn's (#185 bhishma L2).
+    let lines: Vec<&str> = text.lines().skip(usize::from(from > 0)).collect();
+    for l in lines.into_iter().rev().filter(|l| !l.trim().is_empty()) {
+        let e = serde_json::from_str::<Value>(l.trim()).ok()?;
+        if e["type"] == "event_msg" && e["payload"]["type"] == "task_complete" {
+            return e["payload"]["last_agent_message"].as_str().map(String::from);
+        }
+    }
+    None
 }
 
 /// What a Claude worker ran on, from the `system`/`init` event of its stream. Claude has no effort setting here, so the
