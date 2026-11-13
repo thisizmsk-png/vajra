@@ -30,6 +30,8 @@ use crate::crew::redact::Redactor;
 use crate::crew::roles::{self, Kind};
 use crate::crew::security;
 use super::record::{Event, PlanRecord, RecordCard, RunRecord, TaskRecord};
+use super::runlog::{Kind as LogKind, Source as LogSource};
+use super::runlog_store::{LogCard, RunLog};
 use crate::vajra::bridge::{Feature, TaskStatus};
 use crate::vajra::bridge_record::{FEATURE_MAX, one_line};
 use crate::vajra::gitw::{Gitw, GitwError};
@@ -355,6 +357,8 @@ pub struct RunCard {
     pub lead_notes: Option<String>,
     /// The signed run record: its notes, a held lock, a broken signature (6h).
     pub record: Option<RecordCard>,
+    /// The run's hash-chained log: its head, what is on disk, and a break if one was found (W2).
+    pub log: Option<LogCard>,
 }
 
 // ---------------------------------------------------------------- state
@@ -450,6 +454,8 @@ struct Inner {
     changed: Condvar,
     /// The signed run record (6h). `None` only in tests of the rules alone.
     record: Option<Arc<dyn RunRecord>>,
+    /// The run's hash-chained log (W2), anchored into the record. `None` only in tests of the rules alone.
+    log: Option<Arc<RunLog>>,
 }
 
 /// One run's protocol. Cheap to clone.
@@ -490,13 +496,29 @@ impl RunProtocol {
     pub fn new(cfg: RunConfig, workers: Arc<dyn Workers>, gate: Arc<dyn RoundGate>, clock: Arc<dyn RunClock>) -> Self {
         let now = clock.now();
         let st = St { last_call: now, started: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
-        RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new(), record: None }))
+        RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new(), record: None, log: None }))
     }
 
     /// The run with its signed record (6h). Called once, before the protocol is shared.
     pub fn with_record(self, record: Arc<dyn RunRecord>) -> Self {
         let mut inner = Arc::try_unwrap(self.0).unwrap_or_else(|_| panic!("with_record is called before the protocol is shared"));
+        if let Some(l) = &inner.log {
+            l.set_record(Arc::clone(&record));
+        }
         inner.record = Some(record);
+        RunProtocol(Arc::new(inner))
+    }
+
+    /// The run with its hash-chained log (W2), anchored into the record when it has one. Called once, before the
+    /// protocol is shared. A resumed run's log continues after its last good entry; `resumed_from` names the run this
+    /// one continues.
+    pub fn with_log(self, log: Arc<RunLog>, resumed_from: Option<String>) -> Self {
+        let mut inner = Arc::try_unwrap(self.0).unwrap_or_else(|_| panic!("with_log is called before the protocol is shared"));
+        if let Some(r) = &inner.record {
+            log.set_record(Arc::clone(r));
+        }
+        let _ = log.append(LogSource::Core, LogKind::RunStarted { resumed_from });
+        inner.log = Some(log);
         RunProtocol(Arc::new(inner))
     }
 
@@ -504,6 +526,35 @@ impl RunProtocol {
         if let Some(r) = &self.0.record {
             r.send(e);
         }
+    }
+
+    /// Log one core event. In memory only here (the log's thread writes it), so it may run under the protocol lock.
+    fn log(&self, k: LogKind) {
+        self.log_as(LogSource::Core, k);
+    }
+
+    fn log_as(&self, s: LogSource, k: LogKind) {
+        if let Some(l) = &self.0.log {
+            let _ = l.append(s, k);
+        }
+    }
+
+    /// Send the log's head to the signed record once everything logged so far is written.
+    fn anchor(&self) {
+        if let Some(l) = &self.0.log {
+            l.anchor();
+        }
+    }
+
+    /// W1's token and weight receipt for the run or one task (`scope`: `run` or `task:<id>`). It is logged before the
+    /// run's last anchor, so the signed record covers it.
+    pub fn receipt(&self, scope: &str, model: &str, tokens: super::runlog::Tokens, usd_micros: u64, weight: Option<super::runlog::Weight>) {
+        self.log(LogKind::Receipt { scope: scope.into(), model: model.into(), tokens, usd_micros, weight });
+    }
+
+    /// The run's log, for `run_log_since` and verification.
+    pub fn run_log(&self) -> Option<Arc<RunLog>> {
+        self.0.log.clone()
     }
 
     /// The task graph id of a plan task (`TID` in the workflow).
@@ -587,7 +638,7 @@ impl RunProtocol {
     ///   once it ended without one;
     /// - then `report` with its outcome, once it has ended.
     fn record_sync(&self, st: &mut St) {
-        if self.0.record.is_none() {
+        if self.0.record.is_none() && self.0.log.is_none() {
             return;
         }
         // Dependencies first (codex on #190): a prerequisite's done report reaches the queue before a dependent's
@@ -610,6 +661,8 @@ impl RunProtocol {
                 }
             }
             let Some(o) = v.outcome.filter(|_| ended) else { continue };
+            let outcome = json!(o).as_str().unwrap_or_default().to_string();
+            self.log(LogKind::TicketEnded { task: task.clone(), ticket: tk.clone(), outcome });
             st.reported.insert(tk);
             let status = match o {
                 Outcome::Done => TaskStatus::Done,
@@ -636,6 +689,9 @@ impl RunProtocol {
         let kill = st.kill.take();
         let finish = st.status.is_some() && !st.record_finishing;
         st.record_finishing |= finish;
+        if finish && let Some((s, why)) = &st.status {
+            self.log(LogKind::StatusSet { status: json!(s).as_str().unwrap_or_default().to_string(), reason: why.clone() });
+        }
         drop(st);
         if let Some(k) = kill {
             self.0.workers.kill_run(&self.0.cfg.run, k);
@@ -672,10 +728,15 @@ impl RunProtocol {
                 Self::unreported(&st)
             };
             let left = deadline.saturating_duration_since(Instant::now());
-            if open.is_empty() || left.is_zero() || self.0.record.is_none() {
+            if open.is_empty() || left.is_zero() || (self.0.record.is_none() && self.0.log.is_none()) {
                 break;
             }
             let _ = self.0.workers.await_any(&open, left.min(Duration::from_secs(1)));
+        }
+        // The last anchor covers every ticket's end and every receipt, and reaches the record's queue before its end.
+        if let Some(l) = &self.0.log {
+            l.anchor();
+            l.flush();
         }
         if let Some(r) = &self.0.record {
             r.end();
@@ -741,10 +802,28 @@ impl RunProtocol {
         if matches!(q, Question::PickSeat { .. }) && st.paused_at.is_none() {
             st.paused_at = Some(self.now());
         }
+        let (id, text) = Self::question_text(&q);
+        self.log(LogKind::Question { id, text });
         st.questions.push(q);
     }
 
-    fn answered(&self, st: &mut St, pick: impl Fn(&Question) -> bool) {
+    /// A question's log id (its kind) and its fields as text.
+    fn question_text(q: &Question) -> (String, String) {
+        let v = json!(q);
+        let id = v["kind"].as_str().unwrap_or_default().to_string();
+        let mut fields = v;
+        if let Some(m) = fields.as_object_mut() {
+            m.remove("kind");
+        }
+        (id, fields.to_string())
+    }
+
+    /// Drop the questions `pick` matches: answered by `by` (the human), or made stale by the core (a re-plan).
+    fn answered(&self, st: &mut St, by: LogSource, pick: impl Fn(&Question) -> bool) {
+        for q in st.questions.iter().filter(|q| pick(q)) {
+            let (id, text) = Self::question_text(q);
+            self.log_as(by.clone(), LogKind::Answer { id, text });
+        }
         st.questions.retain(|q| !pick(q));
         if let Some(p) = st.paused_at {
             if !st.questions.iter().any(|q| matches!(q, Question::PickSeat { .. })) {
@@ -934,7 +1013,7 @@ impl RunProtocol {
             }
         }
         // A seat question asked for the old role is stale; it is asked again below or at dispatch.
-        self.answered(st, |q| matches!(q, Question::PickSeat { task, .. } if role_changed.contains(task)));
+        self.answered(st, LogSource::Core, |q| matches!(q, Question::PickSeat { task, .. } if role_changed.contains(task)));
         let rework = match st.cur() {
             None => merged.iter().map(|t| t.id.clone()).collect(),
             Some(c) => c.rework.clone(),
@@ -959,7 +1038,8 @@ impl RunProtocol {
         self.record_replan(st, r, &before, &rework);
         let round = st.rounds.entry(r).or_default();
         round.planned = true;
-        round.rework = rework;
+        round.rework = rework.clone();
+        self.log(LogKind::PlanAccepted { round: r, tasks: rework });
         let specs = st.specs();
         PlanAccepted {
             round: r,
@@ -1043,6 +1123,7 @@ impl RunProtocol {
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));
         }
+        self.log(LogKind::Dispatched { task: id.to_string(), ticket: ticket.clone(), seat: slot.clone() });
         // The claim waits for the ticket's worktree (`record_sync`).
         self.record_sync(st);
         Ok(Dispatched::Ticket { ticket, slot })
@@ -1189,6 +1270,8 @@ impl RunProtocol {
         match merged {
             Ok(head) => {
                 st.last_good = Some((r, head.clone()));
+                self.log(LogKind::Integrated { round: r, ok: true, head: Some(head.clone()), why: None });
+                self.log(LogKind::ChecksStarted { round: r });
                 drop(st);
                 let (p, tasks) = (self.clone(), order.clone());
                 let spawned = std::thread::Builder::new().name(format!("vajra-round-{r}")).spawn(move || {
@@ -1212,6 +1295,7 @@ impl RunProtocol {
                     }
                     _ => order.iter().map(|t| (t.clone(), json!({"merge_failed": e.code()}))).collect(),
                 };
+                self.log(LogKind::Integrated { round: r, ok: false, head: None, why: Some(e.code().to_string()) });
                 self.round_failed(&mut st, r, fb);
                 self.release(st);
             }
@@ -1283,6 +1367,17 @@ impl RunProtocol {
     /// The round's checks answered. The status is fixed here when it passed, and nothing later overrides it.
     fn round_checked(&self, r: u32, v: RoundVerdict) {
         let mut st = self.lock();
+        // The gate's answer is the verifier channel: the only source of a verdict in the log (bhishma H1).
+        let verdict = match &v {
+            RoundVerdict::Passed => "passed",
+            RoundVerdict::Failed { .. } => "failed",
+        };
+        if st.status.is_some() {
+            // A verdict after the run ended changes nothing: it is logged as a no-op, not applied.
+            self.log(LogKind::Noop { what: format!("round {r} {verdict}"), why: "the run had already ended".into() });
+        } else {
+            self.log_as(LogSource::Verifier, LogKind::RoundVerdict { round: r, verdict: verdict.into() });
+        }
         if st.status.is_none() {
             match v {
                 RoundVerdict::Passed => {
@@ -1292,7 +1387,13 @@ impl RunProtocol {
                 RoundVerdict::Failed { feedback } => self.round_failed(&mut st, r, feedback),
             }
         }
+        let going = st.status.is_none();
         self.release(st);
+        // Each round's end is signed: its head goes to the record. Once the run has ended, `finish_record` anchors
+        // after its last events and before the record's end, so nothing is sent to an ended record.
+        if going {
+            self.anchor();
+        }
     }
 
     // ------------------------------------------------------------ finish_run
@@ -1358,6 +1459,7 @@ impl RunProtocol {
         let mut st = self.lock();
         st.turns += 1;
         st.tokens += tokens;
+        self.log(LogKind::LeadTurn { turns: st.turns, tokens: st.tokens });
         if st.status.is_none() && st.turns >= st.next_turn_ask {
             let q = Question::TurnBudget { turns: st.turns };
             if !st.questions.iter().any(|x| matches!(x, Question::TurnBudget { .. })) {
@@ -1392,7 +1494,7 @@ impl RunProtocol {
             if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == task) {
                 t.pick = Some(slot.to_string());
             }
-            self.answered(&mut st, |q| matches!(q, Question::PickSeat { task: t, .. } if t == task));
+            self.answered(&mut st, LogSource::Human, |q| matches!(q, Question::PickSeat { task: t, .. } if t == task));
             Ok(())
         })();
         self.release(st);
@@ -1404,7 +1506,7 @@ impl RunProtocol {
         let mut st = self.lock();
         st.last_call = self.now();
         st.next_turn_ask = st.turns + self.0.cfg.limits.lead_turn_budget;
-        self.answered(&mut st, |q| matches!(q, Question::StuckLead | Question::TurnBudget { .. }));
+        self.answered(&mut st, LogSource::Human, |q| matches!(q, Question::StuckLead | Question::TurnBudget { .. }));
         self.release(st);
     }
 
@@ -1432,6 +1534,7 @@ impl RunProtocol {
             questions: st.questions.clone(),
             lead_notes: st.notes.clone(),
             record: self.0.record.as_ref().map(|r| r.card()),
+            log: self.0.log.as_ref().map(|l| l.card()),
         }
     }
 
@@ -1458,6 +1561,10 @@ impl RunProtocol {
             self.record_sync(&mut st);
         }
         drop(st);
+        // The log first: an anchor it sends lands in the record's queue before the record flushes.
+        if let Some(l) = &self.0.log {
+            l.flush();
+        }
         if let Some(r) = &self.0.record {
             r.flush();
         }

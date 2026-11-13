@@ -401,3 +401,15 @@ export const api = {
 export type InboxNew = { project_id: string; kind: string; count: number };
 export const onInboxNew = (cb: (payload: InboxNew) => void) => transport.on("inbox_new", (p) => cb(p as InboxNew));
 export const onChanged = (cb: (payload: unknown) => void) => transport.on("changed", cb);
+
+// ---- a core run's hash-chained log (W2) -----------------------------------------------------------------------------
+
+/** One log entry as the core stores it. `kind` and `body` are typed per kind in the core; the UI reads them as data. */
+export type RunLogEntry = { v: number; seq: number; prev: string; at_ms: number; source: unknown; kind: string; body?: unknown; hash: string };
+export type RunLogBreak = { seq: number; why: "edited" | "dropped" | "reordered" | "unlinked" | "wrong_run" | "format" };
+export type RunLogPage = { run_id: string; entries: RunLogEntry[]; head_seq: number; broken: RunLogBreak | null; io_error: string | null };
+/** `run_log`: the run's log is written up to `seq`. Critical entries are told at once, the rest at most every 100 ms. */
+export type RunLogNotice = { run_id: string; seq: number };
+export const runLogSince = (runId: string, afterSeq: number, limit?: number) => call<RunLogPage>("run_log_since", { runId, afterSeq, limit });
+export const runLogVerify = (runId: string) => call<unknown>("run_log_verify", { runId });
+export const onRunLog = (cb: (payload: RunLogNotice) => void) => transport.on("run_log", (p) => cb(p as RunLogNotice));
