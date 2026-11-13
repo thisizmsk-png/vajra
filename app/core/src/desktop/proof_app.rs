@@ -119,7 +119,8 @@ impl App {
             let harness = s["harness"].as_str().unwrap_or("unknown harness");
             format!("{harness} ({})", s["account"].as_str().unwrap_or(""))
         });
-        (Some(trust), checker, seats["evidence_approval"]["consumed"] == true)
+        // N20: the core's own approval record, consumed by this run's evidence ticket (never a `seats.json` field).
+        (Some(trust), checker, self.evidence_approval_consumed(run))
     }
 
     /// The read-back record against the core's own write ledger. The ledger comes with the signed record (6h, #190);

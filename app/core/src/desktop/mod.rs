@@ -2531,6 +2531,7 @@ mod runindex;
 mod runview;
 pub mod proof;
 mod proof_app;
+mod evidence_approval;
 mod state;
 pub use state::Envelope;
 

@@ -321,6 +321,16 @@ fn act_post_proof_comment(app: State<'_, App>, envelope: Envelope, slug: String,
 }
 
 #[tauri::command(async)]
+fn evidence_approval(app: State<'_, App>, run_id: String) -> Res {
+    app.evidence_approval(&run_id)
+}
+
+#[tauri::command(async)]
+fn act_answer_evidence_approval(app: State<'_, App>, envelope: Envelope, run_id: String, sha256: String, approve: bool) -> Value {
+    app.act_answer_evidence_approval(&envelope, &run_id, &sha256, approve)
+}
+
+#[tauri::command(async)]
 fn verify_campaign(app: State<'_, App>, slug: String) -> Res {
     app.verify_campaign(&slug)
 }
@@ -774,6 +784,8 @@ fn main() {
             run_proof,
             export_proof_page,
             act_post_proof_comment,
+            evidence_approval,
+            act_answer_evidence_approval,
             resume_targets,
             crew,
             tail,
