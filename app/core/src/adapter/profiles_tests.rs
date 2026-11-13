@@ -125,8 +125,10 @@ fn profile_kv(network: bool) -> [String; 3] {
 /// project and temp dir writable and no network.
 #[test]
 fn the_codex_run_lead_runs_like_a_worker_with_no_approvals_and_its_outside_tools_off() {
-    let a = codex_run_lead_argv("exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP), off()).unwrap();
-    let mut want: Vec<String> = vec!["codex".into(), "-c".into(), "approval_policy=\"never\"".into()];
+    let bin = Path::new("/opt/tools/bin/codex");
+    let a = codex_run_lead_argv(bin, "exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP), off()).unwrap();
+    // bhishma #216 Low 1: the binary the proof ran, by its absolute path.
+    let mut want: Vec<String> = vec!["/opt/tools/bin/codex".into(), "-c".into(), "approval_policy=\"never\"".into()];
     for o in codex_profile_overrides(PROFILE, deny(), &[Path::new(WT), Path::new(TMP)], false).unwrap() {
         want.extend(["-c".into(), o]);
     }
@@ -139,9 +141,10 @@ fn the_codex_run_lead_runs_like_a_worker_with_no_approvals_and_its_outside_tools
     assert!(a.iter().any(|x| x.contains(&format!("\"{}\"=\"none\"", DENY[0]))), "{a:?}");
     assert!(a.iter().any(|x| x.ends_with(".network={enabled=false}")), "{a:?}");
     assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
-    assert!(codex_run_lead_argv("x", PROFILE, &[], Path::new(WT), Path::new(TMP), off()).is_err(), "never without the deny set");
-    assert!(codex_run_lead_argv("x", "vajra", deny(), Path::new(WT), Path::new(TMP), off()).is_err(), "never under a guessable name");
-    assert!(codex_run_lead_argv("x", PROFILE, deny(), Path::new(WT), Path::new(TMP), &[]).is_err(), "never without the switch-offs");
+    assert!(codex_run_lead_argv(bin, "x", PROFILE, &[], Path::new(WT), Path::new(TMP), off()).is_err(), "never without the deny set");
+    assert!(codex_run_lead_argv(bin, "x", "vajra", deny(), Path::new(WT), Path::new(TMP), off()).is_err(), "never under a guessable name");
+    assert!(codex_run_lead_argv(bin, "x", PROFILE, deny(), Path::new(WT), Path::new(TMP), &[]).is_err(), "never without the switch-offs");
+    assert!(codex_run_lead_argv(Path::new("codex"), "x", PROFILE, deny(), Path::new(WT), Path::new(TMP), off()).is_err(), "never the bare word");
 }
 
 /// S11 hostile-config check: a user table named like ours merges into it, so each launch gets a name nobody can guess,

@@ -814,9 +814,10 @@ impl App {
         Ok(engine)
     }
 
-    /// The switch-off values for a Codex Lead in `project`, proven with the user's own Codex (the login route: no extra
-    /// env). A managed layer, or anything the proof can't show, refuses the start with the cause named.
-    fn codex_off_for_lead(&self, project: &Path) -> Result<Vec<String>, Value> {
+    /// The codex binary and the switch-off values for a Codex Lead in `project`, proven with the user's own Codex (the
+    /// login route: no extra env). The Lead launches that same binary by its absolute path. A managed layer, or anything
+    /// the proof can't show, refuses the start with the cause named.
+    fn codex_off_for_lead(&self, project: &Path) -> Result<(PathBuf, Vec<String>), Value> {
         use crate::adapter::profiles as p;
         use crate::providers::detect::Probe;
         let probe = self.provider_probe();
@@ -826,8 +827,11 @@ impl App {
             return Err(fail("codex_tools_on", p::CODEX_MANAGED));
         }
         let dirs = self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs);
-        let run = p::codex_check_runner(&codex, project, &[], &dirs);
-        p::codex_tools_off(&run).map_err(|why| fail("codex_tools_on", why))
+        let off = {
+            let run = p::codex_check_runner(&codex, project, &[], &dirs);
+            p::codex_tools_off(&run).map_err(|why| fail("codex_tools_on", why))?
+        };
+        Ok((codex, off))
     }
 
     fn provider_probe(&self) -> crate::providers::detect::System {
@@ -1011,9 +1015,10 @@ impl App {
                 let profile = crate::adapter::profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
                 let real = |p: &Path| p.canonicalize().map_err(|e| fail("io_error", e));
                 let (project, tmp) = (real(&cwd)?, real(&std::env::temp_dir())?);
-                // bhishma #216: its hooks, plugins, MCP servers and notify proven off, as Codex runs in this project.
-                let off = self.codex_off_for_lead(&project)?;
-                crate::adapter::profiles::codex_run_lead_argv(&input.ask, &profile, &deny, &project, &tmp, &off).map_err(invalid_input)
+                // bhishma #216: its hooks, plugins, MCP servers and notify proven off, as Codex runs in this project. A
+                // second Lead in this project was already held by the one-run-per-project cap, under the launching lock.
+                let (codex, off) = self.codex_off_for_lead(&project)?;
+                crate::adapter::profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp, &off).map_err(invalid_input)
             }
         }, false, workers)?;
         self.note("run_started", &[]);

@@ -357,9 +357,11 @@ pub fn codex_profile_overrides(name: &str, deny: &[PathBuf], write: &[&Path], ne
 /// a fresh permission profile like a worker's: the Vajra dirs unreadable, writes only in the project folder and the
 /// system temp dir, no network, no approvals, and its outside tools proven off (`off`, from `codex_tools_off`). A Codex
 /// Lead's run is still never counted guarded (`evidence_of`): it is the user's own interactive session.
-pub fn codex_run_lead_argv(ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path, off: &[String]) -> Result<Vec<String>, InvalidInput> {
+pub fn codex_run_lead_argv(codex: &Path, ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path, off: &[String]) -> Result<Vec<String>, InvalidInput> {
     argv::check_ask(ask)?;
-    let mut a = vec!["codex".to_string()];
+    // bhishma #216 Low 1: the binary the proof ran, by its absolute path, never the bare word looked up on PATH again.
+    let codex = codex.to_str().filter(|c| codex.is_absolute() && !c.is_empty()).ok_or_else(|| bad("codex", "the proven codex must be an absolute UTF-8 path"))?;
+    let mut a = vec![codex.to_string()];
     // bhishma #216 M-Lead (vajra-1's decision): the Lead gets a worker's approvals and sandbox, with no way to run a
     // command outside it, and its outside tools proven off like a worker's.
     let mut kv = vec!["approval_policy=\"never\"".to_string()];
