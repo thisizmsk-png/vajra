@@ -1065,6 +1065,8 @@ fn replay_skips_and_counts_bad_lines_and_follows_no_link() {
     let life2 = next_life(&r);
     assert_eq!(life2.replay_gaps(), 5, "damaged, other run, v2, oversized, partial");
     assert_eq!(life2.view("r1.t1.r1").unwrap().outcome, Some(Outcome::Done));
+    // #178 codex: a rejected whole line may be the only copy of a ticket's id, so the run takes no dispatch.
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)));
     // A link planted at a run's folder, and one at a run's file: neither is read.
     let elsewhere = r.d.join("elsewhere");
     std::fs::create_dir_all(elsewhere.join("r7")).unwrap();
@@ -1074,6 +1076,33 @@ fn replay_skips_and_counts_bad_lines_and_follows_no_link() {
     std::os::unix::fs::symlink(elsewhere.join("r7/tickets.jsonl"), r.gw.data.join("runs/r8/tickets.jsonl")).unwrap();
     let life3 = next_life(&r);
     assert!(life3.list("r7").is_empty() && life3.list("r8").is_empty());
+    for run in ["r7", "r8"] {
+        assert!(matches!(life3.dispatch(r.task(run, "t1"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)), "{run}: an unread history");
+    }
+}
+
+/// #178 codex: a run whose only damage is a partial last line (the crash's own torn write: its `add` never returned,
+/// so no caller holds that id) stays dispatchable, while one whole rejected line, even with good lines around it, makes
+/// the run refuse dispatch on every later start.
+#[test]
+fn a_rejected_history_line_refuses_dispatch_but_a_torn_last_line_does_not() {
+    let r = rig("replay-reject", Opts::default());
+    for run in ["r1", "r2"] {
+        r.done(&r.rt.dispatch(r.task(run, "t1"), seat("w1", "codex")).unwrap());
+    }
+    use std::io::Write as _;
+    let first = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap().lines().next().unwrap().to_string();
+    let mut f = std::fs::OpenOptions::new().append(true).open(tickets_file(&r, "r1")).unwrap();
+    write!(f, "{}", &first[..first.len() / 2]).unwrap();
+    let damaged = std::fs::read_to_string(tickets_file(&r, "r2")).unwrap();
+    std::fs::write(tickets_file(&r, "r2"), format!("{{\"v\":1,\"event\":\"queued\",\"ticket\":{{}}}}\n{damaged}")).unwrap();
+    let life2 = next_life(&r);
+    let v = r.done_on(&life2, &life2.dispatch(r.task("r1", "t2"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "a torn last line alone leaves the run dispatchable");
+    assert!(matches!(life2.dispatch(r.task("r2", "t2"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)));
+    assert_eq!(life2.view("r2.t1.r1").map(|v| v.outcome), Some(Some(Outcome::Done)), "its good lines still replay");
+    let life3 = next_life(&r);
+    assert!(matches!(life3.dispatch(r.task("r2", "t2"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)), "and on every later start");
 }
 
 /// #178 codex P1: a FIFO planted at a run's `tickets.jsonl` with no writer does not block the start. It is refused

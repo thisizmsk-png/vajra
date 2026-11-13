@@ -398,7 +398,8 @@ pub enum DispatchError {
     Exists,
     /// The app is quitting: nothing new is queued.
     Closed,
-    /// This run's recorded history was not read whole at start (too large, or past the run cap), so which ticket ids it
+    /// This run's recorded history was not read whole at start (too large, unreadable, a rejected line, or past the run
+    /// cap), so which ticket ids it
     /// used is unknown: nothing new is dispatched into it (a new run is unaffected). When the runs folder itself could
     /// not be listed, every run answers this.
     HistoryIncomplete,
@@ -1426,8 +1427,11 @@ struct Replayed {
     views: BTreeMap<String, TicketView>,
     /// Lines (or files) it could not use.
     gaps: u64,
-    /// The file is over the read budget, so `views` is a prefix: no unended ticket in it may be taken as crashed, and
-    /// the run's later ids are unknown.
+    /// The history was not read whole: the file is over the read budget (so `views` is a prefix), it could not be
+    /// opened or read, or a whole line in it was rejected (#178 codex: that line may be the only copy of a ticket's id).
+    /// No unended ticket in it may be taken as crashed, and the run's used ids are unknown, so it takes no dispatch. A
+    /// partial last line alone does not make it incomplete: that is the crash's own torn write, whose `add` never
+    /// returned, so no caller holds its id and no worktree was made for it.
     incomplete: bool,
 }
 
@@ -1437,15 +1441,17 @@ fn replay_run(data: &std::path::Path, run: &str) -> Replayed {
     let f = match open_record_read(data, run) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
-        // A special file, or one that can't be opened: refused unread and counted.
+        // A special file, or one that can't be opened: refused unread, counted, and the run's ids are unknown.
         Err(_) => {
             out.gaps = 1;
+            out.incomplete = true;
             return out;
         }
     };
     let mut raw = Vec::new();
     if f.take(REPLAY_MAX_FILE + 1).read_to_end(&mut raw).is_err() {
         out.gaps = 1;
+        out.incomplete = true;
         return out;
     }
     let mut gaps = 0;
@@ -1469,7 +1475,10 @@ fn replay_run(data: &std::path::Path, run: &str) -> Replayed {
             Some(v) => {
                 out.views.insert(v.id.clone(), v);
             }
-            None => gaps += 1,
+            None => {
+                gaps += 1;
+                out.incomplete = true;
+            }
         }
     }
     out.gaps = gaps;
