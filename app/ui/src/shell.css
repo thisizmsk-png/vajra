@@ -50,6 +50,8 @@
 .v-launch .v-button--primary .v-kbd-group { display: none; }
 .v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
+/* The page title stands clear of the first section heading; flush, the two read as one two-line title. */
+h1.v-run__name { margin-bottom: var(--space-lg); }
 .v-run__row { display: flex; align-items: center; gap: var(--space-md); height: 100%; border-bottom: 1px solid var(--c-border); }
 .v-run__row > span { flex: 1; }
 .v-run__row > .v-badge { flex: none; }

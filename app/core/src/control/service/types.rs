@@ -4,6 +4,8 @@ use super::*;
 
 /// How long a queued message waits for the worker's next tool call.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
+/// The most ended core workers' nonces the redactor keeps carrying (oldest out first).
+pub const RETIRED_NONCES: usize = 4096;
 /// An inflight claim with no ack after this is "delivery unknown" (5.4 step 6).
 /// Cap for files a worker can write in the control dir (acks, stops).
 pub const MAX_ACK_BYTES: u64 = 16 * 1024;
