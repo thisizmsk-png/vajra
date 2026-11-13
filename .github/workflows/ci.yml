@@ -52,6 +52,10 @@ jobs:
       - name: Profile sampler unit tests
         if: runner.os == 'macOS'
         run: python3 -m unittest discover -s app/bench/profile
+      - name: No waiting calls (main-thread commands and sync UI calls only go down)
+        run: |
+          python3 -m unittest discover -s app/bench/ci -p "test_waiting_calls.py"
+          python3 app/bench/ci/waiting_calls.py
       - name: Build the UI (tauri::generate_context! needs app/ui/dist)
         if: runner.os == 'macOS'
         working-directory: app/ui

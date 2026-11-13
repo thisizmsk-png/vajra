@@ -5,6 +5,7 @@ import { S } from "../../../strings";
 import { api, errorText } from "../../ipc";
 import type { StreamWindow } from "../../ipc";
 import { onChangedPaced, usePoll } from "../../projects/poll";
+import { appendTail } from "./streamAppend";
 
 const POLL_MS = 1000;
 const EVENT_MIN_GAP_MS = 500;
@@ -16,6 +17,8 @@ const MARGIN = 100;
 /** Fetch the next window once the view comes within this many rows of an edge that has more beyond it. */
 const EDGE = MARGIN / 2;
 const WINDOW_ROWS = VISIBLE + 2 * MARGIN;
+/** A following pane appends this many times, then reads a whole window once, which also brings `first_seq` up to date. */
+const RESYNC_EVERY = 30;
 
 /** One worker's output: the core serves a window of rows and the view holds only that window. */
 export function StreamTab({ stream, live = true }: { stream: string; live?: boolean }) {
@@ -41,13 +44,33 @@ export function StreamTab({ stream, live = true }: { stream: string; live?: bool
   /** The latest `reconcile`, for `fetchWin` to re-check the view once an answer lands (an answer does not re-render the list's range). */
   const reconcileRef = useRef<() => void>(() => {});
 
+  /** Appends since the last whole-window read. `first_seq` only moves when a whole window is read, so it is refreshed every `RESYNC_EVERY`. */
+  const appended = useRef(0);
+
+  /**
+   * Following the live end with a window in hand: ask only for the lines after the last one held and append them (a poll
+   * that finds nothing new costs a few bytes, not a window). Any miss, error or resync falls back to a whole window.
+   */
+  const read = useCallback(async (from: number | null): Promise<StreamWindow> => {
+    const held = winRef.current;
+    const last = held?.lines[held.lines.length - 1]?.seq;
+    if (from === null && held && last !== undefined && appended.current < RESYNC_EVERY) {
+      try {
+        const next = appendTail(held, await api.tail(stream, last), WINDOW_ROWS);
+        if (next) { appended.current += 1; return next; }
+      } catch { /* a whole window below answers, or reports the failure itself */ }
+    }
+    appended.current = 0;
+    return api.streamWindow(stream, from, WINDOW_ROWS);
+  }, [stream]);
+
   const fetchWin = useCallback(async (from: number | null) => {
     want.current = from;
     if (busy.current) { queued.current = true; return; }
     busy.current = true;
     const g = gen.current;
     try {
-      let w = await api.streamWindow(stream, from, WINDOW_ROWS);
+      let w = await read(from);
       if (g !== gen.current || want.current !== from) return;
       setErr("");
       const first = w.lines[0]?.seq;
@@ -76,7 +99,7 @@ export function StreamTab({ stream, live = true }: { stream: string; live?: bool
         if (queued.current) { queued.current = false; void fetchWin(want.current ?? null); }
       }
     }
-  }, [stream]);
+  }, [stream, read]);
 
   /** Re-read what the view is on: the tail while following, otherwise the rows from the held start. */
   const refresh = useCallback(() => {
