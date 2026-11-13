@@ -129,7 +129,10 @@ impl App {
             }
             Err(why) => (runlog::Standing::NotVerified, None, Some(why)),
         };
-        let standing = if card.broken.is_some() { runlog::Standing::NotVerified } else { standing };
+        // A write or sync error, or an anchor skipped because of one, means the run didn't finish logging cleanly: not
+        // verified, even when the anchors that were sent still match (#222 review).
+        let clean = card.broken.is_none() && card.io_error.is_none() && card.skipped_anchors == 0;
+        let standing = if clean { standing } else { runlog::Standing::NotVerified };
         json!({
             "run_id": run_id,
             "head_seq": card.head_seq,
@@ -137,6 +140,8 @@ impl App {
             "broken": card.broken,
             "signed": signed,
             "record_error": record_error,
+            "io_error": card.io_error,
+            "skipped_anchors": card.skipped_anchors,
             "standing": standing,
             "verified": standing == runlog::Standing::Signed,
             "caveat": runlog::CAVEAT,

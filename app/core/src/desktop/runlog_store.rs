@@ -155,7 +155,7 @@ impl Snapshot {
     }
 
     pub fn card(&self) -> LogCard {
-        LogCard { head_seq: self.log.head_seq(), written_seq: self.log.head_seq(), broken: self.log.broken().cloned(), io_error: None }
+        LogCard { head_seq: self.log.head_seq(), written_seq: self.log.head_seq(), broken: self.log.broken().cloned(), io_error: None, skipped_anchors: 0 }
     }
 }
 
@@ -209,8 +209,11 @@ pub struct LogCard {
     pub head_seq: u64,
     pub written_seq: u64,
     pub broken: Option<runlog::Break>,
-    /// The file couldn't be written: entries after `written_seq` are in memory only.
+    /// The file couldn't be written or synced: entries after `written_seq` are in memory only, or not yet durable.
     pub io_error: Option<String>,
+    /// Anchors asked for (a round's end, the run's end) that weren't sent because of `io_error`: whatever came after
+    /// the last sent anchor is outside the signed prefix.
+    pub skipped_anchors: u32,
 }
 
 struct Shared {
@@ -222,6 +225,10 @@ struct Shared {
     notify: Mutex<Option<Notify>>,
     on_anchor: Mutex<Option<OnAnchor>>,
     record: Mutex<Option<Arc<dyn RunRecord>>>,
+    /// Anchors asked for but not sent because the log couldn't be made durable first.
+    skipped_anchors: Mutex<u32>,
+    #[cfg(test)]
+    fail_sync: std::sync::atomic::AtomicBool,
     tx: Mutex<mpsc::Sender<Msg>>,
 }
 
@@ -258,6 +265,9 @@ impl RunLog {
             notify: Mutex::new(None),
             on_anchor: Mutex::new(None),
             record: Mutex::new(None),
+            skipped_anchors: Mutex::new(0),
+            #[cfg(test)]
+            fail_sync: Default::default(),
             tx: Mutex::new(tx),
         });
         let worker = Arc::clone(&s);
@@ -279,6 +289,12 @@ impl RunLog {
 
     pub fn set_notify(&self, n: Notify) {
         *crate::lock(&self.s.notify) = Some(n);
+    }
+
+    /// Tests: make every sync from now on fail.
+    #[cfg(test)]
+    pub fn fail_syncs(&self) {
+        self.s.fail_sync.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn set_on_anchor(&self, f: OnAnchor) {
@@ -347,6 +363,7 @@ impl RunLog {
             written_seq: *crate::lock(&self.s.written),
             broken: log.broken().cloned(),
             io_error: crate::lock(&self.s.io_error).clone(),
+            skipped_anchors: *crate::lock(&self.s.skipped_anchors),
         }
     }
 }
@@ -442,7 +459,7 @@ impl Shared {
             line.push(b'\n');
             f.write_all(&line)?;
             if sync {
-                f.sync_data()?;
+                self.sync(f)?;
             }
             Ok(())
         })();
@@ -467,14 +484,28 @@ impl Shared {
     }
 
     /// Everything before this message is written: sync it, send its head to the signed record, then log that.
+    fn sync(&self, f: &std::fs::File) -> io::Result<()> {
+        #[cfg(test)]
+        if self.fail_sync.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::other("sync failed (test)"));
+        }
+        f.sync_data()
+    }
+
     fn anchor(&self, file: &mut Option<std::fs::File>) {
         let Some(record) = crate::lock(&self.record).clone() else { return };
         if crate::lock(&self.io_error).is_some() {
+            *crate::lock(&self.skipped_anchors) += 1;
             return;
         }
         if let Some(f) = file.as_ref()
-            && f.sync_data().is_err()
+            && let Err(e) = self.sync(f)
         {
+            // The durability barrier failed: the anchor is skipped, and that is shown, never silent (#222 review). The
+            // log stops here, so finalization and verification see a write error, not a cleanly finished log.
+            let written = *crate::lock(&self.written);
+            *crate::lock(&self.io_error) = Some(format!("the run log couldn't be synced to anchor seq {written}: {e}"));
+            *crate::lock(&self.skipped_anchors) += 1;
             return;
         }
         let written = *crate::lock(&self.written);

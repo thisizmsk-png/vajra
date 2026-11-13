@@ -1131,3 +1131,18 @@ fn the_protocol_redacts_log_text_before_it_is_hashed() {
     assert!(on_disk.contains("receipt") && !on_disk.contains(NONCE), "{on_disk}");
     assert_eq!(crate::desktop::runlog::verify("r1", &log.entries()).broken, None);
 }
+
+#[test]
+fn a_run_whose_final_anchor_cannot_be_synced_ends_with_the_error_on_its_card() {
+    let (r, rec, log) = logged_with(Limits::default());
+    r.p.plan_tasks(plan1()).unwrap();
+    log.flush();
+    log.fail_syncs();
+    r.p.stop();
+    r.p.flush_record();
+    let card = r.p.card().log.unwrap();
+    assert!(card.io_error.is_some(), "{card:?}");
+    assert!(card.skipped_anchors >= 1);
+    assert!(crate::desktop::runlog::anchors("r1", &progress_text(&rec)).is_empty(), "the run's end sent no anchor");
+    assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 1, "the record still ends");
+}

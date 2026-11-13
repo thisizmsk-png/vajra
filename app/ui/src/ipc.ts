@@ -419,6 +419,8 @@ export type RunLogVerify = {
   run_id: string; head_seq: number; standing: RunLogStanding; verified: boolean; caveat: string;
   chain: { ok_to: number; broken: RunLogBreak | null }; broken: RunLogBreak | null;
   signed: { signed_to: number; unsigned_tail: number; mismatch: { seq: number; hash: string } | null } | null; record_error: string | null;
+  /** A write or sync failed (`io_error`), so `skipped_anchors` anchors weren't sent: the run didn't finish logging cleanly. */
+  io_error: string | null; skipped_anchors: number;
 };
 export const runLogVerify = (runId: string) => call<RunLogVerify>("run_log_verify", { runId });
 export const onRunLog = (cb: (payload: RunLogNotice) => void) => transport.on("run_log", (p) => cb(p as RunLogNotice));

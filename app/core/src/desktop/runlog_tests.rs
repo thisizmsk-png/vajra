@@ -795,3 +795,22 @@ fn a_log_dropped_with_pending_writes_and_reopened_at_once_has_one_writer() {
     let chain = runlog::verify(RUN, &back.entries);
     assert_eq!((chain.ok_to, chain.broken), (expected, None));
 }
+
+#[test]
+fn a_failed_sync_before_an_anchor_is_shown_and_sends_no_anchor() {
+    let d = scratch();
+    let l = RunLog::open(&d, RUN).unwrap();
+    let rec = Arc::new(FakeRecord::default());
+    l.set_record(rec.clone());
+    l.append(Source::Core, dispatched(1)).unwrap();
+    l.flush();
+    l.fail_syncs();
+    l.anchor();
+    l.anchor();
+    l.flush();
+    let card = l.card();
+    assert!(card.io_error.as_deref().is_some_and(|e| e.contains("synced to anchor seq 1")), "{card:?}");
+    assert_eq!(card.skipped_anchors, 2);
+    assert!(rec.sent.lock().unwrap().is_empty(), "no anchor reaches the record");
+    assert!(!l.since(0, 10).0.iter().any(|e| matches!(e.kind, Kind::Anchored { .. })));
+}
