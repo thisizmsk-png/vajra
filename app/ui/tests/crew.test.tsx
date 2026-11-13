@@ -4,6 +4,7 @@ import { setTransport } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
+import { Live, liveRun } from "./liveRun";
 
 afterEach(() => {
   cleanup();
@@ -100,8 +101,9 @@ describe("Crew tree (S2a, US-2.1)", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     window.location.hash = "#/crew?slug=camp&id=r1";
     let status = "in_progress";
-    open({ crew: () => tree(status) });
-    render(<Crew />);
+    // Only a live run is re-read on a timer.
+    open({ ...liveRun(), crew: () => tree(status) });
+    render(<Live><Crew /></Live>);
     await screen.findByText("Backend");
     status = "blocked";
     await act(async () => { await vi.advanceTimersByTimeAsync(2100); });

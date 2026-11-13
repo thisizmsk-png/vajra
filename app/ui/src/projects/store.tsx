@@ -6,12 +6,13 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from "react";
 import { S } from "../../strings";
 import type { StatusKey } from "../../strings";
-import { api, onChanged } from "../ipc";
+import { api } from "../ipc";
 import { forgetRead, ownedRead } from "../reads";
 import type { Campaign, CrewNodeDto, InboxItem } from "../ipc";
 import { problemDetail } from "../screens/states";
 import { parseWorkerProvider } from "../workerProvider";
 import { groupProjects, summarize } from "./adapter";
+import { onChangedPaced, usePoll } from "./poll";
 import type { ProjectIndex } from "./adapter";
 import type { ActiveCrew, Project, ProjectId, ProjectSummary, WorkerRow } from "./contract";
 
@@ -37,6 +38,8 @@ export type ProjectsView = {
   crew: ActiveCrew | null;
   /** How many runs the core says are live (today at most one; ADR-15 D5 raises it). */
   runs: number;
+  /** The run ids the core says are live: a screen polls its run only while it is one of these. */
+  liveRuns: string[];
   summaries: Map<ProjectId, ProjectSummary>;
   reload: () => void;
 };
@@ -60,17 +63,15 @@ export function workersOf(root: CrewNodeDto): WorkerRow[] {
 
 const EMPTY: ProjectIndex = { projects: [], byCampaign: {} };
 const Ctx = createContext<ProjectsView>({
-  state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, summaries: new Map(), reload: () => {},
+  state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, liveRuns: [], summaries: new Map(), reload: () => {},
 });
 
 export function ProjectsProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, summaries: new Map() });
+  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, liveRuns: [], summaries: new Map() });
   const seq = useRef(0);
-  const last = useRef(0);
 
   const load = useCallback(() => {
     const mine = ++seq.current;
-    last.current = Date.now();
     void (async () => {
       // Campaigns and their folders decide the projects; without either, saying "no projects" would be wrong.
       const [camps, targets, active, inbox, store] = await Promise.allSettled([
@@ -112,29 +113,27 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
       // A newer load started while the crew was asked for: whatever this one learned (answer or failure) is stale.
       if (mine !== seq.current) return;
       const runs = active.status === "fulfilled" && Array.isArray(active.value?.runs) ? active.value.runs.length : 0;
+      const liveRuns = active.status === "fulfilled" && Array.isArray(active.value?.runs)
+        ? (active.value.runs as { run_id?: unknown }[]).map((r) => r.run_id).filter((r): r is string => typeof r === "string")
+        : [];
       // The core's campaign-only total when it is sane (a whole number, at least what the list shows, at most the total);
       // else null: an older core sent none, and the badge must not mistake the cut list for the total.
       const listed = items.filter((i) => i.kind !== "run_proposal").length;
       const cc = inbox.status === "fulfilled" ? inbox.value?.campaign_count : undefined;
       const campaignCount = typeof cc === "number" && Number.isSafeInteger(cc) && cc >= listed && cc <= (inbox.status === "fulfilled" ? inbox.value.count : listed) ? cc : null;
-      setData({ state: "ok", error: "", ...index, runIds, campaigns, inbox: items, inboxCount: inbox.status === "fulfilled" && Number.isSafeInteger(inbox.value?.count) && inbox.value.count >= items.length ? inbox.value.count : items.length, inboxCampaignCount: campaignCount, inboxFailed: inbox.status === "rejected", crew, runs, summaries: summarize(index, campaigns, items, crew) });
+      setData({ state: "ok", error: "", ...index, runIds, campaigns, inbox: items, inboxCount: inbox.status === "fulfilled" && Number.isSafeInteger(inbox.value?.count) && inbox.value.count >= items.length ? inbox.value.count : items.length, inboxCampaignCount: campaignCount, inboxFailed: inbox.status === "rejected", crew, runs, liveRuns, summaries: summarize(index, campaigns, items, crew) });
     })();
   }, []);
 
   useEffect(load, [load]);
   const live = data.crew !== null;
-  useEffect(() => {
-    let later: ReturnType<typeof setTimeout> | undefined;
-    const off = onChanged(() => {
-      // The core says something moved: a read already in flight started before that and must not be joined.
-      forgetRead();
-      const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
-      if (wait <= 0) load();
-      else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);
-    });
-    const poll = live ? setInterval(() => { if (!document.hidden) load(); }, POLL_MS) : undefined;
-    return () => { off(); clearTimeout(later); clearInterval(poll); };
-  }, [load, live]);
+  // Paced, and held back while the window is hidden (one read on showing).
+  useEffect(() => onChangedPaced(EVENT_MIN_GAP_MS, load, () => {
+    // The core says something moved: a read already in flight started before that and must not be joined.
+    forgetRead();
+    return true;
+  }), [load]);
+  usePoll(load, POLL_MS, live);
 
   const view = useMemo(() => ({ ...data, reload: load }), [data, load]);
   return <Ctx.Provider value={view}>{children}</Ctx.Provider>;
