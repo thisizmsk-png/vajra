@@ -183,8 +183,24 @@ sign_as linked "$ESH" 3 "sign refused: a symlinked path" && [ "$(sha_of "$WORK/e
 check "sign: a symlinked bundle folder is refused, its target untouched" $?
 mkdir -p "$VAJRA_WALKTHROUGH_DIR/up"; jq -c '.slug="up"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/up/evidence.json"
 ln -s "$VAJRA_WALKTHROUGH_DIR" "$REPO_T/wlink"
-( export VAJRA_WALKTHROUGH_DIR="$REPO_T/wlink"; sign_as up "$(sha_of "$REPO_T/wlink/up/evidence.json")" 3 "sign refused: a symlinked path" )
+# A relative walkthrough dir sits in the checkout: a link in it is refused. (An absolute one is the core setting, and
+# only its system prefix is resolved.)
+( cd "$REPO_T" && export VAJRA_WALKTHROUGH_DIR="wlink"; sign_as up "$(sha_of "$REPO_T/wlink/up/evidence.json")" 3 "sign refused: a symlinked path" )
 check "sign: a symlinked folder above the bundle is refused" $?
+# bhishma #214 M1-b: a hard link of a real root-owned relative link (a framework's Versions/Current) as the slug
+# folder, its target name an agent symlink to another folder's evidence: refused, nothing signed. Stand-in folders.
+RL="$(find /Library/Frameworks /Applications -maxdepth 6 -type l -user root -name Current 2>/dev/null | head -n 1)"
+if [ -n "$RL" ] && ln -P "$RL" "$VAJRA_WALKTHROUGH_DIR/hlink" 2>/dev/null; then
+  mkdir -p "$WORK/other"; jq -c '.slug="hlink"' "$WORK/ro.fd3" > "$WORK/other/evidence.json"; OH="$(sha_of "$WORK/other/evidence.json")"
+  ln -s "$WORK/other" "$VAJRA_WALKTHROUGH_DIR/$(readlink "$RL")"
+  sign_as hlink "$OH" 3 "sign refused: a symlinked path" && [ "$(sha_of "$WORK/other/evidence.json")" = "$OH" ]
+  check "sign: a hard-linked root-owned link as the slug folder is refused" $?
+else
+  echo "SKIP: no root-owned relative link on this volume to hard-link"
+fi
+# A hard-linked evidence.json is refused too.
+HL="$VAJRA_WALKTHROUGH_DIR/hardev"; mkdir -p "$HL"; jq -c '.slug="hardev"' "$WORK/ro.fd3" > "$WORK/hardev.json"; ln "$WORK/hardev.json" "$HL/evidence.json"
+sign_as hardev "$(sha_of "$HL/evidence.json")" 3 "sign refused: no evidence.json"; check "sign: a hard-linked evidence.json is refused" $?
 # L1: a write error is a refusal (exit 3, fixed line), the file untouched, no temp file left.
 UW="$VAJRA_WALKTHROUGH_DIR/unwritable"; mkdir -p "$UW"; jq -c '.slug="unwritable"' "$WORK/ro.fd3" > "$UW/evidence.json"; UH="$(sha_of "$UW/evidence.json")"
 chmod 555 "$UW"

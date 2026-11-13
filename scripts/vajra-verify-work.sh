@@ -57,7 +57,7 @@ if [ "$MODE" = sign ]; then
   printf '%s' "$SLUG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$' || { echo "vajra-verify-work: invalid slug" >&2; exit 2; }
   printf '%s' "$WANT" | grep -Eq '^[0-9a-f]{64}$' || { echo "vajra-verify-work: --expect-sha256 needs 64 lowercase hex" >&2; exit 2; }
   [ -x "$PYTHON3" ] || { echo "sign refused: no usable key" >&2; echo "vajra-verify-work: /usr/bin/python3 is required to sign" >&2; exit 4; }
-  EVDIR="${VAJRA_WALKTHROUGH_DIR:-data/walkthroughs}/${SLUG}"
+  EVDIR="${VAJRA_WALKTHROUGH_DIR:-data/walkthroughs}"
   HEAD_NOW="$(git rev-parse --verify -q HEAD 2>/dev/null || true)"
   # Every check runs before the key is opened; the key is read last, only to sign.
   # The bundle folder is in the agent's worktree and the core runs sign outside the sandbox (bhishma #214 H1, M1):
@@ -65,40 +65,46 @@ if [ "$MODE" = sign ]; then
   # temp file has a random name and is created exclusively, and evidence.json must still be the file that was read.
   PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON3" -I -c '
 import hashlib, hmac, json, os, re, secrets, stat, sys
-evdir, want, slug, head, keyf = sys.argv[1:6]
+evbase, want, slug, head, keyf = sys.argv[1:6]
+evdir = os.path.join(evbase, slug)
 # The first stderr line is one fixed "sign refused: <reason>" (the core shows it on the card). No reason holds a path
 # or key material; the slug is already checked to be a plain word.
 def refuse(why, code=3):
     print("sign refused: " + why, file=sys.stderr); sys.exit(code)
 D = os.O_RDONLY | os.O_DIRECTORY
-def open_folder(p):
-    # Walk one part at a time. A symlinked part is refused unless root owns it (/var, /tmp on macOS): an agent
-    # can make links, but never root-owned ones.
-    fd = os.open("/" if p.startswith("/") else ".", D)
-    for part in p.split("/"):
+def walk(fd, rel):
+    # One part at a time from fd, every part a real folder: no symlink at all, root-owned or not (bhishma #214 M1-b:
+    # anyone can hard-link a root-owned relative link into their own folder).
+    for part in rel.split("/"):
         if part in ("", "."):
             continue
         try:
             st = os.stat(part, dir_fd=fd, follow_symlinks=False)
             if stat.S_ISLNK(st.st_mode):
-                if st.st_uid != 0:
-                    refuse("a symlinked path")
-                nfd = os.open(part, D, dir_fd=fd)
-            elif stat.S_ISDIR(st.st_mode):
-                nfd = os.open(part, D | os.O_NOFOLLOW, dir_fd=fd)
-            else:
+                refuse("a symlinked path")
+            if not stat.S_ISDIR(st.st_mode):
                 refuse("no evidence.json")
+            nfd = os.open(part, D | os.O_NOFOLLOW, dir_fd=fd)
         except OSError:
             refuse("no evidence.json")
         os.close(fd); fd = nfd
     return fd
-dfd = open_folder(evdir)
+def open_folder(base, slug):
+    # An absolute walkthrough dir is a setting of the core, outside the worktree of the agent: its system prefix
+    # (/var is /private/var) is resolved once. A relative one sits in the checkout and is walked strictly, like the slug.
+    if base.startswith("/"):
+        fd = walk(os.open("/", D), os.path.realpath(base))
+    else:
+        fd = walk(os.open(".", D), base)
+    return walk(fd, slug)
+dfd = open_folder(evbase, slug)
 try:
     efd = os.open("evidence.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
 except OSError:
     refuse("no evidence.json")
 st = os.fstat(efd)
-if not stat.S_ISREG(st.st_mode):
+# One link only: a hard link would make the bundle file another file too.
+if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
     refuse("no evidence.json")
 with os.fdopen(efd, "rb") as f:
     raw = f.read()
