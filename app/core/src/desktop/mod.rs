@@ -2570,6 +2570,8 @@ pub mod record;
 mod record_app;
 pub mod record_ledger;
 pub mod runproto;
+pub mod verify;
+pub mod phases;
 pub mod runlog;
 pub mod runlog_store;
 mod runlog_app;
