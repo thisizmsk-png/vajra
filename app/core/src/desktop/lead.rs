@@ -1311,8 +1311,10 @@ impl App {
                     let receipt = tokens.map(|t| t.to_json());
                     let _ = ledger(AskState::Done, None, None, receipt.as_ref());
                 }
-                Ok(_) => {
-                    let _ = ledger(AskState::Failed, None, Some("lead_error"), None);
+                Ok(Done { tokens, .. }) => {
+                    // An erroring turn still spent tokens (often the most): record them so a goal's sum is the real bill.
+                    let receipt = tokens.map(|t| t.to_json());
+                    let _ = ledger(AskState::Failed, None, Some("lead_error"), receipt.as_ref());
                 }
                 Err(e) => {
                     let _ = ledger(AskState::Failed, None, Some(e.code()), None);

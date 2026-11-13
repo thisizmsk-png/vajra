@@ -27,7 +27,8 @@ its first week** (`continue-on-error`); the p50 and p95 print in the job log.
 
 ## Token receipt
 
-Each finished Director-General turn writes a `vajra.token_receipt/1` object (`fresh`, `cache_write`, `cache_read`, `output`,
-`side`, `total`) on its `done` ledger line, from the provider's own `usage` fields. Nothing is estimated and no price is applied.
+Each Director-General turn that ran writes a `vajra.token_receipt/1` object (`fresh`, `cache_write`, `cache_read`, `output`,
+`side`, `total`) on its `done` ledger line, or on its `failed` line when the provider reported an error (failed turns spend
+tokens too, so a goal's sum counts them). `ade_bench.py tokens` counts every ledger line that carries a receipt. It comes from the provider's own `usage` fields. Nothing is estimated and no price is applied.
 `side` is Vajra's own off-request spend (titles, branch names): always 0. `ade_bench.py tokens` reads these back; the signed run
 record can pick the same object up.

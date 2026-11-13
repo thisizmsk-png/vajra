@@ -331,6 +331,17 @@ fn a_result_event_with_usage_yields_a_token_receipt_and_one_without_yields_none(
 }
 
 #[test]
+fn an_erroring_result_with_usage_still_yields_its_token_receipt() {
+    let d = tmp("err-usage");
+    let ev = json!({"type": "result", "subtype": "error", "is_error": true, "result": "it went wrong",
+        "usage": {"input_tokens": 9, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 500, "output_tokens": 40}});
+    let done = run(&fake_printing(&d, &format!("{}\n{}", good_init(), ev)), quick()).0.unwrap();
+    assert!(done.is_error);
+    let t = done.tokens.expect("an erroring turn still reports what it spent");
+    assert_eq!((t.fresh, t.cache_read, t.output), (9, 500, 40));
+}
+
+#[test]
 fn an_erroring_result_names_a_typed_provider_failure() {
     use crate::providers::errors::Kind;
     for (text, kind) in [("API Error: 429 rate_limit_error", Some(Kind::RateLimit)), ("API Error: 401 authentication_error", Some(Kind::Auth)), ("it went wrong somehow", None)] {
