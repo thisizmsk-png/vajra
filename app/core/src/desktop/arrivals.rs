@@ -79,6 +79,13 @@ impl Hub {
         *self.sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
     }
 
+    /// Send one named event now (the run log's `run_log`, which batches on its own thread). No sink: nothing.
+    pub fn emit(&self, name: &str, payload: serde_json::Value) {
+        if let Some(sink) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            sink(name, payload);
+        }
+    }
+
     #[cfg(test)]
     pub fn set_window_ms(&self, ms: u64) {
         self.window_ms.store(ms, std::sync::atomic::Ordering::Relaxed);

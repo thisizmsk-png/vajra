@@ -35,6 +35,7 @@ const proofFixture = (slug: string, label: ProofLabel): RunProof => ({
   record_note: label === "evidence_unguarded"
     ? "Checked by Vajra on this Mac. The evidence ran outside the guard, so this record isn't tamper-evident."
     : "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
+  requires: "The evidence check needs macOS 15 or later.",
   export: true,
   markdown: `## Vajra proof: Add per-key rate limiting\n\n**${S.run.proof.label[label] ?? ""}**.`,
 });

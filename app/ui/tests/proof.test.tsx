@@ -20,6 +20,7 @@ const proof = (label: ProofLabel, extra: Partial<RunProof> = {}): RunProof => ({
   integrity: "ok",
   record_sha256: "ab".repeat(32),
   record_note: "Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.",
+  requires: "The evidence check needs macOS 15 or later.",
   export: true,
   markdown: `## Vajra proof\n\n**${L.label[label]}**.`,
   ...extra,
@@ -38,6 +39,7 @@ describe("Proof", () => {
     render(<Proof slug="deliver-20261112-1900" />);
     expect(await screen.findByText(L.label[label])).toBeTruthy();
     expect(screen.getByText(`reason for ${label}`)).toBeTruthy();
+    expect(screen.getByText("The evidence check needs macOS 15 or later.")).toBeTruthy();
     // The record note is the core's one string, shown as given.
     expect(screen.getByText("Checked by Vajra on this Mac. The signing key is guarded, not yet sandboxed.")).toBeTruthy();
   });

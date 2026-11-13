@@ -231,6 +231,8 @@ export type RunProof = {
   integrity: ReportIntegrity;
   record_sha256: string | null;
   record_note: string;
+  /** What the evidence check needs from the Mac (macOS 15 or later, for the system jq). */
+  requires: string;
   /** The one capability check for exporting (proof on screen is always shown). */
   export: boolean;
   /** The PR comment, exactly as it would be posted. */
@@ -429,6 +431,30 @@ export const api = {
 /** `inbox_new`: something new started waiting; carries ids, a kind and a count, never item text. Coalesced over 5 s in the core. */
 export type InboxNew = { project_id: string; kind: string; count: number };
 export const onInboxNew = (cb: (payload: InboxNew) => void) => transport.on("inbox_new", (p) => cb(p as InboxNew));
+// ---- a core run's hash-chained log (W2) -----------------------------------------------------------------------------
+
+/** One log entry as the core stores it. `kind` and `body` are typed per kind in the core; the UI reads them as data. */
+export type RunLogEntry = { v: number; seq: number; prev: string; at_ms: number; source: unknown; kind: string; body?: unknown; hash: string };
+export type RunLogBreak = { seq: number; why: "edited" | "dropped" | "reordered" | "unlinked" | "wrong_run" | "format" | "unanchored" };
+export type RunLogPage = { run_id: string; entries: RunLogEntry[]; head_seq: number; broken: RunLogBreak | null; io_error: string | null };
+/** `run_log`: the run's log is written up to `seq`, and `entries` are the written ones after `after` (at most 64). Critical
+ *  entries are told at once, the rest at most every 100 ms. A view holding exactly `after` applies them with no call. */
+export type RunLogNotice = { run_id: string; seq: number; after: number; entries: RunLogEntry[]; io_error: string | null; broken: RunLogBreak | null };
+export const runLogSince = (runId: string, afterSeq: number, limit?: number) => call<RunLogPage>("run_log_since", { runId, afterSeq, limit });
+/** `signed`: every anchor is the core's write and this session sent it. `unconfirmed`: the app restarted since, so read
+ *  it as "hash-chained, anchors not confirmed by this session". Show `caveat` beside it: until the worker sandboxes land,
+ *  an agent on this Mac could rewrite the log with its anchors. Never call it tamper-proof. */
+export type RunLogStanding = "signed" | "unconfirmed" | "not_verified";
+export type RunLogVerify = {
+  run_id: string; head_seq: number; standing: RunLogStanding; verified: boolean; caveat: string;
+  chain: { ok_to: number; broken: RunLogBreak | null }; broken: RunLogBreak | null;
+  signed: { signed_to: number; unsigned_tail: number; mismatch: { seq: number; hash: string } | null } | null; record_error: string | null;
+  /** A write or sync failed (`io_error`), so `skipped_anchors` anchors weren't sent: the run didn't finish logging cleanly. */
+  io_error: string | null; skipped_anchors: number;
+};
+export const runLogVerify = (runId: string) => call<RunLogVerify>("run_log_verify", { runId });
+export const onRunLog = (cb: (payload: RunLogNotice) => void) => transport.on("run_log", (p) => cb(p as RunLogNotice));
+
 /** Every `changed` event, as the core sent it, hidden window or not. Only for code that defers on its own (`onChangedPaced`). */
 export const onChangedRaw = (cb: (payload: unknown) => void) => transport.on("changed", cb);
 
