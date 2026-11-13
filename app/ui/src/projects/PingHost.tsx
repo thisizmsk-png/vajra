@@ -6,10 +6,11 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import type { ReactNode } from "react";
 import { ToastRegion, useToasts } from "../../components/ui/base";
 import { S } from "../../strings";
-import { onInboxNew } from "../ipc";
+import { api, onInboxNew } from "../ipc";
 import type { InboxNew } from "../ipc";
 import { usePreferences } from "../preferences";
-import { DEFAULT_PING } from "../preferenceContract";
+import { DEFAULT_PING, isPreferenceView } from "../preferenceContract";
+import { validId } from "../projectContract";
 import { EMPTY_PING_STATE, arrive, flush } from "./ping";
 import type { PingEntry, PingState } from "./ping";
 import { useProjects } from "./store";
@@ -36,8 +37,10 @@ export function PingHost({ children, now = clock }: { children: ReactNode; now?:
   const rule = useRef(DEFAULT_PING);
   // The rule is global (the core refuses a project one); notifications may be set per project.
   rule.current = prefs.view?.global.ping ?? DEFAULT_PING;
-  const notify = useRef(true);
-  notify.current = prefs.view?.effective.notifications ?? true;
+  // `inbox_new` covers every project, so the selected project's notification switch cannot speak for the others:
+  // each arrival reads its own project's setting (notifyFor). The global value is the fallback.
+  const globalNotify = useRef(true);
+  globalNotify.current = prefs.view?.global.notifications ?? true;
   const names = useRef(P.projects);
   names.current = P.projects;
   const name = useCallback((id: string) => names.current.find((p) => p.id === id)?.name ?? S.projects.unsorted, []);
@@ -60,16 +63,37 @@ export function PingHost({ children, now = clock }: { children: ReactNode; now?:
     }, Math.max(0, due - now()));
   }, [name, now, push, record]);
 
+  /** The arrival's own project's effective `notifications`. Read fresh each time (arrivals are already coalesced over
+   *  5 s, so this is rare), so a change saved in Settings applies at once. Anything that is not a stored project, or a
+   *  read that fails or answers for another scope, falls back to the global setting. */
+  const notifyFor = useCallback(async (projectId: string): Promise<boolean> => {
+    if (!validId("p", projectId)) return globalNotify.current;
+    try {
+      const v = await api.preferencesRead(projectId);
+      return isPreferenceView(v) && v.project_id === projectId ? v.effective.notifications : globalNotify.current;
+    } catch {
+      return globalNotify.current;
+    }
+  }, []);
+
   useEffect(() => {
+    let live = true;
+    // One queue, so a slow read for one arrival never lets a later one overtake it.
+    let queue: Promise<void> = Promise.resolve();
     const off = onInboxNew((a: InboxNew) => {
       if (!a || typeof a.project_id !== "string" || typeof a.kind !== "string") return;
-      const r = arrive(state.current, a, now(), rule.current, notify.current, name);
-      state.current = r.state;
-      if (r.quiet) record(r.quiet);
-      arm();
+      const at = now();
+      queue = queue.then(async () => {
+        const on = await notifyFor(a.project_id);
+        if (!live) return;
+        const r = arrive(state.current, a, at, rule.current, on, name);
+        state.current = r.state;
+        if (r.quiet) record(r.quiet);
+        arm();
+      });
     });
-    return () => { off(); clearTimeout(timer.current); };
-  }, [arm, name, now, record]);
+    return () => { live = false; off(); clearTimeout(timer.current); };
+  }, [arm, name, notifyFor, now, record]);
 
   return (
     <Log.Provider value={log}>

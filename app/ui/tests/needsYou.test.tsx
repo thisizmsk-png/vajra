@@ -18,13 +18,15 @@ const stored = { schema: "vajra.project/1", id: API, name: "api", root: "/src/ap
 const proposal = { id: "proposal:1", kind: "run_proposal", origin: "app", created: "", age_s: 3, title: "Start a run?", body: "", ask: "Add per-key rate limits",
   base: "main", rounds: 2, project_id: API, project: "/src/api", generation: 1, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] };
 const question = { id: "q1", kind: "question", campaign: "api-1", origin: "app", project_id: API, created: "", age_s: 5, title: "Which key?", body: "", actions: [] };
-const view = (rev: number, ping: PingRule) => {
+const view = (rev: number, ping: PingRule, projectId: string | null = null, overrides: Record<string, unknown> = {}) => {
   const prefs = { ...DEFAULT_PREFERENCES, ping };
-  return { schema: "vajra.preferences/1", rev, project_id: null, caps: { active_runs: 1, workers_per_run: 16, editable: false },
-    global: prefs, overrides: {}, effective: prefs, sources: Object.fromEntries(Object.keys(prefs).map((k) => [k, "global"])) };
+  const effective = { ...prefs, ...overrides };
+  return { schema: "vajra.preferences/1", rev, project_id: projectId, caps: { active_runs: 1, workers_per_run: 16, editable: false },
+    global: prefs, overrides, effective, sources: Object.fromEntries(Object.keys(prefs).map((k) => [k, k in overrides ? "project" : "global"])) };
 };
 
-function mount(items: unknown[], rule: PingRule = DEFAULT_PING) {
+/** `scope` is the project the shell has selected; `quiet` lists projects whose own notifications are off. */
+function mount(items: unknown[], rule: PingRule = DEFAULT_PING, opts: { scope?: string | null; quiet?: string[] } = {}) {
   let rev = 0;
   let current = rule;
   const ipc = fakeIpc({
@@ -33,7 +35,10 @@ function mount(items: unknown[], rule: PingRule = DEFAULT_PING) {
     active_runs: { count: 0, runs: [] },
     project_list: { projects: [stored], skipped: 0, truncated: false },
     inbox: { count: items.length, items },
-    preferences_read: () => view(rev, current),
+    preferences_read: (a?: Record<string, unknown>) => {
+      const id = (a?.projectId as string | null) ?? null;
+      return view(rev, current, id, id && opts.quiet?.includes(id) ? { notifications: false } : {});
+    },
     act_preferences_update: (a?: Record<string, unknown>) => {
       current = (a?.patch as { ping: PingRule }).ping;
       rev++;
@@ -41,7 +46,7 @@ function mount(items: unknown[], rule: PingRule = DEFAULT_PING) {
     },
   });
   setTransport(ipc.transport);
-  render(<ProjectsProvider><PreferencesProvider projectId={null}><PingHost><Inbox /></PingHost></PreferencesProvider></ProjectsProvider>);
+  render(<ProjectsProvider><PreferencesProvider projectId={opts.scope ?? null}><PingHost><Inbox /></PingHost></PreferencesProvider></ProjectsProvider>);
   return ipc;
 }
 
@@ -102,9 +107,11 @@ describe("Every ping says why", () => {
     const ipc = mount([]);
     await screen.findByText(S.inbox.rule.summary(6, 2, ["decisions", "questions", "blocked"]));
     vi.useFakeTimers({ shouldAdvanceTime: false, toFake: ["setTimeout", "clearTimeout", "Date"] });
-    act(() => {
+    await act(async () => {
       for (let i = 0; i < 5; i++) ipc.emit("inbox_new", { project_id: API, kind: "blocked", count: 1 });
     });
+    // Each arrival reads its project's notification setting first.
+    await act(async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); });
     expect(screen.queryByText(/things need you/)).toBeNull();
     await act(async () => { vi.advanceTimersByTime(2 * 60_000); });
     vi.useRealTimers();
@@ -122,6 +129,29 @@ describe("Every ping says why", () => {
     expect(await screen.findByText(S.ping.why.muted("questions"))).toBeTruthy();
     expect(screen.getAllByText(S.ping.one.questions("api"))).toHaveLength(1);
     expect(document.querySelector(".v-toast")).toBeNull();
+  });
+
+  // PR #221 review: `inbox_new` covers every project, so the selected project's switch must not decide for the others.
+  it("Given the selected project has notifications off, Then another project's arrival still pings, and its own stays quiet with why", async () => {
+    const WEB = "p_01JC3H0000000000000000000B";
+    const ipc = mount([], { ...DEFAULT_PING, batch_minutes: 0 }, { scope: API, quiet: [API] });
+    await screen.findByText(S.inbox.rule.summary(6, 0, ["decisions", "questions", "blocked"]));
+    act(() => { ipc.emit("inbox_new", { project_id: WEB, kind: "plan", count: 1 }); });
+    await waitFor(() => expect(document.querySelector(".v-toast")).not.toBeNull());
+    act(() => { ipc.emit("inbox_new", { project_id: API, kind: "question", count: 1 }); });
+    expect(await screen.findByText(S.ping.why.off)).toBeTruthy();
+    expect(document.querySelectorAll(".v-toast")).toHaveLength(1);
+    // Each arrival read its own project's setting.
+    const reads = ipc.calls.filter((c) => c.cmd === "preferences_read").map((c) => c.args?.projectId);
+    expect(reads).toEqual(expect.arrayContaining([WEB, API]));
+  });
+
+  it("Given a project that is not stored (or a read that fails), Then the global notification setting decides", async () => {
+    const ipc = mount([], { ...DEFAULT_PING, batch_minutes: 0 }, { scope: API, quiet: [API] });
+    await screen.findByText(S.inbox.rule.summary(6, 0, ["decisions", "questions", "blocked"]));
+    act(() => { ipc.emit("inbox_new", { project_id: "p_unsorted", kind: "plan", count: 1 }); });
+    await waitFor(() => expect(document.querySelector(".v-toast")).not.toBeNull());
+    expect(ipc.calls.some((c) => c.cmd === "preferences_read" && c.args?.projectId === "p_unsorted")).toBe(false);
   });
 
   it("never puts an item's own text in a ping: the event carries only a project, a kind and a count", async () => {
