@@ -372,7 +372,8 @@ fn a_codex_verifier_or_lead_is_never_guarded_and_no_codex_note_claims_the_key() 
         assert!(!note.contains("can't read") && !note.contains("out of reach") && !note.contains("kept from"), "no key claim: {note}");
     }
     assert!(CODEX_WARNING.contains("isn't guarded against reading Vajra's signing key"), "{CODEX_WARNING}");
-    assert!(CODEX_WARNING.contains("internet follows this seat's switch"), "{CODEX_WARNING}");
+    // bhishma #216 F1: the switch limits only the sandbox, never web search or the user's Codex tools.
+    assert!(CODEX_WARNING.contains("Its sandbox's internet follows this seat's switch. Web search and your Codex tools (MCP, hooks, notify) aren't limited by it."), "{CODEX_WARNING}");
 }
 
 #[test]
