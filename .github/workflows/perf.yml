@@ -2,13 +2,19 @@ name: perf
 
 # Per-merge memory check for Vajra Desktop (H0). PRs: idle x3. Main: idle x3 plus a 10 minute growth slope.
 # Blocking: the first macOS run measured idle at 170.9 MiB, so a regression fails the check.
+# TEMPORARY (owner, 13 Nov): restore perf jobs on every PR once batch-3 is on main.
+# Until then the perf jobs (memory, postload, typing-lag) run only on PRs whose base is main, on pushes to main, on the
+# nightly schedule and by hand (workflow_dispatch), so the gate still guards main. A PR into an integration branch gets
+# the test jobs in ci.yml only. To restore: delete the `branches: [main]` line under pull_request.
 on:
   push:
     branches: [main]
     paths: ["app/**", ".github/workflows/perf.yml"]
   pull_request:
+    branches: [main]
     types: [opened, synchronize, reopened, labeled]
     paths: ["app/**", ".github/workflows/perf.yml"]
+  workflow_dispatch:
   schedule:
     - cron: "17 5 * * *"
 
@@ -136,7 +142,7 @@ jobs:
         run: |
           run=false
           case "$EVENT" in
-            push|schedule) run=true ;;
+            push|schedule|workflow_dispatch) run=true ;;
             pull_request)
               case ",$LABELS," in *,perf,*) run=true ;; esac
               if git diff --name-only "$BASE"...HEAD | grep -qE '^app/(ui|bench)/'; then run=true; fi ;;
