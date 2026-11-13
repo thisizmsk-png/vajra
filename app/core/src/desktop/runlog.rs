@@ -435,13 +435,15 @@ pub enum Standing {
 pub const CAVEAT: &str = "hash-chained; until the worker sandboxes land, an agent on this Mac could rewrite this log together with its anchors";
 
 /// The standing of a log: `held` are the anchors the core's ledger holds (`held_anchors`), `sent` the ones this app
-/// session sent. An anchor the session didn't send, while it sent others, is not confirmed: not verified.
+/// session sent. Signed needs the two to match exactly. An anchor the session didn't send while it sent others, or one
+/// it sent that the record no longer holds (a rollback), is not verified.
 pub fn standing(run_id: &str, entries: &[Entry], held: &[Anchor], sent: &[Anchor]) -> (Standing, Signed) {
     let s = signed(run_id, entries, held);
     let chain_ok = verify(run_id, entries).broken.is_none();
     let st = if !chain_ok || !s.verified() {
         Standing::NotVerified
-    } else if held.iter().all(|a| sent.contains(a)) {
+    } else if held.iter().all(|a| sent.contains(a)) && sent.iter().all(|a| held.contains(a)) {
+        // Both ways: a record and ledger rolled back to drop this session's latest anchors don't read signed.
         Standing::Signed
     } else if sent.is_empty() {
         Standing::Unconfirmed

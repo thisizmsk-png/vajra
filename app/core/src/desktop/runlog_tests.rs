@@ -735,3 +735,41 @@ fn f8_a_run_folder_that_is_a_link_is_refused() {
     std::os::unix::fs::symlink(d.join("real"), parent_link.join("runlog")).unwrap();
     assert!(RunLog::open(&parent_link.join("runlog").join(RUN), RUN).is_err(), "the parent is checked too");
 }
+
+#[test]
+fn a_record_rolled_back_past_the_sessions_latest_anchor_is_not_signed() {
+    let v = entries(4);
+    let (a2, a4) = (anchor_of(&v[1]), anchor_of(&v[3]));
+    let sent = [a2.clone(), a4];
+    // Record and ledger rolled back to before the seq-4 anchor: what's left matches, but the session sent more.
+    let (st, s) = runlog::standing(RUN, &v, std::slice::from_ref(&a2), &sent);
+    assert_eq!(s.signed_to, 2, "the held anchor on its own still matches");
+    assert_eq!(st, runlog::Standing::NotVerified);
+}
+
+#[test]
+fn a_reopen_below_the_sessions_anchor_leaves_the_file_as_found() {
+    const R: &str = "20261112-0930";
+    let d = scratch();
+    let app = crate::desktop::App::open(&d.join("data"), &d.join("home")).unwrap();
+    let path = d.join("data/runlog").join(R).join(runlog_store::FILE);
+    let anchored_seq = {
+        let log = app.run_log(R).unwrap();
+        log.set_record(Arc::new(FakeRecord::default()));
+        for i in 1..=10 {
+            log.append(Source::Core, dispatched(i)).unwrap();
+        }
+        log.anchor();
+        log.flush();
+        10
+    };
+    // Cut the file to 8 whole entries, then add a torn line.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut cut: String = text.lines().take(8).map(|l| format!("{l}\n")).collect();
+    cut.push_str(r#"{"v":1,"seq":9,"pr"#);
+    std::fs::write(&path, &cut).unwrap();
+    let log = app.run_log(R).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), cut, "no truncate, no recovered entry");
+    assert_eq!(log.card().broken.map(|b| (b.seq, b.why)), Some((anchored_seq, Why::Unanchored)));
+    assert_eq!(log.head_seq(), 8);
+}

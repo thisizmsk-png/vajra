@@ -63,11 +63,10 @@ impl App {
         if let Some(parent) = dir.parent() {
             crate::control::fsx::private_dir(parent).map_err(|e| format!("the run log folder can't be made: {e}"))?;
         }
-        let log = Arc::new(RunLog::open(&dir, run_id)?);
-        // Reopened in this app's life: the file must still hold the last anchor this session sent (F4).
-        if let Some(last) = super::lock(&self.log_anchors).get(run_id).and_then(|v| v.last().cloned()) {
-            log.require(&last);
-        }
+        // Reopened in this app's life: the file must still hold the last anchor this session sent (F4), checked before
+        // any repair or append, so a log that fails it is left as found.
+        let last = super::lock(&self.log_anchors).get(run_id).and_then(|v| v.last().cloned());
+        let log = Arc::new(RunLog::open_requiring(&dir, run_id, last.as_ref())?);
         let events = Arc::clone(&self.events);
         log.set_notify(Box::new(move |run, seq| events.emit(EVENT, json!({"run_id": run, "seq": seq}))));
         let sent = Arc::clone(&self.log_anchors);

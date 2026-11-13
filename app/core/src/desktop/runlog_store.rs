@@ -97,15 +97,19 @@ fn open_write(path: &Path) -> io::Result<std::fs::File> {
     Ok(f)
 }
 
-/// Read the run's log, cutting a torn last line (only when everything before it holds).
-fn load(path: &Path, run_id: &str) -> io::Result<(Log, u64)> {
+/// Read the run's log, then check `required` (the last anchor this app session sent; F4), and only then cut a torn
+/// last line, and only when everything before it holds. A log that breaks either check is left exactly as found.
+fn load(path: &Path, run_id: &str, required: Option<&runlog::Anchor>) -> io::Result<(Log, u64)> {
     let bytes = match fsx::read_nofollow_capped(path, MAX_BYTES) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),
     };
     let p = parse(&bytes);
-    let log = Log::loaded(run_id, p.entries, p.unreadable);
+    let mut log = Log::loaded(run_id, p.entries, p.unreadable);
+    if let Some(a) = required {
+        log.require(a);
+    }
     let mut torn = 0;
     if p.torn > 0 && log.broken().is_none() {
         let f = open_write(path)?;
@@ -192,9 +196,15 @@ pub struct RunLog {
 impl RunLog {
     /// Open (or create) the run's log in `dir`, resuming after its last good entry.
     pub fn open(dir: &Path, run_id: &str) -> Result<Self, String> {
+        Self::open_requiring(dir, run_id, None)
+    }
+
+    /// Like `open`, but the chain must hold `required` (an anchor this app session sent) before anything is repaired or
+    /// appended. If it doesn't, the log opens broken (`unanchored`) and its file is not touched.
+    pub fn open_requiring(dir: &Path, run_id: &str, required: Option<&runlog::Anchor>) -> Result<Self, String> {
         private_run_dir(dir).map_err(|e| format!("the run log's folder can't be used: {e}"))?;
         let path = dir.join(FILE);
-        let (log, torn) = load(&path, run_id).map_err(|e| format!("the run log can't be read: {e}"))?;
+        let (log, torn) = load(&path, run_id, required).map_err(|e| format!("the run log can't be read: {e}"))?;
         if log.broken().is_none() {
             // Create it now (0600, no link), so a planted file in its place is refused before any run event.
             fsx::open_append(&path).map_err(|e| format!("the run log can't be opened: {e}"))?;
