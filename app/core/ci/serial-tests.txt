@@ -13,7 +13,7 @@ desktop::tests::a_big_untracked_tree_does_not_blow_the_budget
 control::lead_run::tests::cancel_ask_kills_group
 # Two projects' Lead settings written at once.
 desktop::lead::tests::two_projects_asking_at_once_each_get_their_own_settings
-# 20 MB through a PTY, acked chunk by chunk, within 30 s: missed it under the parallel pass on a 3-core runner (#182).
+# Four windows through a PTY, acked chunk by chunk, within 30 s: 20 MB missed it even alone on the macOS runner (#182).
 terminal::tests::output_waits_for_acks_instead_of_queueing_without_bound
 # A PTY redraw nudge observed within a short window.
 terminal::tests_hidden::a_program_still_on_the_alternate_screen_is_nudged_to_redraw_without_a_second_switch
@@ -21,3 +21,9 @@ terminal::tests_hidden::a_program_still_on_the_alternate_screen_is_nudged_to_red
 # (preferences_busy). The whole module, and the seat test that edits preferences.
 preferences::tests::
 desktop::seat_start::tests::editing_preferences_between_propose_and_start_keeps_the_hash_and_the_start_works
+# A hung Claude check worker's init event must be read back before its deadline; under the parallel pass the stand-in
+# harness started too late and the ticket ended profile_not_applied (#182 CI, macOS).
+desktop::workers::tests::a_running_claude_check_worker_shows_message_off_with_its_true_reason
+# A job that ignores SIGHUP must be gone once recovery reports the session ended; under load the kill had not landed
+# when the test looked (#182 CI, macOS).
+owned::tests::given_a_job_that_ignores_hangup_when_the_leader_exits_then_the_job_is_killed_and_ended_is_honest

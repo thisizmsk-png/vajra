@@ -70,12 +70,17 @@ impl Lines {
     }
 }
 
+/// The label `vajra-deliver.js` puts before each progress line of an outside-guard campaign (`OG_MARK`).
+const OUTSIDE_GUARD_MARK: &str = "[evidence ran outside the Vajra guard]";
+
 fn scan(progress: &str) -> Lines {
     let mut out = Lines::default();
     for line in progress.lines() {
         // Only the shape `append_progress` writes: `- <timestamp> <text>`, with the text starting `run <id>` (what the workflow
         // writes) or `resumed by vajra-deliver run <id>`. Free text that merely contains "run " (a note, a reject reason) is not read.
         let Some(text) = line.strip_prefix("- ").and_then(|l| l.split_once(' ')).map(|x| x.1) else { continue };
+        // A campaign whose evidence ran outside the Vajra guard has every line labelled first (`og()` in the workflow).
+        let text = text.strip_prefix(OUTSIDE_GUARD_MARK).map_or(text, str::trim_start);
         if let Some(r) = text.strip_prefix("resumed by vajra-deliver run ") {
             // A resume is a new run: all run-scoped state starts over, even if the id were repeated.
             let id = r.split(|c: char| c.is_whitespace() || c == ':').next().unwrap_or("");
@@ -454,12 +459,13 @@ mod tests {
 
         const WORKFLOW: &str = include_str!("../../../../workflows/vajra-deliver.js");
 
-        /// Every `sq(`run ${RUN}...`)` template in the workflow, with its placeholders filled in.
+        /// Every `sq(`run ${RUN}...`)` template in the workflow, also when wrapped in the outside-guard label
+        /// (`sq(og(`run ${RUN}...`))`), with its placeholders filled in.
         fn written_lines() -> Vec<String> {
             WORKFLOW
                 .lines()
                 .filter_map(|l| {
-                    let start = l.find("sq(`run ${RUN}")? + "sq(`".len();
+                    let start = l.find("sq(`run ${RUN}").map(|i| i + "sq(`".len()).or_else(|| l.find("sq(og(`run ${RUN}").map(|i| i + "sq(og(`".len()))?;
                     let end = start + l[start..].find('`')?;
                     Some(l[start..end].to_string())
                 })
@@ -522,6 +528,20 @@ mod tests {
             assert_eq!(run(&[verified.clone(), line_with("no verified delivery")]), ("Fix", Outcome::NeedInput, Some(3), Some(3)));
             let done = run(&[verified, line_with(" delivered ")]);
             assert_eq!((done.0, done.1), ("Deliver", Outcome::Done));
+        }
+
+        /// An outside-guard campaign's lines carry the workflow's label first (#183); the timeline still reads them.
+        #[test]
+        fn an_outside_guard_campaigns_labelled_lines_still_drive_the_timeline() {
+            let mark = WORKFLOW.lines().find_map(|l| l.strip_prefix("const OG_MARK = '")?.strip_suffix('\'')).expect("the workflow's OG_MARK");
+            assert_eq!(mark, OUTSIDE_GUARD_MARK, "the workflow's outside-guard label changed; update runview.rs");
+            // `timeline` (the test helper) adds the `- <timestamp> ` each line is written with.
+            let progress = |lines: &[String]| lines.iter().map(|l| format!("{mark} {l}")).collect::<Vec<_>>().join("\n");
+            let open = [task("r1.t1", "closed", &[])];
+            let t = timeline(&progress(&[line_with("criteria passing"), line_with(" delivered ")]), Some(&open));
+            assert_eq!((PHASES[t.current], t.outcome), ("Deliver", Outcome::Done));
+            let t = timeline(&progress(&[line_with("waiting for the user")]), Some(&open));
+            assert_eq!(t.outcome, Outcome::NeedInput);
         }
     }
 }
