@@ -67,14 +67,13 @@ jobs:
             idle.json
             growth.json
 
-  # Typing lag with 5 agents streaming a fake load: p95 must be at or under 50 ms (app/ui/tests/typingLag.test.tsx).
-  # REPORT-ONLY for its first week (continue-on-error): the number prints in the log and the job never blocks a merge.
-  # Remove continue-on-error once a week of runs shows it is not flaky.
+  # Typing lag with 5 agents streaming a fake load, keystroke to paint in the runner's real Chrome: p95 must be at or under
+  # 50 ms (app/ui/scripts/typing-lag.mjs). This step BLOCKS. Measured 17-22 ms locally, so the budget has wide headroom.
+  # The jsdom test (app/ui/tests/typingLag.test.tsx) stays as a fast first check and is report-only (continue-on-error).
   typing-lag:
     if: github.event.action != 'labeled'
     runs-on: macos-latest
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,13 +81,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Typing lag gate
+      - name: Install
         working-directory: app/ui
+        run: npm ci --no-audit --no-fund
+      - name: Typing lag, jsdom (report only)
+        working-directory: app/ui
+        continue-on-error: true
         env:
           VAJRA_LAG_GATE: "1"
+        run: npx vitest run tests/typingLag.test.tsx
+      - name: Typing lag gate, real browser
+        working-directory: app/ui
         run: |
-          npm ci --no-audit --no-fund
-          npx vitest run tests/typingLag.test.tsx
+          npx vite build -c vite.lag.config.ts
+          node scripts/typing-lag.mjs --gate --out "$RUNNER_TEMP/typing-lag.json"
+          echo '### Typing lag (real Chrome, 5 agents streaming)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const r=require(process.argv[1]);delete r.keys_ms;console.log(JSON.stringify(r,null,1))' "$RUNNER_TEMP/typing-lag.json" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   # Post-load idle (a scripted 10,000-line stream, then idle at +2 and +10 minutes): a second build plus ~15 minutes, so it
   # does not run on every PR. It runs on push to main, nightly, on a PR that changes app/ui/** or app/bench/**, or when the
