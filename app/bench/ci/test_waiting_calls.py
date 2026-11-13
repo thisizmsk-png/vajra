@@ -36,9 +36,29 @@ class Counting(unittest.TestCase):
         self.assertNotIn("commented_out", {n for n, _, _ in commands(RUST)})
 
     def test_blocking_calls_count_only_in_main_thread_bodies_and_not_in_comments(self):
-        names, blocking = count_core([RUST])
+        names, blocking, unparsed = count_core([RUST])
+        self.assertEqual(unparsed, [])
         self.assertEqual(names, ["quick", "reads_a_file"])
         self.assertEqual(blocking, 2)  # the read_to_string and the sleep; the async command's read and the comment are not
+
+    def test_a_command_with_restricted_visibility_is_still_counted(self):
+        src = "\n".join([
+            "#[tauri::command]", "pub(crate) fn slow_read() -> Res { std::fs::read(\"x\"); Ok(json!({})) }",
+            "#[tauri::command]", "pub(super) fn b() -> Res { Ok(json!({})) }",
+            "#[tauri::command]", "pub(in crate::x) fn c() -> Res { Ok(json!({})) }",
+            "#[tauri::command(async)]", "pub(crate) fn off() -> Res { Ok(json!({})) }",
+            "#[tauri::command]", "pub(crate) async fn also_off() -> Res { Ok(json!({})) }",
+            "#[tauri::command]", "pub unsafe fn d() -> Res { Ok(json!({})) }",
+        ])
+        names, blocking, unparsed = count_core([src])
+        self.assertEqual((names, blocking, unparsed), (["b", "c", "d", "slow_read"], 1, []))
+
+    def test_a_command_attribute_the_scanner_cannot_parse_is_reported_not_skipped(self):
+        names, _, unparsed = count_core(["#[tauri::command]\nmacro_generated_command!(slow_read);\n", "#[tauri::command]\n"])
+        self.assertEqual(names, [])
+        self.assertEqual(unparsed, ["macro_generated_command!(slow_read);", "<end of file>"])
+        out = problems({**Ratchet.ALLOWED, "unparsed_commands": unparsed}, Ratchet.ALLOWED)
+        self.assertEqual(len([l for l in out if "cannot read" in l]), 2, out)
 
     def test_ui_sync_calls(self):
         self.assertEqual(count_ui(["const x = new XMLHttpRequest(); // XMLHttpRequest again", "readFileSync(p); invokeSync(a)"]), 3)

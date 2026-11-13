@@ -32,11 +32,15 @@ BLOCKING = re.compile(
 # The UI has no synchronous call into the core (Tauri's invoke is a promise); these are the ways to wait anyway.
 UI_SYNC = re.compile(r"XMLHttpRequest|Atomics\.wait|\b[A-Za-z_]+Sync\(")
 ATTR = re.compile(r"#\[tauri::command(\((?P<args>[^)]*)\))?\]")
-FN = re.compile(r"^\s*(?:pub\s+)?(?P<async>async\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
+# Any visibility (`pub`, `pub(crate)`, `pub(super)`, `pub(in path)`), and the qualifiers that can precede `fn`.
+FN = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:const|unsafe|extern(?:\s+\"[^\"]*\")?)\s+)*(?P<async>async\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
 
 
 def commands(text):
-    """[(name, is_main_thread, body)] for every `#[tauri::command]` in `text`. Commented-out ones are skipped."""
+    """[(name, is_main_thread, body)] for every `#[tauri::command]` in `text`. Commented-out ones are skipped.
+
+    A command attribute with no recognisable `fn` after it comes back with name None and the first line that followed, so
+    the caller can stop instead of silently not counting it."""
     lines = text.splitlines()
     out = []
     for i, line in enumerate(lines):
@@ -51,6 +55,7 @@ def commands(text):
             j += 1
         f = FN.match(lines[j]) if j < len(lines) else None
         if not f:
+            out.append((None, False, (lines[j] if j < len(lines) else "<end of file>").strip()))
             continue
         out.append((f.group("name"), not (attr_async or f.group("async")), body_of(lines, j)))
     return out
@@ -73,15 +78,17 @@ def body_of(lines, start):
 
 
 def count_core(sources):
-    """(sorted names of main-thread commands, blocking calls written in their bodies)."""
-    names, blocking = [], 0
+    """(sorted names of main-thread commands, blocking calls written in their bodies, command attributes it cannot parse)."""
+    names, blocking, unparsed = [], 0, []
     for text in sources:
         for name, main, body in commands(text):
-            if main:
+            if name is None:
+                unparsed.append(body)
+            elif main:
                 names.append(name)
                 # One per line, not per token: `std::fs::read_to_string` is one call that matches two patterns.
                 blocking += sum(1 for l in strip_comments(body).splitlines() if BLOCKING.search(l))
-    return sorted(names), blocking
+    return sorted(names), blocking, unparsed
 
 
 def strip_comments(text):
@@ -95,13 +102,17 @@ def count_ui(sources):
 def read_repo():
     core = [p.read_text() for p in sorted(CORE_SRC.rglob("*.rs"))]
     ui = [p.read_text() for p in sorted(UI_SRC.rglob("*")) if p.suffix in (".ts", ".tsx") and ".test." not in p.name]
-    names, blocking = count_core(core)
-    return {"main_thread_commands": names, "blocking_calls_in_main_thread_commands": blocking, "sync_ui_calls": count_ui(ui)}
+    names, blocking, unparsed = count_core(core)
+    return {"main_thread_commands": names, "blocking_calls_in_main_thread_commands": blocking, "sync_ui_calls": count_ui(ui),
+            "unparsed_commands": unparsed}
 
 
 def problems(actual, allowed):
     """Failure lines. Empty when the actual counts equal the allowance."""
     out = []
+    # Never part of the allowance: a command the scanner cannot read is a command it cannot count.
+    for line in actual.get("unparsed_commands", []):
+        out.append(f"a `#[tauri::command]` is followed by {line!r}, which this scanner cannot read as a function: it would not be counted. Write it as `fn name(` (any visibility), or teach waiting_calls.py the shape")
     new = sorted(set(actual["main_thread_commands"]) - set(allowed["main_thread_commands"]))
     gone = sorted(set(allowed["main_thread_commands"]) - set(actual["main_thread_commands"]))
     if new:
@@ -119,7 +130,10 @@ def problems(actual, allowed):
 if __name__ == "__main__":
     actual = read_repo()
     if "--write" in sys.argv:
-        ALLOWANCE.write_text(json.dumps(actual, indent=2) + "\n")
+        if actual["unparsed_commands"]:
+            print("\n".join(problems(actual, actual)))
+            sys.exit(1)
+        ALLOWANCE.write_text(json.dumps({k: v for k, v in actual.items() if k != "unparsed_commands"}, indent=2) + "\n")
         print(f"wrote {ALLOWANCE.name}: {len(actual['main_thread_commands'])} main-thread commands")
         sys.exit(0)
     found = problems(actual, json.loads(ALLOWANCE.read_text()))
