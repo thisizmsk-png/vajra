@@ -146,8 +146,8 @@ impl App {
     /// are the bytes the record check just verified (the same ones the label reads, so a signed swap between two
     /// reads can't pass one check and feed the other), with the task graph read by `list --json`; the ledger is the
     /// core's own file for this slug. A run with no ledger (one this app's core didn't record) is `Missing`. A match
-    /// also needs the run's record held live by this app, answering `CoreRecord::verify_record`; a matching file with
-    /// no held record is `NotHeld`, never `Match`.
+    /// also needs the run's record held live by this app, whose in-memory ledger checks the same snapshot
+    /// (`CoreRecord::check_snapshot`, no second read); a matching file with no held record is `NotHeld`, never `Match`.
     pub(super) fn ledger_of(&self, slug: &str, verified: &Value) -> proof::Ledger {
         use super::record::{LedgerStore, ReadBack};
         use crate::vajra::bridge::Request;
@@ -181,16 +181,17 @@ impl App {
             return proof::Ledger::Mismatch;
         }
         // The file alone is never a match (#226's rule): until key A an agent can write it and sign a campaign to fit.
-        // Only a record this app still holds, answering its own check, counts.
+        // Only a record this app still holds counts, and its in-memory ledger checks this same snapshot: a second read
+        // could see the genuine files restored after an altered snapshot passed the file check (#237 review).
         let Some(rec) = self.live_record(slug) else { return proof::Ledger::NotHeld };
-        if rec.verify_record().is_err() {
+        if rec.check_snapshot(&back).is_err() {
             return proof::Ledger::Mismatch;
         }
         proof::Ledger::Match
     }
 
     /// The run's record, if the app still holds it, for this campaign.
-    fn live_record(&self, slug: &str) -> Option<std::sync::Arc<super::record::CoreRecord>> {
+    pub(super) fn live_record(&self, slug: &str) -> Option<std::sync::Arc<super::record::CoreRecord>> {
         use super::record::RunRecord;
         let run = slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r))?;
         let rec = lock(&self.live_records).get(run)?.upgrade()?;

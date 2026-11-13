@@ -104,6 +104,28 @@ fn a_matching_ledger_file_with_no_record_held_by_the_app_is_never_verified() {
     assert_eq!((l, why.as_str()), (proof::Label::NotVerified, proof::NOT_HELD_REASON));
 }
 
+/// Codex on #237: the file check and the held record must check one snapshot. The snapshot the label read has a
+/// progress line the core never wrote, and the saved ledger is edited to agree with it, while the genuine files and
+/// the in-memory ledger stay as the core left them. A second read would see the genuine files and pass; checking the
+/// held ledger against this same snapshot doesn't.
+#[test]
+fn a_snapshot_the_saved_ledger_agrees_with_but_the_held_record_doesnt_is_a_mismatch() {
+    let Some((t, app, _held)) = recorded() else { return };
+    let mut report = app.read_report_with(&slug(), &|_| {}, &|| {}).unwrap();
+    let genuine = report.as_object_mut().and_then(|m| m.remove(crate::desktop::VERIFIED_KEY)).unwrap();
+    assert_eq!(app.ledger_of(&slug(), &genuine), proof::Ledger::Match, "the genuine snapshot matches");
+    let mut altered = genuine.clone();
+    let extra = "an agent's line the core never wrote";
+    altered["progress"] = json!(format!("{}- 2026-11-13T21:00:00Z {extra}\n", genuine["progress"].as_str().unwrap()));
+    let file = t.0.join("data/control/record-ledgers").join(format!("{}.json", slug()));
+    let mut l: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    l["progress"].as_array_mut().unwrap().push(json!(extra));
+    fs::write(&file, serde_json::to_vec(&l).unwrap()).unwrap();
+    // The held record still verifies against the genuine files: a re-read would have passed.
+    assert!(app.live_record(&slug()).unwrap().verify_record().is_ok());
+    assert_eq!(app.ledger_of(&slug(), &altered), proof::Ledger::Mismatch);
+}
+
 #[test]
 fn a_campaign_the_core_never_recorded_has_no_ledger() {
     let Some((t, app, _held)) = recorded() else { return };
