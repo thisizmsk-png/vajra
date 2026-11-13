@@ -299,7 +299,14 @@ fn output_waits_for_acks_instead_of_queueing_without_bound() {
                 after += d.len();
                 last.extend_from_slice(&d);
                 last.drain(..last.len().saturating_sub(200));
-                tail.push_str(&String::from_utf8_lossy(&d[d.len().saturating_sub(64)..]));
+                // The end marker is followed by the shell's prompt, which holds the host name: on the CI runner that is
+                // 80+ bytes, so a 64-byte tail of each chunk missed it (#182 CI). Search the stream's last 4 KiB.
+                tail.push_str(&String::from_utf8_lossy(&d));
+                if tail.len() > 8192 {
+                    let cut = tail.len() - 4096;
+                    let cut = (cut..tail.len()).find(|&i| tail.is_char_boundary(i)).unwrap_or(tail.len());
+                    tail.drain(..cut);
+                }
             }
             Ok(Event::Exit(code)) => exit = Some(code),
             _ => {}
