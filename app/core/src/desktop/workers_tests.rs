@@ -309,6 +309,27 @@ fn two_default_seat_runs_start_side_by_side() {
     assert_eq!((r.rt.view(&a).unwrap().state, r.rt.view(&b).unwrap().state), (State::Running, State::Running));
 }
 
+/// #153 codex P2: a run's max_in_flight holds its excess writers in the queue until a slot frees, even on different
+/// seats; another run, and the run's own check tickets, are not held by it.
+#[test]
+fn a_runs_writer_limit_queues_its_excess_writers_but_not_its_checks_or_other_runs() {
+    let r = rig("runcap", Opts { mode: "slow", ..Opts::default() });
+    r.rt.limit_writers("r1", 1);
+    let a = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let b = r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap();
+    let other = r.rt.dispatch(r.task("r2", "t1"), seat("w2", "codex")).unwrap();
+    let check = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "v"), seat("v1", "codex"), &r.base).unwrap();
+    let vb = r.rt.view(&b).unwrap();
+    assert_eq!(vb.state, State::Queued, "the second independent writer waits for the run's one slot");
+    assert_eq!(vb.wait.as_ref().unwrap()["code"], "run_limit", "{vb:?}");
+    assert_ne!(r.rt.view(&other).unwrap().state, State::Queued, "another run isn't held");
+    assert_ne!(r.rt.view(&check).unwrap().state, State::Queued, "check tickets are exempt");
+    r.done(&a);
+    assert_eq!(r.done(&b).outcome, Some(Outcome::Done), "the slot freed, so it ran");
+    r.done(&other);
+    r.done(&check);
+}
+
 #[test]
 fn an_account_cap_queues_across_runs_and_mixed_providers_and_releases() {
     let caps: BTreeMap<String, u32> = [("codex".to_string(), 1)].into();
@@ -1350,4 +1371,38 @@ fn an_ended_ticket_becomes_a_core_node_with_its_profile_controls_diff_and_provid
     assert_eq!(c.controls["stop"]["enabled"], false);
     assert_eq!(c.diff.unwrap()["added"], 1);
     assert_eq!(c.provider.unwrap().model, "model-fake-1");
+}
+
+// ---------------------------------------------------------------- the run protocol over the real runtime (6d1)
+
+#[test]
+fn the_run_protocol_drives_a_real_worker_through_integration_to_the_stub_gate() {
+    use crate::desktop::plan::{Criterion, PlanTask};
+    use crate::desktop::runproto::*;
+    let r = rig("runproto", Opts::default());
+    let cfg = RunConfig {
+        project: "p".into(), run: "r1".into(), repo: r.repo.clone(), base: r.base.clone(), ask: "add a worker line".into(),
+        seats: vec![seat("w1", "codex")], max_in_flight: 4, limits: Limits { rounds: 1, ..Limits::default() }, redact: Redactor::default(),
+    };
+    let workers = Arc::new(CoreWorkers { rt: r.rt.clone(), gw: r.gw.clone() });
+    let p = RunProtocol::new(cfg, workers, Arc::new(StubGate), Arc::new(SystemClock::default()));
+    let task = PlanTask {
+        id: "t1".into(), title: "add the line".into(), owner_role: "backend".into(), files: vec!["src/**".into()], deps: vec![], criteria: vec!["ac-1".into()],
+        brief: "Add a line to src/lib.rs.".into(), touches_security: false,
+    };
+    let crit = vec![Criterion { id: "ac-1".into(), criterion: "the line is there".into(), check: "grep -q worker src/lib.rs".into() }];
+    p.plan_tasks(PlanInput { round: 1, criteria: Some(crit), tasks: vec![task], ..PlanInput::default() }).unwrap();
+    let Dispatched::Ticket { ticket, slot } = p.dispatch_worker("t1").unwrap() else { panic!("held") };
+    assert_eq!(slot, "w1");
+    let ended = p.await_any(std::slice::from_ref(&ticket), Duration::from_secs(20)).unwrap().ended.expect("the worker ended");
+    assert_eq!(ended.outcome.as_deref(), Some("done"), "{ended:?}");
+    let wt = r.rt.view(&ticket).unwrap().worktree.unwrap();
+    let round = p.integrate(1).unwrap();
+    let rt = p.await_any(&[round], Duration::from_secs(20)).unwrap().ended.expect("the round ended");
+    assert_eq!(rt.outcome.as_deref(), Some("failed"), "the stub gate never passes a round");
+    assert_eq!(p.card().status, Some(RunStatus::NotVerified));
+    let head = ugit(&r.home, &r.repo, &["rev-parse", "refs/heads/vajra/r1/integration"]);
+    let lib = ugit(&r.home, &r.repo, &["show", &format!("{head}:src/lib.rs")]);
+    assert!(lib.contains("worker line"), "the worker's change is on the integration branch: {lib}");
+    assert!(!wt.exists(), "the merged ticket's worktree is cleaned up after integrate");
 }
