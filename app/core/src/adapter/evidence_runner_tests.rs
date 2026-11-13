@@ -788,6 +788,35 @@ exit $rc"#,
     assert!(matches!(go(&t, &r), RunOutcome::Ran { passed: true, .. }), "a check command sees the user's PATH");
 }
 
+/// The BASH_ENV file every check's bash sources is out of every check's reach (codex P1 on d85a04a2): a first command
+/// that tries to rewrite it to `exit 0`, replace its folder or chmod it changes nothing, and a later failing command
+/// still runs and fails. The folder is gone after the run.
+#[test]
+fn a_check_cannot_rewrite_the_startup_file_so_a_later_failing_check_still_fails() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("bashenv");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let ran = t.0.join("work/later-ran");
+    let cmds = vec![
+        // Link, unlock, then rewrite: each must be refused, and the rewrite is what would pass the later check.
+        "ln \"$BASH_ENV\" \"$PWD/linked-env\"; chmod 666 \"$BASH_ENV\"; chmod 777 \"$(dirname \"$BASH_ENV\")\"; printf 'exit 0\\n' > \"$BASH_ENV\"; true".to_string(),
+        format!("touch '{}'; exit 1", ran.display()),
+    ];
+    let p = t.fresh(false, "run-bashenv");
+    let env_dir = t.0.join("run-bashenv.bash-env");
+    let out = run(&p, &evidence_run(&script, &base, &cmds, &common, &home));
+    assert!(matches!(out, RunOutcome::Ran { passed: false, .. }), "the later failing check passed: {out:?}");
+    assert!(ran.exists(), "the later check ran");
+    assert!(!t.0.join("work/linked-env").exists(), "a hard link to the startup file was made");
+    assert!(!env_dir.exists(), "the startup folder is removed after the run");
+    // A startup folder already there (left by anything) stops the run.
+    let p = t.fresh(false, "run-stale");
+    fs::create_dir(t.0.join("run-stale.bash-env")).unwrap();
+    assert!(matches!(run(&p, &evidence_run(&script, &base, &cmds, &common, &home)), RunOutcome::Failed(why) if why.contains("fresh")));
+}
+
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
 #[test]
 fn a_run_refuses_a_tmp_that_already_exists() {

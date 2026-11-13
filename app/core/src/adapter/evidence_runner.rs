@@ -284,6 +284,45 @@ const SCRIPT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 /// text: the PATH itself only ever travels in `VAJRA_CHECK_PATH`.
 const CHECK_ENV: &str = "if [ \"${VAJRA_RUNNER_LEVEL:-0}\" = 1 ]; then PATH=\"$VAJRA_CHECK_PATH\"; export PATH; fi\nexport VAJRA_RUNNER_LEVEL=$(( ${VAJRA_RUNNER_LEVEL:-0} + 1 ))\n";
 
+/// The folder holding the BASH_ENV file (codex P1 on d85a04a2). Every check command's bash sources that file before
+/// its command, so a check that could rewrite it (`exit 0`) would pass every later check unrun. It lives next to the
+/// run's tmp, never under the worktree or the tmp, so the profile allows no write to it, nor to the folder, which
+/// is also made read-only before the run: no rename, no replace, no chmod, and Seatbelt refuses a hard link into a
+/// writable folder. It must not exist yet, and is removed when the run ends.
+struct StartupDir(PathBuf);
+
+impl StartupDir {
+    fn make(profile: &Profile) -> Result<Self, &'static str> {
+        use std::os::unix::fs::PermissionsExt;
+        let name = profile.tmp.file_name().and_then(|n| n.to_str()).ok_or("the run's temp folder has no name")?;
+        let dir = profile.tmp.with_file_name(format!("{name}.bash-env"));
+        let writable = [&profile.worktree, &profile.tmp];
+        if writable.iter().any(|w| dir.starts_with(w) || w.starts_with(&dir)) {
+            return Err("the run's startup file would be writable by its checks");
+        }
+        std::fs::create_dir(&dir).map_err(|_| "the run's startup folder already exists; each run needs a fresh one")?;
+        let me = Self(dir);
+        let set = |p: &Path, mode| std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
+        let ok = std::fs::write(me.file(), CHECK_ENV).is_ok() && set(&me.file(), 0o444).is_ok() && set(&me.0, 0o555).is_ok();
+        if !ok {
+            return Err("couldn't prepare the run's folders");
+        }
+        Ok(me)
+    }
+    fn file(&self) -> PathBuf {
+        self.0.join("check-env.sh")
+    }
+}
+
+impl Drop for StartupDir {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::remove_file(self.file());
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
 /// The system dirs every check command's PATH ends with.
 const SYSTEM_PATH: [&str; 6] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin"];
 
@@ -380,10 +419,11 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     // root-owned system dirs: from a folder the user can write, a planted jq or bash could forge a passing bundle that
     // sign would accept. The check commands get the user's PATH: `CHECK_ENV`, sourced by every bash through
     // BASH_ENV, switches to it one level down, in the `bash -c "$cmd"` the script starts for each command.
-    let check_env = profile.tmp.join("check-env.sh");
-    if std::fs::write(&check_env, CHECK_ENV).is_err() {
-        return RunOutcome::Failed("couldn't prepare the run's folders".into());
-    }
+    let env_dir = match StartupDir::make(profile) {
+        Ok(d) => d,
+        Err(why) => return RunOutcome::Failed(why.into()),
+    };
+    let check_env = env_dir.file();
     cmd.env_clear().env("PATH", SCRIPT_PATH).env("VAJRA_CHECK_PATH", run_path(r.tool_path)).env("BASH_ENV", &check_env).env("HOME", r.home).env("TMPDIR", &profile.tmp).env("LC_ALL", "C.UTF-8");
     cmd.env("VAJRA_WALKTHROUGH_DIR", r.base).env("GIT_TERMINAL_PROMPT", "0").env("GIT_CONFIG_NOSYSTEM", "1");
     for (k, v) in git_env(&profile.tmp, r.git_common).into_iter().chain(cache_env(&profile.tmp)) {
