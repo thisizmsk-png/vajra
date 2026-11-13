@@ -1154,9 +1154,23 @@ core_expands() {
 # The guard's word split for core_campaign_guard: every separator becomes " ; " and every redirect its own word.
 core_words() {
   local X="${1//&>/ > }"; X="${X//>&/ > }"
-  X="${X//;/ ; }"; X="${X//|/ ; }"; X="${X//&/ ; }"; X="${X//(/ ; }"; X="${X//)/ ; }"; X="${X//\`/ ; }"
+  X="${X//;/ ; }"; X="${X//|/ ; }"; X="${X//&/ ; }"; X="${X//(/ ; }"; X="${X//)/ ; }"
+  # bhishma #194: an opening backtick leaves a `$` word, as `$(` does (its `(` is the separator), so both forms of a
+  # substitution are judged the same; a closing one is only a separator.
+  while [[ "$X" == *\`* ]]; do X="${X/\`/ \$ ; }"; [[ "$X" == *\`* ]] && X="${X/\`/ ; }"; done
   X="${X//>/ > }"; X="${X//</ < }"
   printf '%s' "$X"
+}
+# The separator character each `;` word of core_words came from, in order (bhishma #194: a pipe into an interpreter
+# feeds it arguments the command doesn't show). Every separator character makes exactly one `;` word.
+core_seps() {
+  local S="${1//&>/ > }" c m out=""
+  S="${S//>&/ > }"
+  for ((m = 0; m < ${#S}; m++)); do
+    c="${S:m:1}"
+    case "$c" in ";"|"|"|"&"|"("|")"|"\`") out="$out$c" ;; esac
+  done
+  printf '%s' "$out"
 }
 # 0 when word $1 expands: a $ (but $PWD and $HOME), a backtick, or a brace or glob character, unless every place it
 # appears in the raw command is inside quotes, where a glob stays literal (and a quoted $ is one argument; the
@@ -1180,9 +1194,25 @@ core_all_quoted() {
   [ "$all" -gt 0 ] && [ $((n1 + n2)) -eq "$all" ]
 }
 # bhishma #194 M1: 0 when the interpreter operand at word $1 (W/WO index) expands and could reach a core campaign.
+# Known over-block (bhishma #194 Low, accepted): an operand built by a substitution, such as node $(npm bin)/x.js, is
+# refused quoted or not while a core campaign runs, because its name is whatever the substitution prints.
 core_hidden_operand() {
-  local k="$1" to="${WO[$1]}" m s
+  local k="$1" to="${WO[$1]}" m s n
   core_word_expands "$to" raw || return 1
+  # bhishma #194 (on 15fe1ff, H3): arguments fed by xargs, parallel or find -exec before the interpreter, a stdin
+  # redirect after it, or a pipe into its segment never show in the command text. The interpreter is word $i.
+  for ((m = i - 1; m >= 0; m--)); do
+    [ "${W[$m]}" = ";" ] && break
+    case "${W[$m]##*/}" in xargs|gxargs|parallel|-exec|-execdir|-ok|-okdir) return 0 ;; esac
+  done
+  if [ "$m" -ge 0 ]; then
+    n=0; for ((s = 0; s <= m; s++)); do [ "${W[$s]}" = ";" ] && n=$((n + 1)); done
+    [ "${SEPS:$((n - 1)):1}" = "|" ] && return 0
+  fi
+  for ((m = k + 1; m < nw; m++)); do
+    [ "${W[$m]}" = ";" ] && break
+    [ "${W[$m]}" = "<" ] && return 0
+  done
   core_all_quoted "$to" || return 0                       # unquoted: it may split into a script and its arguments
   for ((m = k + 1; m < nw; m++)); do
     [ "${W[$m]}" = ";" ] && break
@@ -1232,9 +1262,12 @@ core_campaign_guard() {
   local XO; XO="$(core_words "$N")"
   local W=() WO=() i j nw t to sub write=0 cwrite=0 name nested=0 feeder=0 lit
   local why="a write through vajra-campaign.sh or vajra_tasks.py while Vajra Desktop runs a campaign"
+  local SEPS; SEPS="$(core_seps "$lc")"
   set -f; W=( $X ); WO=( $XO ); set +f
   nw=${#W[@]}
   [ "${#WO[@]}" = "$nw" ] || block "$why: the guard could not read this command's words"
+  local nsemi=0; for ((i = 0; i < nw; i++)); do [ "${W[$i]}" = ";" ] && nsemi=$((nsemi + 1)); done
+  [ "$nsemi" = "${#SEPS}" ] || block "$why: the guard could not read this command's separators"
   for ((i = 0; i < nw; i++)); do
     name="${W[$i]##*/}"
     # H1: a command word that may expand to either script's name is refused before any write is looked for. Only in
@@ -1243,6 +1276,9 @@ core_campaign_guard() {
     local prev=";"
     [ "$i" -gt 0 ] && prev="${W[$((i - 1))]}"
     case "$prev" in ";"|exec|command|env|nohup|time|nice|sudo|then|do|else) ;; *) prev="" ;; esac
+    # bhishma #194: a `$( )` or backtick substitution in command position builds a name the command doesn't show.
+    [ -n "$prev" ] && [ "${W[$i]}" = "\$" ] \
+      && block "while Vajra Desktop runs a campaign, a command name may not come from a \$( ) or backtick substitution: write the command literally"
     [ -n "$prev" ] && case "$name" in
       *[\$\{\}\*\?\[\]]*)
         lit="${name//[\$\{\}\*\?\[\]]/}"

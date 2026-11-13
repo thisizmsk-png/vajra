@@ -1065,6 +1065,27 @@ echo "$C0" > "$VS/campaigns/.active-0123456789ab"
 bash_case BLOCK "M1: a quoted operand in the app's record repo"  "python3 \"\$s\" report t1 done" "$APPREC"
 bash_case BLOCK "M1: a quoted operand after a cd"               "cd ~/rec && python3 \"\$s\" report t1 done"
 bash_case ALLOW "M1: a quoted operand in a user repo"           "python3 \"\$s\" report t1 done"
+# bhishma #194 (on 15fe1ff): the M1 relaxation must not reopen H3. A quoted operand whose arguments come from xargs,
+# parallel, find -exec, an args file or stdin is a hit, as both were on e953cf9.
+bash_case BLOCK "M1/H3: xargs feeds a quoted operand"           "echo report t1 done | xargs python3 \"\$s\""
+bash_case BLOCK "M1/H3: xargs reads an args file"               "xargs -a /tmp/args python3 \"\$s\""
+bash_case BLOCK "M1/H3: parallel feeds a quoted operand"        "parallel python3 \"\$s\" ::: report"
+bash_case BLOCK "M1/H3: find -exec feeds a quoted operand"      "find /tmp/a -exec python3 \"\$s\" {} +"
+bash_case BLOCK "M1/H3: stdin redirected into the interpreter"  "python3 \"\$s\" < /tmp/args"
+bash_case BLOCK "M1/H3: stdin piped into the interpreter"       "cat /tmp/args | python3 \"\$s\""
+bash_case ALLOW "M1/H3: a quoted operand, output to a file"     "python3 \"\$s\" report t1 done > /tmp/out"
+bash_case ALLOW "M1/H3: a quoted operand piped out, not in"     "python3 \"\$s\" report t1 done | tail -n 3"
+# bhishma #194 Low, documented over-block: while a core campaign runs, an interpreter operand built by a substitution
+# is refused, quoted or not (its name is what the substitution prints). Run the tool by a literal path instead.
+bash_case BLOCK "Low: node on an unquoted npm bin substitution" "node \$(npm bin)/tasks-tool.js build"
+bash_case BLOCK "Low: node on a quoted npm bin substitution"    "node \"\$(npm bin)/tasks-tool.js\" build"
+bash_case ALLOW "Low: node on the literal path is fine"         "node node_modules/.bin/tasks-tool.js build"
+# bhishma #194 (on 15fe1ff): a backtick substitution is judged like \$( ).
+bash_case BLOCK "backtick: builds the operand"                  "python3 \`echo scripts/vajra_ta\`sks.py report t1 done"
+bash_case BLOCK "backtick: is the whole operand"                "python3 \`printf %s \$X\` report t1 done"
+bash_case BLOCK "backtick: builds the command word"             "\`printf scripts/vajra_ta\`sks.py report t1 done"
+bash_case BLOCK "dollar-paren: builds the operand (unchanged)"  "python3 \$(echo scripts/vajra_ta)sks.py report t1 done"
+bash_case BLOCK "dollar-paren: builds the command word (unchanged)" "\$(printf scripts/vajra_ta)sks.py report t1 done"
 rm -f "$VS/campaigns/.active-0123456789ab"
 # M2: the first word is in command position (bash 3.2 errors on index -1; 4.3+ reads the last word).
 bash_case BLOCK "M2: a first-word glob naming the script"      "scr*/vajra_tasks.py report t1 done --campaign deliver-20261112-0930"
