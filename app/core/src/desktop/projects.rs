@@ -101,6 +101,26 @@ impl App {
         self.projects.archive(id, expect_rev).map(|p| json!({"project": project_json(&p)})).map_err(refusal)
     }
 
+    /// Git repositories already on this Mac that are not projects yet (`found`: root, name, worktrees), looked for in the
+    /// common code folders and in `extra` (absolute folders the person names). Read only: it adds nothing; the person
+    /// picks, and each pick goes through `project_add`. `truncated` means the scan stopped early.
+    pub fn project_discover(&self, extra: &[String]) -> Res {
+        self.projects_usable()?;
+        let mut folders = Vec::new();
+        for e in extra.iter().take(16) {
+            let p = std::path::PathBuf::from(e);
+            if !p.is_absolute() {
+                return Err(invalid("path", "must be an absolute folder path"));
+            }
+            folders.push(p);
+        }
+        let store = &self.projects;
+        let owned = |root: &std::path::Path| store.find(root).ok().flatten().is_some_and(|p| p.archived.is_none());
+        let d = crate::projects::discover::discover(store.guard(), &folders, &owned);
+        let found: Vec<Value> = d.found.iter().map(|f| json!({"root": f.root.to_string_lossy(), "name": f.name, "worktrees": f.worktrees})).collect();
+        Ok(json!({"found": found, "truncated": d.truncated}))
+    }
+
     /// What the owner is asked to confirm once: suggested projects for campaigns started before projects existed.
     /// Nothing is written. `done` is true once the owner has confirmed.
     pub fn project_migration_suggest(&self) -> Res {

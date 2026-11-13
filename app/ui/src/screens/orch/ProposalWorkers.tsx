@@ -1,5 +1,5 @@
 // The per-worker provider choice on a run proposal (a lazy chunk: only a proposal that carries `workers` loads it). Each worker
-// has a chip (icon, "Model · provider", effort), a billing line, the Director-General's reason, the limits that provider has
+// has a chip (icon, "Model via provider", effort), a billing line, the Director-General's reason, the limits that provider has
 // and a usage warning at 80%. The pickers offer only what the project allows; a changed pick says "Changed by you", and
 // nothing starts until Start, which carries the changes. The proposal hash covers `workers`: a mismatch is refused by the core.
 import { useEffect, useMemo, useState } from "react";
@@ -20,7 +20,7 @@ const same = (a: AgentPick, b: AgentPick) => sameEntry(a, b) && a.effort === b.e
 function billingLine(a: Account | undefined): string {
   if (!a) return P.billingUnknown;
   const base = a.billing.kind === "unknown" ? P.billingUnknown : a.billing.account_label ?? S.workerProvider.billing[a.billing.kind];
-  return a.billing.override_warning ? `${base} · ${S.accounts.overrideShort(a.billing.override_warning)}` : base;
+  return a.billing.override_warning ? S.accounts.billingAlso(base, S.accounts.overrideShort(a.billing.override_warning)) : base;
 }
 
 function warnLine(a: Account | undefined, u: Usage | undefined): string | null {

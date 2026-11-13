@@ -1,10 +1,10 @@
 // Multi-provider on the Director-General's proposal card and on every surface a worker appears (sidebar, Board, Crew, Run, status
-// bar). Fixture data only; no real key anywhere. Every model reads "Model · provider", a pick outside the project's allowed list is
+// bar). Fixture data only; no real key anywhere. Every model reads "Model via provider", a pick outside the project's allowed list is
 // never offered, Start carries only the picks the user changed, and a hash mismatch is shown.
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { ACCOUNTS, AGENTS, USAGE } from "../src/accountsFixture";
-import { parseProposalWorkers } from "../src/accountsContract";
+import { modelLine, parseAccounts, parseProposalWorkers } from "../src/accountsContract";
 import { setTransport } from "../src/ipc";
 import type { InboxItem, RunOverview } from "../src/ipc";
 import { boardCards } from "../src/projects/adapter";
@@ -35,18 +35,37 @@ describe("a worker's provider (effective)", () => {
     expect(JSON.stringify(parseWorkerProvider(withSecret))).not.toContain("fake-test-key");
     expect(parseWorkerProvider({ ...gateway, billing: "wibble" })?.billing).toBe("unknown");
   });
-  it("every line reads Model · provider: the default model, a named model, an id, and Not reported", () => {
-    expect(workerLine(parseWorkerProvider(claude)!)).toBe(`${S.accounts.defaultModel} · Claude Code`);
-    expect(workerLine(parseWorkerProvider(gateway)!)).toBe("DeepSeek V3.2 · OpenRouter");
-    expect(workerLine(parseWorkerProvider({ ...gateway, model_name: null })!)).toBe("deepseek/deepseek-v3.2 · OpenRouter");
-    expect(workerLine(parseWorkerProvider({ ...claude, model: "unknown" })!)).toBe(`${W.notReported} · Claude Code`);
+  it("every line reads Model via provider: the default model, a named model, an id, and Not reported", () => {
+    expect(workerLine(parseWorkerProvider(claude)!)).toBe(`${S.accounts.defaultModel} via Claude Code`);
+    expect(workerLine(parseWorkerProvider(gateway)!)).toBe("DeepSeek V3.2 via OpenRouter");
+    expect(workerLine(parseWorkerProvider({ ...gateway, model_name: null })!)).toBe("deepseek/deepseek-v3.2 via OpenRouter");
+    expect(workerLine(parseWorkerProvider({ ...claude, model: "unknown" })!)).toBe(`${W.notReported} via Claude Code`);
+  });
+  it("joins a model and its provider with a word, never a middle dot (DESIGN.md)", () => {
+    const dot = String.fromCharCode(0xb7);
+    const parsed = parseAccounts(ACCOUNTS);
+    if (!parsed.ok) throw new Error("the accounts fixture did not parse");
+    const acc = parsed.value.accounts[0];
+    const lines = [
+      workerLine(parseWorkerProvider(claude)!),
+      workerLine(parseWorkerProvider(gateway)!),
+      ranOn(parseWorkerProvider({ ...gateway, requested: { model: "x-ai/grok-4", model_name: "Grok 4", label: "OpenRouter" } })!) ?? "",
+      modelLine(acc, null, S.accounts.defaultModel),
+      modelLine(acc, "unlisted/model-1", S.accounts.defaultModel),
+      S.accounts.billingAlso("Plan", S.accounts.overrideShort({ name: "OPENAI_API_KEY", found_in: "cli_config" })),
+    ];
+    for (const line of lines) {
+      expect(line.length).toBeGreaterThan(0);
+      expect(line).not.toContain(dot);
+    }
+    expect(S.accounts.modelVia("Grok 4", "OpenRouter")).toBe("Grok 4 via OpenRouter");
   });
   it("Ran on X (asked for Y) only when what ran differs from what was asked", () => {
     const asked = { model: "x-ai/grok-4", model_name: "Grok 4", label: "OpenRouter" };
-    expect(ranOn(parseWorkerProvider({ ...gateway, requested: asked })!)).toBe(W.ranOn("DeepSeek V3.2 · OpenRouter", "Grok 4 · OpenRouter"));
+    expect(ranOn(parseWorkerProvider({ ...gateway, requested: asked })!)).toBe(W.ranOn("DeepSeek V3.2 via OpenRouter", "Grok 4 via OpenRouter"));
     expect(ranOn(parseWorkerProvider({ ...gateway, requested: { model: gateway.model, model_name: gateway.model_name, label: "OpenRouter" } })!)).toBeNull();
     // The provider can differ too: the harness ran its own default where the gateway model was asked for.
-    expect(ranOn(parseWorkerProvider({ ...claude, requested: { model: gateway.model, model_name: "DeepSeek V3.2", label: "OpenRouter" } })!)).toBe(W.ranOn(`${S.accounts.defaultModel} · Claude Code`, "DeepSeek V3.2 · OpenRouter"));
+    expect(ranOn(parseWorkerProvider({ ...claude, requested: { model: gateway.model, model_name: "DeepSeek V3.2", label: "OpenRouter" } })!)).toBe(W.ranOn(`${S.accounts.defaultModel} via Claude Code`, "DeepSeek V3.2 via OpenRouter"));
     expect(ranOn(parseWorkerProvider(gateway)!)).toBeNull();
   });
   it("provider errors read in words: retrying with the time, or Needs you with the reason", () => {
@@ -58,9 +77,9 @@ describe("a worker's provider (effective)", () => {
   it("ProviderLine shows the icon, the line, the billing chip, the ran-on note and the error state; compact drops the chip", () => {
     const p = parseWorkerProvider({ ...gateway, requested: { model: "x-ai/grok-4", model_name: "Grok 4" }, error: { kind: "timeout", action: "retrying", attempt: 1, retry_at: "14:05" } })!;
     const { container, rerender } = render(<ProviderLine p={p} live />);
-    expect(container.querySelector("[data-model-line]")?.textContent).toBe("DeepSeek V3.2 · OpenRouter");
+    expect(container.querySelector("[data-model-line]")?.textContent).toBe("DeepSeek V3.2 via OpenRouter");
     expect(screen.getByText(W.billing.gateway)).toBeTruthy();
-    expect(screen.getByText(W.ranOn("DeepSeek V3.2 · OpenRouter", "Grok 4 · OpenRouter"))).toBeTruthy();
+    expect(screen.getByText(W.ranOn("DeepSeek V3.2 via OpenRouter", "Grok 4 via OpenRouter"))).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe("Upstream timeout. Retrying, attempt 1 of 2 at 14:05.");
     expect(container.querySelector("[aria-hidden='true']")?.querySelectorAll(":scope > img")).toHaveLength(2); // the tile is decorative; the name is written beside it
     rerender(<ProviderLine p={p} compact />);
@@ -119,29 +138,29 @@ describe("the proposal card's workers", () => {
   const workers = async () => within(await screen.findByRole("region", { name: P.title }));
   const pick = async (role: string, task: string) => (await (await workers()).findByLabelText(A.pickLabel(`${role}: ${task}`))) as HTMLSelectElement;
 
-  it("a chip per worker: Model · provider, effort, billing, the reason, the limits of a harness outside the guard, and the 80% warning", async () => {
+  it("a chip per worker: Model via provider, effort, billing, the reason, the limits of a harness outside the guard, and the 80% warning", async () => {
     mount(proposal());
     const w = await workers();
-    expect(((await pick("Backend", "Token bucket middleware")).selectedOptions[0]).textContent).toBe(`${S.accounts.defaultModel} · Claude Code`);
+    expect(((await pick("Backend", "Token bucket middleware")).selectedOptions[0]).textContent).toBe(`${S.accounts.defaultModel} via Claude Code`);
     expect(((await w.findByLabelText(A.effortLabel("Backend: Token bucket middleware"))) as HTMLSelectElement).value).toBe("high");
-    expect(((await pick("Docs", "Document the limits")).selectedOptions[0]).textContent).toBe("DeepSeek V3.2 · OpenRouter");
+    expect(((await pick("Docs", "Document the limits")).selectedOptions[0]).textContent).toBe("DeepSeek V3.2 via OpenRouter");
     expect(w.getByText("Touches auth; keeps the guard")).toBeTruthy();
     expect(w.getByText("Max plan, s…@gmail.com")).toBeTruthy();
     expect(w.getByText("OpenRouter key")).toBeTruthy();
-    expect(w.getByText(`${P.billingUnknown} · ${S.accounts.overrideShort({ name: "OPENAI_API_KEY", found_in: "cli_config" })}`)).toBeTruthy();
+    expect(w.getByText(S.accounts.billingAlso(P.billingUnknown, S.accounts.overrideShort({ name: "OPENAI_API_KEY", found_in: "cli_config" })))).toBeTruthy();
     expect(w.getAllByText(P.limits)).toHaveLength(2); // the Codex worker and the gateway worker both run on harness B
     expect(w.getAllByText(S.accounts.warn80("Claude Code", S.accounts.window.weekly, 84, "Thu 09:00"))).toHaveLength(1);
     expect(w.getByText(/Billed to your Claude Code plan \(1\), your OpenRouter key \(1\) and your Codex CLI login \(1\)\./)).toBeTruthy();
     expect(w.getByText(/2 workers run outside the Vajra guard\./)).toBeTruthy();
   });
 
-  it("every option in every picker reads Model · provider, and nothing outside the allowed list is offered", async () => {
+  it("every option in every picker reads Model via provider, and nothing outside the allowed list is offered", async () => {
     mount(proposal());
     await workers();
     const select = await pick("Docs", "Document the limits");
     const texts = [...select.options].map((o) => o.textContent ?? "");
-    expect(texts).toEqual([`${S.accounts.defaultModel} · Claude Code`, `${S.accounts.defaultModel} · Codex CLI`, "DeepSeek V3.2 · OpenRouter"]);
-    for (const t of texts) expect(t).toMatch(/^.+ · .+$/);
+    expect(texts).toEqual([`${S.accounts.defaultModel} via Claude Code`, `${S.accounts.defaultModel} via Codex CLI`, "DeepSeek V3.2 via OpenRouter"]);
+    for (const t of texts) expect(t).toMatch(/^.+ via .+$/);
     expect(screen.queryByRole("option", { name: /Grok 4/ })).toBeNull();
     expect(screen.getByText(P.notAllowed)).toBeTruthy();
   });
@@ -151,7 +170,7 @@ describe("the proposal card's workers", () => {
     const docs = await pick("Docs", "Document the limits");
     fireEvent.change(docs, { target: { value: "codex|" } });
     const w = await workers();
-    expect(w.getByText(P.changed("DeepSeek V3.2 · OpenRouter"))).toBeTruthy();
+    expect(w.getByText(P.changed("DeepSeek V3.2 via OpenRouter"))).toBeTruthy();
     expect(w.getAllByText(/Changed by you/)).toHaveLength(1);
     fireEvent.click(within(card()).getByRole("button", { name: S.dg.start }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "start_proposal")).toBe(true));
@@ -185,7 +204,7 @@ describe("the proposal card's workers", () => {
     await workers();
     fireEvent.click(within(card()).getByRole("button", { name: S.dg.start }));
     await waitFor(() => expect(within(card()).getByText(S.dg.receipt.changed)).toBeTruthy());
-    expect(((await pick("Docs", "Document the limits")).selectedOptions[0]).textContent).toBe("DeepSeek V3.2 · OpenRouter");
+    expect(((await pick("Docs", "Document the limits")).selectedOptions[0]).textContent).toBe("DeepSeek V3.2 via OpenRouter");
   });
 
   it("when the project's allowed list cannot be read, the picks are shown but not editable, with the reason", async () => {
@@ -193,7 +212,7 @@ describe("the proposal card's workers", () => {
     const w = await workers();
     await waitFor(() => expect(w.getByText(P.readFailed)).toBeTruthy());
     expect(w.queryAllByRole("combobox")).toHaveLength(0);
-    expect(document.body.querySelector("[data-model-line]")?.textContent).toMatch(/^.+ · .+$/);
+    expect(document.body.querySelector("[data-model-line]")?.textContent).toMatch(/^.+ via .+$/);
   });
 
   it("a proposal without workers never loads the accounts", async () => {

@@ -5,6 +5,7 @@ import { useState, type CSSProperties } from "react";
 import fallback from "../assets/providers/fallback.svg?raw";
 import { MARKS } from "../assets/providers/marks";
 import { cn } from "../../components/ui/cn";
+import { S } from "../../strings";
 
 const MONOGRAM: Record<string, string> = { claude: "CC", codex: "CX", grok: "GK", deepseek: "DS", openrouter: "OR" };
 /** The provider's name, for the accessible label when no text name sits beside the tile. */
@@ -40,7 +41,7 @@ export function ProviderIcon({ family: given, model, via, large, named }: { fami
   const known = !!MONOGRAM[family] || !!vendor;
   const badge = via && MONOGRAM[via] ? via : undefined;
   const name = PROVIDER_NAME[family] ?? (model ? model.split("/")[0] : family);
-  const a11y = named ? { role: "img", "aria-label": via && PROVIDER_NAME[via] ? `${name} · ${PROVIDER_NAME[via]}` : name } : { "aria-hidden": true as const };
+  const a11y = named ? { role: "img", "aria-label": via && PROVIDER_NAME[via] ? S.accounts.modelVia(name, PROVIDER_NAME[via]) : name } : { "aria-hidden": true as const };
   return (
     <span className={cn("v-pt", large && "v-pt--lg", !known && "v-pt--fb", MARKS[family] && "v-pt--mark", MARKS[family]?.plate && "v-pt--plate")} {...a11y} data-family={known ? family : "unknown"}>
       {known ? <Mark id={family} className="v-pt__mk" /> : <span className="v-pt__fb" dangerouslySetInnerHTML={{ __html: fallback }} />}
