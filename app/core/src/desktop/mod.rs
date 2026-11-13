@@ -814,6 +814,22 @@ impl App {
         Ok(engine)
     }
 
+    /// The switch-off values for a Codex Lead in `project`, proven with the user's own Codex (the login route: no extra
+    /// env). A managed layer, or anything the proof can't show, refuses the start with the cause named.
+    fn codex_off_for_lead(&self, project: &Path) -> Result<Vec<String>, Value> {
+        use crate::adapter::profiles as p;
+        use crate::providers::detect::Probe;
+        let probe = self.provider_probe();
+        let codex = probe.find("codex").ok_or_else(|| fail("provider_not_installed", "codex is not installed; install it or choose another provider"))?;
+        let user = probe.env("USER").and_then(|u| u.into_string().ok()).unwrap_or_default();
+        if p::codex_managed_layer(&user) {
+            return Err(fail("codex_tools_on", p::CODEX_MANAGED));
+        }
+        let dirs = self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs);
+        let run = p::codex_check_runner(&codex, project, &[], &dirs);
+        p::codex_tools_off(&run).map_err(|why| fail("codex_tools_on", why))
+    }
+
     fn provider_probe(&self) -> crate::providers::detect::System {
         crate::providers::detect::System::new(self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs)).with_home(self.home.clone())
     }
@@ -995,7 +1011,9 @@ impl App {
                 let profile = crate::adapter::profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
                 let real = |p: &Path| p.canonicalize().map_err(|e| fail("io_error", e));
                 let (project, tmp) = (real(&cwd)?, real(&std::env::temp_dir())?);
-                crate::adapter::profiles::codex_run_lead_argv(&input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)
+                // bhishma #216: its hooks, plugins, MCP servers and notify proven off, as Codex runs in this project.
+                let off = self.codex_off_for_lead(&project)?;
+                crate::adapter::profiles::codex_run_lead_argv(&input.ask, &profile, &deny, &project, &tmp, &off).map_err(invalid_input)
             }
         }, false, workers)?;
         self.note("run_started", &[]);

@@ -17,11 +17,99 @@ fn deny() -> &'static [PathBuf] {
 /// A launch's permission profile name, as `codex_profile_name` would make it.
 const PROFILE: &str = "vajra-0123456789abcdef";
 
+/// The proven switch-off values for a launch whose Codex has one MCP server, `files`.
+fn off() -> &'static [String] {
+    static O: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    O.get_or_init(|| CODEX_OFF.iter().map(|s| s.to_string()).chain(["mcp_servers.files.enabled=false".to_string()]).collect())
+}
+
 fn launch(kind: RoleKind, network: bool) -> WorkerLaunch<'static> {
     WorkerLaunch {
         kind, prompt: "Do the task", model: Some("vendor/model-a"), effort: Some("high"), network, ticket_tmp: Path::new(TMP), worktree: Path::new(WT),
-        deny: deny(), profile: PROFILE,
+        deny: deny(), profile: PROFILE, off: off(),
     }
+}
+
+/// A Codex that answers `mcp list --json` and `features list` the way 0.166 does under the given `-c` values: a server
+/// shows `enabled: false` once its `mcp_servers.<name>.enabled=false` is passed; the four features follow theirs.
+fn fake_codex<'a>(servers: &'static [&'static str], stuck: Option<&'static str>, asked: &'a std::sync::Mutex<Vec<Vec<String>>>) -> impl Fn(&[String]) -> Option<crate::providers::detect::Out> + 'a {
+    move |args: &[String]| {
+        asked.lock().unwrap().push(args.to_vec());
+        let has = |v: &str| args.windows(2).any(|w| w[0] == "-c" && w[1] == v);
+        let ok = |s: String| Some(crate::providers::detect::Out { code: Some(0), stdout: s, stderr: String::new() });
+        match args.first().map(String::as_str) {
+            Some("mcp") => {
+                let rows: Vec<Value> = servers.iter().map(|n| json!({"name": n, "enabled": !has(&format!("mcp_servers.{n}.enabled=false")) || stuck == Some(n)})).collect();
+                ok(serde_json::to_string(&rows).unwrap())
+            }
+            Some("features") => ok(["hooks", "plugins", "remote_plugin", "apps", "multi_agent"]
+                .iter()
+                .map(|f| format!("{f:<40} stable             {}\n", !has(&format!("features.{f}=false")) || stuck == Some(f)))
+                .collect()),
+            _ => None,
+        }
+    }
+}
+
+/// bhishma #216 H2-b (vajra-1's decision): hooks, plugins, apps, notify and each MCP server are switched off in the
+/// argv and proven off under exactly those values; anything the proof can't show fails closed.
+#[test]
+fn every_tool_outside_the_sandbox_is_switched_off_and_proven_off_or_the_launch_is_not_allowed() {
+    let asked = std::sync::Mutex::new(Vec::new());
+    let got = codex_tools_off(&fake_codex(&["files", "plug-x"], None, &asked)).unwrap();
+    let mut want: Vec<String> = CODEX_OFF.iter().map(|s| s.to_string()).collect();
+    want.extend(["mcp_servers.files.enabled=false".to_string(), "mcp_servers.plug-x.enabled=false".to_string()]);
+    assert_eq!(got, want);
+    let asked = asked.lock().unwrap().clone();
+    // Asked: the server list under the base values, the list again and the features under the full set.
+    assert_eq!(asked.len(), 3, "{asked:?}");
+    for a in &asked[1..] {
+        for v in &want {
+            assert!(a.windows(2).any(|w| w[0] == "-c" && &w[1] == v), "{v} missing from {a:?}");
+        }
+    }
+    let none = std::sync::Mutex::new(Vec::new());
+    assert_eq!(codex_tools_off(&fake_codex(&[], None, &none)).unwrap(), CODEX_OFF.map(String::from).to_vec(), "no servers: the base set");
+    let fails = |servers: &'static [&'static str], stuck: Option<&'static str>, why: &str| {
+        let a = std::sync::Mutex::new(Vec::new());
+        assert_eq!(codex_tools_off(&fake_codex(servers, stuck, &a)).unwrap_err(), CODEX_TOOLS_ON, "{why}");
+    };
+    fails(&["files"], Some("files"), "a server that stays on (a managed or plugin layer)");
+    fails(&[], Some("hooks"), "hooks that stay on");
+    fails(&[], Some("plugins"), "plugins that stay on");
+    fails(&["we ird"], None, "a server name Vajra can't switch off by name");
+    assert_eq!(codex_tools_off(&|_: &[String]| None).unwrap_err(), CODEX_TOOLS_ON, "codex can't be asked");
+    let garbled = |_: &[String]| Some(crate::providers::detect::Out { code: Some(0), stdout: "not json".into(), stderr: String::new() });
+    assert_eq!(codex_tools_off(&garbled).unwrap_err(), CODEX_TOOLS_ON, "an answer Vajra can't read");
+    // The argv never carries anything but the proven base set and per-server switch-offs.
+    let mut bad = launch(RoleKind::Worker, false);
+    let short: Vec<String> = CODEX_OFF[..4].iter().map(|s| s.to_string()).collect();
+    bad.off = &short;
+    assert_eq!(codex_login_worker_argv(&bad).unwrap_err().field, "off", "never without notify off");
+    let extra: Vec<String> = off().iter().cloned().chain(["sandbox_mode=\"danger-full-access\"".to_string()]).collect();
+    bad.off = &extra;
+    assert_eq!(codex_login_worker_argv(&bad).unwrap_err().field, "off", "never a value the proof didn't make");
+}
+
+/// bhishma #216 M1-b: Codex loads a worktree's own `.codex` and `.agents`; any non-empty one refuses a launch.
+#[test]
+fn a_worktree_with_its_own_codex_or_agents_folder_never_gets_a_codex_session() {
+    let wt = tmpdir("wtcodex");
+    assert_eq!(codex_project_outside(&wt), None, "neither folder");
+    std::fs::create_dir_all(wt.join(".codex")).unwrap();
+    std::fs::create_dir_all(wt.join(".agents")).unwrap();
+    assert_eq!(codex_project_outside(&wt), None, "empty folders load nothing");
+    std::fs::write(wt.join(".codex/hooks.json"), "{}").unwrap();
+    assert_eq!(codex_project_outside(&wt).as_deref(), Some(CODEX_PROJECT_TOOLS), "a hooks.json");
+    std::fs::remove_file(wt.join(".codex/hooks.json")).unwrap();
+    std::fs::create_dir_all(wt.join(".agents/skills")).unwrap();
+    assert!(codex_project_outside(&wt).is_some(), "a skills folder");
+    let wt2 = tmpdir("wtcodex2");
+    std::os::unix::fs::symlink(&wt, wt2.join(".codex")).unwrap();
+    assert!(codex_project_outside(&wt2).is_some(), "a symlinked .codex counts as one");
+    let wt3 = tmpdir("wtcodex3");
+    std::fs::write(wt3.join(".agents"), "x").unwrap();
+    assert!(codex_project_outside(&wt3).is_some(), "a file named .agents");
 }
 
 /// The three profile values every Codex worker gets (S11).
@@ -33,68 +121,27 @@ fn profile_kv(network: bool) -> [String; 3] {
     ]
 }
 
-/// bhishma #216 H2: what in a Codex config runs outside the sandbox, named; anything unreadable fails closed.
+/// bhishma #216 H1 and M-Lead: the plain Codex run Lead gets a worker's profile, approvals and switch-offs, with the
+/// project and temp dir writable and no network.
 #[test]
-fn a_codex_config_with_an_mcp_server_or_notify_is_named_and_a_clean_one_is_not() {
-    let named = codex_config_outside;
-    assert_eq!(named("model = \"x\"\n[tui]\nnotifications = true\n"), None);
-    assert_eq!(named("[mcp_servers.files]\ncommand = \"npx\"\nenabled = false\n"), None, "a switched-off server doesn't run");
-    assert!(named("[mcp_servers.files]\ncommand = \"npx\"\n").unwrap().contains("MCP server \"files\""));
-    assert!(named("[profiles.work.mcp_servers.fs]\ncommand = \"x\"\n").unwrap().contains("\"fs\""), "inside a profile too");
-    assert!(named("[mcp_servers.\"we ird\"]\ncommand = \"x\"\n").unwrap().contains("an MCP server"), "an odd name isn't echoed");
-    assert!(named("notify = [\"/bin/sh\", \"-c\", \"x\"]\n").unwrap().contains("notify command"));
-    assert_eq!(named("notify = []\n"), None);
-    assert!(named("[[[ not toml").unwrap().contains("couldn't read"), "an unparsable config fails closed");
-
-    let d = tmpdir("tools");
-    let (none, mcp, bad) = (d.join("none.toml"), d.join("mcp.toml"), d.join("bad.toml"));
-    std::fs::write(&mcp, "[mcp_servers.files]\ncommand = \"npx\"\n").unwrap();
-    std::fs::write(&bad, "[[[").unwrap();
-    let only = std::slice::from_ref(&none);
-    let no = FakeCodex { found: false, answer: None, asked: Default::default() };
-    assert_eq!(codex_tools_outside(&no, only, false), None, "a missing file loads nothing");
-    assert!(codex_tools_outside(&no, &[none.clone(), mcp], false).unwrap().contains("\"files\""));
-    assert!(codex_tools_outside(&no, &[bad], false).unwrap().contains("couldn't read"));
-    // The login route also asks codex itself, which counts plugin servers too.
-    let listed = FakeCodex { found: true, answer: out(0, r#"[{"name":"plug","enabled":true}]"#, ""), asked: Default::default() };
-    assert!(codex_tools_outside(&listed, only, true).unwrap().contains("\"plug\""));
-    assert_eq!(*listed.asked.lock().unwrap(), ["mcp", "list", "--json"]);
-    let off = FakeCodex { found: true, answer: out(0, r#"[{"name":"plug","enabled":false}]"#, ""), asked: Default::default() };
-    assert_eq!(codex_tools_outside(&off, only, true), None);
-    let broken = FakeCodex { found: true, answer: out(1, "", "boom"), asked: Default::default() };
-    assert!(codex_tools_outside(&broken, only, true).unwrap().contains("couldn't read"), "a failed list fails closed");
-    assert!(codex_tools_outside(&no, only, true).unwrap().contains("couldn't read"), "no codex to ask fails closed");
-}
-
-/// bhishma #216 M1: a worktree's own `.codex` config is judged at each launch.
-#[test]
-fn a_worktree_codex_config_that_would_load_tools_outside_the_sandbox_is_found() {
-    let wt = tmpdir("wtcodex");
-    assert_eq!(codex_project_outside(&wt), None, "no .codex");
-    std::fs::create_dir_all(wt.join(".codex")).unwrap();
-    std::fs::write(wt.join(".codex/config.toml"), "model = \"x\"\n").unwrap();
-    assert_eq!(codex_project_outside(&wt), None, "a committed config with no tools is fine");
-    std::fs::write(wt.join(".codex/config.toml"), "notify = [\"/bin/sh\"]\n").unwrap();
-    assert!(codex_project_outside(&wt).is_some());
-    let wt2 = tmpdir("wtcodex2");
-    std::os::unix::fs::symlink(&wt, wt2.join(".codex")).unwrap();
-    assert!(codex_project_outside(&wt2).is_some(), "a symlinked .codex counts as one");
-}
-
-/// bhishma #216 H1: the plain Codex run Lead gets the same profile as a worker, with the project and temp dir writable.
-#[test]
-fn the_codex_run_lead_runs_under_the_profile_with_the_vajra_dirs_denied() {
-    let a = codex_run_lead_argv("exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP)).unwrap();
-    let mut want: Vec<String> = vec!["codex".into()];
-    for o in codex_profile_overrides(PROFILE, deny(), &[Path::new(WT), Path::new(TMP)], true).unwrap() {
+fn the_codex_run_lead_runs_like_a_worker_with_no_approvals_and_its_outside_tools_off() {
+    let a = codex_run_lead_argv("exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP), off()).unwrap();
+    let mut want: Vec<String> = vec!["codex".into(), "-c".into(), "approval_policy=\"never\"".into()];
+    for o in codex_profile_overrides(PROFILE, deny(), &[Path::new(WT), Path::new(TMP)], false).unwrap() {
         want.extend(["-c".into(), o]);
+    }
+    want.extend(["-c".into(), "web_search=\"disabled\"".into()]);
+    for o in off() {
+        want.extend(["-c".into(), o.clone()]);
     }
     want.extend(["--".into(), "exec this --flag".into()]);
     assert_eq!(a, want);
     assert!(a.iter().any(|x| x.contains(&format!("\"{}\"=\"none\"", DENY[0]))), "{a:?}");
-    assert!(!a.iter().any(|x| x == "--sandbox" || x.contains("approval_policy")), "approvals stay the user's: {a:?}");
-    assert!(codex_run_lead_argv("x", PROFILE, &[], Path::new(WT), Path::new(TMP)).is_err(), "never without the deny set");
-    assert!(codex_run_lead_argv("x", "vajra", deny(), Path::new(WT), Path::new(TMP)).is_err(), "never under a guessable name");
+    assert!(a.iter().any(|x| x.ends_with(".network={enabled=false}")), "{a:?}");
+    assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
+    assert!(codex_run_lead_argv("x", PROFILE, &[], Path::new(WT), Path::new(TMP), off()).is_err(), "never without the deny set");
+    assert!(codex_run_lead_argv("x", "vajra", deny(), Path::new(WT), Path::new(TMP), off()).is_err(), "never under a guessable name");
+    assert!(codex_run_lead_argv("x", PROFILE, deny(), Path::new(WT), Path::new(TMP), &[]).is_err(), "never without the switch-offs");
 }
 
 /// S11 hostile-config check: a user table named like ours merges into it, so each launch gets a name nobody can guess,
@@ -122,18 +169,25 @@ fn pairs(a: &[String]) -> Vec<&str> {
     a.windows(2).filter(|w| w[0] == "-c").map(|w| w[1].as_str()).collect()
 }
 
+/// `-c <v>` for each proven switch-off value, as the argv ends before `--`.
+fn off_args() -> Vec<String> {
+    off().iter().flat_map(|o| ["-c".to_string(), o.clone()]).collect()
+}
+
 #[test]
 fn codex_gateway_worker_argv_snapshot() {
     let a = codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap();
     let id = crate::providers::codex_home::PROVIDER_ID;
     let [fs, net, dp] = profile_kv(false);
-    let want: Vec<String> = [
+    let mut want: Vec<String> = [
         "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
         "-c", &format!("model_providers.{id}.request_max_retries=0"), "-c", &format!("model_providers.{id}.stream_max_retries=0"),
         "-c", "approval_policy=\"never\"", "-c", &fs, "-c", &net, "-c", &dp,
-        "-c", "web_search=\"disabled\"", "--", "Do the task",
+        "-c", "web_search=\"disabled\"",
     ].map(String::from).into();
+    want.extend(off_args());
+    want.extend(["--".to_string(), "Do the task".to_string()]);
     assert_eq!(a, want);
 }
 
@@ -141,12 +195,14 @@ fn codex_gateway_worker_argv_snapshot() {
 fn codex_login_worker_argv_snapshot_has_no_builtin_provider_override() {
     let a = codex_login_worker_argv(&launch(RoleKind::Verifier, false)).unwrap();
     let [fs, net, dp] = profile_kv(false);
-    let want: Vec<String> = [
+    let mut want: Vec<String> = [
         "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
         "-c", "approval_policy=\"never\"", "-c", &fs, "-c", &net, "-c", &dp,
-        "-c", "web_search=\"disabled\"", "--", "Do the task",
+        "-c", "web_search=\"disabled\"",
     ].map(String::from).into();
+    want.extend(off_args());
+    want.extend(["--".to_string(), "Do the task".to_string()]);
     assert_eq!(a, want);
     // S3: `model_providers.openai.*` makes codex refuse to load, so the login route never passes one.
     assert!(!a.iter().any(|x| x.contains("model_providers.openai")));
@@ -160,22 +216,25 @@ fn a_network_seat_turns_network_on_and_leaves_web_search_to_the_user() {
     assert!(!c.iter().any(|x| x.starts_with("web_search")), "{c:?}");
 }
 
-/// The "always" settings are present whatever the seat, and nothing switches the user's MCP servers or notify off for
-/// a worker (Q4: they are kept, and disclosed). Spike S3 ran this argv's overrides with a real codex 0.166 against a
-/// hostile temp `config.toml` (`danger-full-access`, `on-request`, network on, a user writable root, web search live,
-/// a user MCP server, notify) and every override won; this test pins the argv the spike proved.
+/// The "always" settings are present whatever the seat. Spike S3 ran this argv's overrides with a real codex 0.166
+/// against a hostile temp `config.toml` (`danger-full-access`, `on-request`, network on, a user writable root, web
+/// search live) and every override won. bhishma #216 (vajra-1's decision): the user's hooks, plugins, MCP servers and
+/// notify are switched off too (the 6k spike: with these values none of a hostile config's MCP server, notify or
+/// hooks ran, and the model saw no MCP tool).
 #[test]
-fn codex_worker_forces_every_always_setting_and_keeps_the_users_mcp_servers() {
+fn codex_worker_forces_every_always_setting_and_switches_off_the_users_outside_tools() {
     for a in [codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), codex_login_worker_argv(&launch(RoleKind::Worker, false)).unwrap()] {
         let c = pairs(&a);
         let [fs, net, dp] = profile_kv(false);
         for want in ["approval_policy=\"never\"", fs.as_str(), net.as_str(), dp.as_str(), "web_search=\"disabled\""] {
             assert!(c.contains(&want), "{want} missing from {c:?}");
         }
+        for want in off() {
+            assert!(c.contains(&want.as_str()), "{want} missing from {c:?}");
+        }
         // S11: `--sandbox` would switch the profile off, and the legacy keys are ignored under one.
         assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
         assert!(!c.iter().any(|x| x.starts_with("sandbox_workspace_write.")), "{c:?}");
-        assert!(!c.iter().any(|x| x.starts_with("mcp_servers") || x.starts_with("notify")), "{c:?}");
         assert!(!a.iter().any(|x| x.contains("danger") || x.contains("bypass")));
         assert_eq!(a[a.len() - 2], "--");
     }

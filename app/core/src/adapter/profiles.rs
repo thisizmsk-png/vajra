@@ -82,9 +82,10 @@ const CODEX_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "working_dir", how: "the core's worktree under <work>" },
     Always { setting: "model_and_effort", how: "`-m`, `-c model_reasoning_effort` when the seat names them" },
     Always { setting: "provider_route", how: "gateway: a Vajra-owned CODEX_HOME and zero retries; login: the user's own" },
+    Always { setting: "outside_tools", how: "`-c` switches hooks, plugins, apps and notify off, and each MCP server's `enabled=false`, proven by `codex mcp list` and `codex features list` under the same values before launch" },
 ];
 
-const CODEX_WORKER_USER: &[&str] = &["login", "mcp_servers", "notify", "AGENTS.md", "history", "default model"];
+const CODEX_WORKER_USER: &[&str] = &["login", "AGENTS.md", "history", "default model"];
 
 const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
@@ -152,6 +153,8 @@ pub struct WorkerLaunch<'a> {
     pub deny: &'a [PathBuf],
     /// This launch's permission profile name, a fresh `codex_profile_name` (unused by other harnesses).
     pub profile: &'a str,
+    /// The switch-off values `codex_tools_off` proved for this launch (Codex only; empty for other harnesses).
+    pub off: &'a [String],
 }
 
 /// 6k (S11): what a Codex session may not read. The Vajra state dir holds the signing key and the stores; the app data
@@ -195,114 +198,123 @@ pub fn codex_key_probe(probe: &dyn crate::providers::detect::Probe, home: &Path,
 pub type CodexLock = Result<(), String>;
 
 pub const CODEX_NOT_PROVEN: &str = "Vajra couldn't confirm on this Mac that Codex's sandbox keeps it away from Vajra's signing key.";
-const CODEX_NOTIFY_ON: &str = "Your Codex config runs a notify command, which runs outside Codex's sandbox and could read Vajra's signing key.";
-const CODEX_CONFIG_UNREAD: &str = "Vajra couldn't read your Codex config, so it can't tell which of your Codex tools would run outside Codex's sandbox.";
+pub const CODEX_MANAGED: &str = "Codex on this Mac has a managed config, which can turn on tools that run outside Codex's sandbox and could read Vajra's signing key.";
+pub const CODEX_TOOLS_ON: &str = "Vajra couldn't confirm that your Codex hooks, plugins, MCP servers and notify are off for this session. They run outside Codex's sandbox and could read Vajra's signing key.";
+pub const CODEX_PROJECT_TOOLS: &str = "The worktree has its own .codex or .agents folder, which Codex would load outside its sandbox.";
 
-fn codex_mcp_on(name: &str) -> String {
-    if !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
-        format!("Your Codex config turns on the MCP server \"{name}\", which runs outside Codex's sandbox and could read Vajra's signing key.")
-    } else {
-        "Your Codex config turns on an MCP server, which runs outside Codex's sandbox and could read Vajra's signing key.".into()
+/// bhishma #216 H2-b (vajra-1's decision): every Codex seat, the Lead included, runs with these switched off: hooks
+/// (config tables, hooks.json, plugin hooks), plugins (and the MCP servers and hooks they bring), apps (connectors) and
+/// notify. MCP servers are switched off one by one by name (`mcp_servers={}` doesn't clear the table: S11 spike).
+pub const CODEX_OFF: [&str; 5] = ["features.hooks=false", "features.plugins=false", "features.remote_plugin=false", "features.apps=false", "notify=[]"];
+const CODEX_FEATURES_OFF: [&str; 4] = ["hooks", "plugins", "remote_plugin", "apps"];
+
+fn mcp_name_ok(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Whether `v` is one of the switch-off values `codex_tools_off` makes.
+fn off_value_ok(v: &str) -> bool {
+    CODEX_OFF.contains(&v) || v.strip_prefix("mcp_servers.").and_then(|r| r.strip_suffix(".enabled=false")).is_some_and(mcp_name_ok)
+}
+
+/// A managed Codex layer (admin config, requirements, or an MDM profile) can turn tools back on over the argv, and
+/// Vajra can't read all of it: any one of them means not proven.
+pub fn codex_managed_layer(user: &str) -> bool {
+    let mdm = |d: &str| Path::new(d).join("com.openai.codex.plist");
+    [
+        PathBuf::from("/etc/codex/managed_config.toml"),
+        PathBuf::from("/etc/codex/requirements.toml"),
+        mdm("/Library/Managed Preferences"),
+        mdm(&format!("/Library/Managed Preferences/{user}")),
+    ]
+    .iter()
+    .any(|p| p.symlink_metadata().is_ok())
+}
+
+/// Runs `codex <args>` the way the launch will: the same binary, cwd and env.
+pub type CodexRun<'a> = &'a dyn Fn(&[String]) -> Option<crate::providers::detect::Out>;
+
+/// The real `CodexRun`: `codex` in `cwd` with the scrubbed launch env plus `env` (a launch's own extra variables).
+pub fn codex_check_runner<'a>(codex: &'a Path, cwd: &'a Path, env: &'a [(&'static str, OsString)], dirs: &'a [PathBuf]) -> impl Fn(&[String]) -> Option<crate::providers::detect::Out> + 'a {
+    move |args: &[String]| {
+        let e: Vec<(&str, &Path)> = env.iter().map(|(k, v)| (*k, Path::new(v))).collect();
+        let o = crate::vajra::bridge::run_codex_check(codex, args, cwd, &e, dirs).ok()?;
+        o.whole().then_some(crate::providers::detect::Out { code: o.code, stdout: o.stdout, stderr: o.stderr })
     }
 }
 
-/// bhishma #216 H2: what in one Codex `config.toml` would run outside the session's sandbox: an MCP server that isn't
-/// switched off, or a notify command, anywhere in the file (a `[profiles.*]` table too). A file that can't be parsed
-/// counts too: Vajra can't tell what it would load.
-pub fn codex_config_outside(text: &str) -> Option<String> {
-    fn walk(t: &toml::Table) -> Option<String> {
-        for (k, v) in t {
-            match (k.as_str(), v) {
-                ("mcp_servers", toml::Value::Table(s)) => {
-                    if let Some((name, _)) = s.iter().find(|(_, c)| c.get("enabled").and_then(toml::Value::as_bool) != Some(false)) {
-                        return Some(codex_mcp_on(name));
-                    }
-                }
-                ("notify", toml::Value::Array(a)) if !a.is_empty() => return Some(CODEX_NOTIFY_ON.into()),
-                ("notify", toml::Value::String(s)) if !s.trim().is_empty() => return Some(CODEX_NOTIFY_ON.into()),
-                (_, toml::Value::Table(inner)) => {
-                    if let Some(c) = walk(inner) {
-                        return Some(c);
-                    }
-                }
-                _ => {}
-            }
+fn with_c(head: &[&str], vals: &[String]) -> Vec<String> {
+    let mut a: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+    for v in vals {
+        a.extend(["-c".to_string(), v.clone()]);
+    }
+    a
+}
+
+fn mcp_list(run: CodexRun<'_>, vals: &[String]) -> Option<Vec<Value>> {
+    let out = run(&with_c(&["mcp", "list", "--json"], vals)).filter(|o| o.code == Some(0))?;
+    match serde_json::from_str::<Value>(&out.stdout).ok()? {
+        Value::Array(a) => Some(a),
+        _ => None,
+    }
+}
+
+/// The `-c` values that switch off everything that would run outside the sandbox for this launch, each one proven off:
+/// under exactly these values, `codex features list` shows the four features false and `codex mcp list --json` shows
+/// every server disabled. Anything it can't show is `Err` with the cause (fail closed). The rollout records none of
+/// these, so this check, run with the launch's own binary, cwd and env, is the read-back.
+pub fn codex_tools_off(run: CodexRun<'_>) -> Result<Vec<String>, String> {
+    let mut off: Vec<String> = CODEX_OFF.iter().map(|s| s.to_string()).collect();
+    for s in mcp_list(run, &off).ok_or_else(|| CODEX_TOOLS_ON.to_string())? {
+        let name = s["name"].as_str().filter(|n| mcp_name_ok(n)).ok_or_else(|| CODEX_TOOLS_ON.to_string())?;
+        off.push(format!("mcp_servers.{name}.enabled=false"));
+    }
+    let after = mcp_list(run, &off).ok_or_else(|| CODEX_TOOLS_ON.to_string())?;
+    if after.iter().any(|s| s["enabled"] != json!(false)) {
+        return Err(CODEX_TOOLS_ON.into());
+    }
+    let feats = run(&with_c(&["features", "list"], &off)).filter(|o| o.code == Some(0)).ok_or_else(|| CODEX_TOOLS_ON.to_string())?;
+    for f in CODEX_FEATURES_OFF {
+        let shown = feats.stdout.lines().find_map(|l| {
+            let mut w = l.split_whitespace();
+            (w.next() == Some(f)).then(|| w.last().map(str::to_string)).flatten()
+        });
+        if shown.as_deref() != Some("false") {
+            return Err(CODEX_TOOLS_ON.into());
         }
-        None
     }
-    match text.parse::<toml::Table>() {
-        Ok(t) => walk(&t),
-        Err(_) => Some(CODEX_CONFIG_UNREAD.into()),
-    }
+    Ok(off)
 }
 
-/// The config files a Codex session on this route loads that could hold MCP servers or notify: the system one, and the
-/// route's own `CODEX_HOME/config.toml` (the user's for the login route, Vajra's per-account one for a gateway). The
-/// project's own `.codex` is checked at every launch instead (`codex_project_outside`).
-pub fn codex_config_files(codex_home: &Path) -> Vec<PathBuf> {
-    vec![PathBuf::from("/etc/codex/config.toml"), codex_home.join("config.toml")]
-}
-
-/// What runs outside a Codex session's sandbox, judged from what Codex itself would load: each config file, then (the
-/// login route) `codex mcp list --json`, which also counts servers from plugins. `None`: nothing does.
-pub fn codex_tools_outside(probe: &dyn crate::providers::detect::Probe, files: &[PathBuf], list_mcp: bool) -> Option<String> {
-    for f in files {
-        match std::fs::read_to_string(f) {
-            Ok(text) => {
-                if let Some(c) = codex_config_outside(&text) {
-                    return Some(c);
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Some(CODEX_CONFIG_UNREAD.into()),
-        }
-    }
-    if !list_mcp {
-        return None;
-    }
-    let Some(codex) = probe.find("codex") else { return Some(CODEX_CONFIG_UNREAD.into()) };
-    let Some(out) = probe.run(&codex, &["mcp", "list", "--json"]).filter(|o| o.code == Some(0)) else { return Some(CODEX_CONFIG_UNREAD.into()) };
-    let Ok(Value::Array(servers)) = serde_json::from_str::<Value>(&out.stdout) else { return Some(CODEX_CONFIG_UNREAD.into()) };
-    servers.iter().find(|s| s["enabled"] != json!(false)).map(|s| codex_mcp_on(s["name"].as_str().unwrap_or("")))
-}
-
-/// bhishma #216 M1: a launch in a worktree whose own `.codex` config would load an MCP server or notify (written by an
-/// earlier session there, or committed) is refused: those run outside the sandbox. A `.codex` that can't be read or
-/// isn't a plain folder counts as one.
+/// bhishma #216 M1-b: Codex loads a worktree's own `.codex` (config, hooks.json, agents) and `.agents` (skills), and an
+/// earlier session there can write them. A Codex launch over either one, unless it is an empty folder, is refused.
 pub fn codex_project_outside(worktree: &Path) -> Option<String> {
-    let dir = worktree.join(".codex");
-    match std::fs::symlink_metadata(&dir) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Ok(m) if m.is_dir() => {}
-        _ => return Some(CODEX_CONFIG_UNREAD.into()),
+    for d in [".codex", ".agents"] {
+        let p = worktree.join(d);
+        match std::fs::symlink_metadata(&p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(m) if m.is_dir() => {
+                if !std::fs::read_dir(&p).is_ok_and(|mut r| r.next().is_none()) {
+                    return Some(CODEX_PROJECT_TOOLS.into());
+                }
+            }
+            _ => return Some(CODEX_PROJECT_TOOLS.into()),
+        }
     }
-    codex_tools_outside(&NoProbe, &[dir.join("config.toml")], false)
-}
-
-struct NoProbe;
-impl crate::providers::detect::Probe for NoProbe {
-    fn find(&self, _: &str) -> Option<PathBuf> {
-        None
-    }
-    fn run(&self, _: &Path, _: &[&str]) -> Option<crate::providers::detect::Out> {
-        None
-    }
-    fn env(&self, _: &str) -> Option<OsString> {
-        None
-    }
+    None
 }
 
 /// The whole launch-time answer for a Codex seat (6k, bhishma #216 H2): the OS keeps the session from the state dir,
-/// and nothing from the route's config runs outside the sandbox. Matches the Claude worker rule: judge what would
-/// load, and name the cause.
-pub fn codex_lock(probe: &dyn crate::providers::detect::Probe, home: &Path, data: &Path, codex_home: &Path, login: bool) -> CodexLock {
+/// no managed layer is present, and every tool that would run outside the sandbox is proven off. Matches the Claude
+/// worker rule: judge what would load, and name the cause.
+pub fn codex_lock(probe: &dyn crate::providers::detect::Probe, home: &Path, data: &Path, user: &str, run: CodexRun<'_>) -> CodexLock {
     if !codex_key_probe(probe, home, data) {
         return Err(CODEX_NOT_PROVEN.into());
     }
-    match codex_tools_outside(probe, &codex_config_files(codex_home), login) {
-        Some(c) => Err(c),
-        None => Ok(()),
+    if codex_managed_layer(user) {
+        return Err(CODEX_MANAGED.into());
     }
+    codex_tools_off(run).map(|_| ())
 }
 
 /// A fresh name for one launch's Codex permission profile: `vajra-` and 16 random hex digits. A user's `config.toml`
@@ -341,14 +353,20 @@ pub fn codex_profile_overrides(name: &str, deny: &[PathBuf], write: &[&Path], ne
     ])
 }
 
-/// bhishma #216 H1: the plain Codex run Lead (`start_run` with provider `codex`), `codex -c ... -- <ask>`. It is the
-/// user's own interactive session, so approvals, network and their other settings stay theirs. But it runs under a
-/// fresh permission profile like a worker's: the Vajra dirs unreadable, writes only in the project folder and the
-/// system temp dir. A Codex Lead's run is never counted guarded (`evidence_of`).
-pub fn codex_run_lead_argv(ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path) -> Result<Vec<String>, InvalidInput> {
+/// bhishma #216 H1: the plain Codex run Lead (`start_run` with provider `codex`), `codex -c ... -- <ask>`. It runs under
+/// a fresh permission profile like a worker's: the Vajra dirs unreadable, writes only in the project folder and the
+/// system temp dir, no network, no approvals, and its outside tools proven off (`off`, from `codex_tools_off`). A Codex
+/// Lead's run is still never counted guarded (`evidence_of`): it is the user's own interactive session.
+pub fn codex_run_lead_argv(ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path, off: &[String]) -> Result<Vec<String>, InvalidInput> {
     argv::check_ask(ask)?;
     let mut a = vec!["codex".to_string()];
-    for o in codex_profile_overrides(profile, deny, &[project, tmp], true)? {
+    // bhishma #216 M-Lead (vajra-1's decision): the Lead gets a worker's approvals and sandbox, with no way to run a
+    // command outside it, and its outside tools proven off like a worker's.
+    let mut kv = vec!["approval_policy=\"never\"".to_string()];
+    kv.extend(codex_profile_overrides(profile, deny, &[project, tmp], false)?);
+    kv.push("web_search=\"disabled\"".into());
+    kv.extend(checked_off(off)?);
+    for o in kv {
         a.extend(["-c".to_string(), o]);
     }
     a.extend(["--".to_string(), ask.to_string()]);
@@ -390,7 +408,16 @@ fn codex_confinement(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> 
     if !l.network {
         kv.push("web_search=\"disabled\"".into());
     }
+    kv.extend(checked_off(l.off)?);
     Ok(kv.into_iter().flat_map(|v| ["-c".to_string(), v]).collect())
+}
+
+/// The proven switch-off values, never a launch without the base set, and nothing else (bhishma #216 H2-b).
+fn checked_off(off: &[String]) -> Result<Vec<String>, InvalidInput> {
+    if !CODEX_OFF.iter().all(|b| off.iter().any(|o| o == b)) || !off.iter().all(|o| off_value_ok(o)) {
+        return Err(bad("off", "a Codex session always runs with its hooks, plugins, MCP servers and notify proven off"));
+    }
+    Ok(off.to_vec())
 }
 
 /// Insert `extra` before the trailing `-- <prompt>` of a Codex exec argv.

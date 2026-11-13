@@ -94,6 +94,18 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path) -> P
         r#"#!/bin/sh
 MODE='{mode}'
 WT=$(pwd -P)
+# bhishma #216: the launch-time proof. No MCP server is configured here, and a feature reads `false` only when the
+# argv switched it off, as codex 0.166 shows it.
+case "$1" in
+  mcp) echo '[]'; exit 0 ;;
+  features)
+    for f in hooks plugins remote_plugin apps; do
+      v=true
+      for a in "$@"; do [ "$a" = "features.$f=false" ] && v=false; done
+      echo "$f stable $v"
+    done
+    exit 0 ;;
+esac
 case "$1" in
   -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
@@ -551,17 +563,21 @@ fn a_codex_worker_cannot_read_the_vajra_dirs_or_it_does_not_run() {
     assert!(v.commit.is_none());
 }
 
-/// bhishma #216 M1: a worktree whose own `.codex` config would run notify or an MCP server outside the sandbox never
-/// gets a Codex worker; a `.codex` config with neither is fine.
+/// bhishma #216 M1-b (vajra-1's decision): Codex loads a worktree's own `.codex` (config, hooks, agents) and `.agents`
+/// (skills), so a Codex worker never launches over either one unless it is empty, whatever it holds.
 #[test]
-fn a_codex_worker_never_launches_over_a_worktree_codex_config_with_tools() {
-    let r = rig("wtcodex", Opts { files: vec![(".codex/config.toml", "notify = [\"/bin/sh\", \"-c\", \"true\"]\n")], ..Opts::default() });
-    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
-    assert_eq!(v.outcome, Some(Outcome::Failed), "{v:?}");
-    assert!(v.commit.is_none());
-    let r = rig("wtcodexok", Opts { files: vec![(".codex/config.toml", "model = \"x\"\n")], ..Opts::default() });
-    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
-    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+fn a_codex_worker_never_launches_over_a_worktree_codex_or_agents_folder() {
+    for (name, file, body) in [
+        ("wtcodex", ".codex/config.toml", "notify = [\"/bin/sh\", \"-c\", \"true\"]\n"),
+        ("wtcodexplain", ".codex/config.toml", "model = \"x\"\n"),
+        ("wtcodexhooks", ".codex/hooks.json", "{}\n"),
+        ("wtagents", ".agents/skills/x/SKILL.md", "x\n"),
+    ] {
+        let r = rig(name, Opts { files: vec![(file, body)], ..Opts::default() });
+        let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+        assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "{file}: {v:?}");
+        assert!(v.commit.is_none());
+    }
 }
 
 #[test]

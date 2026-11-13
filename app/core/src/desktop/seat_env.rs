@@ -43,29 +43,41 @@ impl SeatEnv {
 
     /// 6k's launch-time check for a Codex seat on `account`, run now: is a session under Vajra's profile kept from the
     /// Vajra state dir, with nothing from that route's config (MCP servers, notify) running outside its sandbox?
-    pub fn codex_lock(&self, account: &str) -> crate::adapter::profiles::CodexLock {
-        let dirs = crate::lock(&self.dirs).clone().unwrap_or_else(crate::vajra::preflight::path_dirs);
-        let system = detect::System::new(dirs).with_home(self.home.clone());
-        let login = account == "codex";
-        let codex_home = if login {
-            // The user's own: `CODEX_HOME` when the app was started with one, else `~/.codex`, as Codex picks it.
-            system.env("CODEX_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| self.home.join(".codex"))
-        } else {
-            match crate::providers::codex_home::home_for(&self.data, account) {
-                Ok(h) => h,
-                Err(_) => return Err(crate::adapter::profiles::CODEX_NOT_PROVEN.into()),
-            }
-        };
-        let r = crate::adapter::profiles::codex_lock(&system, &self.home, &self.data, &codex_home, login);
+    /// 6k's launch-time check for a Codex seat on `account` in the project folder `cwd`, run now: is a session under
+    /// Vajra's profile kept from the Vajra state dir, and are its hooks, plugins, MCP servers and notify proven off the
+    /// way a launch there runs Codex? Each launch proves the switch-off again in its own worktree, and doesn't start
+    /// if it can't.
+    pub fn codex_lock(&self, account: &str, cwd: Option<&Path>) -> crate::adapter::profiles::CodexLock {
+        let r = self.codex_lock_now(account, cwd);
         crate::lock(&self.locked).insert(account.to_string(), r.clone());
         r
     }
 
+    fn codex_lock_now(&self, account: &str, cwd: Option<&Path>) -> crate::adapter::profiles::CodexLock {
+        use crate::adapter::profiles as p;
+        let dirs = crate::lock(&self.dirs).clone().unwrap_or_else(crate::vajra::preflight::path_dirs);
+        let system = detect::System::new(dirs.clone()).with_home(self.home.clone());
+        let (Some(cwd), Some(codex)) = (cwd, system.find("codex")) else { return Err(p::CODEX_NOT_PROVEN.into()) };
+        // The env a launch on this route gets beyond the scrubbed one: a gateway account's own `CODEX_HOME`, made now
+        // through the guarded writer as a launch makes it; the login route passes none, so Codex uses `~/.codex`.
+        let mut env: Vec<(&'static str, OsString)> = Vec::new();
+        if account != "codex" {
+            use crate::providers::codex_home;
+            match codex_home::write(&self.data, account, codex_home::DEFAULT_BASE_URL) {
+                Ok(h) => env.push(("CODEX_HOME", h.into_os_string())),
+                Err(_) => return Err(p::CODEX_NOT_PROVEN.into()),
+            }
+        }
+        let user = system.env("USER").and_then(|u| u.into_string().ok()).unwrap_or_default();
+        let run = p::codex_check_runner(&codex, cwd, &env, &dirs);
+        p::codex_lock(&system, &self.home, &self.data, &user, &run)
+    }
+
     /// The last check's answer for `account`, or a fresh check the first time. For the card only: it predicts what
     /// Start will find.
-    pub fn codex_lock_hint(&self, account: &str) -> crate::adapter::profiles::CodexLock {
+    pub fn codex_lock_hint(&self, account: &str, cwd: Option<&Path>) -> crate::adapter::profiles::CodexLock {
         let last = crate::lock(&self.locked).get(account).cloned();
-        last.unwrap_or_else(|| self.codex_lock(account))
+        last.unwrap_or_else(|| self.codex_lock(account, cwd))
     }
 
     /// The checks of 16.2 for every seat, then the engine once. A project that is not a store id reads the global agents.

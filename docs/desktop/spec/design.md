@@ -1152,7 +1152,7 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 | Model and effort | `-m <model>` and `-c model_reasoning_effort=…` when the seat names them | the same | always, when set |
 | Provider route | Gateway: `CODEX_HOME=<data>/codex-home/<account>` (PR 3), and `-c model_providers.vajra-openrouter.{request,stream}_max_retries=0`. Login: the user's `~/.codex`, plus `-c model_providers.openai.*_max_retries=0` if S3 shows it applies | the same | always |
 | Vajra tools | none (a worker needs no core tools) | `-c mcp_servers.vajra_run.{command,args,env}`. The env holds only `VAJRA_RUN` and the **path** of a 0600 token file, **never the token itself**, because `-c` values appear in `ps`. The name `vajra_run` is reserved: a user server with that name is overridden. Also `-c mcp_servers.vajra_run.tool_timeout_sec=130` | always |
-| The user's MCP servers and `notify` | **kept** (Q4), and disclosed | **switched off** under N3: `-c mcp_servers={…only vajra_run…}`, `-c notify=[]`; S3 verifies | worker: theirs; lead: always |
+| The user's hooks, plugins, apps, MCP servers and `notify` | **switched off** (6k, bhishma #216): `-c features.{hooks,plugins,remote_plugin,apps}=false`, `-c notify=[]`, and `-c mcp_servers.<name>.enabled=false` for each server (`mcp_servers={}` does not clear the table). Proven before launch by `codex mcp list --json` and `codex features list` under the same values; a failed proof refuses the launch. A non-empty worktree `.codex` or `.agents` folder refuses it too | **switched off** the same way, with the same proof (N3) | always |
 | Instructions (`AGENTS.md`), profiles, history | theirs | theirs | user |
 
 **Claude Code profiles.**

@@ -189,7 +189,8 @@ impl App {
                     "proposal_sha256": p.proposal_sha256, "actions": actions,
                 });
                 let mut v = v;
-                if let Some(c) = card(&p, &|a: &str| self.seat_env.codex_lock_hint(a)) {
+                let at = self.proposal_root(&p);
+                if let Some(c) = card(&p, &|a: &str| self.seat_env.codex_lock_hint(a, at.as_deref())) {
                     v["seats_card"] = c;
                 }
                 if standin {

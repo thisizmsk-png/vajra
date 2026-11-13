@@ -31,6 +31,11 @@ pub const CODEX_WARNING_OPEN: &str = "Runs outside the Vajra guard, in Codex's o
 /// The lock answer per Codex account (`SeatEnv::codex_lock` or its hint).
 pub type LockOf<'a> = &'a dyn Fn(&str) -> CodexLock;
 
+/// bhishma #216 M-Lead: the Codex Lead row never says it can't read the key. Its run is never counted guarded.
+fn codex_lead_note() -> String {
+    format!("{CODEX_WARNING_OPEN} {CODEX_LEAD_CAUSE}")
+}
+
 fn codex_note(lock: &CodexLock) -> String {
     match lock {
         Ok(()) => CODEX_WARNING.to_string(),
@@ -158,7 +163,10 @@ fn seat_entry(seat: &str, role: &str, kind: Kind, account: &str, extra: Map<Stri
     let h = harness(account);
     let (limits, mut disclosures) = match h {
         Some(Engine::Claude) => (json!({"message": true, "redirect": true, "stop": "hook_block"}), vec![CLAUDE_NOTE.to_string()]),
-        Some(Engine::Codex) => (json!({"message": false, "redirect": false, "stop": "terminate", "note": "This worker can't take a message mid-run."}), vec![codex_note(&lock(account))]),
+        Some(Engine::Codex) => {
+            let note = if kind == Kind::Lead { codex_lead_note() } else { codex_note(&lock(account)) };
+            (json!({"message": false, "redirect": false, "stop": "terminate", "note": "This worker can't take a message mid-run."}), vec![note])
+        }
         None => (json!({}), vec![]),
     };
     if network {
@@ -245,6 +253,14 @@ impl App {
         json!({"error": "worker_unavailable", "detail": "some seats cannot be launched", "refusals": list})
     }
 
+    /// The proposal's project folder, where its Codex seats' config is judged (the project's own `.codex` loads too).
+    pub(super) fn proposal_root(&self, p: &Proposal) -> Option<std::path::PathBuf> {
+        match self.projects.get(&p.project) {
+            Ok(sp) => Some(std::path::PathBuf::from(sp.root)),
+            Err(_) => self.orchestrator_root(&p.project),
+        }
+    }
+
     /// Everything a seat start needs before the `requested` line: overrides applied, every seat checked again with them,
     /// the run id taken, and `seats.json` written. Returns the run id, the id's minute, the document and the file's sha256.
     pub(super) fn prepare_seats(&self, p: &Proposal, opts: &StartOptions) -> Result<(String, u64, Value, String), Value> {
@@ -256,10 +272,11 @@ impl App {
         }
         // 6k: the launch-time check, run fresh at every Start, once per Codex account on the seats. The verifier's
         // answer decides the trust; every Codex seat's card note follows its own.
+        let root = self.proposal_root(p);
         let mut answers: std::collections::HashMap<String, CodexLock> = std::collections::HashMap::new();
         for a in std::iter::once(&seats.lead.account).chain(seats.workers.iter().map(|w| &w.account)) {
             if harness(a) == Some(Engine::Codex) && !answers.contains_key(a.as_str()) {
-                answers.insert(a.clone(), self.seat_env.codex_lock(a));
+                answers.insert(a.clone(), self.seat_env.codex_lock(a, root.as_deref()));
             }
         }
         let lock = |a: &str| answers.get(a).cloned().unwrap_or_else(|| Err(crate::adapter::profiles::CODEX_NOT_PROVEN.into()));

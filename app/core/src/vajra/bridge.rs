@@ -585,6 +585,12 @@ pub fn run_process_on_path(
     run_process_inner(program, argv, cwd, timeout, None, None, &[], probe_path(path))
 }
 
+/// 6k (bhishma #216): a `codex` check run the way a launch runs it, in `cwd` with the scrubbed env plus `env` (the
+/// launch's own extra variables), on `probe_path(path)`. For `codex mcp list` and `codex features list` only.
+pub fn run_codex_check(program: &Path, argv: &[String], cwd: &Path, env: &[(&str, &Path)], path: &[PathBuf]) -> Result<Output, BridgeError> {
+    run_process_inner(program, argv, Some(cwd), Duration::from_secs(20), None, None, env, probe_path(path))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_process_inner(
     program: &Path,
