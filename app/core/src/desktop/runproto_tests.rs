@@ -32,6 +32,8 @@ struct FakeWorkers {
     merge_result: Mutex<Option<GitwError>>,
     /// Every dispatch answers this error while it is set.
     dispatch_error: Mutex<Option<DispatchError>>,
+    /// While set, `integrate` says it entered, then blocks until released (#153 review: a stop during the merge).
+    integrate_hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
 impl FakeWorkers {
@@ -114,6 +116,11 @@ impl Workers for FakeWorkers {
     }
     fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
         assert_eq!(at.base, BASE);
+        let hold = crate::lock(&self.integrate_hold).take();
+        if let Some((entered, release)) = hold {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(20)).unwrap();
+        }
         crate::lock(&self.merges).push(commits.to_vec());
         match crate::lock(&self.merge_result).take() {
             Some(e) => Err(e),
@@ -127,6 +134,8 @@ impl Workers for FakeWorkers {
 struct FakeGate {
     verdicts: Mutex<Vec<RoundVerdict>>,
     changed: Condvar,
+    /// How many times a round's checks started.
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeGate {
@@ -138,6 +147,7 @@ impl FakeGate {
 
 impl RoundGate for FakeGate {
     fn check(&self, _: &str, _: u32, _: &str, _: &[String]) -> RoundVerdict {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // A test that never answers leaves no thread behind for long.
         let v = crate::lock(&self.verdicts);
         let (mut v, _) = self.changed.wait_timeout_while(v, Duration::from_secs(20), |v| v.is_empty()).unwrap();
@@ -788,4 +798,66 @@ fn a_dispatch_refused_for_an_incomplete_history_ends_the_run_not_verified() {
     assert_eq!(card.status, Some(RunStatus::NotVerified));
     assert!(card.reason.as_deref().unwrap().contains("history"), "{card:?}");
     assert_eq!(*crate::lock(&r.w.kills), [KillReason::Stopped]);
+}
+
+/// #153 review P2: the lock is released while the merge runs, so a Stop can end the run (and make its one kill)
+/// mid-merge. A merge that then succeeds must not start the round's checks, whose workers would escape that kill.
+#[test]
+fn a_run_stopped_during_the_merge_never_starts_the_rounds_checks() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *crate::lock(&r.w.integrate_hold) = Some((entered_tx, release_rx));
+    let p = r.p.clone();
+    let merging = std::thread::spawn(move || p.integrate(1));
+    entered.recv_timeout(Duration::from_secs(20)).expect("the merge started");
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    release.send(()).unwrap();
+    merging.join().unwrap().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(r.gate.calls.load(std::sync::atomic::Ordering::SeqCst), 0, "no checks after the run ended");
+    assert_eq!(r.p.card().status, Some(RunStatus::Stopped));
+}
+
+/// #153 review P2: a worker the runtime ended `needs_user` (a typed auth, quota or other provider error) is a human
+/// hold, not a generic failure: the run that ends with one says `needs_user` and why.
+#[test]
+fn a_worker_that_needs_the_human_keeps_the_run_needs_user() {
+    // The lead finishes the run.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    r.w.end(&t1, Outcome::NeedsUser);
+    assert_eq!(r.p.finish_run("stuck").unwrap(), RunStatus::NeedsUser);
+    assert!(r.p.card().reason.as_deref().unwrap().contains("t1"), "{:?}", r.p.card());
+    // The lead exits with nothing live.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    r.w.end(&t1, Outcome::NeedsUser);
+    assert_eq!(r.p.lead_exited(LeadExit::Exited), LeadAction::Ended(RunStatus::NeedsUser));
+    // Integration at the round limit: the hold is surfaced, not "no round passed".
+    let r = rig_with("add a --json flag", default_seats(), Limits { rounds: 1, ..Limits::default() }, false);
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2"]);
+    let t3 = r.dispatch("t3");
+    r.w.end(&t3, Outcome::NeedsUser);
+    r.p.integrate(1).unwrap();
+    let card = r.p.card();
+    assert_eq!(card.status, Some(RunStatus::NeedsUser), "{card:?}");
+    assert!(card.reason.as_deref().unwrap().contains("task t3 needs you"), "{card:?}");
+    // A later done ticket for the task clears the hold.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2"]);
+    let t3 = r.dispatch("t3");
+    r.w.end(&t3, Outcome::NeedsUser);
+    r.p.integrate(1).unwrap();
+    r.await_round(1);
+    r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() }).unwrap();
+    let again = r.dispatch("t3");
+    r.w.end(&again, Outcome::Done);
+    assert_eq!(r.p.finish_run("done").unwrap(), RunStatus::NotVerified);
 }
