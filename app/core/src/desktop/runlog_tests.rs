@@ -814,3 +814,26 @@ fn a_failed_sync_before_an_anchor_is_shown_and_sends_no_anchor() {
     assert!(rec.sent.lock().unwrap().is_empty(), "no anchor reaches the record");
     assert!(!l.since(0, 10).0.iter().any(|e| matches!(e.kind, Kind::Anchored { .. })));
 }
+
+#[test]
+fn a_blank_line_inside_the_log_breaks_it_there() {
+    let mut body = String::new();
+    for e in entries(3) {
+        body.push_str(&serde_json::to_string(&e).unwrap());
+        body.push('\n');
+    }
+    let p = runlog_store::parse(body.as_bytes());
+    assert_eq!((p.entries.len(), p.unreadable), (3, None), "only the final newline is exempt");
+    for at in [0, 1, 2] {
+        let mut lines: Vec<&str> = body.lines().collect();
+        lines.insert(at, "");
+        let edited = lines.join("\n") + "\n";
+        let p = runlog_store::parse(edited.as_bytes());
+        assert_eq!(p.unreadable, Some(at as u64 + 1), "blank line at {at}");
+        assert_eq!(p.entries.len(), at);
+    }
+    let doubled = format!("{body}\n");
+    assert_eq!(runlog_store::parse(doubled.as_bytes()).unreadable, Some(4), "a second trailing newline is a blank line");
+    assert_eq!(runlog_store::parse(b"").entries.len(), 0);
+    assert_eq!(runlog_store::parse(b"\n").unreadable, Some(1));
+}

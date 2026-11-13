@@ -76,7 +76,10 @@ pub struct Loaded {
 pub fn parse(bytes: &[u8]) -> Loaded {
     let good_len = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let mut out = Loaded { torn: (bytes.len() - good_len) as u64, good_len: good_len as u64, ..Loaded::default() };
-    for (i, line) in bytes[..good_len].split(|&b| b == b'\n').filter(|l| !l.is_empty()).enumerate() {
+    // Only the final newline ends a line without starting one: every line before it, an empty one included, must be an
+    // entry, so a blank line added inside the file breaks the log there (#222 review).
+    let whole = bytes[..good_len].strip_suffix(b"\n").filter(|_| good_len > 0);
+    for (i, line) in whole.into_iter().flat_map(|w| w.split(|&b| b == b'\n')).enumerate() {
         match serde_json::from_slice::<Entry>(line) {
             Ok(e) => out.entries.push(e),
             Err(_) => {
