@@ -15,8 +15,8 @@ import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { pct } from "./pct.mjs";
+import { BUDGET_DELTA_P95_MS, BUDGET_P95_MS, verdict } from "./verdict.mjs";
 
-export const BUDGET_P95_MS = 50;
 const here = fileURLToPath(new URL(".", import.meta.url));
 const DIST = resolve(here, "../dist-lag");
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
@@ -35,8 +35,12 @@ function serve() {
   return new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(server)));
 }
 
-async function pass(browser, base, query, keys) {
+async function pass(browser, base, query, keys, opts = {}) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  // --throttle N: slow the main thread N times (Chrome's own CPU throttle), to stand in for a slow runner.
+  const cdp = opts.throttle > 1 || opts.profile ? await page.context().newCDPSession(page) : null;
+  if (opts.throttle > 1) await cdp.send("Emulation.setCPUThrottlingRate", { rate: opts.throttle });
+  if (opts.profile) { await cdp.send("Profiler.enable"); await cdp.send("Profiler.setSamplingInterval", { interval: 500 }); }
   await page.addInitScript(() => {
     window.__keys = [];
     window.__events = [];
@@ -60,14 +64,32 @@ async function pass(browser, base, query, keys) {
   await box.waitFor();
   await page.waitForTimeout(1500); // let the first reads and the stream settle
   await box.focus();
+  if (opts.profile) await cdp.send("Profiler.start");
   for (let i = 0; i < keys; i++) {
     await page.keyboard.press(String.fromCharCode(97 + (i % 26)));
     await page.waitForTimeout(25);
   }
   await page.waitForTimeout(300);
+  let profile = null;
+  if (opts.profile) profile = (await cdp.send("Profiler.stop")).profile;
   const out = await page.evaluate(() => ({ keys: window.__keys, events: window.__events, loaf: window.__loaf, lines: window.__lag.lines(), value: document.querySelector("textarea")?.value.length ?? 0 }));
   await page.close();
-  return out;
+  return { ...out, profile };
+}
+
+/** Self time per function from a CDP CPU profile, as {name, file:line, ms}, biggest first. */
+export function topSelfTime(profile, n = 12) {
+  if (!profile) return [];
+  const byId = new Map(profile.nodes.map((x) => [x.id, x]));
+  const self = new Map();
+  profile.samples.forEach((id, i) => self.set(id, (self.get(id) ?? 0) + (profile.timeDeltas[i] ?? 0)));
+  const agg = new Map();
+  for (const [id, us] of self) {
+    const cf = byId.get(id).callFrame;
+    const key = `${cf.functionName || "(anonymous)"} ${cf.url.split("/").pop()}:${cf.lineNumber + 1}`;
+    agg.set(key, (agg.get(key) ?? 0) + us);
+  }
+  return [...agg].map(([name, us]) => ({ name, ms: +(us / 1000).toFixed(1) })).sort((a, b) => b.ms - a.ms).slice(0, n);
 }
 
 const summary = (r, keys) => ({
@@ -84,20 +106,25 @@ async function main() {
   const keys = Number(val("--keys", 120));
   const server = await serve();
   const base = `http://127.0.0.1:${server.address().port}`;
-  const browser = await chromium.launch({ channel: "chrome", args: ["--disable-extensions"] });
+  // --software: no GPU, like a CI VM. --throttle N: main thread N times slower. --profile: top self-time functions, streaming pass.
+  const software = args.includes("--software");
+  const opts = { throttle: Number(val("--throttle", 1)), profile: args.includes("--profile") };
+  const browser = await chromium.launch({ channel: "chrome", args: ["--disable-extensions", ...(software ? ["--disable-gpu", "--use-gl=disabled", "--disable-gpu-compositing"] : [])] });
   try {
     const version = browser.version();
-    await pass(browser, base, "", 20); // one warm-up pass, thrown away
-    const streaming = await pass(browser, base, "", keys);
-    const idle = await pass(browser, base, "?idle=1", keys);
-    const result = { schema: "vajra.typing_lag/1", browser: version, os: process.platform, budget_p95_ms: BUDGET_P95_MS, agents: 5,
+    await pass(browser, base, "", 20, opts); // one warm-up pass, thrown away
+    const streaming = await pass(browser, base, "", keys, opts);
+    const idle = await pass(browser, base, "?idle=1", keys, opts);
+    const result = { throttle: opts.throttle, software, top_self_time_streaming: opts.profile ? topSelfTime(streaming.profile) : undefined,
+      top_self_time_idle: opts.profile ? topSelfTime(idle.profile) : undefined, schema: "vajra.typing_lag/1", browser: version, os: process.platform, budget_p95_ms: BUDGET_P95_MS, agents: 5,
       streaming: summary(streaming, keys), control_idle: summary(idle, keys), keys_ms: streaming.keys.map((x) => +x.toFixed(1)) };
     const out = val("--out", null);
     if (out) await writeFile(out, JSON.stringify(result, null, 1));
     console.log(JSON.stringify({ ...result, keys_ms: undefined }, null, 1));
-    const ok = streaming.keys.length === keys && streaming.value === keys && result.streaming.p95_ms <= BUDGET_P95_MS;
-    if (!ok) console.log(`typing lag ${gate ? "GATE FAILED" : "over budget or incomplete (report only)"}: p95 ${result.streaming.p95_ms} ms, budget ${BUDGET_P95_MS} ms, painted ${streaming.keys.length}/${keys}`);
-    if (gate && !ok) process.exitCode = 1;
+    const v = verdict({ keystrokes: keys, painted: streaming.keys.length, typed: streaming.value, p95_ms: result.streaming.p95_ms }, result.control_idle, { absolute: args.includes("--absolute") });
+    console.log(`typing lag: p95 ${result.streaming.p95_ms} ms streaming, ${result.control_idle.p95_ms} ms idle control, streaming adds ${v.delta_p95_ms} ms (budget ${BUDGET_DELTA_P95_MS} ms)`);
+    if (!v.ok) console.log(`typing lag ${gate ? "GATE FAILED" : "over budget (report only)"}: ${v.reasons.join("; ")}`);
+    if (gate && !v.ok) process.exitCode = 1;
   } finally {
     await browser.close();
     server.close();
