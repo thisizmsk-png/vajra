@@ -94,26 +94,15 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path) -> P
         r#"#!/bin/sh
 MODE='{mode}'
 WT=$(pwd -P)
-# bhishma #216: the launch-time proof. No MCP server is configured here, and a feature reads `false` only when the
-# argv switched it off, as codex 0.166 shows it.
-case "$1" in
-  mcp) echo '[]'; exit 0 ;;
-  features)
-    for f in hooks plugins remote_plugin apps; do
-      v=true
-      for a in "$@"; do [ "$a" = "features.$f=false" ] && v=false; done
-      echo "$f stable $v"
-    done
-    exit 0 ;;
-esac
 case "$1" in
   -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
     mkdir -p "$D"
-    NET=false
-    [ "$MODE" = wide ] && NET=true
+    NET=true
+    ROOTS="\"$TMPDIR\""
+    [ "$MODE" = wide ] && ROOTS="\"$TMPDIR\",\"/\""
     # 6k: like codex 0.166, report each `"<dir>"="none"` of the launch's permission profile as a `deny` entry.
     ENT='{{"path":{{"type":"path","path":"/"}},"access":"read"}}'
     for a in "$@"; do
@@ -124,7 +113,7 @@ case "$1" in
       esac
     done
     [ "$MODE" = nodeny ] && ENT='{{"path":{{"type":"path","path":"/"}},"access":"read"}}'
-    printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"model-fake-1","effort":"medium","sandbox_policy":{{"type":"workspace-write","network_access":%s,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":["%s"]}},"file_system_sandbox_policy":{{"kind":"restricted","entries":[%s]}}}}}}\n' "$WT" "$NET" "$TMPDIR" "$ENT" > "$D/rollout-x-$TID.jsonl"
+    printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"model-fake-1","effort":"medium","sandbox_policy":{{"type":"workspace-write","network_access":%s,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":[%s]}},"file_system_sandbox_policy":{{"kind":"restricted","entries":[%s]}}}}}}\n' "$WT" "$NET" "$ROOTS" "$ENT" > "$D/rollout-x-$TID.jsonl"
     echo '{{"type":"thread.started","thread_id":"'$TID'"}}'
     ;;
 esac
@@ -546,7 +535,7 @@ fn no_changes_fail_and_a_wider_sandbox_is_killed() {
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("no_changes")));
     let r = rig("wide", Opts { mode: "wide", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
-    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "network on, asked off");
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "a writable root outside the worktree");
     assert!(v.commit.is_none());
 }
 

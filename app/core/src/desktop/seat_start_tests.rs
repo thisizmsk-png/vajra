@@ -342,21 +342,19 @@ fn the_inbox_card_shows_the_seats_the_warnings_and_the_label_the_run_will_get() 
     assert_eq!(c["evidence"]["approval_offer"], APPROVAL_OFFER);
     let seats = c["seats"].as_array().unwrap();
     let by = |s: &str| seats.iter().find(|x| x["seat"] == s).unwrap();
-    // bhishma #216 L1: no codex here, so the launch-time check can't pass: the note makes no key claim and names why,
-    // and so does the evidence.
-    let not_proven = crate::adapter::profiles::CODEX_NOT_PROVEN;
-    assert_eq!(by("w1")["disclosures"][0], format!("{CODEX_WARNING_OPEN} {not_proven}"));
-    assert_eq!(c["evidence"]["cause"], not_proven);
+    // Owner 2026-11-13: a Codex seat runs with the user's own settings and the card never claims the key is out of reach.
+    assert_eq!(by("w1")["disclosures"][0], CODEX_WARNING);
+    assert!(c["evidence"]["cause"].is_null(), "a Claude lead: the verifier's own note says why");
     assert_eq!(by("lead")["disclosures"][0], CLAUDE_NOTE);
     assert_eq!((by("w1")["limits"]["message"].as_bool(), by("w1")["limits"]["stop"].as_str()), (Some(false), Some("terminate")));
     assert!(seats.iter().any(|s| s["role"] == "security_reviewer"), "added for the security ask");
     assert!(it["proposal_sha256"].as_str().is_some());
 }
 
-/// bhishma #216 H1, H2, L1: the trust and every Codex note follow each account's own launch-time answer, and the card
-/// names the cause.
+/// Owner 2026-11-13 ("keep my extras, no key claim") and bhishma #216 H1: a Codex verifier or a Codex lead is never
+/// guarded, and no Codex note says it can't read the key.
 #[test]
-fn a_codex_verifier_is_guarded_only_when_its_lock_holds_and_the_card_names_the_cause() {
+fn a_codex_verifier_or_lead_is_never_guarded_and_no_codex_note_claims_the_key() {
     let p = |lead: &str| {
         let seats: Seats = serde_json::from_value(json!({
             "lead": {"account": lead, "model": null, "effort": null, "source": "role_default"},
@@ -365,18 +363,15 @@ fn a_codex_verifier_is_guarded_only_when_its_lock_holds_and_the_card_names_the_c
         })).unwrap();
         seats
     };
-    let ok: &dyn Fn(&str) -> CodexLock = &|_| Ok(());
-    let mcp = "Your Codex config turns on the MCP server \"files\", which runs outside Codex's sandbox and could read Vajra's signing key.";
-    let open: &dyn Fn(&str) -> CodexLock = &|_| Err(mcp.to_string());
-    assert_eq!(evidence_of(&p("claude"), false, "r", ok)["evidence_trust"], "guarded");
-    assert_eq!(evidence_of(&p("claude"), false, "r", open)["evidence_trust"], "outside_guard");
-    assert_eq!(evidence_of(&p("codex"), false, "r", ok)["evidence_trust"], "outside_guard", "a Codex lead's run is never guarded");
-    assert_eq!(outside_cause(&p("claude"), open).as_deref(), Some(mcp));
-    assert_eq!(outside_cause(&p("codex"), ok).as_deref(), Some(CODEX_LEAD_CAUSE));
-    assert_eq!(outside_cause(&p("claude"), ok), None);
-    assert_eq!(codex_note(&Ok(())), CODEX_WARNING);
-    assert_eq!(codex_note(&Err(mcp.into())), format!("{CODEX_WARNING_OPEN} {mcp}"));
-    assert!(!codex_note(&Err(mcp.into())).contains("can't read Vajra's signing key"), "no key claim when the check failed");
+    assert_eq!(evidence_of(&p("claude"), false, "r")["evidence_trust"], "outside_guard", "a Codex verifier");
+    assert_eq!(evidence_of(&p("claude"), true, "r")["evidence_trust"], "guarded_by_approval");
+    assert_eq!(evidence_of(&p("codex"), false, "r")["evidence_trust"], "outside_guard", "a Codex lead's run is never guarded");
+    assert_eq!(outside_cause(&p("codex")), Some(CODEX_LEAD_CAUSE));
+    assert_eq!(outside_cause(&p("claude")), None);
+    for note in [CODEX_WARNING.to_string(), codex_lead_note(), OUTSIDE_GUARD_WHY.to_string()] {
+        assert!(!note.contains("can't read") && !note.contains("out of reach") && !note.contains("kept from"), "no key claim: {note}");
+    }
+    assert!(CODEX_WARNING.contains("isn't guarded against reading Vajra's signing key"), "{CODEX_WARNING}");
 }
 
 #[test]

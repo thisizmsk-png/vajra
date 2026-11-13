@@ -1285,7 +1285,8 @@ impl Launch {
             brief = format!("{brief}\n\n{}", profiles::steer_brief(n));
             redact.add(Some(n));
         }
-        // 6k: a Codex session can't read the Vajra state dir (the signing key, the stores) or the app data dir.
+        // 6k: the profile denies the Vajra state dir and the app data dir, as defense in depth only. The user's own
+        // Codex tools run outside it, so no claim is made about the key (owner 2026-11-13).
         let deny = profiles::vajra_deny_dirs(&cfg.home, &cfg.data);
         // A fresh profile name per launch, so no table in the user's Codex config merges into it.
         let profile = profiles::codex_profile_name().map_err(|_| "spawn_failed")?;
@@ -1302,37 +1303,20 @@ impl Launch {
         } else {
             None
         };
-        // bhishma #216 (vajra-1's decision): a Codex session runs with its hooks, plugins, MCP servers and notify switched
-        // off, each proven off with this launch's own binary, worktree and env; if that can't be shown, it doesn't run.
-        let off = if engine == Engine::Codex {
-            // M1-b: Codex loads the worktree's own `.codex` and `.agents`, which an earlier session there could write.
-            if profiles::codex_project_outside(&t.wt).is_some() {
-                return Err("profile_not_applied");
-            }
-            let mut env: Vec<(&'static str, std::ffi::OsString)> = vec![("TMPDIR", t.tmp.clone().into_os_string())];
-            if let Some(h) = &home {
-                env.push(("CODEX_HOME", h.clone().into_os_string()));
-            }
-            let dirs = crate::vajra::preflight::path_dirs();
-            let run = profiles::codex_check_runner(&cfg.codex, &t.wt, &env, &dirs);
-            if profiles::codex_managed_layer(&std::env::var("USER").unwrap_or_default()) {
-                return Err("profile_not_applied");
-            }
-            let off = profiles::codex_tools_off(&run).map_err(|_| "profile_not_applied")?;
-            // Decision B launches a ChatGPT-login seat unguarded (its card names `CODEX_CLOUD`); option A refuses it.
-            if profiles::CODEX_CLOUD_REFUSES_LAUNCH && profiles::codex_cloud_login(&run) {
-                return Err("profile_not_applied");
-            }
-            off
-        } else {
-            Vec::new()
-        };
+        // bhishma #216 M1-b: Codex loads the worktree's own `.codex` and `.agents`, which an earlier session there could
+        // write, so a Codex worker never launches over a non-empty one. The user's own Codex tools stay on (owner).
+        if engine == Engine::Codex && profiles::codex_project_outside(&t.wt).is_some() {
+            return Err("profile_not_applied");
+        }
+        // vajra-1 2026-11-13: a Codex seat keeps the user's own network, so its profile has network on (a profile with
+        // no network key would turn it off, whatever the user's own setting says).
+        let network = seat.network || engine == Engine::Codex;
         let wl = WorkerLaunch {
-            kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network: seat.network, ticket_tmp: &t.tmp,
-            worktree: &t.wt, deny: &deny, profile: &profile, off: &off,
+            kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network, ticket_tmp: &t.tmp,
+            worktree: &t.wt, deny: &deny, profile: &profile,
         };
         let mut l = Launch {
-            engine, argv: Vec::new(), env: Vec::new(), flag: None, session_id: None, tools: String::new(), network: seat.network,
+            engine, argv: Vec::new(), env: Vec::new(), flag: None, session_id: None, tools: String::new(), network,
             ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact, steer_off, deny: deny.clone(),
         };
         match engine {
