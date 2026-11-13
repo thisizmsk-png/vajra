@@ -122,6 +122,36 @@ fn project_slug_matches_claude_code() {
     assert_eq!(project_slug(Path::new("/Users/a/my.repo")), "-Users-a-my-repo");
 }
 
+// Nothing runs at rest: a bare wake returns at once with no payload (the UI is not told anything moved), and a wake
+// mixed with lines still reports just the lines.
+#[test]
+fn a_bare_wake_returns_at_once_with_nothing_to_tell() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = app.bus.subscribe();
+    app.bus.wake();
+    let t0 = std::time::Instant::now();
+    assert!(collect_changes(&sub, Duration::from_secs(5)).is_none());
+    assert!(t0.elapsed() < Duration::from_secs(1), "a wake must not wait out the timeout");
+    app.bus.wake();
+    app.bus.push("s1", "a").unwrap();
+    let p = collect_changes(&sub, Duration::from_secs(1)).unwrap();
+    assert_eq!(p["streams"], json!(["s1"]));
+}
+
+// Given no live run, Then the loop waits on the bus with only the hour-long backstop; while a run is live and for
+// AFTER_RUN after it ends, it looks every second and does its housekeeping.
+#[test]
+fn the_loop_is_at_rest_with_no_live_run_and_busy_while_and_just_after_one() {
+    let t0 = std::time::Instant::now();
+    let mut p = Pace::default();
+    assert_eq!(p.next(false, t0), (false, IDLE_WAIT));
+    assert_eq!(p.next(true, t0 + Duration::from_secs(5)), (true, LIVE_WAIT));
+    assert_eq!(p.next(false, t0 + Duration::from_secs(6)), (true, LIVE_WAIT), "a run that just ended is still reaped");
+    assert_eq!(p.next(false, t0 + Duration::from_secs(5) + AFTER_RUN), (false, IDLE_WAIT));
+    assert!(IDLE_WAIT >= Duration::from_secs(3600));
+}
+
 #[test]
 fn changes_coalesce_into_one_payload() {
     let t = Tmp::new();
@@ -349,6 +379,23 @@ fn a_spawn_failure_rolls_the_control_session_back() {
     assert_eq!(code(&e), "spawn_failed");
     assert!(lock(&app.control).nonce(sid).is_none(), "the control session ended with the failed spawn");
     assert_eq!(app.active_run_count(), 0);
+}
+
+// Given the loop at rest (waiting on the bus with the hour-long backstop), When a run starts that prints nothing, Then
+// the loop wakes at once and sees it live.
+#[test]
+fn a_run_start_wakes_a_loop_at_rest() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = app.bus.subscribe();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["sleep".into(), "2".into()]), false).unwrap();
+    let t0 = std::time::Instant::now();
+    let _ = collect_changes(&sub, IDLE_WAIT);
+    assert!(t0.elapsed() < Duration::from_secs(1), "the run's wake reaches the loop without waiting out the backstop");
+    assert_eq!(Pace::default().next(app.active_run_count() > 0, std::time::Instant::now()), (true, LIVE_WAIT));
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
 }
 
 #[test]

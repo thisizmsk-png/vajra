@@ -4,6 +4,7 @@ import { TerminalPane } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { StreamWindow } from "../../ipc";
+import { usePoll } from "../../projects/poll";
 
 const POLL_MS = 1000;
 const EVENT_MIN_GAP_MS = 500;
@@ -17,7 +18,7 @@ const EDGE = MARGIN / 2;
 const WINDOW_ROWS = VISIBLE + 2 * MARGIN;
 
 /** One worker's output: the core serves a window of rows and the view holds only that window. */
-export function StreamTab({ stream }: { stream: string }) {
+export function StreamTab({ stream, live = true }: { stream: string; live?: boolean }) {
   const [win, setWin] = useState<StreamWindow | null>(null);
   const [following, setFollowing] = useState(true);
   const [err, setErr] = useState("");
@@ -87,17 +88,23 @@ export function StreamTab({ stream }: { stream: string }) {
 
   useEffect(() => {
     refresh();
-    const poll = setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
     let later: ReturnType<typeof setTimeout> | undefined;
+    // Hidden window: nothing is drawn. The core keeps the log; one read on showing again catches up.
+    let stale = false;
     const off = onChanged((p) => {
       const streams = (p as { streams?: unknown } | null)?.streams;
       if (Array.isArray(streams) && !streams.includes(stream)) return;
+      if (document.hidden) { stale = true; return; }
       const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
       if (wait <= 0) refresh();
       else if (later === undefined) later = setTimeout(() => { later = undefined; refresh(); }, wait);
     });
-    return () => { clearInterval(poll); clearTimeout(later); off(); };
+    const onVisibility = () => { if (!document.hidden && stale) { stale = false; refresh(); } };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => { clearTimeout(later); off(); document.removeEventListener("visibilitychange", onVisibility); };
   }, [stream, refresh]);
+  // A live worker's stream is polled (output can outrun the events); a finished one only on events.
+  usePoll(refresh, POLL_MS, live);
 
   /**
    * Ask for the rows around the view when it nears an edge of the held window that has more beyond it. Row i is seq `first_seq + i`.

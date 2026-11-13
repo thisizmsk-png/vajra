@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertDialog, Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import type { StatusKey } from "../../../strings";
 import { DiffView, Tabs } from "../../../components/ui/desktop";
@@ -6,6 +6,8 @@ import { S } from "../../../strings";
 import { api, errorText, newActionId } from "../../ipc";
 import { unsavedText, useCloseout } from "../../projects/closeout";
 import { useCurrentProject } from "../../projects/current";
+import { usePoll } from "../../projects/poll";
+import { useProjects } from "../../projects/store";
 import type { CrewNodeDto, Json, WorktreeInfo } from "../../ipc";
 import { StreamTab } from "./StreamTab";
 import { DiffCount, ProviderLine } from "../ProviderLine";
@@ -101,24 +103,21 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
   const [info, setInfo] = useState<WorktreeInfo | null | undefined>(undefined);
   const [task, setTask] = useState<TaskState>(null);
   const taskId = taskGraphId(runId, taskLocalId);
+  const taskRead = useRef<() => void>(() => {});
 
   // A worker can exist before its transcript names a cwd, so the first answer may be "no crew worktree". Keep asking
-  // while the worker is live; a worker that finished (or never had a crew worktree) is asked once more per status change.
+  // while its run is live and the window shows; otherwise it is asked once more per status change.
   const finished = status === "done" || status === "failed";
+  const runLive = useProjects().liveRuns.includes(runId);
+  const askInfo = useRef<() => void>(() => {});
   useEffect(() => {
     let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const ask = () => api.worktreeInfo(agent).then(
-      (i) => live && setInfo(i),
-      () => {
-        if (!live) return;
-        setInfo(null);
-        if (!finished) timer = setTimeout(ask, WORKTREE_RETRY_MS);
-      },
-    );
+    const ask = () => api.worktreeInfo(agent).then((i) => live && setInfo(i), () => live && setInfo(null));
     void ask();
-    return () => { live = false; clearTimeout(timer); };
+    askInfo.current = () => void ask();
+    return () => { live = false; askInfo.current = () => {}; };
   }, [agent, finished]);
+  usePoll(() => askInfo.current(), WORKTREE_RETRY_MS, runLive && !finished && info === null);
   // One task read shared by the header and the Task tab, repeated on the crew's own cadence so attempts and the last
   // report follow tasks.json while this worker stays selected.
   useEffect(() => {
@@ -129,9 +128,11 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
       (e) => live && setTask(typeof e === "object" && e && (e as { error?: string }).error === "task_not_found" ? "none" : { err: errorText(e) }),
     );
     void read();
-    const poll = setInterval(() => { if (!document.hidden) void read(); }, TASK_POLL_MS);
-    return () => { live = false; clearInterval(poll); };
+    taskRead.current = () => void read();
+    return () => { live = false; taskRead.current = () => {}; };
   }, [slug, taskId]);
+  // Re-read on the crew's cadence only while this run is live and the window shows (nothing runs at rest).
+  usePoll(() => taskRead.current(), TASK_POLL_MS, runLive && !!taskId);
   // A finished worker with work that exists only in its worktree: shown with the exact counts, and the one way to close it.
   const closeout = useCloseout(slug, runId);
   const { project } = useCurrentProject();
@@ -180,7 +181,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
           value={tab}
           onChange={setTab}
           tabs={[
-            { id: "stream", label: S.crew.tabs.stream, panel: <StreamTab stream={`w-${agent}`} /> },
+            { id: "stream", label: S.crew.tabs.stream, panel: <StreamTab stream={`w-${agent}`} live={runLive} /> },
             { id: "diff", label: S.crew.tabs.diff, panel: info ? <DiffTab info={info} /> : <Text variant="body-sm" muted>{info === null ? S.crew.noWorktree : S.crew.loading}</Text> },
             { id: "task", label: S.crew.tabs.task, panel: <TaskTab t={task} /> },
             { id: "worktree", label: S.crew.tabs.worktree, panel: <WorktreeTab info={info} /> },

@@ -13,13 +13,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::Instant;
 
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
 use vajra_desktop::control::{self, mcp};
 use serde_json::Value;
-use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
+use vajra_desktop::desktop::{App, Envelope, Pace, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
@@ -714,13 +714,21 @@ fn main() {
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
+                // Nothing runs at rest: with no live run (and past `AFTER_RUN`), the loop only waits on the bus. A line,
+                // or the wake a new run sends, brings it back.
+                let mut pace = Pace::default();
+                let mut wait = vajra_desktop::desktop::LIVE_WAIT;
                 loop {
-                    let changed = collect_changes(&sub, Duration::from_secs(1));
+                    let changed = collect_changes(&sub, wait);
+                    let (busy, next) = pace.next(handle.state::<App>().active_run_count() > 0, Instant::now());
+                    wait = next;
                     // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
-                    handle.state::<App>().refresh_workers();
+                    if busy {
+                        handle.state::<App>().refresh_workers();
+                    }
                     // Finished workers that lose nothing are closed on their own (setting `auto_close_finished`). Git is
                     // asked off this loop, so a slow repo never delays worker refreshes.
-                    if handle.state::<App>().closeout_due() {
+                    if busy && handle.state::<App>().closeout_due() {
                         let h = handle.clone();
                         std::thread::spawn(move || {
                             let n = h.state::<App>().closeout_auto(&WorktreeTerms(&h.state::<Terminals>(), &h.state::<Ownership>()));
@@ -738,7 +746,9 @@ fn main() {
                     #[cfg(target_os = "macos")]
                     {
                         let app = handle.state::<App>();
-                        app.reap_runs();
+                        if busy {
+                            app.reap_runs();
+                        }
                         nap.update(app.active_run_count());
                     }
                 }

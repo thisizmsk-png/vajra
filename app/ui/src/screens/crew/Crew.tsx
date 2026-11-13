@@ -12,6 +12,8 @@ import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import type { CrewNodeDto } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
+import { usePoll } from "../../projects/poll";
+import { useProjects } from "../../projects/store";
 import { WorkerPane } from "./WorkerPane";
 import { CoreWorkerPane } from "./CoreWorkerPane";
 
@@ -80,6 +82,7 @@ const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
 
 export function Crew() {
   const [route, go] = useRoute();
+  const { liveRuns } = useProjects();
   const routed = route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined;
   const [target, setTarget] = useState<Target | null | undefined>(routed);
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
@@ -147,9 +150,10 @@ export function Crew() {
   }, [target]);
 
   useEffect(load, [load]);
+  // Polled only while this run is live and the window shows; a finished run changes only with an event.
+  usePoll(load, POLL_MS, !!target && liveRuns.includes(target.runId));
   useEffect(() => {
     if (!target) return;
-    const poll = setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
     // Leading and trailing: an event inside the gap is not lost, it is read when the gap ends.
     let later: ReturnType<typeof setTimeout> | undefined;
     const off = onChanged(() => {
@@ -157,7 +161,7 @@ export function Crew() {
       if (wait <= 0) load();
       else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);
     });
-    return () => { clearInterval(poll); clearTimeout(later); off(); };
+    return () => { clearTimeout(later); off(); };
   }, [target, load]);
 
   // ⌘K: go to any worker of this run by name.

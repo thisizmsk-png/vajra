@@ -4,6 +4,7 @@ import { setTransport } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
+import { Live, liveRun } from "./liveRun";
 
 afterEach(() => {
   cleanup();
@@ -31,9 +32,10 @@ const base = { active_runs: { count: 0, runs: [] }, crew: tree, tail: { lines: [
 
 async function open(replies: Record<string, unknown> = {}) {
   window.location.hash = "#/crew?slug=camp&id=r1";
-  const f = fakeIpc({ ...base, ...replies });
+  // A live run: its worker's task is polled.
+  const f = fakeIpc({ ...base, ...liveRun(), ...replies });
   setTransport(f.transport);
-  render(<Crew />);
+  render(<Live><Crew /></Live>);
   fireEvent.click((await screen.findByText("round 1")).closest("[role=treeitem]") as HTMLElement);
   return f;
 }
