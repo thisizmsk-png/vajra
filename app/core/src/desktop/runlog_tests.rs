@@ -628,6 +628,13 @@ fn the_app_reads_a_runs_log_by_seq_and_refuses_a_bad_run_id() {
     let ver = app.run_log_verify("20261112-0930");
     assert_eq!((ver["verified"].as_bool(), ver["chain"]["ok_to"].as_u64()), (Some(false), Some(3)));
     assert!(ver["record_error"].is_string());
+    // As command answers: an error rejects (the UI's call must not resolve with a non-page), an answer passes through.
+    use crate::desktop::run_log_answered as answered;
+    assert_eq!(answered(app.run_log_since("20261112-0931", 0, 10)).unwrap_err()["error"], "not_found");
+    assert_eq!(answered(app.run_log_since("../x", 0, 10)).unwrap_err()["error"], "invalid");
+    assert_eq!(answered(app.run_log_verify("20261112-0931")).unwrap_err()["error"], "not_found");
+    assert_eq!(answered(v).unwrap()["head_seq"], 3);
+    assert_eq!(answered(ver).unwrap()["chain"]["ok_to"], 3, "a verify that has a record_error is still an answer");
 }
 
 // ---------------------------------------------------------------- bhishma's fixes (F1, F3, F4, F6, F7, F8)

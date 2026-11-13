@@ -11,6 +11,26 @@ import { S } from "../strings";
 const RUN = "20261106-2140";
 const SLUG = `deliver-${RUN}`;
 
+/** The run's log so far: what the core, the lead, the verifier and two workers wrote, in order. */
+const RUN_LOG = ([
+  ["core", "run_started", { resumed_from: null }],
+  ["lead", "plan_accepted", { round: 1, tasks: ["t1", "t2", "t3", "t4", "t5", "t6", "t7"] }],
+  ["core", "dispatched", { task: "t1", ticket: "k1", seat: "arjuna" }],
+  [{ worker: "k1" }, "ticket_ended", { task: "t1", ticket: "k1", outcome: "done" }],
+  ["core", "anchored", { seq: 4, hash: "4e1c" }],
+  ["core", "dispatched", { task: "t2", ticket: "k2", seat: "bhima" }],
+  ["core", "dispatched", { task: "t3", ticket: "k3", seat: "nakula" }],
+  ["core", "dispatched", { task: "t7", ticket: "k4", seat: "bhima" }],
+  [{ worker: "k4" }, "ticket_ended", { task: "t7", ticket: "k4", outcome: "done" }],
+  ["core", "dispatched", { task: "t4", ticket: "k5", seat: "bhima" }],
+  ["lead", "question", { id: "q-t4", text: "Should the 429 body name the limit and the reset time?" }],
+  ["lead", "lead_turn", { turns: 6, tokens: 48210 }],
+  ["core", "receipt", { scope: "task:t1", model: "claude-opus-5-5", tokens: { fresh: 21400, cache_write: 6100, cache_read: 88300, output: 4900, side: 2 }, usd_micros: 1_840_000, weight: null }],
+  ["core", "anchored", { seq: 13, hash: "9a7f" }],
+] as const).map(([source, kind, body], i) => ({
+  v: 1, seq: i + 1, prev: `h${i}`, at_ms: Date.UTC(2026, 10, 6, 21, 40, 12) + i * 47_000, source, kind, body, hash: `h${i + 1}`,
+}));
+
 /** The core's `run_proof` answer for each label, as the 6i core writes it. */
 const PROOF_REASON: Record<ProofLabel, string> = {
   verified: "Every criterion passed on the delivered commit.",
@@ -265,6 +285,15 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   export_proof_page: (a) => ({ slug: String(a?.slug), path: `~/Library/Application Support/Vajra/exports/${String(a?.slug)}-proof.html`, label: "evidence_unguarded" }),
   act_post_proof_comment: () => ({ receipt: { action_id: "a_fixture5", state: "done" }, result: { repo: "acme/web", pr: 42 } }),
   verify_campaign: (a) => ({ slug: String(a?.slug), ok: true, restore: null }),
+  // The run's hash-chained log (W2), as `run_log_since` pages it; `run_log_verify` answers as an app restarted since.
+  run_log_since: (a) => {
+    const after = Number(a?.afterSeq ?? 0);
+    return { run_id: RUN, entries: RUN_LOG.slice(after), head_seq: RUN_LOG.length, broken: null, io_error: null };
+  },
+  run_log_verify: () => ({
+    run_id: RUN, head_seq: RUN_LOG.length, standing: "unconfirmed", verified: false, chain: { ok_to: RUN_LOG.length, broken: null }, broken: null,
+    caveat: "hash-chained; until the worker sandboxes land, an agent on this Mac could rewrite this log together with its anchors",
+  }),
   kb_search: () => ({ code: 0, hits: [
     { id: "k1", kind: "decision", title: "Rate limits are per API key, not per IP, so shared NATs are not throttled together" },
     { id: "k2", kind: "lesson", title: "Redis MULTI in tests needs the ioredis-mock pipeline shim" },

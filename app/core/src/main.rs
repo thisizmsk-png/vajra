@@ -128,14 +128,14 @@ fn record_orphans(app: State<'_, App>) -> Value {
 
 /// A core run's log entries after `after_seq` (W2): the UI applies these deltas in order instead of refetching.
 #[tauri::command(async)]
-fn run_log_since(app: State<'_, App>, run_id: String, after_seq: u64, limit: Option<usize>) -> Value {
-    app.run_log_since(&run_id, after_seq, limit.unwrap_or(vajra_desktop::desktop::runlog_store::PAGE_MAX))
+fn run_log_since(app: State<'_, App>, run_id: String, after_seq: u64, limit: Option<usize>) -> Res {
+    vajra_desktop::desktop::run_log_answered(app.run_log_since(&run_id, after_seq, limit.unwrap_or(vajra_desktop::desktop::runlog_store::PAGE_MAX)))
 }
 
 /// How far a core run's hash-chained log holds, and how far its signed record vouches for it (W2).
 #[tauri::command(async)]
-fn run_log_verify(app: State<'_, App>, run_id: String) -> Value {
-    app.run_log_verify(&run_id)
+fn run_log_verify(app: State<'_, App>, run_id: String) -> Res {
+    vajra_desktop::desktop::run_log_answered(app.run_log_verify(&run_id))
 }
 
 #[tauri::command(async)]

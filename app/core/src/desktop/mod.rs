@@ -2588,6 +2588,7 @@ pub mod phases;
 pub mod runlog;
 pub mod runlog_store;
 mod runlog_app;
+pub use runlog_app::answered as run_log_answered;
 #[cfg(test)]
 mod runlog_tests;
 pub mod worker_host;

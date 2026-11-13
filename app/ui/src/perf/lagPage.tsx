@@ -8,6 +8,9 @@ import type { Transport } from "../ipc";
 import { CurrentProject } from "../projects/current";
 import type { Current } from "../projects/current";
 import { DirectorGeneral } from "../screens/orch/DirectorGeneral";
+import { RunLog } from "../screens/run/RunLog";
+import type { RunLogEntry } from "../ipc";
+import type { RunLogStats } from "../runLog";
 import "../../components/ui/base";
 
 const AGENTS = 5;
@@ -16,6 +19,16 @@ const STREAM = "orchestrator-p_X-g3";
 const params = new URLSearchParams(location.search);
 // ?idle=1 runs the same page with nothing streaming: the control the report compares against.
 const streaming = !params.has("idle");
+// ?runlog=1 also shows a core run's live log (W2) beside the composer, fed by the same 5 agents: each tick, one notice
+// carrying one entry per agent, as the core's coalesced notices do. It counts notices and `run_log_since` calls.
+const runLog = streaming && params.has("runlog");
+const RUN = "20261113-2200";
+const logged: RunLogEntry[] = [];
+const logStats: RunLogStats = { notices: 0, calls: 0 };
+const logEntry = (seq: number): RunLogEntry => ({
+  v: 1, seq, prev: `h${seq - 1}`, at_ms: Date.now(), source: { worker: `k${seq % AGENTS}` }, kind: "ticket_ended",
+  body: { task: `t${seq}`, ticket: `k${seq % AGENTS}`, outcome: "done" }, hash: `h${seq}`,
+});
 
 let n = 40;
 const t0 = Date.now();
@@ -23,13 +36,22 @@ const text = (i: number) => (i % 2 ? `lead\tstep ${i} of the plan, checking the 
 const window_ = () => ({ lines: Array.from({ length: n }, (_, i) => ({ seq: i + 1, text: text(i) })), head_seq: n, first_seq: 1, at_start: true, at_end: true, gap: false });
 
 const listeners = new Set<(p: unknown) => void>();
+const logListeners = new Set<(p: unknown) => void>();
 const transport: Transport = {
-  async call(cmd) {
+  async call(cmd, a) {
     if (cmd === "lead_status") return { available: true, busy: true, name: "Director-General", state: "running", reason: "working", project_id: "p_X", generation: 3, stream: STREAM };
     if (cmd === "stream_window") return window_();
+    if (cmd === "run_log_since") {
+      const after = Number((a as { afterSeq?: number } | undefined)?.afterSeq ?? 0);
+      return { run_id: RUN, entries: logged.slice(after, after + 500), head_seq: logged.length, broken: null, io_error: null };
+    }
     throw { error: "unknown_command", detail: cmd };
   },
-  on(_e, cb) { listeners.add(cb); return () => { listeners.delete(cb); }; },
+  on(e, cb) {
+    const set = e === "run_log" ? logListeners : listeners;
+    set.add(cb);
+    return () => { set.delete(cb); };
+  },
 };
 setTransport(transport);
 
@@ -37,15 +59,27 @@ if (streaming) {
   setInterval(() => {
     n += AGENTS;
     listeners.forEach((cb) => cb({ streams: [STREAM, ...Array.from({ length: AGENTS }, (_, i) => `w-a${i}`)], snapshot_needed: false }));
+    if (runLog) {
+      const after = logged.length;
+      for (let i = 0; i < AGENTS; i++) logged.push(logEntry(logged.length + 1));
+      const notice = { run_id: RUN, seq: logged.length, after, entries: logged.slice(after), io_error: null, broken: null };
+      logListeners.forEach((cb) => cb(notice));
+    }
   }, Math.floor(1000 / LINES_PER_S));
 }
 
 const project = { schema: "vajra.project/1", id: "p_1", name: "api", root: "/src/api", created: null, archived: null, rev: 0 };
 const cur: Current = { project, campaigns: [], focus: "c1", runId: null, dgRun: "20261106-2140", proposals: [] };
 
-(window as unknown as { __lag: unknown }).__lag = { startedMs: t0, agents: AGENTS, streaming, lines: () => n };
+(window as unknown as { __lag: unknown }).__lag = {
+  startedMs: t0, agents: AGENTS, streaming, runLog, lines: () => n,
+  log: () => ({ entries: logged.length, notices: logStats.notices, calls: logStats.calls }),
+};
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <CurrentProject.Provider value={cur}><DirectorGeneral /></CurrentProject.Provider>
+    <div style={runLog ? { display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 } : undefined}>
+      <CurrentProject.Provider value={cur}><DirectorGeneral /></CurrentProject.Provider>
+      {runLog && <RunLog runId={RUN} stats={logStats} />}
+    </div>
   </StrictMode>,
 );
