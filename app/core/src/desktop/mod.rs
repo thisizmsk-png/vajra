@@ -284,6 +284,9 @@ pub struct App {
     limits: Mutex<caps::RunLimits>,
     /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
     run_workers: Mutex<HashMap<String, u32>>,
+    /// Each core run's record, by run id: live until its protocol finalizes, so it is never listed as an orphan
+    /// between tickets (6h).
+    live_records: Mutex<HashMap<String, std::sync::Weak<record::CoreRecord>>>,
     /// Workers closed once finished (see `closeout`); persisted.
     closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
@@ -433,6 +436,7 @@ impl App {
             launching: Mutex::new(()),
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
+            live_records: Mutex::new(HashMap::new()),
             closeout: closeout::Store::open(data),
             issued: Mutex::new(Default::default()),
             log,
@@ -2554,6 +2558,9 @@ impl Pace {
 mod worker_diff;
 pub mod workers;
 pub mod plan;
+pub mod record;
+mod record_app;
+pub mod record_ledger;
 pub mod runproto;
 pub mod verify;
 pub mod phases;

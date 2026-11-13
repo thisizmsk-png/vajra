@@ -29,6 +29,9 @@ use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
 use crate::crew::roles::{self, Kind};
 use crate::crew::security;
+use super::record::{Event, PlanRecord, RecordCard, RunRecord, TaskRecord};
+use crate::vajra::bridge::{Feature, TaskStatus};
+use crate::vajra::bridge_record::{FEATURE_MAX, one_line};
 use crate::vajra::gitw::{Gitw, GitwError};
 
 // ---------------------------------------------------------------- limits
@@ -68,6 +71,8 @@ impl Default for Limits {
 
 /// The first backoff after a retryable lead error; it doubles each time.
 const LEAD_BACKOFF: Duration = Duration::from_secs(5);
+/// After the run ends, how long its record waits for killed tickets to end before it records what it has.
+const RECORD_END_WAIT: Duration = Duration::from_secs(60);
 const MAX_REPORT: usize = 8 * 1024;
 const MAX_TITLE: usize = 300;
 const MAX_BRIEF: usize = 20_000;
@@ -104,11 +109,13 @@ pub struct Tick {
     pub attempt: u32,
     pub elapsed_s: u64,
     pub queue_position: Option<u32>,
+    /// The ticket's worktree once it has one (the task graph's `claim --worktree`).
+    pub worktree: Option<PathBuf>,
 }
 
 impl From<TicketView> for Tick {
     fn from(v: TicketView) -> Self {
-        Tick { id: v.id, state: v.state, outcome: v.outcome, reason: v.reason, commit: v.commit, attempt: v.attempt, elapsed_s: v.elapsed_s, queue_position: v.queue_position }
+        Tick { id: v.id, state: v.state, outcome: v.outcome, reason: v.reason, commit: v.commit, attempt: v.attempt, elapsed_s: v.elapsed_s, queue_position: v.queue_position, worktree: v.worktree }
     }
 }
 
@@ -287,6 +294,8 @@ pub const RUN_ENDED: &str = "run_ended";
 pub const INVALID: &str = "invalid";
 pub const PLAN_INVALID: &str = "plan_invalid";
 pub const PLAN_REFUSED: &str = "plan_refused";
+/// The signed run record (6h) could not be written at plan time: the run ended before dispatch.
+pub const RECORD_FAILED: &str = "record_failed";
 
 fn refuse<T>(code: &'static str, reason: impl Into<String>) -> Result<T, Refusal> {
     Err(Refusal { code, reason: reason.into() })
@@ -401,6 +410,8 @@ pub struct RunCard {
     pub lead_notes: Option<String>,
     /// Who ran each check of the last checked round ("Security review by ...").
     pub checks: Vec<Value>,
+    /// The signed run record: its notes, a held lock, a broken signature (6h).
+    pub record: Option<RecordCard>,
 }
 
 // ---------------------------------------------------------------- state
@@ -460,6 +471,17 @@ struct St {
     retries: u32,
     /// Set by `finalize`, carried out once the lock is released.
     kill: Option<KillReason>,
+    /// Worker tickets whose outcome the record has (`report`), so each is sent once.
+    reported: std::collections::BTreeSet<String>,
+    /// Worker tickets the task graph has a `claim` for.
+    claimed: std::collections::BTreeSet<String>,
+    /// The last clean integration: (round, head), for the record's progress lines.
+    last_good: Option<(u32, String)>,
+    /// The run's end is being recorded (each ticket's last outcome, then `end`), and that has finished.
+    record_finishing: bool,
+    record_done: bool,
+    /// Each task's last reported status in the task graph, by plan id.
+    last_report: BTreeMap<String, TaskStatus>,
 }
 
 impl St {
@@ -484,6 +506,8 @@ struct Inner {
     clock: Arc<dyn RunClock>,
     st: Mutex<St>,
     changed: Condvar,
+    /// The signed run record (6h). `None` only in tests of the rules alone.
+    record: Option<Arc<dyn RunRecord>>,
 }
 
 /// One run's protocol. Cheap to clone.
@@ -540,7 +564,139 @@ impl RunProtocol {
         let st = St { last_call: now, started: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
         // The waves the lead is given are only advice; the runtime holds the limit however dispatch is called.
         workers.limit_writers(&cfg.run, cfg.max_in_flight);
-        RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new() }))
+        RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new(), record: None }))
+    }
+
+    /// The run with its signed record (6h). Called once, before the protocol is shared.
+    pub fn with_record(self, record: Arc<dyn RunRecord>) -> Self {
+        let mut inner = Arc::try_unwrap(self.0).unwrap_or_else(|_| panic!("with_record is called before the protocol is shared"));
+        inner.record = Some(record);
+        RunProtocol(Arc::new(inner))
+    }
+
+    fn send(&self, e: Event) {
+        if let Some(r) = &self.0.record {
+            r.send(e);
+        }
+    }
+
+    /// The task graph id of a plan task (`TID` in the workflow).
+    fn tid(&self, id: &str) -> String {
+        format!("{}.{id}", self.0.cfg.run)
+    }
+
+    /// The workflow's `integrationNote()`, with the branch the core really makes.
+    fn integration_note(&self, st: &St) -> String {
+        match &st.last_good {
+            Some((r, head)) => {
+                let suffix = if *r == 1 { String::new() } else { format!("-r{r}") };
+                format!("integration vajra/{}/integration{suffix} @ {head} from {}", self.0.cfg.run, self.0.cfg.base)
+            }
+            None => "no integration yet".into(),
+        }
+    }
+
+    /// Round 1's campaign and task graph, from the plan as the core stored it.
+    fn record_plan(&self, st: &St) -> Result<(), String> {
+        let Some(rec) = &self.0.record else { return Ok(()) };
+        let features = st.criteria.iter().map(|c| Feature { id: c.id.clone(), desc: one_line(&c.criterion, FEATURE_MAX) }).collect();
+        let mut tasks = Vec::new();
+        for id in plan::topo(&st.specs()) {
+            let Some(t) = st.task(&id) else { continue };
+            tasks.push(self.task_record(&t.spec, 1)?);
+        }
+        rec.plan(&PlanRecord { goal: self.0.cfg.ask.clone(), features, tasks })
+    }
+
+    /// A task's definition as the task graph keeps it, with the branch the core's git writer makes for its ticket in
+    /// round `r` (`gitw.rs`).
+    fn task_record(&self, spec: &PlanTask, r: u32) -> Result<TaskRecord, String> {
+        let id = &spec.id;
+        let agent = roles::agent_of(&spec.owner_role).ok_or_else(|| format!("task {id}'s role {} has no agent", spec.owner_role))?;
+        Ok(TaskRecord {
+            id: self.tid(id),
+            title: spec.title.clone(),
+            agent: agent.into(),
+            deps: spec.deps.iter().map(|d| self.tid(d)).collect(),
+            files: spec.files.clone(),
+            criteria: spec.criteria.clone(),
+            branch: format!("vajra/{}/task-{id}-r{r}", self.0.cfg.run),
+        })
+    }
+
+    /// A later round's plan reaches the task graph before anything in it is dispatched (#190 review), in the record's
+    /// queue ahead of the round's claims:
+    /// - each new or re-defined task (title, role, deps, files or criteria changed): `add`, then `validate`;
+    /// - each reworked task its last report left in progress (it reported done or progress, then the round failed):
+    ///   `report failed`, so the next claim, by any agent, is the script's retry.
+    fn record_replan(&self, st: &St, r: u32, before: &BTreeMap<String, PlanTask>, rework: &[String]) {
+        if self.0.record.is_none() || r == 1 {
+            return;
+        }
+        let same = |a: &PlanTask, b: &PlanTask| a.title == b.title && a.owner_role == b.owner_role && a.deps == b.deps && a.files == b.files && a.criteria == b.criteria;
+        let mut defs = Vec::new();
+        for id in plan::topo(&st.specs()) {
+            let Some(t) = st.task(&id) else { continue };
+            // A reworked task runs on this round's branch even when nothing else changed (only its brief, say): its
+            // definition goes again, so the task graph names that branch (codex on #190).
+            if before.get(&id).is_some_and(|b| same(b, &t.spec)) && !rework.contains(&id) {
+                continue;
+            }
+            match self.task_record(&t.spec, r) {
+                Ok(rec) => defs.push(rec),
+                // The plan check already refused a role without an agent; this can't happen, but never send a guess.
+                Err(_) => continue,
+            }
+        }
+        if !defs.is_empty() {
+            self.send(Event::Define(defs));
+        }
+        for id in rework {
+            if matches!(st.last_report.get(id), Some(TaskStatus::Done | TaskStatus::Progress)) {
+                self.send(Event::Report { task: self.tid(id), status: TaskStatus::Failed, summary: format!("round {}'s checks failed; re-planned for round {r}", r - 1) });
+            }
+        }
+    }
+
+    /// The task graph catches up with the tickets, each step once per ticket and in order:
+    /// - `claim` once the ticket's worktree exists (the runtime makes it after dispatch, or later when queued), or
+    ///   once it ended without one;
+    /// - then `report` with its outcome, once it has ended.
+    fn record_sync(&self, st: &mut St) {
+        if self.0.record.is_none() {
+            return;
+        }
+        // Dependencies first (codex on #190): a prerequisite's done report reaches the queue before a dependent's
+        // claim, which the engine's `claim --stacked` needs. A dependent is dispatched only after its prerequisite's
+        // ticket ended, so viewing in this order sees that end first.
+        let order = plan::topo(&st.specs());
+        let open: Vec<(String, String)> = order
+            .iter()
+            .filter_map(|id| st.task(id))
+            .flat_map(|t| t.tickets.iter().map(move |(_, tk, _)| (t.spec.id.clone(), tk.clone())))
+            .filter(|(_, tk)| !st.reported.contains(tk))
+            .collect();
+        for (task, tk) in open {
+            let Some(v) = self.0.workers.view(&tk) else { continue };
+            let ended = v.state == State::Ended;
+            if !st.claimed.contains(&tk) && (v.worktree.is_some() || ended) {
+                st.claimed.insert(tk.clone());
+                if let Some(agent) = st.task(&task).and_then(|t| roles::agent_of(&t.spec.owner_role)) {
+                    self.send(Event::Claim { task: self.tid(&task), agent: agent.into(), worktree: v.worktree.clone() });
+                }
+            }
+            let Some(o) = v.outcome.filter(|_| ended) else { continue };
+            st.reported.insert(tk);
+            let status = match o {
+                Outcome::Done => TaskStatus::Done,
+                Outcome::Progress => TaskStatus::Progress,
+                Outcome::Failed => TaskStatus::Failed,
+                Outcome::NeedsUser => TaskStatus::Question,
+                Outcome::Stopped => TaskStatus::Blocked,
+            };
+            st.last_report.insert(task.clone(), status);
+            self.send(Event::Report { task: self.tid(&task), status, summary: self.text(&v.reason.unwrap_or_default()) });
+        }
     }
 
     fn now(&self) -> Duration {
@@ -554,11 +710,57 @@ impl RunProtocol {
     /// Drop the lock, then carry out a pending kill and wake every waiter.
     fn release(&self, mut st: MutexGuard<'_, St>) {
         let kill = st.kill.take();
+        let finish = st.status.is_some() && !st.record_finishing;
+        st.record_finishing |= finish;
         drop(st);
         if let Some(k) = kill {
             self.0.workers.kill_run(&self.0.cfg.run, k);
         }
+        if finish {
+            // No lead call is due after the run ends, and a kill ends tickets on the runtime's own threads: the
+            // record catches up here, apart from the lead.
+            let p = self.clone();
+            // No thread: record what has ended now, without waiting, so this caller never blocks (bhishma, #190).
+            if std::thread::Builder::new().name("vajra-record-end".into()).spawn(move || p.finish_record(RECORD_END_WAIT)).is_err() {
+                self.finish_record(Duration::ZERO);
+            }
+        }
         self.0.changed.notify_all();
+    }
+
+    /// The run has finalized: wait (at most `wait`) for its tickets to end, record each one's last outcome once, then
+    /// tell the record the run ended. Only then may its campaign be listed as an orphan (#190 review). The end is marked
+    /// done even if this panics, so `flush_record` never waits on it for ever.
+    fn finish_record(&self, wait: Duration) {
+        struct Done<'a>(&'a RunProtocol);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                crate::lock(&self.0.0.st).record_done = true;
+                self.0.0.changed.notify_all();
+            }
+        }
+        let _done = Done(self);
+        let deadline = Instant::now() + wait;
+        loop {
+            let open = {
+                let mut st = self.lock();
+                self.record_sync(&mut st);
+                Self::unreported(&st)
+            };
+            let left = deadline.saturating_duration_since(Instant::now());
+            if open.is_empty() || left.is_zero() || self.0.record.is_none() {
+                break;
+            }
+            let _ = self.0.workers.await_any(&open, left.min(Duration::from_secs(1)));
+        }
+        if let Some(r) = &self.0.record {
+            r.end();
+        }
+    }
+
+    /// The run's tickets whose outcome the record doesn't have yet.
+    fn unreported(st: &St) -> Vec<String> {
+        st.tasks.iter().flat_map(|t| t.tickets.iter().map(|(_, tk, _)| tk.clone())).filter(|tk| !st.reported.contains(tk)).collect()
     }
 
     /// Fix the status, once. Run end kills the run's workers and drops its queue.
@@ -706,7 +908,18 @@ impl RunProtocol {
             return refuse(NOT_READY, format!("this run has {} rounds", self.0.cfg.limits.rounds));
         }
         match self.check_plan(st, &input) {
-            Ok(accepted) => Ok(self.accept(st, input, accepted)),
+            Ok(accepted) => {
+                let out = self.accept(st, input, accepted);
+                // Round 1 registers the campaign and the task graph before anything is dispatched. It runs under the
+                // protocol lock: no worker exists yet, so only the lead's own calls wait. A failure ends the run here.
+                if r == 1
+                    && let Err(why) = self.record_plan(st)
+                {
+                    Self::finalize(st, RunStatus::NotVerified, format!("the signed run record failed: {why}"));
+                    return refuse(RECORD_FAILED, format!("the signed run record failed, so the run has ended: {why}"));
+                }
+                Ok(out)
+            }
             Err(why) => {
                 let round = st.rounds.entry(r).or_default();
                 round.refusals += 1;
@@ -797,6 +1010,7 @@ impl RunProtocol {
             }
         }
         let mut role_changed = Vec::new();
+        let before: BTreeMap<String, PlanTask> = st.tasks.iter().map(|t| (t.spec.id.clone(), t.spec.clone())).collect();
         for spec in merged.iter().map(clean) {
             // The lead can't clear a security flag: a re-planned task keeps it.
             let sec = Self::security_task(&spec);
@@ -838,6 +1052,7 @@ impl RunProtocol {
             self.ask(st, q);
         }
         st.round = r;
+        self.record_replan(st, r, &before, &rework);
         let round = st.rounds.entry(r).or_default();
         round.planned = true;
         round.rework = rework;
@@ -940,6 +1155,8 @@ impl RunProtocol {
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));
         }
+        // The claim waits for the ticket's worktree (`record_sync`).
+        self.record_sync(st);
         Ok(Dispatched::Ticket { ticket, slot })
     }
 
@@ -1025,6 +1242,8 @@ impl RunProtocol {
         let rounds = tickets.iter().any(|t| self.round_of(t).is_some());
         loop {
             let mut st = self.lock();
+            // Each slice: a ticket that got its worktree is claimed, one that ended is reported.
+            self.record_sync(&mut st);
             let all: Vec<TicketStatus> = tickets.iter().filter_map(|t| self.status_of(&st, t)).collect();
             let left = deadline.saturating_duration_since(Instant::now());
             if let Some(i) = all.iter().position(|s| s.state == "ended").or(left.is_zero().then_some(usize::MAX)) {
@@ -1086,6 +1305,7 @@ impl RunProtocol {
             // round's checks never start, so nothing they launch escapes that kill (#153 review P2).
             Ok(_) if st.status.is_some() => self.release(st),
             Ok(head) => {
+                st.last_good = Some((r, head.clone()));
                 let input = self.round_input(&st, r, head);
                 drop(st);
                 let p = self.clone();
@@ -1144,6 +1364,16 @@ impl RunProtocol {
                 }
             }
         }
+        self.record_sync(st);
+        let asks: Vec<&str> = broken
+            .keys()
+            .filter(|id| st.task(id).and_then(|t| t.tickets.last()).filter(|(tr, _, _)| *tr == r).and_then(|(_, tk, _)| self.0.workers.view(tk)).is_some_and(|v| v.outcome == Some(Outcome::NeedsUser)))
+            .map(String::as_str)
+            .collect();
+        if !asks.is_empty() {
+            let line = format!("run {} round {r}: waiting for the user on {}; {}", self.0.cfg.run, asks.join(", "), self.integration_note(st));
+            self.send(Event::Progress(line));
+        }
         let round = st.rounds.entry(r).or_default();
         round.integrated = true;
         if !broken.is_empty() {
@@ -1162,6 +1392,9 @@ impl RunProtocol {
         round.feedback = feedback;
         if r >= self.0.cfg.limits.rounds {
             self.finalize_computed(st, format!("no round passed in {r} round(s)"));
+            let n = self.0.cfg.limits.rounds;
+            self.send(Event::Progress(format!("run {}: no verified delivery after {n} round(s); {}", self.0.cfg.run, self.integration_note(st))));
+            self.send(Event::Checkpoint(format!("stuck after {n} rounds")));
         }
     }
 
@@ -1362,6 +1595,35 @@ impl RunProtocol {
             questions: st.questions.clone(),
             lead_notes: st.notes.clone(),
             checks: st.rounds.values().rev().find_map(|r| r.result.as_ref()).map(|x| x.checks.clone()).unwrap_or_default(),
+            record: self.0.record.as_ref().map(|r| r.card()),
+        }
+    }
+
+    /// The record's lock card: Repair (`unlock --if-stale`). The core never removes a lock itself.
+    pub fn repair_record_lock(&self) -> Option<RecordCard> {
+        self.0.record.as_ref().map(|r| r.repair())
+    }
+
+    /// Wait for the record's queued writes (the run's end, and tests). After the run ended, first wait until its end
+    /// is recorded: every ticket's last outcome (`finish_record`).
+    pub fn flush_record(&self) {
+        let mut st = self.lock();
+        if st.status.is_some() {
+            // Bounded too: the end's own wait plus slack for its writes.
+            let deadline = Instant::now() + RECORD_END_WAIT + Duration::from_secs(30);
+            while !st.record_done {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                st = self.0.changed.wait_timeout(st, left).unwrap_or_else(std::sync::PoisonError::into_inner).0;
+            }
+        } else {
+            self.record_sync(&mut st);
+        }
+        drop(st);
+        if let Some(r) = &self.0.record {
+            r.flush();
         }
     }
 
