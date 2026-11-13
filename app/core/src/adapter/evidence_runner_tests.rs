@@ -849,6 +849,45 @@ fn a_profile_whose_startup_folder_would_be_writable_through_an_alias_is_refused(
     assert!(!ran.exists() && !t.0.join("work/node_modules/run-b.bash-env").exists());
 }
 
+/// The run's tmp is made exclusively, never through a link, and pinned (codex P1 on 3dc1a7bf, bhishma Low): a link
+/// to its parent put in its place before it's made, or swapped in right after, refuses the run, and no command runs.
+/// The profile names only the literal tmp, so a link there can't add the folder it points at.
+#[test]
+fn a_tmp_swapped_for_a_link_while_it_is_made_refuses_the_run() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("tmplink");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let ran = t.0.join("work/ran");
+    let cmds = vec![format!("touch '{}'", ran.display())];
+    for stage in ["before-create", "after-create"] {
+        let p = t.fresh(false, &format!("run-{stage}"));
+        let (tmp, parent, want) = (p.tmp.clone(), t.0.clone(), stage.to_string());
+        super::TMP_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |at: &str| {
+                if at == want {
+                    let _ = fs::remove_dir(&tmp);
+                    std::os::unix::fs::symlink(&parent, &tmp).unwrap();
+                }
+            }))
+        });
+        let out = run(&p, &evidence_run(&script, &base, &cmds, &common, &home));
+        super::TMP_HOOK.with(|h| *h.borrow_mut() = None);
+        assert!(matches!(&out, RunOutcome::Failed(why) if why.contains("already exists") || why.contains("replaced")), "{stage}: {out:?}");
+        assert!(!ran.exists(), "{stage}: a command ran");
+        assert!(!t.0.join("objects").exists() && !t.0.join("cache").exists(), "{stage}: folders were made through the link");
+        assert!(!t.0.join(format!("run-{stage}.bash-env")).exists());
+    }
+    // The profile text names each writable root as given, never a resolved form of it.
+    let link = t.0.join("tmp-as-link");
+    std::os::unix::fs::symlink(&t.0, &link).unwrap();
+    let p = Profile { worktree: t.0.join("work"), tmp: link, deny: deny_dirs(&home, &t.0.join("data")), network: false };
+    let text = p.sbpl().unwrap();
+    let allow = text.lines().find(|l| l.starts_with("(allow file-write*")).unwrap();
+    assert!(!allow.contains(&format!("(subpath \"{}\")", t.0.display())), "{allow}");
+}
+
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
 #[test]
 fn a_run_refuses_a_tmp_that_already_exists() {

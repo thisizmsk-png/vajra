@@ -103,7 +103,13 @@ impl Profile {
         if self.deny.is_empty() {
             return Err("the runner needs the Vajra dirs to deny".into());
         }
-        let run_dirs = subpaths(&[self.worktree.clone(), self.tmp.clone()])?;
+        // The writable roots exactly as given, never resolved here: a link swapped into a root's place can't add the
+        // folder it points at (codex P1 on 3dc1a7bf). `run` requires them resolved already.
+        let mut run_dirs = String::new();
+        for p in [&self.worktree, &self.tmp] {
+            let l = lit(p).ok_or_else(|| format!("a runner path isn't a plain absolute path: {}", p.display()))?;
+            run_dirs.push_str(&format!(" (subpath {l})"));
+        }
         let resolver = both(Path::new(RESOLVER_SOCKET)).iter().map(|p| lit(p).map(|l| format!(" (literal {l})"))).collect::<Option<String>>().ok_or("the resolver socket path")?;
         let deny = subpaths(&self.deny)?;
         let mut p = String::from("(version 1)\n(allow default)\n");
@@ -296,11 +302,10 @@ impl StartupDir {
         use std::os::unix::fs::PermissionsExt;
         let name = profile.tmp.file_name().and_then(|n| n.to_str()).ok_or("the run's temp folder has no name")?;
         let dir = profile.tmp.with_file_name(format!("{name}.bash-env"));
-        // The containment check below compares paths as written, while the profile also allows each writable root's
-        // resolved form (`/tmp` is `/private/tmp`): so every path in it must already be resolved (codex P1 on
-        // d660bb62). The worktree must be canonical, and so must the tmp's parent (the tmp itself doesn't exist yet).
+        // The containment check below compares paths as written, so every path must already be resolved (codex P1 on
+        // d660bb62): `make_tmp` checked the worktree and the tmp's parent before making the tmp.
         let resolved = |p: &Path| p.canonicalize().ok().as_deref() == Some(p);
-        if !resolved(&profile.worktree) || !profile.tmp.parent().is_some_and(resolved) {
+        if !resolved(&profile.worktree) || !resolved(&profile.tmp) {
             return Err("the run's folders aren't plain, resolved paths");
         }
         let writable = [&profile.worktree, &profile.tmp];
@@ -381,12 +386,8 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     if !crate::vajra::allowlist::key_has_one_link(r.state_dir) {
         return RunOutcome::Failed("Vajra's signing key has a second name somewhere, so the runner can't keep it out of reach".into());
     }
-    // A fresh tmp for every run (L2): a process an earlier run left behind can't have prepared this one's files.
-    if std::fs::symlink_metadata(&profile.tmp).is_ok() {
-        return RunOutcome::Failed("the run's temp folder already exists; each run needs a fresh one".into());
-    }
-    if let Err(e) = profile.prepare() {
-        return RunOutcome::Failed(format!("couldn't prepare the run's folders: {e}"));
+    if let Err(why) = make_tmp(profile) {
+        return RunOutcome::Failed(why.into());
     }
     // bash gets the script's text, read here once, never its path: the engine folder is denied inside the profile,
     // and a copy anywhere a command can write could be rewritten while bash reads it, so a command could print a
@@ -524,19 +525,75 @@ thread_local! {
 /// swapped for a link at any moment. The walk opens every component from `/` with O_NOFOLLOW, holds the bundle
 /// folder's descriptor, and does the whole atomic write (`openat`, `renameat`) relative to it: a swap after the open
 /// can't redirect the write, and a link on the way fails it.
-fn save_evidence(base: &Path, slug: &str, json: &[u8]) -> std::io::Result<()> {
+/// Open `path`'s folder by walking from `/`, every component with O_NOFOLLOW, each relative to the one above: a link
+/// anywhere on the way fails it, and the descriptor stays on that folder whatever is renamed afterwards. With `create`,
+/// missing components below `from` (0700) are made the same way.
+fn walk(from: Option<&crate::projects::pinned::Pinned>, path: &Path, create: bool) -> std::io::Result<crate::projects::pinned::Pinned> {
     use crate::projects::pinned::Pinned;
     use std::path::Component;
     let bad = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a plain path");
-    let mut dir = Pinned::open(Path::new("/"), false)?;
-    for c in base.components() {
-        match c {
-            Component::RootDir => {}
-            Component::Normal(n) => dir = dir.child(n.to_str().ok_or_else(bad)?, false)?,
+    let mut dir: Option<Pinned> = None;
+    for c in path.components() {
+        let next = match (c, dir.as_ref().or(from)) {
+            (Component::RootDir, None) => Pinned::open(Path::new("/"), false)?,
+            (Component::Normal(n), Some(d)) => d.child(n.to_str().ok_or_else(bad)?, create)?,
             _ => return Err(bad()),
-        }
+        };
+        dir = Some(next);
     }
-    let dir = dir.child(slug, true)?;
+    dir.ok_or_else(bad)
+}
+
+#[cfg(test)]
+type StageHook = Option<Box<dyn Fn(&str)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs at each stage of making the run's tmp ("before-create", "after-create"), to swap it for a link.
+    pub(super) static TMP_HOOK: std::cell::RefCell<StageHook> = const { std::cell::RefCell::new(None) };
+}
+
+fn tmp_hook(_stage: &str) {
+    #[cfg(test)]
+    TMP_HOOK.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f(_stage)
+        }
+    });
+}
+
+/// Make the run's tmp and its folders without ever following a link (codex P1 on 3dc1a7bf, bhishma Low). The worktree
+/// and the tmp's parent must be resolved paths already, so the profile's literal roots are exact. The tmp is made by
+/// one exclusive `mkdir` (a name already there, a link included, refuses the run), then pinned by a walk from `/` that
+/// refuses a link anywhere on the way, and checked to be a plain folder at its resolved path; every folder in it is
+/// made relative to that descriptor. A swap afterwards can't widen anything: the profile names only the literal tmp,
+/// and Seatbelt judges a write by the path it resolves to.
+fn make_tmp(profile: &Profile) -> Result<(), &'static str> {
+    let resolved = |p: &Path| p.canonicalize().ok().as_deref() == Some(p);
+    if !resolved(&profile.worktree) || !profile.tmp.parent().is_some_and(resolved) {
+        return Err("the run's folders aren't plain, resolved paths");
+    }
+    tmp_hook("before-create");
+    // A fresh tmp for every run (L2): a process an earlier run left behind can't have prepared this one's files.
+    if std::fs::create_dir(&profile.tmp).is_err() {
+        return Err("the run's temp folder already exists; each run needs a fresh one");
+    }
+    tmp_hook("after-create");
+    let replaced = "the run's temp folder was replaced as it was made";
+    let tmp = walk(None, &profile.tmp, false).map_err(|_| replaced)?;
+    let plain = std::fs::symlink_metadata(&profile.tmp).is_ok_and(|m| m.file_type().is_dir()) && resolved(&profile.tmp);
+    if !plain {
+        return Err(replaced);
+    }
+    let rel = |d: &Path| d.strip_prefix(&profile.tmp).map(Path::to_path_buf).map_err(|_| replaced);
+    for d in std::iter::once(profile.tmp.join("objects")).chain(cache_env(&profile.tmp).into_iter().map(|(_, d)| d)) {
+        walk(Some(&tmp), &rel(&d)?, true).map_err(|_| "couldn't prepare the run's folders")?;
+    }
+    Ok(())
+}
+
+fn save_evidence(base: &Path, slug: &str, json: &[u8]) -> std::io::Result<()> {
+    let dir = walk(None, base, false)?.child(slug, true)?;
     #[cfg(test)]
     AFTER_PIN.with(|h| {
         if let Some(f) = h.borrow().as_ref() {
