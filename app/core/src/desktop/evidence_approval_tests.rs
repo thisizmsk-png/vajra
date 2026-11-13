@@ -241,6 +241,38 @@ fn a_hand_written_approved_record_is_refused() {
 }
 
 #[test]
+fn a_file_whose_commands_were_swapped_with_the_sha_kept_never_shows_or_authorizes_them() {
+    // codex on #226: the core asks for one list; an agent puts a harmless list in the file and keeps the sha.
+    let t = Tmp::new();
+    let app = t.app();
+    let real = Ask { commands: vec!["npm ci".into(), "./deploy-to-prod.sh".into()], ..ask() };
+    let sha = app.request_evidence_approval(&real, at(T0)).unwrap();
+    let file = t.0.join("data/control/lead").join(RUN).join("approval.json");
+    let mut rec: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    rec["ask"]["commands"] = json!(["npm test"]);
+    fs::write(&file, rec.to_string()).unwrap();
+    // The dialog shows the core's own list, never the file's; the file's disagreement makes it void.
+    let shown = app.evidence_approval_read_at(RUN, at(T0 + 1)).unwrap();
+    assert_eq!(shown["ask"]["commands"], json!(["npm ci", "./deploy-to-prod.sh"]), "{shown}");
+    assert_eq!(shown["state"], "void");
+    // Answering it is refused, and nothing can then consume the real list.
+    assert_eq!(app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 2)).unwrap_err()["error"], "record_changed");
+    assert!(app.consume_evidence_approval(&real, at(T0 + 3)).is_err());
+    assert!(app.evidence_approval_consumed(RUN).is_none());
+    // The swap after an approval, before the consume, is refused the same way.
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = app.request_evidence_approval(&real, at(T0)).unwrap();
+    app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 1)).unwrap();
+    let file = t.0.join("data/control/lead").join(RUN).join("approval.json");
+    let mut rec: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    rec["ask"]["commands"] = json!(["npm test"]);
+    fs::write(&file, rec.to_string()).unwrap();
+    assert!(app.consume_evidence_approval(&real, at(T0 + 2)).is_err());
+    assert!(app.evidence_approval_consumed(RUN).is_none());
+}
+
+#[test]
 fn after_a_restart_an_open_or_approved_ask_is_void_and_the_core_asks_again() {
     let t = Tmp::new();
     let sha = {

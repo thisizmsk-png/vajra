@@ -113,6 +113,13 @@ fn secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// The file agrees with what this app holds: its whole ask equals the held ask, and its sha is the held sha (codex on
+/// #226: an agent can edit the file's commands and keep its sha). The file is never the source of what is shown or
+/// approved; this only decides whether it has been tampered with.
+fn file_matches(rec: &Value, held: &Held) -> bool {
+    rec["ask"] == held.ask.to_json() && rec["sha256"].as_str() == Some(held.sha.as_str()) && held.ask.sha256() == held.sha
+}
+
 fn expired(asked_at: u64, now: SystemTime) -> bool {
     secs(now).saturating_sub(asked_at) > HOLD_MAX.as_secs()
 }
@@ -187,8 +194,15 @@ impl App {
         if held.answer.is_some() || rec["state"] != "pending" {
             return Err(fail("not_pending", "this approval was already answered or is void"));
         }
-        if held.sha != sha || rec["sha256"].as_str() != Some(sha) {
+        if held.sha != sha {
             return Err(fail("list_changed", "the command list changed; review the new list"));
+        }
+        if !file_matches(&rec, &held) {
+            crate::lock(&self.approvals).remove(run_id);
+            rec["state"] = json!("void");
+            rec["why"] = json!("the approval record was changed outside Vajra");
+            self.write_approval(run_id, &rec).map_err(|e| fail("io_error", e))?;
+            return Err(fail("record_changed", "This approval's record was changed outside Vajra, so it can't be trusted. Vajra will ask again."));
         }
         if expired(held.asked_at, now) {
             crate::lock(&self.approvals).remove(run_id);
@@ -240,7 +254,7 @@ impl App {
         if expired(held.asked_at, now) {
             return refuse("the approval is older than the hold");
         }
-        let Some(mut rec) = rec.filter(|r| r["state"] == "approved" && r["sha256"].as_str() == Some(sha.as_str())) else {
+        let Some(mut rec) = rec.filter(|r| r["state"] == "approved" && file_matches(r, &held)) else {
             return refuse("the approval record doesn't match the answer given");
         };
         self.audit_approval("ALLOW", "consumed", &ask.run_id, &sha, now)?;
@@ -264,20 +278,28 @@ impl App {
             return Err(invalid("run_id", "not a run id"));
         }
         let rec = self.read_approval(run_id).map_err(|e| fail("io_error", e))?;
-        let Some(r) = rec else { return Ok(json!({"run_id": run_id, "state": "none"})) };
-        let mut state = r["state"].as_str().unwrap_or("void").to_string();
-        if state == "pending" || state == "approved" {
-            let held = crate::lock(&self.approvals).get(run_id).cloned();
-            match held {
-                Some(h) if r["sha256"].as_str() == Some(h.sha.as_str()) => {
-                    if expired(h.asked_at, now) {
-                        state = "expired".into();
-                    }
+        let held = crate::lock(&self.approvals).get(run_id).cloned();
+        // What is shown always comes from memory (codex on #226): the file says only whether it still agrees. A record
+        // with no held ask (hand-written, or kept over a restart) or one that differs from it shows no list at all.
+        let Some(h) = held else {
+            return Ok(match rec {
+                None => json!({"run_id": run_id, "state": "none"}),
+                Some(r) => {
+                    let s = r["state"].as_str().unwrap_or("void");
+                    json!({"run_id": run_id, "state": if matches!(s, "declined" | "expired" | "void") { s } else { "void" }, "hold_max_s": HOLD_MAX.as_secs()})
                 }
-                _ => state = "void".into(),
-            }
-        }
-        Ok(json!({"run_id": run_id, "state": state, "sha256": r["sha256"], "ask": r["ask"], "asked_at": r["asked_at"], "hold_max_s": HOLD_MAX.as_secs()}))
+            });
+        };
+        let file_state = rec.as_ref().filter(|r| file_matches(r, &h)).and_then(|r| r["state"].as_str().map(str::to_string));
+        let state = match (file_state.as_deref(), h.answer, h.consumed) {
+            (Some("consumed"), Some(true), true) => "consumed",
+            (Some("approved"), Some(true), false) if !expired(h.asked_at, now) => "approved",
+            (Some("pending"), None, false) if !expired(h.asked_at, now) => "pending",
+            (Some("pending" | "approved"), _, false) => "expired",
+            (Some("declined"), Some(false), _) => "declined",
+            _ => "void",
+        };
+        Ok(json!({"run_id": run_id, "state": state, "sha256": h.sha, "ask": h.ask.to_json(), "asked_at": h.asked_at, "hold_max_s": HOLD_MAX.as_secs()}))
     }
 
     /// The sha of the list this run's evidence ticket consumed: only when this app made the ask, a person approved it
@@ -291,7 +313,7 @@ impl App {
             return None;
         }
         let r = self.read_approval(run_id).ok()??;
-        (r["state"] == "consumed" && r["ask"]["run_id"] == run_id && r["sha256"].as_str() == Some(held.sha.as_str())).then_some(held.sha)
+        (r["state"] == "consumed" && file_matches(&r, &held)).then_some(held.sha)
     }
 
     /// Approve or decline: a person's click in the app only.
