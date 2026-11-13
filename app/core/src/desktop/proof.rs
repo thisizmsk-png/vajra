@@ -118,7 +118,14 @@ pub enum Ledger {
     /// No ledger: a record the core didn't write (today's workflow), or one from before the ledger existed.
     #[default]
     Missing,
+    /// The ledger file matches, but the app no longer holds the run's record (it restarted, or let the run go). Until
+    /// key A, agents can write the app's data folder and read the signing key, so a matching file alone is never
+    /// enough: only a record this app holds counts (#226's rule).
+    NotHeld,
 }
+
+/// The reason under Not verified when the ledger file matches but the app no longer holds the run's record.
+pub const NOT_HELD_REASON: &str = "Vajra no longer holds this run's record, so it can't confirm it wrote every entry.";
 
 /// The trust the signed record itself carries: the `-og` slug or the goal marker. When unsure, the label.
 pub fn signed_trust(slug: &str, goal: &str) -> Trust {
@@ -166,6 +173,7 @@ pub fn label(i: &Input) -> (Label, String) {
         Ledger::Match => {}
         Ledger::Mismatch => return (Label::NotVerified, "The record has entries Vajra didn't write.".into()),
         Ledger::Missing => return (Label::NotVerified, "Vajra has no write ledger for this record, so it can't confirm it.".into()),
+        Ledger::NotHeld => return (Label::NotVerified, NOT_HELD_REASON.into()),
     }
     let own = match i.trust {
         None => Trust::Guarded,

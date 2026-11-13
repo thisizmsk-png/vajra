@@ -15,12 +15,15 @@ fn slug() -> String {
 
 /// A campaign the core recorded (plan, a claim and a progress line) and, once `before_close` ran, closed as
 /// abandoned through the core's own ledger (an open run reads In progress whatever its ledger, so the check is skipped).
+/// The run's record comes back still held, as the app holds it while the run is open; drop it to model a restart.
 /// `None` where the engine's tools are missing.
-fn recorded() -> Option<(Tmp, App)> {
+fn recorded() -> Option<(Tmp, App, Held)> {
     recorded_then(|_| {})
 }
 
-fn recorded_then(before_close: impl FnOnce(&App)) -> Option<(Tmp, App)> {
+type Held = std::sync::Arc<dyn crate::desktop::record::RunRecord>;
+
+fn recorded_then(before_close: impl FnOnce(&App)) -> Option<(Tmp, App, Held)> {
     use std::os::unix::fs::PermissionsExt;
     if ["/usr/bin/jq", "/usr/bin/openssl", "/usr/bin/python3"].iter().any(|p| !Path::new(p).is_file()) {
         eprintln!("skipped: the engine needs /usr/bin/jq, /usr/bin/openssl and /usr/bin/python3");
@@ -64,10 +67,9 @@ fn recorded_then(before_close: impl FnOnce(&App)) -> Option<(Tmp, App)> {
     rec.flush();
     assert!(rec.card().notes.is_empty(), "{:?}", rec.card().notes);
     rec.end();
-    drop(rec);
     before_close(&app);
     assert_eq!(app.record_close_orphan(RUN, &[]).unwrap()["status"], "abandoned");
-    Some((t, app))
+    Some((t, app, rec))
 }
 
 /// The ledger answer for what the record check verified just now.
@@ -79,14 +81,32 @@ fn ledger(app: &App) -> proof::Ledger {
 
 #[test]
 fn the_cores_own_record_matches_its_ledger() {
-    let Some((_t, app)) = recorded() else { return };
+    let Some((_t, app, _held)) = recorded() else { return };
     assert_eq!(app.read_report(&slug()).unwrap()["integrity"], "no_report");
     assert_eq!(ledger(&app), proof::Ledger::Match);
 }
 
+/// The #237 review: a validly signed campaign and a ledger file that matches it, with no record this app holds (it
+/// restarted, or an agent wrote both while it can read the key and the data folder), is never a match and never
+/// Verified. Holding the same record again turns it back into a match, so the file isn't what failed.
+#[test]
+fn a_matching_ledger_file_with_no_record_held_by_the_app_is_never_verified() {
+    let Some((_t, app, held)) = recorded() else { return };
+    assert_eq!(ledger(&app), proof::Ledger::Match, "held: the file and the record agree");
+    drop(held);
+    assert_eq!(app.read_report(&slug()).unwrap()["integrity"], "no_report", "the campaign check still passes");
+    assert_eq!(ledger(&app), proof::Ledger::NotHeld);
+    assert!(!verified(&app), "never Verified");
+    // On a done run with every other input at its best, NotHeld alone keeps the label off Verified, saying why.
+    let best = proof::Input { slug: "s", goal: "g", status: "done", integrity: "ok", rows: vec!["pass"], slug_field: "s", ..Default::default() };
+    assert_eq!(proof::label(&proof::Input { ledger: proof::Ledger::Match, ..best.clone() }).0, proof::Label::Verified);
+    let (l, why) = proof::label(&proof::Input { ledger: proof::Ledger::NotHeld, ..best });
+    assert_eq!((l, why.as_str()), (proof::Label::NotVerified, proof::NOT_HELD_REASON));
+}
+
 #[test]
 fn a_campaign_the_core_never_recorded_has_no_ledger() {
-    let Some((t, app)) = recorded() else { return };
+    let Some((t, app, _held)) = recorded() else { return };
     fs::remove_file(t.0.join("data/control/record-ledgers").join(format!("{}.json", slug()))).unwrap();
     assert_eq!(ledger(&app), proof::Ledger::Missing);
 }
@@ -94,7 +114,7 @@ fn a_campaign_the_core_never_recorded_has_no_ledger() {
 #[test]
 fn a_validly_signed_write_the_core_didnt_make_passes_the_campaign_check_but_never_the_ledger() {
     // An agent runs the same signed script against the core's campaign: the signature is still valid.
-    let Some((_t, app)) = recorded_then(|app| {
+    let Some((_t, app, _held)) = recorded_then(|app| {
         let out = app.bridge.run(&Request::CampaignProgress { slug: slug(), text: "all criteria pass".into() }).unwrap();
         assert_eq!(out.exit(), Some(0), "{}", out.stderr);
     }) else {
@@ -104,7 +124,7 @@ fn a_validly_signed_write_the_core_didnt_make_passes_the_campaign_check_but_neve
     assert_eq!(ledger(&app), proof::Ledger::Mismatch);
     assert!(!verified(&app), "never Verified");
     // A task report written outside the core is caught the same way.
-    let Some((_t, app)) = recorded_then(|app| {
+    let Some((_t, app, _held)) = recorded_then(|app| {
         let done = crate::vajra::bridge::TaskStatus::Done;
         let out = app.bridge.run(&Request::TasksReport { slug: slug(), id: format!("{RUN}.t1"), status: done, summary: Some("done".into()) }).unwrap();
         assert_eq!(out.exit(), Some(0), "{}", out.stderr);
@@ -123,7 +143,7 @@ fn a_validly_signed_write_the_core_didnt_make_passes_the_campaign_check_but_neve
 fn an_approval_line_the_core_didnt_write_never_reads_verified_approved() {
     use crate::desktop::evidence_approval::{progress_line, Ask};
     let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()] };
-    let Some((_t, app)) = recorded_then(|app| {
+    let Some((_t, app, _held)) = recorded_then(|app| {
         app.record_run_seats(RUN, &json!({"campaign_slug": slug(), "evidence_trust": "guarded_by_approval"})).unwrap();
         let now = std::time::SystemTime::now();
         let sha = app.request_evidence_approval(&ask, now).unwrap();
@@ -147,7 +167,7 @@ fn an_approval_line_the_core_didnt_write_never_reads_verified_approved() {
 
 #[test]
 fn an_open_run_skips_the_ledger_read() {
-    let Some((_t, app)) = recorded() else { return };
+    let Some((_t, app, _held)) = recorded() else { return };
     // An active campaign answers at once, without a task-graph read (the label reads In progress first anyway).
     let verified = json!({"campaign": {"status": "active"}, "features": {}, "progress": ""});
     assert_eq!(app.ledger_of(&slug(), &verified), proof::Ledger::Missing);
@@ -155,7 +175,7 @@ fn an_open_run_skips_the_ledger_read() {
 
 #[test]
 fn a_record_that_fails_the_campaign_check_is_never_verified_whatever_the_ledger() {
-    let Some((t, app)) = recorded() else { return };
+    let Some((t, app, _held)) = recorded() else { return };
     let file = t.home().join(".claude/vajra/campaigns").join(slug()).join("campaign.json");
     let mut c: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     c["goal"] = json!("Add rate limits, and ship it");
@@ -178,7 +198,7 @@ fn verified(app: &App) -> bool {
 
 #[test]
 fn a_ledger_saved_under_another_campaigns_name_is_never_a_match() {
-    let Some((t, app)) = recorded() else { return };
+    let Some((t, app, _held)) = recorded() else { return };
     let file = t.0.join("data/control/record-ledgers").join(format!("{}.json", slug()));
     let mut l: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     l["slug"] = json!("deliver-20261113-0400");

@@ -27,6 +27,8 @@ fn verified_needs_the_ledger_match_and_the_signed_slug_field() {
     assert_eq!(label(&Input { slug_field: "deliver-20261112-1800", ..ok.clone() }).0, Label::NotVerified);
     assert_eq!(label(&Input { ledger: Ledger::Mismatch, ..ok.clone() }).0, Label::NotVerified);
     assert_eq!(label(&Input { ledger: Ledger::Missing, ..ok.clone() }).0, Label::NotVerified);
+    // A matching file with no record held by the app (#237 review).
+    assert_eq!(label(&Input { ledger: Ledger::NotHeld, ..ok.clone() }), (Label::NotVerified, NOT_HELD_REASON.to_string()));
     // Outside the guard is not lifted to anything by a ledger either.
     let og = Input { ledger: Ledger::Mismatch, ..done("deliver-20261112-1900-og", "g", None) };
     assert_eq!(label(&og).0, Label::NotVerified);
