@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Section, Text } from "../../../components/ui/base";
 import { TerminalPane } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
-import { api, errorText, onChanged } from "../../ipc";
+import { api, errorText } from "../../ipc";
 import type { StreamWindow } from "../../ipc";
-import { usePoll } from "../../projects/poll";
+import { onChangedPaced, usePoll } from "../../projects/poll";
 
 const POLL_MS = 1000;
 const EVENT_MIN_GAP_MS = 500;
@@ -40,14 +40,12 @@ export function StreamTab({ stream, live = true }: { stream: string; live?: bool
   const lostHeld0 = useRef<number | null>(null);
   /** The latest `reconcile`, for `fetchWin` to re-check the view once an answer lands (an answer does not re-render the list's range). */
   const reconcileRef = useRef<() => void>(() => {});
-  const last = useRef(0);
 
   const fetchWin = useCallback(async (from: number | null) => {
     want.current = from;
     if (busy.current) { queued.current = true; return; }
     busy.current = true;
     const g = gen.current;
-    last.current = Date.now();
     try {
       let w = await api.streamWindow(stream, from, WINDOW_ROWS);
       if (g !== gen.current || want.current !== from) return;
@@ -88,20 +86,11 @@ export function StreamTab({ stream, live = true }: { stream: string; live?: bool
 
   useEffect(() => {
     refresh();
-    let later: ReturnType<typeof setTimeout> | undefined;
     // Hidden window: nothing is drawn. The core keeps the log; one read on showing again catches up.
-    let stale = false;
-    const off = onChanged((p) => {
+    return onChangedPaced(EVENT_MIN_GAP_MS, refresh, (p) => {
       const streams = (p as { streams?: unknown } | null)?.streams;
-      if (Array.isArray(streams) && !streams.includes(stream)) return;
-      if (document.hidden) { stale = true; return; }
-      const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
-      if (wait <= 0) refresh();
-      else if (later === undefined) later = setTimeout(() => { later = undefined; refresh(); }, wait);
+      return !Array.isArray(streams) || streams.includes(stream);
     });
-    const onVisibility = () => { if (!document.hidden && stale) { stale = false; refresh(); } };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => { clearTimeout(later); off(); document.removeEventListener("visibilitychange", onVisibility); };
   }, [stream, refresh]);
   // A live worker's stream is polled (output can outrun the events); a finished one only on events.
   usePoll(refresh, POLL_MS, live);

@@ -7,12 +7,12 @@ import { iconOf } from "../ProviderLine";
 import { parseWorkerProvider } from "../../workerProvider";
 import { S } from "../../../strings";
 import type { StatusKey } from "../../../strings";
-import { api, onChanged } from "../../ipc";
+import { api } from "../../ipc";
 import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import type { CrewNodeDto } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
-import { usePoll } from "../../projects/poll";
+import { onChangedPaced, usePoll } from "../../projects/poll";
 import { useProjects } from "../../projects/store";
 import { WorkerPane } from "./WorkerPane";
 import { CoreWorkerPane } from "./CoreWorkerPane";
@@ -90,7 +90,6 @@ export function Crew() {
   // `worker` in the route opens on that worker (a deep link, for example from an action card).
   const [selected, setSelected] = useState(route.params.worker ? `agent:${route.params.worker}` : "");
   const [err, setErr] = useState("");
-  const last = useRef(0);
   const current = useRef<Target | null | undefined>(target);
   current.current = target;
 
@@ -141,7 +140,6 @@ export function Crew() {
 
   const load = useCallback(() => {
     if (!target) return;
-    last.current = Date.now();
     const asked = target;
     api.crew(target.slug, target.runId).then(
       (n) => { if (current.current !== asked) return; setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
@@ -152,17 +150,8 @@ export function Crew() {
   useEffect(load, [load]);
   // Polled only while this run is live and the window shows; a finished run changes only with an event.
   usePoll(load, POLL_MS, !!target && liveRuns.includes(target.runId));
-  useEffect(() => {
-    if (!target) return;
-    // Leading and trailing: an event inside the gap is not lost, it is read when the gap ends.
-    let later: ReturnType<typeof setTimeout> | undefined;
-    const off = onChanged(() => {
-      const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
-      if (wait <= 0) load();
-      else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);
-    });
-    return () => { clearTimeout(later); off(); };
-  }, [target, load]);
+  // Leading and trailing: an event inside the gap is not lost, it is read when the gap ends. Hidden: one read on showing.
+  useEffect(() => (target ? onChangedPaced(EVENT_MIN_GAP_MS, load) : undefined), [target, load]);
 
   // ⌘K: go to any worker of this run by name.
   useCommands(root ? agents(root).map((n) => ({ id: n.id, label: S.palette.goWorker(n.title), hint: statusLabel(n), run: () => setSelected(n.id) })) : []);

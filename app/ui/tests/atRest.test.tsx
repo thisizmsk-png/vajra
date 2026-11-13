@@ -2,7 +2,7 @@
 // and while the window is hidden it makes none even for a live run. Events still reach the screens. Counted over 60 s.
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { setTransport } from "../src/ipc";
+import { mergeChanged, onChanged, setTransport } from "../src/ipc";
 import { Shell } from "../src/Shell";
 import { fakeIpc } from "./fakeIpc";
 
@@ -58,6 +58,43 @@ afterEach(() => {
   hidden = false;
 });
 
+describe("events held back while hidden merge into one that says at least as much", () => {
+  it("joins streams, keeps a snapshot request, and keeps each project's newest revision", () => {
+    const m = mergeChanged(
+      { streams: ["a"], snapshot_needed: true, projects: [{ project_id: "p", rev: 3 }] },
+      { streams: ["b", "a"], snapshot_needed: false, projects: [{ project_id: "p", rev: 5 }, { project_id: "q", rev: 1 }] },
+    ) as { streams: string[]; snapshot_needed: boolean; projects: { project_id: string; rev: number }[] };
+    expect(m.streams.sort()).toEqual(["a", "b"]);
+    expect(m.snapshot_needed).toBe(true);
+    expect(m.projects).toEqual([{ project_id: "p", rev: 5 }, { project_id: "q", rev: 1 }]);
+  });
+
+  it("an event that names no list makes the merge name none (anything may have moved)", () => {
+    expect(mergeChanged({ streams: ["a"] }, null)).toBeNull();
+    const m = mergeChanged({ streams: ["a"], projects: [] }, { snapshot_needed: false }) as Record<string, unknown>;
+    expect(m.streams).toBeUndefined();
+    expect(m.projects).toBeUndefined();
+  });
+
+  it("a listener hears nothing while hidden and one merged event on showing", () => {
+    const f = fakeIpc({});
+    setTransport(f.transport);
+    const got: unknown[] = [];
+    const off = onChanged((p) => got.push(p));
+    setHidden(true);
+    f.emit("changed", { streams: ["a"] });
+    f.emit("changed", { streams: ["b"] });
+    expect(got).toEqual([]);
+    setHidden(false);
+    expect(got).toHaveLength(1);
+    expect((got[0] as { streams: string[] }).streams.sort()).toEqual(["a", "b"]);
+    setHidden(true);
+    setHidden(false);
+    expect(got).toHaveLength(1);
+    off();
+  });
+});
+
 describe("nothing runs at rest", () => {
   it("makes no calls to the core in 60 s idle when no run is live", async () => {
     const ipc = await boot(IDLE);
@@ -77,6 +114,31 @@ describe("nothing runs at rest", () => {
     const shown = ipc.calls.slice(before).map((c) => c.cmd);
     expect(shown).toContain("crew");
     expect(shown).toContain("stream_window");
+  });
+
+  it("makes no calls in 60 s hidden while a live run streams `changed` events; showing it catches up once", async () => {
+    const ipc = await boot(LIVE);
+    // An event just before hiding leaves trailing reads pending: hiding cancels them.
+    act(() => ipc.emit("changed", { streams: ["agent-backend"], snapshot_needed: false }));
+    act(() => ipc.emit("changed", { streams: ["agent-backend"], snapshot_needed: false }));
+    setHidden(true);
+    await wait(0);
+    const before = ipc.calls.length;
+    for (let s = 0; s < 60; s++) {
+      act(() => ipc.emit("changed", { streams: ["agent-backend", "s"], snapshot_needed: s === 30 }));
+      await wait(1000);
+    }
+    expect(ipc.calls.slice(before).map((c) => c.cmd)).toEqual([]);
+    setHidden(false);
+    await wait(0);
+    const shown = ipc.calls.slice(before).map((c) => c.cmd);
+    // A catch-up per reader, not one per missed event (60 were sent). The crew is read by the projects view and by the
+    // crew screen (its poll's read on showing and its event catch-up).
+    expect(shown.filter((c) => c === "list_campaigns")).toHaveLength(1);
+    expect(shown.filter((c) => c === "crew").length).toBeGreaterThanOrEqual(1);
+    expect(shown.filter((c) => c === "crew").length).toBeLessThanOrEqual(3);
+    expect(shown.filter((c) => c === "stream_window").length).toBeGreaterThanOrEqual(1);
+    expect(shown.filter((c) => c === "stream_window").length).toBeLessThanOrEqual(2);
   });
 
   it("does poll a live run while the window shows (the counter above is not blind)", async () => {

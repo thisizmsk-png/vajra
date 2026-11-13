@@ -6,13 +6,13 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from "react";
 import { S } from "../../strings";
 import type { StatusKey } from "../../strings";
-import { api, onChanged } from "../ipc";
+import { api } from "../ipc";
 import { forgetRead, ownedRead } from "../reads";
 import type { Campaign, CrewNodeDto, InboxItem } from "../ipc";
 import { problemDetail } from "../screens/states";
 import { parseWorkerProvider } from "../workerProvider";
 import { groupProjects, summarize } from "./adapter";
-import { usePoll } from "./poll";
+import { onChangedPaced, usePoll } from "./poll";
 import type { ProjectIndex } from "./adapter";
 import type { ActiveCrew, Project, ProjectId, ProjectSummary, WorkerRow } from "./contract";
 
@@ -69,11 +69,9 @@ const Ctx = createContext<ProjectsView>({
 export function ProjectsProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, liveRuns: [], summaries: new Map() });
   const seq = useRef(0);
-  const last = useRef(0);
 
   const load = useCallback(() => {
     const mine = ++seq.current;
-    last.current = Date.now();
     void (async () => {
       // Campaigns and their folders decide the projects; without either, saying "no projects" would be wrong.
       const [camps, targets, active, inbox, store] = await Promise.allSettled([
@@ -129,17 +127,12 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
 
   useEffect(load, [load]);
   const live = data.crew !== null;
-  useEffect(() => {
-    let later: ReturnType<typeof setTimeout> | undefined;
-    const off = onChanged(() => {
-      // The core says something moved: a read already in flight started before that and must not be joined.
-      forgetRead();
-      const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
-      if (wait <= 0) load();
-      else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);
-    });
-    return () => { off(); clearTimeout(later); };
-  }, [load]);
+  // Paced, and held back while the window is hidden (one read on showing).
+  useEffect(() => onChangedPaced(EVENT_MIN_GAP_MS, load, () => {
+    // The core says something moved: a read already in flight started before that and must not be joined.
+    forgetRead();
+    return true;
+  }), [load]);
   usePoll(load, POLL_MS, live);
 
   const view = useMemo(() => ({ ...data, reload: load }), [data, load]);

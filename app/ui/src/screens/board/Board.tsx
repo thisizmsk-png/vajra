@@ -5,7 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { Badge, Button, StatusDot } from "../../../components/ui/base";
 import { S } from "../../../strings";
-import { api, onChanged } from "../../ipc";
+import { api } from "../../ipc";
+import { onChangedPaced } from "../../projects/poll";
 import type { RunOverview } from "../../ipc";
 import { boardCards } from "../../projects/adapter";
 import type { BoardCard, Lane } from "../../projects/contract";
@@ -32,7 +33,6 @@ export function Board() {
   // Every load takes a number; only the newest may set state. A slug check is not enough: two loads of the same
   // campaign overlap when events arrive while one is out, and the older answer must not land last.
   const seq = useRef(0);
-  const last = useRef(0);
   const seenRev = useRef<number | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const refs = useRef(new Map<string, HTMLButtonElement>());
@@ -40,7 +40,6 @@ export function Board() {
   const load = useCallback(() => {
     if (!focus) return;
     const mine = ++seq.current;
-    last.current = Date.now();
     const slug = focus;
     void Promise.allSettled([api.runOverview(slug), api.evidenceList(slug)]).then(([o, e]) => {
       if (mine !== seq.current) return;
@@ -68,16 +67,8 @@ export function Board() {
     if (seenRev.current === null) { seenRev.current = rev; return; }
     if (rev !== seenRev.current) { seenRev.current = rev; load(); }
   }, [rev, load]);
-  useEffect(() => {
-    if (!focus || !noRevision) return;
-    let later: ReturnType<typeof setTimeout> | undefined;
-    const off = onChanged(() => {
-      const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
-      if (wait <= 0) load();
-      else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);
-    });
-    return () => { off(); clearTimeout(later); };
-  }, [focus, load, noRevision]);
+  // Paced; hidden: held back, one read on showing.
+  useEffect(() => (focus && noRevision ? onChangedPaced(EVENT_MIN_GAP_MS, load) : undefined), [focus, load, noRevision]);
 
   const open = (c: BoardCard) => {
     if (!focus) return;

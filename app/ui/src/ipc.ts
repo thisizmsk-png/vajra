@@ -429,4 +429,45 @@ export const api = {
 /** `inbox_new`: something new started waiting; carries ids, a kind and a count, never item text. Coalesced over 5 s in the core. */
 export type InboxNew = { project_id: string; kind: string; count: number };
 export const onInboxNew = (cb: (payload: InboxNew) => void) => transport.on("inbox_new", (p) => cb(p as InboxNew));
-export const onChanged = (cb: (payload: unknown) => void) => transport.on("changed", cb);
+/** Every `changed` event, as the core sent it, hidden window or not. Only for code that defers on its own (`onChangedPaced`). */
+export const onChangedRaw = (cb: (payload: unknown) => void) => transport.on("changed", cb);
+
+type ChangedPayload = { streams?: unknown; snapshot_needed?: unknown; projects?: unknown; [k: string]: unknown };
+const isObj = (p: unknown): p is ChangedPayload => typeof p === "object" && p !== null && !Array.isArray(p);
+/** Two `changed` payloads as one that says at least as much: streams joined, a snapshot if either asked, each project at
+ * its newest revision. A payload that names no list means "anything may have moved", and so does the merge. */
+export function mergeChanged(a: unknown, b: unknown): unknown {
+  if (!isObj(a) || !isObj(b)) return null;
+  const out: ChangedPayload = { ...a, ...b };
+  if (Array.isArray(a.streams) && Array.isArray(b.streams)) out.streams = [...new Set([...a.streams, ...b.streams])];
+  else delete out.streams;
+  if (a.snapshot_needed || b.snapshot_needed) out.snapshot_needed = true;
+  if (Array.isArray(a.projects) && Array.isArray(b.projects)) {
+    const by = new Map<unknown, { project_id?: unknown; rev?: unknown }>();
+    for (const p of [...a.projects, ...b.projects] as { project_id?: unknown; rev?: unknown }[]) {
+      const had = by.get(p?.project_id);
+      if (!had || (typeof p?.rev === "number" && typeof had.rev === "number" && p.rev > had.rev)) by.set(p?.project_id, p);
+    }
+    out.projects = [...by.values()];
+  } else delete out.projects;
+  return out;
+}
+
+/** `changed`, held back while the window is hidden: nothing is read or drawn then. On showing, a listener that missed
+ * events gets one, merged (`mergeChanged`), so it catches up once. */
+export function onChanged(cb: (payload: unknown) => void): () => void {
+  let held: { p: unknown } | undefined;
+  const off = transport.on("changed", (p) => {
+    if (typeof document !== "undefined" && document.hidden) held = held ? { p: mergeChanged(held.p, p) } : { p };
+    else cb(p);
+  });
+  if (typeof document === "undefined") return off;
+  const onVisibility = () => {
+    if (document.hidden || !held) return;
+    const { p } = held;
+    held = undefined;
+    cb(p);
+  };
+  document.addEventListener("visibilitychange", onVisibility);
+  return () => { off(); document.removeEventListener("visibilitychange", onVisibility); };
+}
