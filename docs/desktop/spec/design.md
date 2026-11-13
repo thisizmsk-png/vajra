@@ -1173,7 +1173,7 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 
 **What the cards say.**
 - **A Codex worker (N23 a):** "Runs outside the Vajra guard. Can read your files, **including Vajra's signing key**. With that key it could fake Vajra's records and approvals, not only test results. It can write only in its worktree. Your own Codex tools (MCP servers, notify) run with it, outside its sandbox."
-- **A Claude worker:** "Runs with the Vajra guard, in Claude Code's sandbox. Your own Claude Code settings and MCP servers don't load for this worker." If an MCP server did load, the card instead says the worker is not guarded, with the reason naming it: "Your MCP server <name> runs outside the sandbox and can read your files, including Vajra's signing key."
+- **A Claude worker:** "Runs with the Vajra guard, in Claude Code's sandbox. Your own Claude Code settings and MCP servers don't load for this worker." If an MCP server did load, the card instead says the worker is not guarded. The core already records the reason and the server names ("Your MCP server <name> runs outside the sandbox and can read your files, including Vajra's signing key."); showing them on the card is a follow-up.
 
 ### 16.5 The run protocol: any lead, the rules in the core
 
