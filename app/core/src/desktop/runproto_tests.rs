@@ -844,6 +844,23 @@ fn a_replanned_round_redefines_changed_tasks_and_fails_their_last_attempt_before
     assert!(matches!(&ev[claim], Event::Claim { agent, .. } if agent == "bhima"));
 }
 
+/// codex on #190: a reworked task whose definition didn't change is still sent again with this round's branch.
+#[test]
+fn a_reworked_task_with_the_same_definition_is_redefined_on_the_rounds_branch() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::from([("t2".to_string(), json!({"x": 1}))]) });
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("failed"));
+    let before = events(&rec).len();
+    let same = plan1().tasks.into_iter().find(|t| t.id == "t2").unwrap();
+    r.p.plan_tasks(PlanInput { round: 2, tasks: vec![same], ..PlanInput::default() }).unwrap();
+    let ev = events(&rec)[before..].to_vec();
+    let Some(Event::Define(defs)) = ev.first() else { panic!("the reworked task is redefined: {ev:?}") };
+    assert_eq!(defs.iter().map(|d| (d.id.as_str(), d.branch.as_str())).collect::<Vec<_>>(), [("r1.t2", "vajra/r1/task-t2-r2")]);
+}
+
 /// codex on #190: a stop or a timeout with tickets still going records each ticket's terminal outcome exactly once,
 /// with no lead call after the end.
 #[test]

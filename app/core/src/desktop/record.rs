@@ -27,6 +27,8 @@ use crate::vajra::bridge_record::{self as bridge_text, GOAL_MAX, PROGRESS_MAX, S
 
 /// One campaign or task write's timeout: the script waits up to 10 s for its lock, then does its work.
 pub const RECORD_TIMEOUT: Duration = Duration::from_secs(60);
+/// ADR-16 16.5a: the start of an outside-guard run's goal (with the `-og` slug, the two parts only `create` sets).
+pub const OUTSIDE_GUARD: &str = "[evidence ran outside the Vajra guard]";
 
 /// The whole plan-time record (create, every add, validate), which runs under the protocol lock: past this, the
 /// remaining calls aren't started and the run ends before dispatch.
@@ -307,13 +309,24 @@ impl Writer {
     }
 
     fn add(&self, t: &TaskRecord) -> Request {
+        // As the script's `csv()` stores them: trimmed, blanks dropped, the first of each duplicate kept in order. The
+        // ledger then holds what `list` shows (codex on #190).
+        let csv = |v: &[String]| {
+            let mut out: Vec<String> = Vec::new();
+            for x in v.iter().map(|x| x.trim()).filter(|x| !x.is_empty()) {
+                if !out.iter().any(|o| o == x) {
+                    out.push(x.to_string());
+                }
+            }
+            out
+        };
         Request::TasksAdd {
             slug: self.cfg.slug.clone(),
             id: t.id.clone(),
             title: bridge_text::one_line(&t.title, TITLE_MAX),
             owner: t.agent.clone(),
-            deps: t.deps.clone(),
-            files: t.files.clone(),
+            deps: csv(&t.deps),
+            files: csv(&t.files),
             acceptance: t.criteria.clone(),
             branch: t.branch.clone(),
         }
@@ -337,9 +350,12 @@ impl Writer {
     fn plan(&self, p: &PlanRecord) -> Result<(), String> {
         let started = std::time::Instant::now();
         let in_time = || if started.elapsed() < PLAN_DEADLINE { Ok(()) } else { Err(format!("the run record took longer than {} s", PLAN_DEADLINE.as_secs())) };
-        let goal = bridge_text::one_line(&p.goal, GOAL_MAX);
+        let goal = self.goal(&p.goal);
         let create = Request::CampaignCreate { slug: self.cfg.slug.clone(), goal: goal.clone(), features: p.features.clone() };
         match self.call(&create) {
+            // Read back what `create` signed: an outside-guard run must carry its marker in both the slug and the goal,
+            // or the run stops before dispatch (ADR-16 16.5a).
+            Ok(_) if self.outside_guard() => self.created_marked(&goal)?,
             Ok(_) => {}
             Err(Fail::Exit(why)) if why.contains("campaign already exists") => self.reuse(&goal, &p.features)?,
             Err(f) => return Err(f.why().to_string()),
@@ -354,6 +370,30 @@ impl Writer {
     }
 
     /// An existing campaign, reused only for a resume the core made, and only when it is exactly this run's.
+    fn outside_guard(&self) -> bool {
+        self.cfg.trust == "outside_guard"
+    }
+
+    /// The goal `create` signs. An outside-guard run's starts with `OUTSIDE_GUARD`, and the ask is cut to fit after it,
+    /// so the cut can never take the marker.
+    fn goal(&self, ask: &str) -> String {
+        if !self.outside_guard() {
+            return bridge_text::one_line(ask, GOAL_MAX);
+        }
+        let rest = bridge_text::one_line(ask, GOAL_MAX - OUTSIDE_GUARD.len() - 1);
+        if rest.is_empty() { OUTSIDE_GUARD.to_string() } else { format!("{OUTSIDE_GUARD} {rest}") }
+    }
+
+    fn created_marked(&self, goal: &str) -> Result<(), String> {
+        let slug = &self.cfg.slug;
+        let o = self.call(&Request::CampaignShow { slug: slug.clone() }).map_err(|f| f.why().to_string())?;
+        let v: Value = serde_json::from_str(&o.stdout).map_err(|_| format!("campaign {slug} could not be read back"))?;
+        let c = &v["campaign"];
+        let marked = c["slug"].as_str().is_some_and(|s| s == slug && s.ends_with("-og"))
+            && c["goal"].as_str().is_some_and(|g| g == goal && g.starts_with(OUTSIDE_GUARD));
+        if marked { Ok(()) } else { Err(format!("campaign {slug} doesn't carry the outside-guard marker in its slug and goal")) }
+    }
+
     fn reuse(&self, goal: &str, features: &[Feature]) -> Result<(), String> {
         let slug = &self.cfg.slug;
         if !self.cfg.resumed {

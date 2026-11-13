@@ -864,6 +864,53 @@ fn the_real_scripts_take_a_replanned_role_and_dependency_and_the_record_verifies
     r.verify_record().unwrap();
 }
 
+/// codex on #190, with the real scripts: (1) duplicate files and dependencies, which the engine dedupes, still verify;
+/// (2) a reworked task with an unchanged definition is retried on round 2's branch and worktree.
+#[test]
+fn the_real_scripts_dedupe_lists_and_a_same_definition_retry_names_round_twos_branch() {
+    if ["/usr/bin/jq", "/usr/bin/openssl", "/usr/bin/python3"].iter().any(|p| !Path::new(p).is_file()) {
+        eprintln!("skipped: the engine needs /usr/bin/jq, /usr/bin/openssl and /usr/bin/python3");
+        return;
+    }
+    let t = Tmp::new();
+    let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+    let mut b = Bridge::new(scripts.canonicalize().unwrap()).with_home(t.0.join("home"));
+    let key = t.0.join("home/.claude/vajra/.hmac-key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&key, "00".repeat(32)).unwrap();
+    std::fs::create_dir_all(t.0.join("home/.claude/agents")).unwrap();
+    for a in ["bhima", "abhimanyu"] {
+        std::fs::write(t.0.join("home/.claude/agents").join(format!("{a}.md")), "---\nname: x\n---\n").unwrap();
+    }
+    b.record_cwd = Some(super::super::record_app::record_dir(&t.0.join("data")).unwrap());
+    b.timeout = RECORD_TIMEOUT;
+    let store = || super::super::record_app::AppLedgerStore::new(&t.0.join("data"), SLUG, t.0.join("home/.claude/vajra/campaigns"), key.clone(), b.clone()).unwrap();
+    let r = CoreRecord::new(t.cfg(false), b.clone(), Arc::new(store())).unwrap();
+    let (t1, t2) = (format!("{RUN}.t1"), format!("{RUN}.t2"));
+    let mut p = plan();
+    p.tasks[0].files = v(&["src/a/", "src/a/", "src/*.rs"]);
+    p.tasks[1].deps = vec![t1.clone(), t1.clone()];
+    r.plan(&p).unwrap();
+    r.verify_record().unwrap();
+    // Round 1: t1 reports done, the round fails; round 2 reworks it with the same definition on its new branch.
+    r.send(Event::Claim { task: t1.clone(), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/one")) });
+    r.send(Event::Report { task: t1.clone(), status: TaskStatus::Done, summary: "done".into() });
+    let mut d1 = p.tasks[0].clone();
+    d1.branch = format!("vajra/{RUN}/task-t1-r2");
+    r.send(Event::Define(vec![d1]));
+    r.send(Event::Report { task: t1.clone(), status: TaskStatus::Failed, summary: "round 1's checks failed; re-planned for round 2".into() });
+    r.send(Event::Claim { task: t1.clone(), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/two")) });
+    r.flush();
+    assert!(r.card().notes.is_empty(), "every write was taken: {:?}", r.card().notes);
+    let back = store().read_back(SLUG).unwrap();
+    let task = |id: &str| back.tasks["tasks"].as_array().unwrap().iter().find(|x| x["id"] == id).unwrap().clone();
+    assert_eq!(task(&t1)["files"], serde_json::json!(["src/a/", "src/*.rs"]));
+    assert_eq!(task(&t2)["deps"], serde_json::json!([t1]));
+    assert_eq!(task(&t1)["branch"], format!("vajra/{RUN}/task-t1-r2"));
+    assert_eq!(task(&t1)["worktree"], "/wt/two");
+    r.verify_record().unwrap();
+}
+
 /// codex on #190, with the real scripts: after the core's own report is recorded, editing or deleting report.md
 /// (campaign.json and state.sig untouched, so the signature still checks) makes the record not verified.
 #[test]
@@ -971,6 +1018,40 @@ fn the_real_scripts_close_is_read_as_the_cores_own_and_the_record_verifies() {
     // A second close finds it done: exit 0, "already done", and the record no longer reads as only the core's.
     r.write(&close).unwrap();
     assert!(r.verify_record().unwrap_err().contains("isn't the core's"), "{:?}", r.verify_record());
+}
+
+/// codex on #190 (ADR-16 16.5a): an outside-guard run's signed goal starts with the marker, a long ask is cut after
+/// it, and a created campaign that doesn't carry it is refused before anything else is written.
+#[test]
+fn an_outside_guard_goal_starts_with_the_marker_and_is_checked_after_create() {
+    let og = format!("{SLUG}-og");
+    let cfg = |t: &Tmp| RecordConfig { slug: og.clone(), trust: "outside_guard".into(), ..t.cfg(false) };
+    let long = PlanRecord { goal: "x".repeat(3000), ..plan() };
+    // The script stores and shows the goal it was given.
+    let t = Tmp::new();
+    let file = t.0.join("goal");
+    t.campaign_script(&format!(
+        "case \"$1\" in create) shift 2; printf '%s' \"$2\" > '{f}' ;; show) printf '{{\"campaign\":{{\"slug\":\"{og}\",\"goal\":%s}}}}' \"$(/usr/bin/python3 -I -c 'import json,sys; print(json.dumps(open(sys.argv[1]).read()))' '{f}')\" ;; esac",
+        f = file.display()
+    ));
+    CoreRecord::new(cfg(&t), t.bridge(), mem()).unwrap().plan(&long).unwrap();
+    let sent = std::fs::read_to_string(&file).unwrap();
+    assert!(sent.starts_with(&format!("{OUTSIDE_GUARD} x")), "{}", &sent[..60]);
+    assert!(sent.len() <= crate::vajra::bridge_record::GOAL_MAX, "cut to the script's limit after the marker");
+    let kinds: Vec<String> = t.calls().iter().map(|c| c[2].clone()).collect();
+    assert_eq!(&kinds[..2], ["create", "show"], "read back right after create: {kinds:?}");
+    // A guarded run's goal has no marker.
+    let g = Tmp::new();
+    let gfile = g.0.join("goal");
+    g.campaign_script(&format!("case \"$1\" in create) shift 2; printf '%s' \"$2\" > '{}' ;; esac", gfile.display()));
+    g.record(false).plan(&plan()).unwrap();
+    assert!(!std::fs::read_to_string(&gfile).unwrap().contains(OUTSIDE_GUARD));
+    // The campaign read back has no marker in its goal: refused, nothing more written.
+    let u = Tmp::new();
+    u.campaign_script(&format!("case \"$1\" in show) printf '%s' '{{\"campaign\":{{\"slug\":\"{og}\",\"goal\":\"add a --json flag to export\"}}}}' ;; esac"));
+    let err = CoreRecord::new(cfg(&u), u.bridge(), mem()).unwrap().plan(&plan()).unwrap_err();
+    assert!(err.contains("outside-guard marker"), "{err}");
+    assert!(!u.calls().iter().any(|c| c[0] == "python"), "no task was added: {:?}", u.calls());
 }
 
 // ---------------------------------------------------------------- the core's ledger (bhishma H1)

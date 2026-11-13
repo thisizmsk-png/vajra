@@ -563,7 +563,9 @@ impl RunProtocol {
         let mut defs = Vec::new();
         for id in plan::topo(&st.specs()) {
             let Some(t) = st.task(&id) else { continue };
-            if before.get(&id).is_some_and(|b| same(b, &t.spec)) {
+            // A reworked task runs on this round's branch even when nothing else changed (only its brief, say): its
+            // definition goes again, so the task graph names that branch (codex on #190).
+            if before.get(&id).is_some_and(|b| same(b, &t.spec)) && !rework.contains(&id) {
                 continue;
             }
             match self.task_record(&t.spec, r) {
