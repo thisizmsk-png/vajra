@@ -154,6 +154,11 @@ impl WorkerHost {
         self.rt.get().map(|rt| rt.list(run).iter().map(super::workers::TicketView::core_worker).collect()).unwrap_or_default()
     }
 
+    /// `run` has a core ticket that hasn't ended (never builds the runtime).
+    pub fn run_has_live_tickets(&self, run: &str) -> bool {
+        self.rt.get().is_some_and(|rt| rt.list(run).iter().any(|v| v.state != super::workers::State::Ended))
+    }
+
     /// Settings: the disk under `<work>`, every copy any app life made. A walk only: no git, and no runtime is built.
     pub fn disk_use(&self) -> Value {
         let copies = copies_under(&self.work);
