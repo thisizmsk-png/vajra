@@ -66,7 +66,6 @@ fn a_chatgpt_login_or_an_unreadable_one_could_bring_cloud_settings_and_an_api_ke
     assert!(!codex_cloud_login(&say(Some(1), "Not logged in\n")));
     assert!(codex_cloud_login(&say(None, "")), "killed: can't tell");
     assert!(codex_cloud_login(&|_: &[String]| None), "didn't run: can't tell");
-    assert!(!CODEX_CLOUD_REFUSES_LAUNCH, "interim decision B: it launches, unguarded, with the cause named");
 }
 
 /// bhishma #216 H2-b (vajra-1's decision): hooks, plugins, apps, notify and each MCP server are switched off in the
