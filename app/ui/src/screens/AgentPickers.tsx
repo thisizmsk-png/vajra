@@ -1,5 +1,5 @@
 // The pickers shared by the project's agents (Settings) and the proposal card's override menu: every option is an allowed
-// choice and reads "Model · provider"; effort is offered only where the account has an effort setting.
+// choice and reads "Model via provider"; effort is offered only where the account has an effort setting.
 import { allowedChoices, choiceKey, modelLine } from "../accountsContract";
 import type { Account, AgentPick, Agents } from "../accountsContract";
 import { Text } from "../../components/ui/base";
@@ -37,7 +37,7 @@ export function PickRow({ label, pick, agents, accounts, onChange, inherit, hide
       <label className="v-agent__label"><span className={hideLabel ? "v-agent__sr" : undefined}>{label}</span>
         <select aria-label={C.pickLabel(label)} value={value} onChange={(e) => set(e.target.value)}>
           {inherit && <option value="">{C.useDefault}</option>}
-          {stale && pick && <option value={value} disabled>{account ? modelLine(account, pick.model, WORD) : `${pick.model ?? WORD} · ${pick.account}`}</option>}
+          {stale && pick && <option value={value} disabled>{account ? modelLine(account, pick.model, WORD) : S.accounts.modelVia(pick.model ?? WORD, pick.account)}</option>}
           {choices.map((c) => <option key={choiceKey(c.account.id, c.model)} value={choiceKey(c.account.id, c.model)}>{modelLine(c.account, c.model, WORD)}</option>)}
         </select>
       </label>

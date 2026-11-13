@@ -71,7 +71,7 @@ export function CrewTree({ label, nodes, selected, onSelect, defaultOpen = [] }:
           </span>
           {r.node.icon}
           <span className="v-tree__label" title={r.node.label}>{r.node.label}</span>
-          <span className="v-row__meta"><StatusDot status={r.node.status} label={r.node.statusLabel} /></span>
+          <span className="v-row__meta" title={r.node.statusLabel}><StatusDot status={r.node.status} label={r.node.statusLabel} /></span>
         </li>
       ))}
     </ul>

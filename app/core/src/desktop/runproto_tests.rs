@@ -31,6 +31,10 @@ struct FakeWorkers {
     merges: Mutex<Vec<Vec<String>>>,
     merge_result: Mutex<Option<GitwError>>,
     fast: std::sync::atomic::AtomicBool,
+    /// Every dispatch answers this error while it is set.
+    dispatch_error: Mutex<Option<DispatchError>>,
+    /// While set, `integrate` says it entered, then blocks until released (#153 review: a stop during the merge).
+    integrate_hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
 impl FakeWorkers {
@@ -53,6 +57,13 @@ impl FakeWorkers {
         drop(b);
         self.changed.notify_all();
     }
+    /// As `WorkerRuntime` can leave it: the snapshot commit stored, then a concurrent cancel turned the outcome
+    /// to `stopped` (#153 review).
+    fn end_stopped_with_commit(&self, id: &str) {
+        self.end(id, Outcome::Stopped);
+        crate::lock(&self.tickets).get_mut(id).unwrap().0.commit = Some(commit_of(id));
+        self.changed.notify_all();
+    }
     fn spec(&self, id: &str) -> (TaskSpec, WorkerSeat) {
         let b = crate::lock(&self.tickets);
         let (_, s, w) = &b[id];
@@ -69,6 +80,9 @@ fn commit_of(id: &str) -> String {
 
 impl Workers for FakeWorkers {
     fn dispatch(&self, spec: TaskSpec, seat: WorkerSeat) -> Result<String, DispatchError> {
+        if let Some(e) = crate::lock(&self.dispatch_error).clone() {
+            return Err(e);
+        }
         let id = format!("{}.{}.r{}", spec.run, spec.task, spec.round);
         let mut b = crate::lock(&self.tickets);
         if b.contains_key(&id) {
@@ -114,6 +128,11 @@ impl Workers for FakeWorkers {
     }
     fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
         assert_eq!(at.base, BASE);
+        let hold = crate::lock(&self.integrate_hold).take();
+        if let Some((entered, release)) = hold {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(20)).unwrap();
+        }
         crate::lock(&self.merges).push(commits.to_vec());
         match crate::lock(&self.merge_result).take() {
             Some(e) => Err(e),
@@ -127,6 +146,8 @@ impl Workers for FakeWorkers {
 struct FakeGate {
     verdicts: Mutex<Vec<RoundVerdict>>,
     changed: Condvar,
+    /// How many times a round's checks started.
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeGate {
@@ -138,6 +159,7 @@ impl FakeGate {
 
 impl RoundGate for FakeGate {
     fn check(&self, _: &str, _: u32, _: &str, _: &[String]) -> RoundVerdict {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // A test that never answers leaves no thread behind for long.
         let v = crate::lock(&self.verdicts);
         let (mut v, _) = self.changed.wait_timeout_while(v, Duration::from_secs(20), |v| v.is_empty()).unwrap();
@@ -309,6 +331,29 @@ fn later_rounds_come_only_after_a_failed_round_and_replan_only_failed_tasks() {
     assert!(code(r.p.plan_tasks(PlanInput { round: 2, criteria: crit, tasks: vec![], ..PlanInput::default() })).1.contains("fixed after round 1"));
     // Both refusals were in round 2: the run ended. A fresh rig shows the accepted path.
     assert_eq!(r.status(), Some(RunStatus::NotVerified));
+}
+
+/// #153 review P2: a stopped ticket can keep its snapshot commit. A stopped worker is held back and never
+/// integrated, so the next round's retry must not start from (and so later merge) that commit.
+#[test]
+fn a_stopped_tickets_snapshot_commit_is_never_the_next_rounds_base() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t3"]);
+    let t2 = r.dispatch("t2");
+    r.w.end_stopped_with_commit(&t2);
+    r.p.integrate(1).unwrap();
+    // A task with no done commit uses up the round: nothing merges, and the round fails without a gate call.
+    assert!(r.w.merges.lock().unwrap().is_empty(), "the stopped commit isn't integrated");
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("failed"));
+    r.p.plan_tasks(PlanInput { round: 2, tasks: vec![task("t2", "frontend", &["web/"], &["t1"], &[])], ..PlanInput::default() }).unwrap();
+    let again = r.dispatch("t2");
+    let (spec, _) = r.w.spec(&again);
+    assert_ne!(spec.from, commit_of("r1.t2.r1"), "not from the stopped ticket's commit");
+    assert_eq!(spec.from, BASE, "from the base: the task has no eligible commit");
+    r.w.end(&again, Outcome::Done);
+    r.p.integrate(2).unwrap();
+    assert!(!r.w.merges.lock().unwrap()[0].contains(&commit_of("r1.t2.r1")));
 }
 
 #[test]
@@ -1017,7 +1062,8 @@ fn a_waiting_round_and_the_last_failed_round_write_the_workflow_texts() {
             Event::Checkpoint("stuck after 1 rounds".into()),
         ]
     );
-    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    // #153: a task that ended `needs_user` makes the out-of-rounds end a human hold, not a plain failure.
+    assert_eq!(r.status(), Some(RunStatus::NeedsUser));
 }
 
 #[test]
@@ -1030,4 +1076,99 @@ fn a_clean_integration_is_named_in_later_progress() {
     let _ = r.await_round(1);
     let want = format!("run r1: no verified delivery after 1 round(s); integration vajra/r1/integration @ {:f>40} from {BASE}", 1);
     assert!(events(&rec).contains(&Event::Progress(want.clone())), "{want} in {:?}", events(&rec));
+}
+
+/// batch-3's `Closed`: the app is quitting, so nothing new is queued. The run is stopped (as a human Stop would), and
+/// the lead hears why; it is not told to retry.
+#[test]
+fn a_dispatch_refused_because_the_app_is_quitting_stops_the_run() {
+    let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), true);
+    r.p.plan_tasks(plan1()).unwrap();
+    *crate::lock(&r.w.dispatch_error) = Some(DispatchError::Closed);
+    let e = r.p.dispatch_worker("t1").unwrap_err();
+    assert_eq!(e.code, RUN_ENDED, "{e:?}");
+    assert!(e.reason.contains("quitting"), "{e:?}");
+    let card = r.p.card();
+    assert_eq!(card.status, Some(RunStatus::Stopped));
+    assert_eq!(*crate::lock(&r.w.kills), [KillReason::Stopped], "the run's workers are stopped");
+    // Every later call hears that the run ended.
+    *crate::lock(&r.w.dispatch_error) = None;
+    assert_eq!(r.p.dispatch_worker("t2").unwrap_err().code, RUN_ENDED);
+}
+
+/// batch-3's `HistoryIncomplete`: the run's recorded history wasn't read whole, so the ticket ids it used are unknown
+/// and nothing new can go into it. No retry or later round can fix that: the run ends `not_verified`, saying so.
+#[test]
+fn a_dispatch_refused_for_an_incomplete_history_ends_the_run_not_verified() {
+    let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), true);
+    r.p.plan_tasks(plan1()).unwrap();
+    *crate::lock(&r.w.dispatch_error) = Some(DispatchError::HistoryIncomplete);
+    let e = r.p.dispatch_worker("t1").unwrap_err();
+    assert_eq!(e.code, RUN_ENDED, "{e:?}");
+    let card = r.p.card();
+    assert_eq!(card.status, Some(RunStatus::NotVerified));
+    assert!(card.reason.as_deref().unwrap().contains("history"), "{card:?}");
+    assert_eq!(*crate::lock(&r.w.kills), [KillReason::Stopped]);
+}
+
+/// #153 review P2: the lock is released while the merge runs, so a Stop can end the run (and make its one kill)
+/// mid-merge. A merge that then succeeds must not start the round's checks, whose workers would escape that kill.
+#[test]
+fn a_run_stopped_during_the_merge_never_starts_the_rounds_checks() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *crate::lock(&r.w.integrate_hold) = Some((entered_tx, release_rx));
+    let p = r.p.clone();
+    let merging = std::thread::spawn(move || p.integrate(1));
+    entered.recv_timeout(Duration::from_secs(20)).expect("the merge started");
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    release.send(()).unwrap();
+    merging.join().unwrap().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(r.gate.calls.load(std::sync::atomic::Ordering::SeqCst), 0, "no checks after the run ended");
+    assert_eq!(r.p.card().status, Some(RunStatus::Stopped));
+}
+
+/// #153 review P2: a worker the runtime ended `needs_user` (a typed auth, quota or other provider error) is a human
+/// hold, not a generic failure: the run that ends with one says `needs_user` and why.
+#[test]
+fn a_worker_that_needs_the_human_keeps_the_run_needs_user() {
+    // The lead finishes the run.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    r.w.end(&t1, Outcome::NeedsUser);
+    assert_eq!(r.p.finish_run("stuck").unwrap(), RunStatus::NeedsUser);
+    assert!(r.p.card().reason.as_deref().unwrap().contains("t1"), "{:?}", r.p.card());
+    // The lead exits with nothing live.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    r.w.end(&t1, Outcome::NeedsUser);
+    assert_eq!(r.p.lead_exited(LeadExit::Exited), LeadAction::Ended(RunStatus::NeedsUser));
+    // Integration at the round limit: the hold is surfaced, not "no round passed".
+    let r = rig_with("add a --json flag", default_seats(), Limits { rounds: 1, ..Limits::default() }, false);
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2"]);
+    let t3 = r.dispatch("t3");
+    r.w.end(&t3, Outcome::NeedsUser);
+    r.p.integrate(1).unwrap();
+    let card = r.p.card();
+    assert_eq!(card.status, Some(RunStatus::NeedsUser), "{card:?}");
+    assert!(card.reason.as_deref().unwrap().contains("task t3 needs you"), "{card:?}");
+    // A later done ticket for the task clears the hold.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2"]);
+    let t3 = r.dispatch("t3");
+    r.w.end(&t3, Outcome::NeedsUser);
+    r.p.integrate(1).unwrap();
+    r.await_round(1);
+    r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() }).unwrap();
+    let again = r.dispatch("t3");
+    r.w.end(&again, Outcome::Done);
+    assert_eq!(r.p.finish_run("done").unwrap(), RunStatus::NotVerified);
 }

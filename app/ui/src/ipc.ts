@@ -218,6 +218,26 @@ export type CloseFinishedResult = { closed: { worker: string; label: string }[];
 export type WorkerDisk = { copies: number; bytes: number; partial?: boolean };
 export type CleanUpResult = { removed: string[]; disk: WorkerDisk };
 export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
+/** Every run label the core can answer. Views match on it exhaustively (`proofLabel` in strings.ts). */
+export type ProofLabel = "verified" | "verified_approved" | "evidence_unguarded" | "not_verified" | "rejected" | "abandoned" | "in_progress";
+export type RunProof = {
+  slug: string;
+  goal: string;
+  label: ProofLabel;
+  reason: string;
+  /** Only for `evidence_unguarded`: the risk text, and how to get plain Verified. */
+  why: string | null;
+  hint: string | null;
+  integrity: ReportIntegrity;
+  record_sha256: string | null;
+  record_note: string;
+  /** The one capability check for exporting (proof on screen is always shown). */
+  export: boolean;
+  /** The PR comment, exactly as it would be posted. */
+  markdown: string;
+  /** A row's check hasn't finished; ask again (a finished sweep sends no `changed` event). */
+  pending?: boolean;
+};
 /** `vajra.project_state/1`: the one revisioned projection every surface reads. */
 export type ProjectState =
   | { schema: "vajra.project_state/1"; project_id: string; rev: number; unchanged: true }
@@ -265,6 +285,13 @@ export const api = {
   readReport: (slug: string) => call<Report>("read_report", { slug }),
   /** Run the signature check now (not the cached badge). */
   verifyCampaign: (slug: string) => call<Verified>("verify_campaign", { slug }),
+  /** The run's proof (6i): its label, computed by the core from the signed record and its own trust record. */
+  runProof: (slug: string) => call<RunProof>("run_proof", { slug }),
+  /** Write the self-contained proof page under the app data dir; answers its path. */
+  exportProofPage: (slug: string) => call<{ slug: string; path: string; label: ProofLabel }>("export_proof_page", { slug }),
+  /** Post the proof as a PR comment: a human click, confirmed per run. The core rebuilds the text it posts. */
+  actPostProofComment: (envelope: Envelope, slug: string, prUrl: string) =>
+    call<ActResult<{ repo: string; pr: number; url?: string }>>("act_post_proof_comment", { envelope, slug, prUrl }),
   /** One campaign's badge (#28): `ok`, `failed` or `unknown`. The core runs at most four verifies at once. */
   campaignIntegrity: (slug: string, refresh = false) => call<{ slug: string; integrity: "ok" | "failed" | "unknown" }>("campaign_integrity", { slug, refresh }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
@@ -380,6 +407,8 @@ export const api = {
   /** The project that owns a folder by the core's identity rules (symlink, linked worktree), else `p_unsorted`. Read only. */
   projectForFolder: (path: string) => call<{ project_id: string }>("project_for_folder", { path }),
   projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
+  /** Git repositories on this Mac that are not projects yet, from the common code folders and any `extra` absolute folders. Read only; `truncated` means the scan stopped early. */
+  projectDiscover: (extra: string[] = []) => call<{ found: { root: string; name: string; worktrees: number }[]; truncated: boolean }>("project_discover", { extra }),
   /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
   projectAdd: (path: string, confirmNested = false) =>
     call<{ outcome: "created" | "existing" | "restored"; project: Project }>("project_add", { path, confirmNested }),

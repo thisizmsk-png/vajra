@@ -11,6 +11,7 @@ import { boardCards } from "../../projects/adapter";
 import type { BoardCard, Lane } from "../../projects/contract";
 import { useCurrentProject } from "../../projects/current";
 import { useProjectState } from "../../projects/state";
+import { useProjects } from "../../projects/store";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { Empty, LoadingRows, Problem, problemDetail } from "../states";
@@ -22,6 +23,7 @@ const EVENT_MIN_GAP_MS = 500;
 export function Board() {
   const { focus, project } = useCurrentProject();
   const { rev, failed: noRevision } = useProjectState(project?.id ?? null);
+  const P = useProjects();
   const [, go] = useRoute();
   const [cards, setCards] = useState<BoardCard[] | null>(null);
   const [run, setRun] = useState<RunOverview | null>(null);
@@ -102,6 +104,14 @@ export function Board() {
   };
   useCommands(focus ? [{ id: "needs-you", label: S.board.needsYouFilter, run: () => setOnlyYou((x) => !x) }] : []);
 
+  // With no project list there is no project to have a campaign: "none yet" would be a guess, so say what failed.
+  if (!focus && P.state === "error") {
+    return (
+      <div className="v-board__state">
+        <Problem title={S.frame.loadFailed} detail={P.error} retry={P.reload} />
+      </div>
+    );
+  }
   if (!focus) {
     return (
       <div className="v-board__state">

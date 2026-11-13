@@ -34,7 +34,9 @@ jobs:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
       - name: Gate unit tests
-        run: python3 -m unittest discover -s app/bench/ci
+        run: |
+          python3 -m unittest discover -s app/bench/ci
+          python3 -m unittest discover -s app/bench/ade
       - name: Build the app
         working-directory: app/ui
         run: |
@@ -64,6 +66,29 @@ jobs:
           path: |
             idle.json
             growth.json
+
+  # Typing lag with 5 agents streaming a fake load: p95 must be at or under 50 ms (app/ui/tests/typingLag.test.tsx).
+  # REPORT-ONLY for its first week (continue-on-error): the number prints in the log and the job never blocks a merge.
+  # Remove continue-on-error once a week of runs shows it is not flaky.
+  typing-lag:
+    if: github.event.action != 'labeled'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Typing lag gate
+        working-directory: app/ui
+        env:
+          VAJRA_LAG_GATE: "1"
+        run: |
+          npm ci --no-audit --no-fund
+          npx vitest run tests/typingLag.test.tsx
 
   # Post-load idle (a scripted 10,000-line stream, then idle at +2 and +10 minutes): a second build plus ~15 minutes, so it
   # does not run on every PR. It runs on push to main, nightly, on a PR that changes app/ui/** or app/bench/**, or when the
