@@ -47,7 +47,8 @@ export function DirectorGeneral() {
   const [askErr, setAskErr] = useState("");
   const [sending, setSending] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
-  const end = useRef<HTMLDivElement>(null);
+  const pane = useRef<HTMLDivElement>(null);
+  const frame = useRef(0);
   const watch = useRef<ResizeObserver | null>(null);
   const atEnd = useRef(true);
   const lastTop = useRef(0);
@@ -134,7 +135,19 @@ export function DirectorGeneral() {
   // New lines, the reader's own question and a new proposal bring the end into view, but only while the reader is at
   // the end. Someone who scrolled up to read is left where they are; asking a question or scrolling back down pins
   // them again.
-  useEffect(() => { if (atEnd.current) end.current?.scrollIntoView?.({ block: "end" }); }, [lines.length, showEcho, proposals.length]);
+  // The scroll is one write of `scrollTop` in the next animation frame, however many things ask for it in between: a batch
+  // of lines, the resize it causes and a new proposal share a single forced layout instead of one each (and no
+  // `scrollIntoView`, which also walks every scrollable ancestor).
+  const pin = useCallback(() => {
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const el = pane.current;
+      if (el && atEnd.current) el.scrollTop = el.scrollHeight;
+    });
+  }, []);
+  useEffect(() => () => { if (frame.current) cancelAnimationFrame(frame.current); frame.current = 0; }, []);
+  useEffect(() => { if (atEnd.current) pin(); }, [lines.length, showEcho, proposals.length, pin]);
   // A proposal's worker table and a long answer arrive after that scroll and push the newest turn (and Start run) below
   // the fold. While the reader is at the end, growth keeps them there; once they scroll up, nothing moves them.
   // A callback ref, not a mount effect: the column only exists once there is a project with a run, which can be long
@@ -145,10 +158,10 @@ export function DirectorGeneral() {
     if (!el || typeof ResizeObserver === "undefined") return;
     atEnd.current = true;
     lastTop.current = 0;
-    const ro = new ResizeObserver(() => { if (atEnd.current) end.current?.scrollIntoView?.({ block: "end" }); });
+    const ro = new ResizeObserver(() => { if (atEnd.current) pin(); });
     ro.observe(el);
     watch.current = ro;
-  }, []);
+  }, [pin]);
   // Growth never moves the scroll position up, so only an upward scroll means the reader left the end. (Judging every
   // scroll event by its distance from the end would unpin on our own scroll when more content lands before the event.)
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
@@ -252,7 +265,7 @@ export function DirectorGeneral() {
 
       {loadErr && !st && <div className="v-dgv__state"><Problem title={S.dg.loadFailed} detail={loadErr} retry={() => void readStatus()} /></div>}
 
-      <div className="v-dgv__scroll" onScroll={onScroll}>
+      <div className="v-dgv__scroll" ref={pane} onScroll={onScroll}>
         <div className="v-dgv__col" ref={col}>
           <div role="log" aria-label={S.dg.transcript} aria-live="polite" className="v-dgv__log">
             {shown.length === 0 && !showEcho && st && (
@@ -263,7 +276,7 @@ export function DirectorGeneral() {
             {busy && <p className="v-dgv__thinking" role="status"><i aria-hidden="true" />{S.dg.thinking}</p>}
           </div>
           <Proposals items={proposals} target={target} />
-          <div ref={end} />
+          <div aria-hidden="true" />
         </div>
       </div>
 
