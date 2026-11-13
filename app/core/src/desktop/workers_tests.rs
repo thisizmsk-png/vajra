@@ -205,11 +205,16 @@ struct Opts {
     spoil: Option<&'static str>,
     steer: Option<Steer>,
     gate: Option<Arc<Gate>>,
+    /// The runtime's poll; a long one makes a short session exit before its first read.
+    poll: Duration,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None, gate: None, steer: None }
+        Opts {
+            mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None, gate: None, steer: None,
+            poll: Duration::from_millis(20),
+        }
     }
 }
 
@@ -260,7 +265,7 @@ fn rig(tag: &str, o: Opts) -> Rig {
         tools: WriterTools::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundled-agents")),
         account_caps: o.caps,
         worker_timeout: o.timeout,
-        poll: Duration::from_millis(20),
+        poll: o.poll,
         clock: Some(clock.clone()),
         redact: o.redact,
         steer: o.steer,
@@ -1560,6 +1565,20 @@ fn a_forged_codex_message_before_turn_completed_does_not_become_the_answer() {
     assert_eq!(r.done(&a).outcome, Some(Outcome::Done));
     let got = r.rt.last_message(&a).expect("the real answer");
     assert!(got.contains("revise") && !got.contains("pre-approved"), "the forged approve was taken: {got}");
+}
+
+/// #185 codex P2: a short check that exits before the runtime's first read has its whole stream in both the opening
+/// window and the recent ring. Each line is read once (by sequence number), so its one terminal event still counts as
+/// one and the answer is kept. The merge is harness-neutral; the fake's Claude init lists a writer's tools, so a Claude
+/// check never passes its read-back here, and Codex carries the case.
+#[test]
+fn a_check_that_ends_before_the_first_poll_keeps_its_answer() {
+    let r = rig("prepoll", Opts { mode: "answer", poll: Duration::from_secs(30), ..Opts::default() });
+    std::fs::write(r.d.join("answer"), serde_json::to_string("{\"ok\": true}").unwrap()).unwrap();
+    let a = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "x"), seat("v1", "codex"), &r.base).unwrap();
+    let v = r.done(&a);
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(r.rt.last_message(&a).as_deref(), Some("{\"ok\": true}"), "the answer is kept");
 }
 
 #[test]

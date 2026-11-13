@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 use super::caps::{self, Wait};
 use crate::adapter::Engine;
 use crate::adapter::profiles::{self, ClaudeWorker, CodexWant, RoleKind, WorkerLaunch, WriterTools};
-use crate::bus::Bus;
+use crate::bus::{Bus, Line};
 use crate::control::receipt::LaunchReceipt;
 use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
@@ -1151,7 +1151,7 @@ impl WorkerRuntime {
         let start = Instant::now();
         let mut applied: Option<Result<(), String>> = None;
         // The harness's opening lines carry its startup identity; kept once seen, so later output can't push it out.
-        let mut opening = String::new();
+        let mut opening: Vec<Line> = Vec::new();
         // When the stop was first seen: the wait for the worker to exit after it is bounded (`kill_wait`).
         let mut stop_seen: Option<Instant> = None;
         // Processes seen holding the worker's terminal while it lives (macOS revokes it when the worker exits), for the
@@ -1315,18 +1315,18 @@ impl WorkerRuntime {
 
     /// What one attempt's checks read: its opening lines, read from the start of the stream through the spill and
     /// kept once they hold the harness's startup event, then the recent ring. Heavy early output evicts the startup
-    /// line from the ring (256 KiB), never from here (#149 codex).
-    fn attempt_events(&self, sid: &str, l: &Launch, opening: &mut String) -> String {
-        if !l.started(opening) {
+    /// line from the ring (256 KiB), never from here (#149 codex). The two overlap when the whole stream fits the ring
+    /// (a short check that ended before the first read): each line is taken once by its sequence number, so a single
+    /// terminal event is never seen twice (#185 codex P2).
+    fn attempt_events(&self, sid: &str, l: &Launch, opening: &mut Vec<Line>) -> String {
+        if !l.started(&join_lines(opening.iter())) {
             if let Ok(w) = self.0.bus.window(sid, Some(1), OPENING_LINES, OPENING_BYTES) {
-                *opening = w.lines.iter().map(|l| l.text.as_ref()).collect::<Vec<_>>().join("\n");
+                *opening = w.lines;
             }
         }
-        format!("{opening}\n{}", self.events(sid))
-    }
-
-    fn events(&self, sid: &str) -> String {
-        self.0.bus.recent(sid, 1 << 20).iter().map(|l| l.text.as_ref()).collect::<Vec<_>>().join("\n")
+        let after = opening.last().map_or(0, |x| x.seq);
+        let recent = self.0.bus.recent(sid, 1 << 20);
+        join_lines(opening.iter().chain(recent.iter().filter(|x| x.seq > after)))
     }
 
     /// One line in `<data>/runs/<run>/tickets.jsonl`: core-only state under the guarded data dir, opened append-only,
@@ -1642,6 +1642,11 @@ enum Ended {
 /// The terminal is not the harness's alone: a process the check runs can print on it (bhishma H1). So the stream must
 /// hold exactly one terminal event, and it must be the last JSON line. A forged event printed before or after the
 /// real one leaves no answer, and the check fails closed; it never becomes the answer.
+/// Stream lines as one text, one line each.
+fn join_lines<'a>(lines: impl IntoIterator<Item = &'a Line>) -> String {
+    lines.into_iter().map(|l| l.text.as_ref()).collect::<Vec<_>>().join("\n")
+}
+
 pub(super) fn final_message(events: &str) -> Option<String> {
     let evs: Vec<Value> = events.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(Value::is_object).collect();
     let ty = |v: &Value| v.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
