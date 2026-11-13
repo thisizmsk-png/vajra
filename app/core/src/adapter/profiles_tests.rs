@@ -230,6 +230,73 @@ fn the_flag_file_turns_the_os_sandbox_on_around_the_key_folder_and_data_dir() {
     }
 }
 
+/// Sandbox B: the user's default model and named model-routing env vars carry over into the flag file; no permission,
+/// sandbox, hook, apiKeyHelper or MCP key, no key or token, and no unnamed env var ever does.
+#[test]
+fn only_the_default_model_and_named_routing_env_carry_over_from_the_users_settings() {
+    let hostile = r#"{
+        "model": "opus-plan",
+        "env": {"ANTHROPIC_BASE_URL": "https://gw.example/v1", "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2",
+                "HTTPS_PROXY": "http://proxy:3128", "ANTHROPIC_API_KEY": "sk-not-carried", "ANTHROPIC_AUTH_TOKEN": "t",
+                "ANTHROPIC_CUSTOM_HEADERS": "x-key: v", "AWS_PROFILE": "p", "CLAUDE_CODE_SANDBOX": "off", "PATH": "/evil",
+                "ANTHROPIC_MODEL": "bad\nline", "ANTHROPIC_SMALL_FAST_MODEL": 7, "NO_PROXY": "  "},
+        "permissions": {"allow": ["Bash(*)"], "defaultMode": "bypassPermissions"},
+        "sandbox": {"enabled": false, "filesystem": {"allowRead": ["/"]}, "excludedCommands": ["*"]},
+        "hooks": {"PreToolUse": []}, "disableAllHooks": true, "apiKeyHelper": "/bin/echo k",
+        "enabledMcpjsonServers": ["x"], "mcpServers": {"x": {}}
+    }"#;
+    let c = claude_carry_over(Some(hostile));
+    assert_eq!(c.model.as_deref(), Some("opus-plan"));
+    assert_eq!(c.env, vec![
+        ("ANTHROPIC_BASE_URL", "https://gw.example/v1".to_string()),
+        ("CLAUDE_CODE_USE_BEDROCK", "1".to_string()),
+        ("AWS_REGION", "us-west-2".to_string()),
+        ("HTTPS_PROXY", "http://proxy:3128".to_string()),
+    ], "only named, single-line, non-blank strings");
+    for k in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "AWS_PROFILE", "PATH"] {
+        assert!(!CLAUDE_CARRY_ENV.contains(&k), "{k}");
+    }
+    assert!(CLAUDE_CARRY_ENV.iter().all(|k| !k.contains("KEY") && !k.contains("TOKEN") && !k.contains("HEADER")));
+    for t in [None, Some(""), Some("not json"), Some("[1]"), Some(r#"{"model": 3, "env": "x"}"#)] {
+        assert_eq!(claude_carry_over(t), CarryOver::default(), "{t:?}");
+    }
+    assert_eq!(claude_carry_over(Some(&format!(r#"{{"model":"{}"}}"#, "m".repeat(600)))).model, None, "too long");
+
+    // In the flag: only `model` and `env` change; the sandbox, permissions and hooks are the template's, byte for byte.
+    let d = tmpdir("carry");
+    let (home, work, repo, data, tmp) = (d.join("home"), d.join("work"), d.join("repo"), d.join("data"), d.join("tmp"));
+    for p in [&home, &work, &repo, &data, &tmp] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    let base: Value = serde_json::from_str(&claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).unwrap()).unwrap();
+    let mut with: Value = serde_json::from_str(&claude_worker_flag_with(&home, &work, std::slice::from_ref(&repo), &data, &tmp, &c).unwrap()).unwrap();
+    assert_eq!(with["model"], "opus-plan");
+    assert_eq!(with["env"], json!({"ANTHROPIC_BASE_URL": "https://gw.example/v1", "AWS_REGION": "us-west-2", "CLAUDE_CODE_USE_BEDROCK": "1", "HTTPS_PROXY": "http://proxy:3128"}));
+    assert!(base.get("model").is_none() && base.get("env").is_none(), "the template carries nothing");
+    let o = with.as_object_mut().unwrap();
+    o.remove("model");
+    o.remove("env");
+    assert_eq!(with, base);
+    // The proven shape hashes the template, whatever the user's settings hold.
+    let shape = claude_worker_flag_shape(&repo_hooks()).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/settings.json"), hostile).unwrap();
+    assert_eq!(read_claude_carry_over(&home), c, "read through the provider check's reader");
+    assert_eq!(claude_worker_flag_shape(&repo_hooks()).unwrap(), shape);
+}
+
+/// The carry-over reader follows no link: a settings.json that is a symlink carries nothing.
+#[test]
+fn a_linked_user_settings_file_carries_nothing() {
+    let d = tmpdir("carry-link");
+    let home = d.join("home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(d.join("elsewhere.json"), r#"{"model":"m"}"#).unwrap();
+    std::os::unix::fs::symlink(d.join("elsewhere.json"), home.join(".claude/settings.json")).unwrap();
+    assert_eq!(read_claude_carry_over(&home), CarryOver::default());
+    assert_eq!(read_claude_carry_over(&d.join("no-home")), CarryOver::default());
+}
+
 /// A Claude worker's build caches live in its ticket tmp: the sandbox leaves HOME read-only and rewrites TMPDIR.
 #[test]
 fn a_claude_worker_keeps_its_build_caches_in_the_ticket_tmp() {
