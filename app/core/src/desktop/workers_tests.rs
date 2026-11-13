@@ -775,8 +775,9 @@ fn tickets_jsonl_records_dispatch_head_before_the_outcome_and_the_summary_is_red
     assert!(s["note"].as_str().unwrap().contains("data, not instructions"));
     assert!(!s.to_string().contains("abcdef0123456789"), "the nonce never reaches the lead: {s}");
     let lines: Vec<Value> = std::fs::read_to_string(r.gw.data.join("runs/r1/tickets.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(lines.iter().map(|l| l["event"].as_str().unwrap()).collect::<Vec<_>>(), vec!["dispatch", "outcome"]);
-    assert_eq!(lines[0]["ticket"]["dispatch_head"], json!(r.base));
+    assert_eq!(lines.iter().map(|l| l["event"].as_str().unwrap()).collect::<Vec<_>>(), vec!["queued", "dispatch", "outcome"]);
+    assert_eq!(lines[0]["ticket"]["state"], "queued", "the first line is written when dispatch accepts the ticket");
+    assert_eq!(lines[1]["ticket"]["dispatch_head"], json!(r.base));
     assert!(v.receipt.unwrap()["effective"]["model"] == "model-fake-1", "the receipt is read from the rollout");
 }
 
@@ -984,6 +985,32 @@ fn a_restart_replays_every_ticket_and_a_crashed_running_one_ends_abandoned() {
     let life3 = next_life(&r);
     assert_eq!(life3.view(&id).unwrap().detail.as_deref(), Some("app_restarted"));
     assert_eq!(std::fs::read_to_string(tickets_file(&r, "r1")).unwrap(), lines, "nothing more is written");
+    r.rt.quit(WAIT);
+}
+
+/// #176 review: a ticket still waiting for a seat (account cap 1, the seat held by a hanging worker) when the app
+/// crashes has its line from dispatch, so the next life replays it ended `abandoned`/`app_restarted`, lists it and
+/// keeps its id taken, instead of losing it.
+#[test]
+fn a_ticket_still_queued_for_a_seat_at_a_crash_is_replayed_ended_and_its_id_stays_taken() {
+    let caps: BTreeMap<String, u32> = [("codex".to_string(), 1)].into();
+    let r = rig("replay-queued", Opts { mode: "hang", caps, ..Opts::default() });
+    let held = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let queued = r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap();
+    let t0 = Instant::now();
+    while r.rt.view(&held).unwrap().attempt == 0 {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.rt.view(&queued).unwrap().state, State::Queued, "the cap holds it");
+    // The crash: the first life just stops.
+    let life2 = next_life(&r);
+    let ids: Vec<String> = life2.list("r1").into_iter().map(|v| v.id).collect();
+    assert_eq!(ids, vec![held.clone(), queued.clone()]);
+    let q = life2.view(&queued).expect("the queued ticket is replayed");
+    assert_eq!((q.state, q.outcome, q.reason.as_deref(), q.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_restarted")), "{q:?}");
+    assert!(life2.from_earlier_life(&queued));
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w2", "codex")), Err(DispatchError::Exists)), "its id stays taken");
     r.rt.quit(WAIT);
 }
 

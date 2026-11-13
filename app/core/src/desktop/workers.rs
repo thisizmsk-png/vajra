@@ -411,7 +411,8 @@ impl WorkerRuntime {
     }
 
     /// Read back what earlier app lives recorded (`<data>/runs/*/tickets.jsonl`), before any ticket of this life. Each
-    /// ticket takes its last line. One an earlier life left queued or running (a crash) ends here `failed`/`abandoned`
+    /// ticket takes its last line; its first is written when dispatch accepts it (`queued`), so a ticket still waiting
+    /// for a seat is here too. One an earlier life left queued or running (a crash) ends here `failed`/`abandoned`
     /// with detail `app_restarted`, and that outcome is written, so the next replay reads it ended. Replayed tickets
     /// are shown and keep their ids taken (a re-dispatch is the next round), but are never started, integrated or
     /// cleaned up by this life: it holds no worktree handle for them. Their worktrees stay on disk.
@@ -543,6 +544,10 @@ impl WorkerRuntime {
             receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
+        // The ticket's first line, before dispatch answers: one still waiting for a seat when the app crashes is
+        // replayed (ended, its id kept taken) instead of vanishing. Written under the book lock, so no pump can start
+        // the ticket and write a later line ahead of it.
+        self.record(&view, "queued");
         b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None, integration: None });
         drop(b);
         self.pump();
