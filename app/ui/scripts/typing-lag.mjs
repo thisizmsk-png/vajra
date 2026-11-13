@@ -72,7 +72,7 @@ async function pass(browser, base, query, keys, opts = {}) {
   await page.waitForTimeout(300);
   let profile = null;
   if (opts.profile) profile = (await cdp.send("Profiler.stop")).profile;
-  const out = await page.evaluate(() => ({ keys: window.__keys, events: window.__events, loaf: window.__loaf, lines: window.__lag.lines(), value: document.querySelector("textarea")?.value.length ?? 0 }));
+  const out = await page.evaluate(() => ({ keys: window.__keys, events: window.__events, loaf: window.__loaf, lines: window.__lag.lines(), value: document.querySelector("textarea")?.value.length ?? 0, log: window.__lag.runLog ? window.__lag.log() : null }));
   await page.close();
   return { ...out, profile };
 }
@@ -115,14 +115,19 @@ async function main() {
     await pass(browser, base, "", 20, opts); // one warm-up pass, thrown away
     const streaming = await pass(browser, base, "", keys, opts);
     const idle = await pass(browser, base, "?idle=1", keys, opts);
+    // The same streaming page with a core run's live log beside the composer (W2): reported, not gated.
+    const withLog = await pass(browser, base, "?runlog=1", keys, opts);
     const result = { throttle: opts.throttle, software, top_self_time_streaming: opts.profile ? topSelfTime(streaming.profile) : undefined,
       top_self_time_idle: opts.profile ? topSelfTime(idle.profile) : undefined, schema: "vajra.typing_lag/1", browser: version, os: process.platform, budget_p95_ms: BUDGET_P95_MS, agents: 5,
-      streaming: summary(streaming, keys), control_idle: summary(idle, keys), keys_ms: streaming.keys.map((x) => +x.toFixed(1)) };
+      streaming: summary(streaming, keys), control_idle: summary(idle, keys),
+      streaming_with_run_log: { ...summary(withLog, keys), run_log: withLog.log }, keys_ms: streaming.keys.map((x) => +x.toFixed(1)) };
     const out = val("--out", null);
     if (out) await writeFile(out, JSON.stringify(result, null, 1));
     console.log(JSON.stringify({ ...result, keys_ms: undefined }, null, 1));
     const v = verdict({ keystrokes: keys, painted: streaming.keys.length, typed: streaming.value, p95_ms: result.streaming.p95_ms }, result.control_idle, { absolute: args.includes("--absolute") });
     console.log(`typing lag: p95 ${result.streaming.p95_ms} ms streaming, ${result.control_idle.p95_ms} ms idle control, streaming adds ${v.delta_p95_ms} ms (budget ${BUDGET_DELTA_P95_MS} ms)`);
+    const rl = result.streaming_with_run_log;
+    console.log(`with the live run log: p95 ${rl.p95_ms} ms (${(rl.p95_ms - result.streaming.p95_ms).toFixed(1)} ms over streaming alone); ${rl.run_log?.entries ?? 0} entries in ${rl.run_log?.notices ?? 0} notices, ${rl.run_log?.calls ?? 0} run_log_since call(s) (report only)`);
     if (!v.ok) console.log(`typing lag ${gate ? "GATE FAILED" : "over budget (report only)"}: ${v.reasons.join("; ")}`);
     if (gate && !v.ok) process.exitCode = 1;
   } finally {

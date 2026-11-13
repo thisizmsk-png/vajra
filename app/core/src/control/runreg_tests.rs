@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
-use crate::desktop::runproto::{Integration, Limits, RunConfig, StubGate, SystemClock, Tick, Workers};
+use crate::desktop::runproto::{Integrated, Integration, Limits, RunConfig, StubGate, SystemClock, Tick, Workers};
 use crate::desktop::workers::{DispatchError, KillReason, State, TaskSpec};
 use crate::vajra::gitw::GitwError;
 
@@ -53,8 +53,8 @@ impl Workers for FakeWorkers {
         false
     }
     fn kill_run(&self, _: &str, _: KillReason) {}
-    fn integrate(&self, _: &Integration<'_>, _: &[String]) -> Result<String, GitwError> {
-        Ok("f".repeat(40))
+    fn integrate(&self, _: &Integration<'_>, _: &[String]) -> Result<Integrated, GitwError> {
+        Ok(Integrated { head: "f".repeat(40), paths: Some(vec![]) })
     }
     // The transport tests run no writers to cap; the cap itself is the run protocol's tests' concern.
     fn limit_writers(&self, _: &str, _: u32) {}

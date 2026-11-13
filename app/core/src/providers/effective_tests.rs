@@ -135,6 +135,12 @@ fn a_hostile_session_file_or_thread_id_is_not_followed_or_trusted() {
     assert_eq!(codex_thread_id("{\"type\":\"thread.started\",\"thread_id\":\"../../etc/passwd\"}"), None);
     assert_eq!(codex_thread_id("{\"type\":\"thread.started\",\"thread_id\":\"abc\"}"), None);
     assert_eq!(codex_thread_id(EVENTS).as_deref(), Some(THREAD));
+    // Only the harness's own (first) thread.started counts (#185 bhishma L1): an invalid first one is no thread, and a
+    // later one printed by a process the session ran can't point the lookup at another session's file.
+    let first_bad = format!("{{\"type\":\"thread.started\",\"thread_id\":\"../x\"}}\n{{\"type\":\"thread.started\",\"thread_id\":\"{THREAD}\"}}");
+    assert_eq!(codex_thread_id(&first_bad), None);
+    let later = format!("{EVENTS}\n{{\"type\":\"thread.started\",\"thread_id\":\"00000000-0000-7000-8000-0000000ffff1\"}}");
+    assert_eq!(codex_thread_id(&later).as_deref(), Some(THREAD));
     // A link at the rollout name is not read.
     let home = tmp();
     let outside = tmp().join("outside.jsonl");
