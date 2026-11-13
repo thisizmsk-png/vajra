@@ -1127,6 +1127,26 @@ print(v if isinstance(v, str) else "")' "$f" 2>/dev/null)" || s=""
   return 0
 }
 core_slug_block() { block "campaign $1 is run by Vajra Desktop: only the app writes it, so agents may read it (show, list, verify, status) but never change it"; }
+# bhishma #194 (on e512745a): every slug a core run may have, read with no fork (both forms of each run folder's name,
+# and every campaign_slug its seats file records), so a command that names one is judged even when it never spells
+# either script's name (a renamed copy, a name built by a glob or by code). A superset of CORE_SLUGS: it only triggers.
+CORE_QUICK=" "
+core_slugs_quick() {
+  local ng=0 base d f txt re='"campaign_slug"[[:space:]]*:[[:space:]]*"([a-z0-9][a-z0-9-]*)"'
+  shopt -q nullglob && ng=1
+  shopt -s nullglob
+  for base in "${CORE_DATA[@]}"; do
+    [ -d "$base/control/lead" ] || continue
+    for d in "$base/control/lead"/*/; do
+      d="${d%/}"; CORE_QUICK+="deliver-${d##*/} deliver-${d##*/}-og "
+      f="$d/seats.json"; txt=""
+      if [ -f "$f" ] && [ -r "$f" ]; then IFS= read -r -d '' txt < "$f" || :; fi
+      while [[ "$txt" =~ $re ]]; do CORE_QUICK+="${BASH_REMATCH[1]} "; txt="${txt#*"${BASH_REMATCH[0]}"}"; done
+    done
+  done
+  [ "$ng" = 1 ] || shopt -u nullglob
+  return 0
+}
 # 0 when the command has a shell expansion outside single quotes: $ (but $PWD and $HOME), a backtick, or (unquoted)
 # a brace or glob character. Single-quoted text is literal, which is how the CLI workflow quotes every value.
 # With $1 = strict (#194 H2: a nested shell or eval runs its quoted body as code), single quotes protect nothing.
@@ -1251,6 +1271,18 @@ core_campaign_guard() {
   # Any later word of the same segment that expands (bhishma #194 M3: an option value such as -X dev comes first).
   local RE_IOP='(^|[ ;|&(])(python[0-9.]*|perl|ruby|node|bash|sh|zsh|dash|ksh)( +[^ ;|&]+)* +[^ ;|&]*[][$*?{}]'
   [[ "$N" =~ $RE_IOP ]] && hit=1
+  # bhishma #194 (on e512745a): the slug is a trigger too, so a renamed copy, a globbed name or a name built by code
+  # that closes a core campaign is judged. deliver- covers the core's own names (and a run folder that can't be read);
+  # any other slug a seats file records (a resumed campaign) is matched as vajra-campaign.sh create would sanitize it.
+  [[ "$N" == *deliver* ]] && hit=1
+  if [ "$hit" = 0 ]; then
+    core_slugs_quick
+    if [ "$CORE_QUICK" != " " ]; then
+      local q="${N//[^a-zA-Z0-9-]/-}" qs
+      while [[ "$q" == *--* ]]; do q="${q//--/-}"; done
+      for qs in $CORE_QUICK; do [[ "$q" == *"$qs"* ]] && { hit=1; break; }; done
+    fi
+  fi
   [ "$was" = 1 ] || shopt -u nocasematch
   [ "$hit" = 1 ] || return 0
   lc="$(printf '%s' "$N" | tr '[:upper:]' '[:lower:]')"
@@ -1361,6 +1393,42 @@ core_campaign_guard() {
     fi
     write=1
   done
+  local NS s
+  NS="$(printf '%s' "$lc" | tr -c 'a-z0-9-' '-' | tr -s '-')"
+  # bhishma #194 (on e512745a): a command that names a core slug may only read it. Every command in it must be a plain
+  # reader, a git read, or vajra-campaign.sh or vajra_tasks.py by its own name (run directly or as an interpreter's
+  # first operand), whose subcommand the loop above judges. Anything else (a renamed copy, a globbed or built name, an
+  # interpreter running code, a nested shell, xargs or find) could run a copy that writes it.
+  local named=""
+  for s in $CORE_SLUGS; do [[ "$NS" == *"$s"* ]] && { named="$s"; break; }; done
+  [ -z "$named" ] && [ "$CORE_UNKNOWN" = 1 ] && [[ "$NS" == *deliver-* ]] && named="a deliver- campaign"
+  if [ -n "$named" ]; then
+    local rwhy="while Vajra Desktop runs campaign $named, a command that names it may only read it: run vajra-campaign.sh or vajra_tasks.py by their own names with a read subcommand (show, list, verify, status), or a plain reader such as cat, grep or ls"
+    [ "$RAW_FALLBACK" = 0 ] || block "$rwhy (and with plain quoting the guard can read)"
+    local cmdpos=1 cw ok
+    for ((i = 0; i < nw; i++)); do
+      t="${W[$i]}"
+      [ "$t" = "\$" ] && block "$rwhy (no \$( ) or backtick substitutions)"
+      if [ "$t" = ";" ]; then cmdpos=1; continue; fi
+      [ "$cmdpos" = 1 ] || continue
+      case "$t" in
+        ">"|"<") i=$((i + 1)); continue ;;
+        [0-9]|[0-9][0-9]) case "${W[$((i + 1))]:-}" in ">"|"<") continue ;; esac ;;
+        if|then|do|else|elif|while|until|"!"|"{"|"}"|"("|")"|fi|done|exec|command|nohup|time|nice|sudo|env) continue ;;
+        -*) [ "$i" -gt 0 ] && case "${W[$((i - 1))]}" in env|nice|sudo|time|command) continue ;; esac ;;
+        [a-z_]*=*) [[ "${t%%=*}" =~ ^[a-z_][a-z0-9_]*$ ]] && continue ;;
+      esac
+      cmdpos=0; cw="${t##*/}"; ok=0
+      case "$cw" in
+        vajra-campaign.sh|vajra_tasks.py) ok=1 ;;
+        git) case " status log diff show rev-parse ls-files ls-tree cat-file blame describe shortlog " in *" ${W[$((i + 1))]:-} "*) ok=1 ;; esac ;;
+        sh|bash|zsh|dash|ksh|python|python2|python3|python3.[0-9]|python3.[0-9][0-9])
+          case "${W[$((i + 1))]:-}" in */vajra-campaign.sh|vajra-campaign.sh|*/vajra_tasks.py|vajra_tasks.py) ok=1 ;; esac ;;
+        *) [[ "$READERS" == *" $cw "* ]] && ok=1 ;;
+      esac
+      [ "$ok" = 1 ] || block "$rwhy: ${t}"
+    done
+  fi
   [ "$write" = 1 ] || return 0
   [ "$RAW_FALLBACK" = 0 ] || block "$why must use plain quoting the guard can read (no \$( ), backticks, \$'...' or unclosed quotes)"
   [ "$feeder" = 0 ] || block "$why must name its arguments in the command itself, not through xargs, parallel or find -exec"
@@ -1368,8 +1436,6 @@ core_campaign_guard() {
     core_expands strict && block "$why inside bash -c, sh -c or eval must have no variables (only \$PWD and \$HOME), substitutions, braces or globs, even in quotes"
   fi
   core_expands && block "$why must name everything literally: no variables (only \$PWD and \$HOME), substitutions, braces or globs outside single quotes"
-  local NS s
-  NS="$(printf '%s' "$lc" | tr -c 'a-z0-9-' '-' | tr -s '-')"
   for s in $CORE_SLUGS; do [[ "$NS" == *"$s"* ]] && core_slug_block "$s"; done
   [ "$CORE_UNKNOWN" = 1 ] && [[ "$NS" == *deliver-* ]] && block "$why can't name a deliver- campaign: the app's run folders can't be read, so any of them may be the app's"
   # No slug named: vajra-campaign.sh writes the active campaign of the cwd's repository. Only the core's record repo,
