@@ -67,6 +67,12 @@ fn approve_then_consume_once_gives_the_consumed_state_and_an_audit_line() {
     assert_eq!(app.evidence_approval_consumed(RUN).as_deref(), Some(sha.as_str()));
     // Single use.
     assert!(app.consume_evidence_approval(&ask(), at(T0 + 130)).is_err());
+    assert!(app.evidence_approval_consumed(RUN).is_some(), "a refused second use leaves the first one standing");
+    // A later void (the run ended) leaves a consumed approval consumed, in memory as in the file.
+    app.void_evidence_approval(RUN, "run ended").unwrap();
+    assert_eq!(app.evidence_approval_consumed(RUN).as_deref(), Some(sha.as_str()));
+    // The record alone, in a new app, is never a consume.
+    assert!(t.app().evidence_approval_consumed(RUN).is_none());
     let log = t.audit();
     assert!(log.contains(&format!("evidence-approval approved run={RUN} sha={sha}")), "{log}");
     assert!(log.contains(&format!("evidence-approval consumed run={RUN} sha={sha}")), "{log}");

@@ -56,11 +56,12 @@ impl App {
         let list = self.evidence_list(slug).unwrap_or_else(|_| json!({"rows": []}));
         let rows_json = list["rows"].as_array().cloned().unwrap_or_default();
         let (trust, checker, consumed) = self.trust_of(slug);
-        // N20 (bhishma M1 on #226): the core's record names the list it consumed, and the signed progress line the
-        // evidence ticket wrote must name the same one. The file alone never makes a run read approved.
+        // N20 (bhishma M1, Opus on #226): the consume this app holds in memory names the list, the core's record agrees
+        // (`evidence_approval_consumed`), and a signed progress line is exactly the approval line for that list (the
+        // whole line text after its timestamp, no prefix). Neither the file nor the line counts alone.
         let approval = consumed.is_some_and(|sha| {
             let line = super::evidence_approval::progress_line(&sha);
-            progress.lines().any(|l| l.trim_end().ends_with(&line))
+            progress.lines().filter_map(|l| l.strip_prefix("- ")).any(|l| l.split_once(' ').is_some_and(|(_, text)| text.trim_end() == line))
         });
         let statuses: Vec<&str> = rows_json.iter().map(|r| r["status"].as_str().unwrap_or("not_run")).collect();
         let (label, reason) = proof::label(&Input {

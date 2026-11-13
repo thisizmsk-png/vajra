@@ -59,6 +59,8 @@ pub(crate) struct Held {
     sha: String,
     asked_at: u64,
     answer: Option<bool>,
+    /// Set when this run's evidence ticket used it: kept (not removed) so the proof can require it (Opus on #226).
+    consumed: bool,
 }
 
 /// A character that can make a command show differently from what runs: any control character but tab (CR, ESC and
@@ -148,7 +150,7 @@ impl App {
         let _g = crate::lock(&LOCK);
         let sha = ask.sha256();
         self.audit_approval("ALLOW", "asked", &ask.run_id, &sha, now)?;
-        crate::lock(&self.approvals).insert(ask.run_id.clone(), Held { ask: ask.clone(), sha: sha.clone(), asked_at: secs(now), answer: None });
+        crate::lock(&self.approvals).insert(ask.run_id.clone(), Held { ask: ask.clone(), sha: sha.clone(), asked_at: secs(now), answer: None, consumed: false });
         self.write_approval(&ask.run_id, &json!({"state": "pending", "ask": ask.to_json(), "sha256": sha, "asked_at": secs(now)}))?;
         Ok(sha)
     }
@@ -157,7 +159,12 @@ impl App {
     #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
     pub(crate) fn void_evidence_approval(&self, run_id: &str, why: &str) -> Result<(), String> {
         let _g = crate::lock(&LOCK);
-        crate::lock(&self.approvals).remove(run_id);
+        // A consumed approval stays consumed (in memory too, as in the file); anything else is dropped.
+        let mut held = crate::lock(&self.approvals);
+        if held.get(run_id).is_some_and(|h| !h.consumed) {
+            held.remove(run_id);
+        }
+        drop(held);
         let Some(mut rec) = self.read_approval(run_id)? else { return Ok(()) };
         if rec["state"] != "consumed" {
             rec["state"] = json!("void");
@@ -221,6 +228,9 @@ impl App {
             Err(why.to_string())
         };
         let Some(held) = held else { return refuse("no approval this app asked for and a person gave") };
+        if held.consumed {
+            return Err("the approval was already used".into());
+        }
         if held.answer != Some(true) {
             return Err(format!("the approval is {}", if held.answer == Some(false) { "declined" } else { "not answered" }));
         }
@@ -234,7 +244,9 @@ impl App {
             return refuse("the approval record doesn't match the answer given");
         };
         self.audit_approval("ALLOW", "consumed", &ask.run_id, &sha, now)?;
-        crate::lock(&self.approvals).remove(&ask.run_id);
+        if let Some(h) = crate::lock(&self.approvals).get_mut(&ask.run_id) {
+            h.consumed = true;
+        }
         rec["state"] = json!("consumed");
         rec["consumed_at"] = json!(secs(now));
         self.write_approval(&ask.run_id, &rec)?;
@@ -268,11 +280,18 @@ impl App {
         Ok(json!({"run_id": run_id, "state": state, "sha256": r["sha256"], "ask": r["ask"], "asked_at": r["asked_at"], "hold_max_s": HOLD_MAX.as_secs()}))
     }
 
-    /// The sha of the list this run's evidence ticket consumed, from the core's record. The proof also needs the
-    /// signed progress line naming it (`progress_line`), so the file alone never makes a run read approved.
+    /// The sha of the list this run's evidence ticket consumed: only when this app made the ask, a person approved it
+    /// and the ticket consumed it in this app's lifetime (held in memory), and the core's record agrees. The proof also
+    /// needs the signed progress line naming it (`progress_line`). The file and the line can both be written by an agent
+    /// before key A, so neither counts without the held entry; after a restart nothing is held, and a run reads not
+    /// verified (Opus on #226).
     pub(crate) fn evidence_approval_consumed(&self, run_id: &str) -> Option<String> {
+        let held = crate::lock(&self.approvals).get(run_id).cloned()?;
+        if !(held.consumed && held.answer == Some(true) && held.ask.run_id == run_id) {
+            return None;
+        }
         let r = self.read_approval(run_id).ok()??;
-        (r["state"] == "consumed" && r["ask"]["run_id"] == run_id).then(|| r["sha256"].as_str().map(str::to_string)).flatten()
+        (r["state"] == "consumed" && r["ask"]["run_id"] == run_id && r["sha256"].as_str() == Some(held.sha.as_str())).then_some(held.sha)
     }
 
     /// Approve or decline: a person's click in the app only.
