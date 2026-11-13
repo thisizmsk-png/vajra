@@ -116,6 +116,13 @@ impl Service {
     /// audit.log, passed explicitly. Pending actions are rebuilt from the
     /// ledger so acks that land while the app is down are still recorded.
     pub fn open(data_dir: &Path, audit_log: PathBuf, logger: Option<Logger>) -> io::Result<Self> {
+        Self::open_with(data_dir, audit_log, logger, true)
+    }
+
+    /// `open`, settling the previous life's leftover `core:` stops only when `settle`: the app holds the instance locks
+    /// (6c-3). A second app on the same data folder must not settle them, since they are the first, running app's live
+    /// actions; it rebuilds the same pending state read-only.
+    pub fn open_with(data_dir: &Path, audit_log: PathBuf, logger: Option<Logger>, settle: bool) -> io::Result<Self> {
         let control_root = data_dir.join("control");
         fsx::private_dir(data_dir)?;
         fsx::private_dir(&control_root)?;
@@ -144,7 +151,9 @@ impl Service {
             ttl: DEFAULT_TTL,
         };
         svc.rebuild(&records);
-        svc.settle_core_after_restart(SystemTime::now());
+        if settle {
+            svc.settle_core_after_restart(SystemTime::now());
+        }
         Ok(svc)
     }
 

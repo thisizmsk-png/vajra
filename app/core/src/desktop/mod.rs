@@ -37,6 +37,8 @@ pub use arrivals::EventSink;
 
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
+/// How long quit waits for the core tickets to end (their own kill, line and sweep) before the supervisor kills the rest.
+const QUIT_TICKETS: Duration = Duration::from_secs(4);
 /// Upper bound for one `tail` / `read_spill` page.
 const MAX_PAGE: usize = 64 * 1024;
 /// Most rows and text one `stream_window` call returns: a view shows tens of rows, so this is a ceiling, not a default.
@@ -248,6 +250,8 @@ pub struct App {
     pub bus: Arc<Bus>,
     pub sup: Arc<Supervisor>,
     pub control: Arc<Mutex<Service>>,
+    /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
+    _instance: Option<(std::fs::File, std::fs::File)>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -334,13 +338,18 @@ impl App {
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
-        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots()));
+        // Only the app holding the data folder's and the account's worktree folder's locks sweeps and starts agents: a
+        // second instance (a development build beside the installed app) would take the first one's live workers for
+        // an earlier life's. Held for the app's life.
+        let instance = instance::InstanceLock::take_both(data, home);
+        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots(), instance.is_some()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
         let control_log = Logger::open(&logs.join("control")).ok();
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
-        let mut svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        // A second instance settles nothing in the shared control ledger: its pending stops are the first app's live ones.
+        let mut svc = Service::open_with(data, claude.join("vajra/audit.log"), control_log, instance.is_some())?;
         // A refused projects folder (a symlink, a file) no longer stops the launch (#77 follow-up): the store opens
         // refusing, and preflight and every project command say what is wrong and what to do.
         let projects = Arc::new(crate::projects::store::Store::open(data, home)?);
@@ -367,6 +376,7 @@ impl App {
             lead: lead::LeadState::new(home),
             shown: Mutex::new(HashMap::new()),
             deciding: Mutex::new(Default::default()),
+            _instance: instance,
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verify_slots: (Mutex::new(VERIFY_SLOTS), Condvar::new()),
@@ -625,6 +635,55 @@ impl App {
     }
 
     /// The active run groups for diagnostics: stream id and the pid of the group leader.
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end, every core ticket ends `abandoned`
+    /// (`app_quit`) with its line written and its descendants swept, then every supervisor session is killed and
+    /// reaped. Bounded: a ticket that is not done within `QUIT_TICKETS` is left to the supervisor's kill.
+    pub fn quit(&self) {
+        self.shutdown_lead();
+        self.workers.quit(QUIT_TICKETS);
+        self.sup.shutdown();
+    }
+
+    /// The lifecycle report's `swept`: `at_startup` (an earlier app life's workers, killed before any agent could start)
+    /// and `after_attempts` (descendants that left their worker's group, killed when its attempt ended).
+    pub fn swept_report(&self) -> Value {
+        let s = self.workers.startup_swept();
+        let (killed, survived) = self.workers.runtime_swept();
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance()})
+    }
+
+    /// Another app instance holds this data folder or the account's worktree folder: this one sweeps nothing and
+    /// starts no agent.
+    pub fn other_instance(&self) -> bool {
+        self._instance.is_none()
+    }
+
+    /// The control watcher and the Lead socket, started only by the app holding the instance locks (#177 review). A
+    /// second app on the same data folder would tick the first app's live pending actions (recording refusals, expiries
+    /// and acks in the shared ledger, twice when both settle the same ack), and binding would unlink the first app's
+    /// socket so its Director-General's tool calls reach a service with none of its sessions. `None`: nothing started,
+    /// the socket left as it was. A bind failure is noted and the watcher still runs.
+    pub fn serve_control(&self) -> Option<crate::control::service::Watcher> {
+        if self.other_instance() {
+            self.note("control_not_served_other_instance", &[]);
+            return None;
+        }
+        let watcher = crate::control::service::spawn_watcher(self.control.clone(), Duration::from_secs(1));
+        match crate::control::socket::bind(&crate::control::socket_path(&self.data)) {
+            Ok(listener) => {
+                let svc = self.control.clone();
+                // SAFETY: getuid has no preconditions and cannot fail.
+                let uid = unsafe { libc::getuid() };
+                std::thread::spawn(move || crate::control::socket::serve(listener, svc, uid));
+            }
+            Err(e) => {
+                eprintln!("vajra-desktop: control socket: {e}");
+                self.note("control_socket_failed", &[]);
+            }
+        }
+        Some(watcher)
+    }
+
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
         let mut v: Vec<_> = lock(&self.runs)
             .keys()
@@ -2374,6 +2433,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 mod worker_diff;
 pub mod workers;
 pub mod worker_host;
+mod instance;
 mod arrivals;
 mod caps;
 mod closeout;

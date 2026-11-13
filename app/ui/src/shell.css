@@ -91,6 +91,10 @@
 .v-crew__err { padding: var(--space-sm) var(--space-lg); border-bottom: 1px solid var(--c-border); }
 .v-crew__body { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px minmax(0, 1fr) 280px; }
 .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 320px minmax(0, 1fr); }
+/* A worker's own tab is the same pane and Details as Crew, without the tree: Details sits beside the stream, not under it. */
+/* It fills the screen's height (the screen is a flex column inside an overflow-hidden main), and its single row is capped
+   at that height, so the stream and Details scroll inside their panes instead of running off the window. */
+.v-worker { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 280px; grid-template-rows: minmax(0, 1fr); }
 .v-crew__tree { min-height: 0; overflow: auto; padding: 6px var(--space-sm); border-right: 1px solid var(--c-border); }
 .v-crew__pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }
 .v-crew__pane--facts { padding: var(--space-xl); gap: var(--space-lg); max-width: 760px; }
@@ -147,6 +151,13 @@
 .v-history__meter > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--c-text-secondary); }
 /* With the report open, Status and Updated give their room to the campaign (the report names its status). */
 .v-history__body--open .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
+/* With a report open the list has about 560 px at 1280. The run name gets what is left, so the count loses its
+   meter and its column shrinks to the count. 64 px holds the sortable "Passing" header and a three-digit count beside
+   16 px of cell padding. Integrity (168) and Actions (140) keep their full widths: they hold "Integrity check failed"
+   and the Report and Verify buttons. */
+.v-history__body--open .v-history__main { padding-inline: var(--space-lg); }
+.v-history__body--open .v-history__meter { display: none; }
+.v-history__body--open .v-table th:nth-child(3) { width: 64px; }
 .v-history__main { padding: var(--space-xl); display: flex; flex-direction: column; gap: var(--space-xl); }
 .v-history__muted { color: var(--c-text-secondary); font-size: 12px; }
 .v-history__acts { display: inline-flex; gap: var(--space-xs); }
@@ -189,8 +200,17 @@
 
 /* Under 1200 px (UX.md section 3): Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */
 @media (max-width: 1199px) {
-  .v-crew__body { grid-template-columns: 240px minmax(0, 1fr) 220px; }
-  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 240px minmax(0, 1fr); }
+  /* 260 leaves the middle its 480 px minimum at 960 with the details column open. Every row keeps its chevron slot,
+     shrunk to 16 px, which is the indent step, so a leaf's icon stays in the same column as its siblings' and under
+     its parent's label. Dropping the slot only on leaf rows would pull a leaf left of its own parent. A longer
+     status still clips, and the tree gives it a tooltip. */
+  .v-crew__body { grid-template-columns: 260px minmax(0, 1fr) 220px; }
+  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 260px minmax(0, 1fr); }
+  .v-crew__tree .v-tree__twisty { min-width: 16px; }
+  .v-worker { grid-template-columns: minmax(0, 1fr) 220px; }
+  /* The narrow Details column: each label sits over its value, so a path and its Copy button get the whole width. */
+  .v-crew__aside .v-crew__facts { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .v-crew__aside .v-crew__facts dd { margin-bottom: var(--space-sm); }
   .v-crew__head { padding: 0 var(--space-md); }
   .v-history .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
   .v-history__body--open { grid-template-columns: minmax(0, 1fr); }
