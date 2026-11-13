@@ -100,10 +100,9 @@ const CLAUDE_WORKER_USER: &[&str] = &["login", "mcp_servers", "CLAUDE.md", "them
 
 /// Spike S4 (does `-p` keep the flag file's hooks, does `--tools` hold against a user `Bash(*)` allow, is
 /// `disableAllHooks:false` honoured, does `--setting-sources user` keep the worktree's project-settings hook from
-/// running). The owner runs `app/bench/spikes/s4-claude-settings.sh`; once it prints PASS, set this to `true` (and
-/// update the pinning test). The 2026-11-10 run (claude 2.1.322) predates the project-hook check: rerun before the flip,
-/// and only after the data-dir guard PR is merged and installed.
-pub const CLAUDE_WORKER_S4_PASSED: bool = false;
+/// running). The owner runs `app/bench/spikes/s4-claude-settings.sh`; it printed PASS on batch-3, so this is `true`.
+/// Set it back to `false` (and update the pinning test) if a Claude Code build fails S4.
+pub const CLAUDE_WORKER_S4_PASSED: bool = true;
 
 pub const S4_UNVERIFIED: Unsupported = Unsupported {
     reason: "s4_unverified",
