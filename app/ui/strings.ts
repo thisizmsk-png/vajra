@@ -639,7 +639,7 @@ export const S = {
     engineState: { installed: "Installed", missing: "Not installed" },
     engineHint: "Run this in a terminal to install them.",
   },
-  /** Multi-provider accounts (Settings > Providers). Every model row reads "Model · provider" (H6); no secret is ever worded as shown. */
+  /** Multi-provider accounts (Settings > Providers). Every model row reads "Model via provider" (H6); no secret is ever worded as shown. */
   accounts: {
     title: "Accounts",
     lede: "The accounts your agents run on, and which ones each project may use.",
@@ -676,6 +676,10 @@ export const S = {
     newBadge: "New",
     toolCheck: { passed: "Passed the tool-use check", unchecked: "Not checked yet", failed: (on: string | null) => (on ? `Failed on ${on}` : "Failed the tool-use check") },
     defaultModel: "Default model",
+    /** A model with the provider it runs on, the one way the app writes that pair. Words, not a middle dot (DESIGN.md). */
+    modelVia: (model: string, provider: string) => `${model} via ${provider}`,
+    /** A second billing fact after the first, such as a key that overrides the plan. */
+    billingAlso: (billing: string, also: string) => `${billing}, ${also}`,
     check: "Check again",
     add: "Add OpenRouter",
     replace: "Replace key",
