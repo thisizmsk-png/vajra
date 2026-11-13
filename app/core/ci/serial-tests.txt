@@ -21,6 +21,9 @@ terminal::tests_hidden::a_program_still_on_the_alternate_screen_is_nudged_to_red
 # (preferences_busy). The whole module, and the seat test that edits preferences.
 preferences::tests::
 desktop::seat_start::tests::editing_preferences_between_propose_and_start_keeps_the_hash_and_the_start_works
+desktop::preferences::tests::receipts_guard_preferences_replay_conflicts_and_scope
+# A hidden pane's 4 MiB/s producer must finish within 2.5 s; under the parallel pass it took 2.65 s (#182 CI, macOS).
+terminal::tests_hidden::a_hidden_pane_is_not_held_to_the_visible_rate_and_a_realistic_producer_is_not_held_at_all
 # A hung Claude check worker's init event must be read back before its deadline; under the parallel pass the stand-in
 # harness started too late and the ticket ended profile_not_applied (#182 CI, macOS).
 desktop::workers::tests::a_running_claude_check_worker_shows_message_off_with_its_true_reason
