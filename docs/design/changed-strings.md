@@ -355,3 +355,32 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | Claude Code / Engine self-check / Safety hooks / OS sandbox / Git / Python 3 / OpenSSL / Run workflow | check names in the pre-flight list | a check with no plain name shows as the core sent it |
 | Ready / Question (were ready / question) | Review, task list status | task statuses the list had no wording for now use the shared status words, so every status has one casing |
 | A run cannot start until the failing check below passes. / ...the failing checks below pass. | beside the disabled Start run button | shown only when the checks are what blocks a start; the button points to it for screen readers |
+| Engine id (row removed) | Crew, details of a run, task or check | Only a worker's own pane shows the engine id now, as DESIGN.md says. No wording changed. |
+| A run cannot start until the checks below finish. | beside the disabled Start run button | shown when the checks could not run at all; the button points to it for screen readers |
+| Checked at 2:03:34 AM (was 02:03:34 AM) | "Checked at" and "Tried again at" lines | the hour is no longer padded; seconds stay so two checks in one minute read differently |
+| "MODEL via PROVIDER" (was the two joined by a middle dot), for example "Default model via Claude Code", "DeepSeek V3.2 via OpenRouter" | every place a model is named with its provider: project column, Board, Review, Crew, worker header, proposal, the model pickers, Settings > Providers | DESIGN.md bans meta strings joined with middle dots; one helper writes the pair |
+| "BILLING, KEY NAME ..." (was joined by a middle dot), for example "Billing: can't tell, OPENAI_API_KEY set in the CLI config" | billing line under a proposed worker | same rule |
+| Back to NAME / Back | top of the Settings section list | the visible way out of Settings, which shows no view tabs; opens the project's Director-General view |
+| Goal, as the workers will be asked (was What the workers will be asked) / Threads / "N threads: 2 Backend, 1 Docs" | Director-General plan card | the threads line counts the proposal's workers by owner; the table below keeps model, effort and why |
+| Ping rule / "At most N pings an hour. Arrivals within M min are one ping. On for ..." / Change / Save rule / Most pings in an hour / Group arrivals within / Don't group / "M min" / Ping me for / Decisions / Questions / Blocked tasks (with one-line hints) / The rule only decides when you are pinged... / Saved. New arrivals follow this rule. / The ping rule could not be read... | top of the Inbox | the rule is global; it cannot start or approve anything |
+| Recent pings / No pings since Vajra opened. / Pinged / Not pinged | Inbox, under the rule | session only |
+| "A decision needs you in P" / "A worker has a question in P" / "A task is blocked in P" / "N things need you: ..." | ping toast and the recent-pings list | counts and project names only, never an item's text |
+| "Pinged because your rule is on for ..." / "Grouped: they arrived within M min of the first." / "Held until now: you allow N pings an hour." / "Not pinged: notifications are off." / "Not pinged: your rule is off for ..." | under every ping and every quiet arrival | why it pinged, or why not |
+| Run to start / Review in Director-General | Inbox card for a run the Director-General proposes | it starts only from the Director-General view |
+
+One-click install (ADR-17 17b). Only a source that passed its security review gets the sheet; every other row keeps the step-1 wording and has no Install button.
+
+| String | Where | Note |
+|---|---|---|
+| Not installed. Install it in one click, or run one of these in a terminal. | missing row, verified source | |
+| The last install didn't match what was approved. / The last install couldn't be undone. / The last upgrade failed partway. / The last upgrade ran too long and was stopped. + "Repair it, or reinstall it with the vendor's steps." | broken row after a one-click install | the Broken mark's reason (bhishma condition 1) |
+| "Plan a one-click install of NAME" / Checking the pinned package and your tools / Could not plan the install. | row button, loading, error | planning installs nothing |
+| "One-click install: NAME" | sheet title | |
+| Command / From / Version / Tools / Installs into / Registry for its scope / Also installs or upgrades / Needs admin | sheet fields | the exact argv; the tarball shows as "<verified tarball>" |
+| owned by you | tool row | a tool in a Homebrew prefix the user owns (condition 4) |
+| Your npm config (.npmrc) applies to this install. / The tool folder it uses belongs to you, not to the system. / Homebrew installs its current version, not a pinned one. / Your Homebrew settings (brew.env) apply to this install. | sheet notes | conditions 5 and 6 |
+| This folder belongs to the system, so installing needs admin rights. / belongs to another user. / You can't write to this folder. / has too many files to check. + "Run the command yourself in a terminal." | needs-admin line | no Install button then (ADR-17 rule 5) |
+| "Install NAME" / "Repair NAME" / Installs exactly this. If anything changes before it runs, you'll be asked again. | consent button and hint | Repair on a broken row |
+| Installing / "NAME install output" | while running; accessible label of the live output | the `setup-<id>` stream |
+| Installed / The install failed. Nothing changed. / The install didn't match what was approved, so it was removed again. / The install couldn't be confirmed or undone. It stays marked Broken until a clean install. | result | |
+| Install-it-yourself reasons: not reviewed, unpinned packages, install scripts, package didn't match its pin, no npm, no Homebrew, no ready-built package, script doesn't check its download; otherwise "This one can't be installed in one click here." Each ends "Install it yourself with the steps above." | sheet, when the core answers manual | |

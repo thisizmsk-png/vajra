@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -37,6 +37,8 @@ pub use arrivals::EventSink;
 
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
+/// How long quit waits for the core tickets to end (their own kill, line and sweep) before the supervisor kills the rest.
+const QUIT_TICKETS: Duration = Duration::from_secs(4);
 /// Upper bound for one `tail` / `read_spill` page.
 const MAX_PAGE: usize = 64 * 1024;
 /// Most rows and text one `stream_window` call returns: a view shows tens of rows, so this is a ceiling, not a default.
@@ -230,6 +232,8 @@ type StateKey = (PathBuf, Option<PathBuf>);
 type WorktreeCache = HashMap<StateKey, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
+pub const SETUP_PLAN_SCHEMA: &str = "vajra.setup_plan/1";
+
 pub struct App {
     preferences: Mutex<crate::preferences::Store>,
     data: PathBuf,
@@ -237,6 +241,12 @@ pub struct App {
     claude: PathBuf,
     /// Where provider CLIs are looked for; `None` is the user's resolved PATH. Tests point it at a temp dir.
     provider_dirs: Option<Vec<PathBuf>>,
+    /// Tests only: the write-ledger answer for the proof label, until 6h's ledger is wired (`proof_app::ledger_of`).
+    #[cfg(test)]
+    proof_ledger: Option<proof::Ledger>,
+    /// N20 (bhishma M1 on #226): the asks this app made and the answers a person gave, per run, for the app's lifetime
+    /// only. The file is display; a consume needs this too, so a record written by hand (or kept over a restart) is void.
+    approvals: Mutex<HashMap<String, evidence_approval::Held>>,
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
@@ -248,6 +258,8 @@ pub struct App {
     pub bus: Arc<Bus>,
     pub sup: Arc<Supervisor>,
     pub control: Arc<Mutex<Service>>,
+    /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
+    _instance: Option<(std::fs::File, std::fs::File)>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -274,6 +286,14 @@ pub struct App {
     limits: Mutex<caps::RunLimits>,
     /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
     run_workers: Mutex<HashMap<String, u32>>,
+    /// Each core run's record, by run id: live until its protocol finalizes, so it is never listed as an orphan
+    /// between tickets (6h).
+    live_records: Mutex<HashMap<String, std::sync::Weak<record::CoreRecord>>>,
+    /// Each core run's open log, by run id (W2): `run_log_since` reads the held one, so it sees what is written.
+    live_logs: Mutex<HashMap<String, std::sync::Weak<runlog_store::RunLog>>>,
+    /// Every anchor this app session sent to a run's signed record, by run id, kept for the app's life (W2, bhishma F4):
+    /// only these confirm an anchor, and a reopened log must still hold the last one.
+    log_anchors: Arc<Mutex<HashMap<String, Vec<runlog::Anchor>>>>,
     /// Workers closed once finished (see `closeout`); persisted.
     closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
@@ -320,6 +340,8 @@ pub struct App {
     sink: Mutex<Option<ChangeSink>>,
     /// New-item notifications (`inbox_new`), coalesced over 5 s (see `arrivals`).
     events: Arc<arrivals::Hub>,
+    /// One-click install consents (ADR-17 rule 4): tokens in memory only, one run per harness at a time.
+    consents: crate::providers::install::consent::Consents,
     /// ADR 16.6: the global git baseline (taken first thing in `open`) and the worker runtime, built on first use.
     workers: Arc<worker_host::WorkerHost>,
 }
@@ -334,13 +356,18 @@ impl App {
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
-        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots()));
+        // Only the app holding the data folder's and the account's worktree folder's locks sweeps and starts agents: a
+        // second instance (a development build beside the installed app) would take the first one's live workers for
+        // an earlier life's. Held for the app's life.
+        let instance = instance::InstanceLock::take_both(data, home);
+        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots(), instance.is_some()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
         let control_log = Logger::open(&logs.join("control")).ok();
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
-        let mut svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        // A second instance settles nothing in the shared control ledger: its pending stops are the first app's live ones.
+        let mut svc = Service::open_with(data, claude.join("vajra/audit.log"), control_log, instance.is_some())?;
         // A refused projects folder (a symlink, a file) no longer stops the launch (#77 follow-up): the store opens
         // refusing, and preflight and every project command say what is wrong and what to do.
         let projects = Arc::new(crate::projects::store::Store::open(data, home)?);
@@ -353,6 +380,13 @@ impl App {
         svc.set_seat_policy(seat_env.clone());
         svc.set_seats_enabled(seat_env.route());
         svc.set_core_workers(workers.clone());
+        // Before any agent: control dirs no session needs any more (an earlier life's core workers, finished runs) go.
+        // Every session an index line names is kept, whatever its harness or folder, so a run that may be resumed keeps
+        // its steering dir. The index is worker-writable, so a forged line can only keep a dir, never remove one. Only
+        // the app holding the instance locks prunes: a second one would remove the first app's live sessions' dirs.
+        if let Some(keep) = instance.as_ref().and_then(|_| control_keep(data)) {
+            svc.prune_control_dirs(&keep);
+        }
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             workers,
@@ -367,6 +401,7 @@ impl App {
             lead: lead::LeadState::new(home),
             shown: Mutex::new(HashMap::new()),
             deciding: Mutex::new(Default::default()),
+            _instance: instance,
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verify_slots: (Mutex::new(VERIFY_SLOTS), Condvar::new()),
@@ -381,6 +416,9 @@ impl App {
             reader: Mutex::new(None),
             claude,
             provider_dirs: None,
+            #[cfg(test)]
+            proof_ledger: None,
+            approvals: Mutex::new(HashMap::new()),
             provider_cache: Mutex::new(None),
             keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
@@ -407,7 +445,11 @@ impl App {
             launching: Mutex::new(()),
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
+            live_records: Mutex::new(HashMap::new()),
+            live_logs: Mutex::new(HashMap::new()),
+            log_anchors: Default::default(),
             closeout: closeout::Store::open(data),
+            consents: Default::default(),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -487,8 +529,8 @@ impl App {
             // A ticket that ended can't be stopped: a Lead's stop still waiting for the human is refused. On its own
             // thread, since a human Stop ends a queued ticket while it holds the control lock.
             on_outcome: Some(Box::new(move |v: &workers::TicketView| {
-                let (control, id) = (control.clone(), v.id.clone());
-                std::thread::spawn(move || lock(&control).core_ticket_ended(&id));
+                let (control, id, sid) = (control.clone(), v.id.clone(), v.harness_session.clone());
+                std::thread::spawn(move || lock(&control).core_ticket_ended(&id, sid.as_deref()));
             })),
         };
         // A Claude task worker's steering channel: its own control dir and nonce, opened before it starts (16.7).
@@ -625,6 +667,55 @@ impl App {
     }
 
     /// The active run groups for diagnostics: stream id and the pid of the group leader.
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end, every core ticket ends `abandoned`
+    /// (`app_quit`) with its line written and its descendants swept, then every supervisor session is killed and
+    /// reaped. Bounded: a ticket that is not done within `QUIT_TICKETS` is left to the supervisor's kill.
+    pub fn quit(&self) {
+        self.shutdown_lead();
+        self.workers.quit(QUIT_TICKETS);
+        self.sup.shutdown();
+    }
+
+    /// The lifecycle report's `swept`: `at_startup` (an earlier app life's workers, killed before any agent could start)
+    /// and `after_attempts` (descendants that left their worker's group, killed when its attempt ended).
+    pub fn swept_report(&self) -> Value {
+        let s = self.workers.startup_swept();
+        let (killed, survived) = self.workers.runtime_swept();
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance()})
+    }
+
+    /// Another app instance holds this data folder or the account's worktree folder: this one sweeps nothing and
+    /// starts no agent.
+    pub fn other_instance(&self) -> bool {
+        self._instance.is_none()
+    }
+
+    /// The control watcher and the Lead socket, started only by the app holding the instance locks (#177 review). A
+    /// second app on the same data folder would tick the first app's live pending actions (recording refusals, expiries
+    /// and acks in the shared ledger, twice when both settle the same ack), and binding would unlink the first app's
+    /// socket so its Director-General's tool calls reach a service with none of its sessions. `None`: nothing started,
+    /// the socket left as it was. A bind failure is noted and the watcher still runs.
+    pub fn serve_control(&self) -> Option<crate::control::service::Watcher> {
+        if self.other_instance() {
+            self.note("control_not_served_other_instance", &[]);
+            return None;
+        }
+        let watcher = crate::control::service::spawn_watcher(self.control.clone(), Duration::from_secs(1));
+        match crate::control::socket::bind(&crate::control::socket_path(&self.data)) {
+            Ok(listener) => {
+                let svc = self.control.clone();
+                // SAFETY: getuid has no preconditions and cannot fail.
+                let uid = unsafe { libc::getuid() };
+                std::thread::spawn(move || crate::control::socket::serve(listener, svc, uid));
+            }
+            Err(e) => {
+                eprintln!("vajra-desktop: control socket: {e}");
+                self.note("control_socket_failed", &[]);
+            }
+        }
+        Some(watcher)
+    }
+
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
         let mut v: Vec<_> = lock(&self.runs)
             .keys()
@@ -774,6 +865,8 @@ impl App {
             stream.clone(),
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
+        // The app's loop may be at rest, waiting on the bus with no timer: tell it a run is live now.
+        self.bus.wake();
         // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
         let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: Some(engine.id().to_string()) };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
@@ -814,6 +907,12 @@ impl App {
         Ok(engine)
     }
 
+    /// The absolute codex binary a Codex Lead launches (bhishma #216 Low 1: never the bare word looked up again).
+    fn codex_for_lead(&self) -> Result<PathBuf, Value> {
+        use crate::providers::detect::Probe;
+        self.provider_probe().find("codex").ok_or_else(|| fail("provider_not_installed", "codex is not installed; install it or choose another provider"))
+    }
+
     fn provider_probe(&self) -> crate::providers::detect::System {
         crate::providers::detect::System::new(self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs)).with_home(self.home.clone())
     }
@@ -837,7 +936,58 @@ impl App {
             crate::userpath::refresh(&self.home);
         }
         let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
-        serde_json::to_value(crate::providers::setup::list(&self.provider_probe(), engine)).map_err(|e| fail("internal", e))
+        let marks = crate::providers::install::marks::Marks::at(&self.data);
+        serde_json::to_value(crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks)).map_err(|e| fail("internal", e))
+    }
+
+    /// `setup_plan` (`vajra.setup_plan/1`): the one-click plan for catalog harness `id` (ADR-17 rule 3: the exact
+    /// command, source, version, tools, target, needs_admin, notes, scope registry and dependencies), or `manual` with
+    /// why it is "Install it yourself". Installs nothing; npm's pack folder is private and removed before this answers.
+    pub fn setup_plan(&self, id: &str) -> Res {
+        use crate::providers::install::flow;
+        let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        let answer = |r: Result<Value, &str>| match r {
+            Ok(plan) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "plan": plan }),
+            Err(code) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "manual": code }),
+        };
+        // An unverified source never resolves a tool or runs anything.
+        if !h.verified() {
+            return Ok(answer(Err("source_not_verified")));
+        }
+        let offer = flow::offer(h, &flow::Machine::this(&self.home));
+        Ok(answer(offer.and_then(|o| serde_json::to_value(&o.plan).map_err(|_| "internal"))))
+    }
+
+    /// `setup_consent`: the user clicked Install on the plan whose hash is `hash`. A single-use token bound to {id,
+    /// hash}, valid for two minutes; it is never logged or stored.
+    pub fn setup_consent(&self, id: &str, hash: &str) -> Res {
+        crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(fail("bad_hash", "a plan hash is 64 hex digits"));
+        }
+        Ok(serde_json::json!({ "token": self.consents.mint(id, hash, std::time::Instant::now()) }))
+    }
+
+    /// `setup_run`: install `id` with consent `token`. The plan is recomputed and must hash the same; the install
+    /// streams on `setup-<id>`, is checked on every exit, rolled back or marked Broken, and audited. Blocks until done.
+    pub fn setup_run(&self, id: &str, token: &str) -> Res {
+        use crate::providers::install::{flow, run};
+        let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if !h.verified() {
+            return Err(fail("source_not_verified", "this harness is Install it yourself"));
+        }
+        // Read after the install too (a repair counts only if the program runs), so the PATH is refreshed first and
+        // the probe is built fresh: a newly linked binary must be found.
+        let current = || {
+            crate::userpath::refresh(&self.home);
+            crate::providers::setup::current(h, &self.provider_probe())
+        };
+        let audit = self.claude.join("vajra/audit.log");
+        let paths = flow::Paths { data: &self.data, audit: &audit };
+        let r = flow::run(h, &flow::Machine::this(&self.home), &self.consents, token, &self.sup, paths, &current).map_err(|c| fail(c, "setup refused"))?;
+        // The new binary is found without a restart.
+        crate::userpath::refresh(&self.home);
+        Ok(serde_json::json!({ "stream": run::stream(id), "report": r }))
     }
 
     /// The CLI's own sign-in for `id`, for a user terminal: only for a catalog harness that is installed and reports a
@@ -990,7 +1140,14 @@ impl App {
             if engine == Engine::Claude {
                 argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
             } else {
-                adapter_for(engine).run_argv(&input, n).map_err(invalid_input)
+                // bhishma #216 H1: a Codex Lead never runs without the Vajra dirs denied.
+                let deny = crate::adapter::profiles::vajra_deny_dirs(&self.home, &self.data);
+                let profile = crate::adapter::profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
+                let real = |p: &Path| p.canonicalize().map_err(|e| fail("io_error", e));
+                let (project, tmp) = (real(&cwd)?, real(&std::env::temp_dir())?);
+                // A second Lead in this project was already held by the one-run-per-project cap, under the launching lock.
+                let codex = self.codex_for_lead()?;
+                crate::adapter::profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)
             }
         }, false, workers)?;
         self.note("run_started", &[]);
@@ -2070,7 +2227,12 @@ impl App {
     /// hashes" (`verify-digest`), so it stays the only HMAC key holder. Result `{slug, integrity, text?}` where
     /// integrity is `ok`, `no_report`, `integrity_failed`, `not_text` or `unknown` (too large / could not run).
     pub fn read_report(&self, slug: &str) -> Res {
-        self.read_report_with(slug, &|_| {}, &|| {})
+        self.read_report_with(slug, &|_| {}, &|| {}).map(|mut v| {
+            if let Some(m) = v.as_object_mut() {
+                m.remove(VERIFIED_KEY);
+            }
+            v
+        })
     }
 
     /// `seam` is passed to the held reader and is also called with `"check:report"` right before the report check;
@@ -2142,7 +2304,7 @@ impl App {
         if bridge.find_jq().is_none() {
             return unknown(reason("jq_missing", None, None));
         }
-        let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
+        let o = match bridge.run(&Request::VerifyDigest { input: input.as_bytes().to_vec() }) {
             Ok(o) => o,
             Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };
@@ -2167,20 +2329,32 @@ impl App {
         // "ok" is published once, only after every check that applies has passed (plain `verify` also fails a
         // recorded report that is missing or edited), so a concurrent listing can never see a partial success.
         seam("check:report");
+        // The record hash (6i export): the sha256 of the exact digest lines the script just accepted, so a reader on this
+        // Mac can match an export to the record it came from. It carries no key material.
+        // `VERIFIED_KEY`: the campaign, features and progress exactly as checked here, for the proof label and its
+        // write-ledger check (6i). `read_report` drops it.
+        let progress = String::from_utf8_lossy(&h.progress).into_owned();
+        let record = |v: Res| {
+            v.map(|mut v| {
+                v["record_sha256"] = json!(hex_digest(input.as_bytes()));
+                v[VERIFIED_KEY] = json!({"campaign": campaign, "features": features, "progress": progress});
+                v
+            })
+        };
         let want = campaign.get("reportSha256").and_then(Value::as_str).unwrap_or("");
         if want.is_empty() {
             self.settle(slug, "ok", ticket);
-            return verdict("no_report", None);
+            return record(verdict("no_report", None));
         }
         let Some(report) = h.report else { return bad(self) };
         if hex_digest(&report) != want {
             return bad(self);
         }
         self.settle(slug, "ok", ticket);
-        match String::from_utf8(report) {
+        record(match String::from_utf8(report) {
             Ok(t) => verdict("ok", Some(t)),
             Err(_) => verdict("not_text", None),
-        }
+        })
     }
 
     pub fn take_over(&self, stream: &str, on: bool) -> Res {
@@ -2302,6 +2476,9 @@ fn key_state(account: &str, r: Result<bool, crate::providers::keychain::Error>) 
     }
 }
 
+/// `read_report_with`'s internal answer: the campaign and progress bytes its check verified (never sent to the UI).
+pub(super) const VERIFIED_KEY: &str = "_verified";
+
 fn invalid(field: &str, reason: &str) -> Value {
     json!({"error": "invalid_args", "detail": format!("{field}: {reason}")})
 }
@@ -2321,6 +2498,52 @@ fn repo_dir(s: &str) -> Result<PathBuf, Value> {
 /// Claude Code's project dir name for a cwd: every non-alphanumeric is `-`.
 fn project_slug(cwd: &Path) -> String {
     cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// The largest run index the start-up prune reads whole; a bigger one skips the prune.
+const PRUNE_INDEX_CAP: u64 = 64 << 20;
+
+/// The control session dirs start-up pruning keeps besides the live ones: every session the whole run index names
+/// (launch and Lead sessions), and every Lead session recorded under `<control>/lead/<run>/lead_session`. `None` when
+/// the index can't be read whole: then nothing is pruned (a missed name would remove a dir a resume needs).
+fn control_keep(data: &Path) -> Option<std::collections::HashSet<String>> {
+    let mut keep = std::collections::HashSet::new();
+    for e in runindex::entries_all(&data.join("runs.jsonl"), PRUNE_INDEX_CAP).ok()? {
+        keep.insert(e.session_id);
+        keep.extend(e.lead_session_id);
+    }
+    // The guarded run records keep their sessions whatever the index says (#179 codex P1): a worker that drops a run
+    // from `runs.jsonl` must not get its control dir, nonce and acknowledged stops deleted. Each run's own session
+    // (`session`, written by `record_run_pinned`) and its Lead's (`lead_session`) are kept. A record that exists but
+    // can't be read whole (a link, an oversized file, an unreadable entry) prunes nothing at all, and neither does one
+    // that isn't exactly a canonical session id once trimmed (#179 review): a lossy decode of invalid UTF-8, or any
+    // other text, would keep a name that matches no dir while the real session's dir was deleted.
+    let lead = data.join("control").join("lead");
+    match std::fs::read_dir(&lead) {
+        Ok(rd) => {
+            for d in rd {
+                let d = d.ok()?;
+                for name in ["session", "lead_session"] {
+                    match crate::control::fsx::read_nofollow_capped(&d.path().join(name), 256) {
+                        Ok(b) => {
+                            let id = String::from_utf8(b).ok()?;
+                            let id = id.trim();
+                            if !ids::valid_session_id(id) {
+                                return None;
+                            }
+                            keep.insert(id.to_string());
+                        }
+                        // No such record, or the entry is no run dir: nothing to keep from it.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {}
+                        Err(_) => return None,
+                    }
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    Some(keep)
 }
 
 fn lines_json(lines: &[bus::Line]) -> Vec<Value> {
@@ -2355,6 +2578,10 @@ fn node_json(n: &Node, diff_of: &dyn Fn(&str) -> Option<Value>) -> Value {
 /// `changed` payload, or `None` when nothing happened.
 pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     let first = sub.recv_timeout(wait)?;
+    // A bare wake changes nothing the UI shows: the loop just looks again, at once.
+    if first == Event::Wake && sub.is_empty() {
+        return None;
+    }
     std::thread::sleep(COALESCE);
     let mut streams = BTreeSet::new();
     let mut snapshot_needed = false;
@@ -2363,17 +2590,65 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
             streams.insert(stream.to_string());
         }
         Event::SnapshotNeeded => snapshot_needed = true,
+        Event::Wake => {}
     };
     add(first);
     while let Some(e) = sub.try_recv() {
         add(e);
     }
+    if streams.is_empty() && !snapshot_needed {
+        return None;
+    }
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
+}
+
+/// How often the app's loop looks at live runs (worker refresh, run reaping, App Nap).
+pub const LIVE_WAIT: Duration = Duration::from_secs(1);
+/// With nothing running the loop waits on the bus, waking on its own only this often: one housekeeping turn (a finished
+/// worker that became safe to close, say its branch was pushed, is closed then), never a per-second timer.
+pub const IDLE_WAIT: Duration = Duration::from_secs(5 * 60);
+/// After the last run ends, housekeeping (automatic close of finished workers, reaping) goes on this long.
+pub const AFTER_RUN: Duration = Duration::from_secs(120);
+
+/// The app loop's pace: busy while a run is live and for `AFTER_RUN` after the last one ended, else at rest.
+pub struct Pace {
+    last_live: Option<Instant>,
+}
+
+impl Pace {
+    /// A fresh pace starts busy: launch gets one `AFTER_RUN` window of housekeeping, so finished workers left from the
+    /// last session are closed without waiting for a run.
+    pub fn new(now: Instant) -> Self {
+        Pace { last_live: Some(now) }
+    }
+
+    /// Whether this turn does housekeeping, and how long the next wait is.
+    pub fn next(&mut self, live: bool, now: Instant) -> (bool, Duration) {
+        if live {
+            self.last_live = Some(now);
+        }
+        let busy = self.last_live.is_some_and(|t| now.saturating_duration_since(t) < AFTER_RUN);
+        (busy, if busy { LIVE_WAIT } else { IDLE_WAIT })
+    }
 }
 
 mod worker_diff;
 pub mod workers;
+pub mod plan;
+pub mod record;
+mod record_app;
+pub mod record_ledger;
+pub mod runproto;
+pub mod verify;
+pub mod phases;
+pub mod runlog;
+pub mod runlog_store;
+mod runlog_app;
+pub use runlog_app::answered as run_log_answered;
+#[cfg(test)]
+mod runlog_tests;
 pub mod worker_host;
+mod instance;
 mod arrivals;
 mod caps;
 mod closeout;
@@ -2392,6 +2667,9 @@ mod board;
 mod lead_acts;
 mod runindex;
 mod runview;
+pub mod proof;
+mod proof_app;
+mod evidence_approval;
 mod state;
 pub use state::Envelope;
 

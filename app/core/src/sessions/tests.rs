@@ -432,6 +432,9 @@ fn sessions_extra_env_outside_the_allowlist_refuses_the_spawn() {
         vec![("OPENAI_API_KEY", OsString::from("sentinel-not-a-key"))],
         vec![("CODEX_HOME", OsString::from("/a")), ("CODEX_HOME", OsString::from("/b"))],
         vec![("TMPDIR", OsString::new())],
+        // The Setup profile's proxy and CA variables never reach an agent (ADR-17, bhishma condition 8).
+        vec![("HTTPS_PROXY", OsString::from("http://proxy.example:3128"))],
+        vec![("NODE_EXTRA_CA_CERTS", OsString::from("/etc/ca.pem"))],
     ] {
         let mut s = spec(&["/usr/bin/env"], &dir);
         s.extra_env = env;
@@ -544,4 +547,36 @@ fn a_retry_reports_its_own_attempt_and_keeps_its_last_lines() {
     sup.spawn_tagged("s-a3", spec(&["sh", "-c", "echo 'unexpected status 504'; exit 1"], &dir), Some(t(3))).unwrap();
     let ev = wait_events(&got, 2);
     assert_eq!((ev[1].attempt, ev[1].action), (3, errors::Action::AskingUser), "the third asks the user");
+}
+
+#[test]
+fn sessions_a_setup_run_gets_exactly_the_setup_env_and_its_proxy_login_is_redacted() {
+    use crate::providers::install::env::{setup_env, ALLOWED};
+    let (sup, bus, dir) = setup("setup");
+    let proxy = "http://alice:hunter2pass@proxy.example:3128";
+    let env = setup_env(&[], |k| match k {
+        "HTTPS_PROXY" => Some(proxy.into()),
+        "HOME" => Some(dir.clone().into()),
+        "OPENAI_API_KEY" => Some("sentinel-not-a-key".into()),
+        _ => None,
+    });
+    sup.spawn_setup("setup-codex", vec!["/usr/bin/env".into()], &dir, &env, Redactor::default()).unwrap();
+    assert!(sup.wait("setup-codex", WAIT).unwrap().is_some());
+    let out = wait_lines(&bus, "setup-codex", |l| l.iter().any(|s| s.starts_with("HTTPS_PROXY=")));
+    let all = out.join("\n");
+    assert!(!all.contains("hunter2pass") && !all.contains("alice"), "{all}");
+    assert!(!all.contains("sentinel-not-a-key"), "{all}");
+    for l in out.iter().filter(|l| l.contains('=')) {
+        let name = l.split('=').next().unwrap();
+        assert!(ALLOWED.contains(&name), "{name} is outside the Setup profile");
+    }
+}
+
+#[test]
+fn sessions_setup_streams_are_only_for_setup_runs() {
+    use crate::providers::install::env::setup_env;
+    let (sup, _bus, dir) = setup("setupid");
+    let env = setup_env(&[], |_| None);
+    assert_eq!(sup.spawn_setup("s-codex", vec!["/usr/bin/true".into()], &dir, &env, Redactor::default()), Err(SessionError::InvalidId));
+    assert_eq!(sup.spawn("setup-codex", spec(&["/usr/bin/true"], &dir)), Err(SessionError::InvalidId), "an agent can't take a setup stream");
 }

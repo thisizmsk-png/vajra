@@ -63,9 +63,9 @@ const W = S.workerProvider;
 export const diffText = (d: WorkerDiff): string => (d.partial ? W.diff.atLeast(d.added) : W.diff.exact(d.added, d.removed));
 /** The accessible label: what the short form means. */
 export const diffLabel = (d: WorkerDiff): string => (d.partial ? W.diff.atLeastLabel(d.added, d.uncounted) : W.diff.exactLabel(d.added, d.removed, d.files_total));
-/** "Model · provider": the model's name (or id, or the CLI default, or "Not reported") with its provider. Never a bare model. */
+/** "Model via provider": the model's name (or id, or the CLI default, or "Not reported") with its provider. Never a bare model. */
 export const providerText = (label: string, model: string | null, name: string | null): string =>
-  `${model === "unknown" ? W.notReported : name ?? model ?? S.accounts.defaultModel} · ${label}`;
+  S.accounts.modelVia(model === "unknown" ? W.notReported : name ?? model ?? S.accounts.defaultModel, label);
 export const workerLine = (p: WorkerProvider): string => providerText(p.label, p.model, p.model_name);
 /** "Ran on X (asked for Y)" when the harness ran something other than what was asked for; null when it matches or nothing was asked. */
 export function ranOn(p: WorkerProvider): string | null {

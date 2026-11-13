@@ -18,14 +18,16 @@ const overview = {
 const ev = (t: string, status: string, criterion: string) => ({ task: t, title: null, owner: null, criterion, status, head: null, path: null, commands: null, report: null });
 const current: Current = { project: { schema: "vajra.project/1", id: "p_1", name: "api", root: "/src/api", created: null, archived: null, rev: 0 }, campaigns: [], focus: "c1", runId: "r1" };
 
+// The board takes the inbox from the projects store, so it is mounted under it, as in the app.
 const mount = (replies: Record<string, unknown>, cur: Current = current) => {
   setTransport(fakeIpc(replies).transport);
-  return render(<CurrentProject.Provider value={cur}><Board /></CurrentProject.Provider>);
+  return render(<ProjectsProvider><CurrentProject.Provider value={cur}><Board /></CurrentProject.Provider></ProjectsProvider>);
 };
 const ok = {
   run_overview: overview,
   evidence_list: { slug: "c1", stale: false, rows: [ev("r1.t1", "pass", "AC-1"), ev("r1.t5", "pass", "AC-2"), ev("r1.t5", "fail", "AC-3")] },
-  inbox: { count: 1, items: [{ id: "i1", kind: "plan", campaign: "c1", origin: "app", created: "", age_s: 3, title: "Deploy to staging", body: "", actions: [] }] },
+  inbox: { count: 1, items: [{ id: "i1", kind: "plan", campaign: "c1", origin: "app", created: "", age_s: 3, title: "Deploy to staging", body: "", actions: [] }] },  list_campaigns: { campaigns: [] },
+  resume_targets: { targets: {} },
 };
 const lane = (name: string) => screen.getByRole("region", { name: new RegExp(`^${name},`) });
 
@@ -103,7 +105,7 @@ describe("Board", () => {
     const renamed = { ...overview, graph: { ...overview.graph, tasks: [task("t2", "in_progress", "Token bucket, newer")] } };
     const f = fakeIpc({ ...ok, run_overview: () => (++calls === 1 ? new Promise((r) => { answerOld = r; }) : renamed) });
     setTransport(f.transport);
-    render(<CurrentProject.Provider value={current}><Board /></CurrentProject.Provider>);
+    render(<ProjectsProvider><CurrentProject.Provider value={current}><Board /></CurrentProject.Provider></ProjectsProvider>);
     await waitFor(() => expect(calls).toBe(1));
     act(() => { f.emit("changed", {}); }); // a second load for the same campaign, while the first is still out
     expect(await screen.findByText("Token bucket, newer", undefined, { timeout: 1500 })).toBeTruthy();
