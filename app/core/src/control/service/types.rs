@@ -315,6 +315,8 @@ pub struct AskRecord<'a> {
     pub reason: Option<&'a str>,
     /// The Director-General's project and conversation the ask went to (FG-02c); `None` only in the service's tests.
     pub project: Option<(&'a str, u32)>,
+    /// The finished turn's token receipt (`vajra.token_receipt/1`), written on the `done` line only.
+    pub tokens: Option<&'a serde_json::Value>,
 }
 
 /// A human decision on a plan item (ADR-14).
