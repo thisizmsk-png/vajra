@@ -14,6 +14,11 @@ use super::{bus, fail, invalid, App, Envelope, Res};
 use crate::lock;
 use crate::crew::redact::{redact_provider_text, Redactor};
 
+/// The run id a `deliver-<run>` or `deliver-<run>-og` campaign belongs to.
+fn run_of(slug: &str) -> Option<&str> {
+    slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r)).filter(|r| crate::ids::valid_run_id(r))
+}
+
 /// `gh pr comment` gets this long.
 const POST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The largest comment GitHub takes is 65536 characters; the proof stays well under it.
@@ -72,6 +77,7 @@ impl App {
             rows: statuses,
             trust: trust.as_deref(),
             approval_consumed: approval,
+            approval_unheld: !approval && run_of(slug).is_some_and(|r| self.evidence_approval_unheld(r)),
             rejected,
             slug_field: &slug_field,
             ledger: self.ledger_of(slug, &verified),
@@ -109,8 +115,7 @@ impl App {
     /// evidence seat) and whether a single-use approval was consumed. A campaign no run of this app started has none; one
     /// whose record can't be read answers `"?"`, so the label fails closed.
     fn trust_of(&self, slug: &str) -> (Option<String>, Option<String>, Option<String>) {
-        let run = slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r));
-        let Some(run) = run.filter(|r| crate::ids::valid_run_id(r)) else { return (None, None, None) };
+        let Some(run) = run_of(slug) else { return (None, None, None) };
         let seats = match self.read_run_seats(run) {
             Ok(Some(s)) => s,
             Ok(None) => return (None, None, None),

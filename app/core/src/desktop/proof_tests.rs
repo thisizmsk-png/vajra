@@ -1,7 +1,22 @@
 use super::*;
 
 fn done<'a>(slug: &'a str, goal: &'a str, trust: Option<&'a str>) -> Input<'a> {
-    Input { slug, goal, status: "done", integrity: "ok", rows: vec!["pass", "pass"], trust, approval_consumed: false, rejected: false, slug_field: slug, ledger: Ledger::Match }
+    Input { slug, goal, status: "done", integrity: "ok", rows: vec!["pass", "pass"], trust, approval_consumed: false, approval_unheld: false, rejected: false, slug_field: slug, ledger: Ledger::Match }
+}
+
+/// bhishma on #226: an approval used before a restart can't be checked, so the run reads Not verified and the card
+/// says why in these words; nothing else changes the label.
+#[test]
+fn an_approval_used_before_a_restart_reads_not_verified_with_the_restart_reason() {
+    let mut i = done("deliver-x", "g", Some("guarded_by_approval"));
+    i.approval_unheld = true;
+    assert_eq!(label(&i), (Label::NotVerified, RESTART_REASON.to_string()));
+    i.approval_unheld = false;
+    assert_eq!(label(&i).1, "The check commands were not approved for this run.");
+    // A consumed approval wins; the flag only ever picks a Not verified reason.
+    i.approval_consumed = true;
+    i.approval_unheld = true;
+    assert_eq!(label(&i).0, Label::VerifiedApproved);
 }
 
 #[test]

@@ -116,6 +116,35 @@ fn a_validly_signed_write_the_core_didnt_make_passes_the_campaign_check_but_neve
     assert!(!verified(&app), "never Verified");
 }
 
+/// bhishma's B1 note on #226: the N20 approval line written by a script call the core didn't make. A person really
+/// approved and the evidence ticket really consumed (held in this app), so only the ledger stands between that line
+/// and Verified-approved: it reads `Mismatch`, and the run is never Verified-approved.
+#[test]
+fn an_approval_line_the_core_didnt_write_never_reads_verified_approved() {
+    use crate::desktop::evidence_approval::{progress_line, Ask};
+    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()] };
+    let Some((_t, app)) = recorded_then(|app| {
+        app.record_run_seats(RUN, &json!({"campaign_slug": slug(), "evidence_trust": "guarded_by_approval"})).unwrap();
+        let now = std::time::SystemTime::now();
+        let sha = app.request_evidence_approval(&ask, now).unwrap();
+        app.answer_evidence_approval_at(RUN, &sha, true, now).unwrap();
+        app.consume_evidence_approval(&ask, now).unwrap();
+        // The line the evidence ticket would write, through the same signed script, but not by the core's record.
+        let out = app.bridge.run(&Request::CampaignProgress { slug: slug(), text: progress_line(&sha) }).unwrap();
+        assert_eq!(out.exit(), Some(0), "{}", out.stderr);
+    }) else {
+        return;
+    };
+    assert!(app.evidence_approval_consumed(RUN).is_some(), "the consume is real and held");
+    assert_eq!(ledger(&app), proof::Ledger::Mismatch, "the signed line isn't one the core wrote");
+    assert!(!verified(&app), "never Verified");
+    // With every other input at its best (done, all criteria pass, the approval consumed), that Mismatch alone keeps
+    // the label off Verified-approved.
+    let best = proof::Input { slug: "s", goal: "g", status: "done", integrity: "ok", rows: vec!["pass"], trust: Some("guarded_by_approval"), approval_consumed: true, slug_field: "s", ..Default::default() };
+    assert_eq!(proof::label(&proof::Input { ledger: proof::Ledger::Match, ..best.clone() }).0, proof::Label::VerifiedApproved);
+    assert_eq!(proof::label(&proof::Input { ledger: proof::Ledger::Mismatch, ..best }).0, proof::Label::NotVerified);
+}
+
 #[test]
 fn an_open_run_skips_the_ledger_read() {
     let Some((_t, app)) = recorded() else { return };

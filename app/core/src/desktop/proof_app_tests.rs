@@ -186,10 +186,13 @@ fn an_unconsumed_approval_is_not_verified_and_a_consumed_one_is() {
     assert_eq!(app.run_proof(&slug).unwrap()["label"], "not_verified");
     approve_and_consume(&t, &app, &slug, true);
     assert_eq!(app.run_proof(&slug).unwrap()["label"], "verified_approved");
-    // After a restart nothing is held: the same files and signed line read not verified.
+    // After a restart nothing is held: the same files and signed line read not verified, and the card says why.
     let mut restarted = t.app();
     restarted.proof_ledger = Some(proof::Ledger::Match);
-    assert_eq!(restarted.run_proof(&slug).unwrap()["label"], "not_verified");
+    let p = restarted.run_proof(&slug).unwrap();
+    assert_eq!(p["label"], "not_verified");
+    assert_eq!(p["reason"], proof::RESTART_REASON);
+    assert_eq!(p["requires"], proof::MACOS_NEED, "the card names what the evidence check needs");
 }
 
 #[test]

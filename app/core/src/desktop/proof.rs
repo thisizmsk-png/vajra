@@ -99,6 +99,9 @@ pub struct Input<'a> {
     pub trust: Option<&'a str>,
     /// A `guarded_by_approval` run's approval was consumed by its evidence ticket (N20).
     pub approval_consumed: bool,
+    /// The run's approval record says it was used, but this app doesn't hold it (a restart came between): only the
+    /// reason under Not verified changes.
+    pub approval_unheld: bool,
     /// A review rejected the approach.
     pub rejected: bool,
     /// The signed campaign's own `slug` field. The signature doesn't bind the folder name, so it must equal `slug`.
@@ -174,10 +177,18 @@ pub fn label(i: &Input) -> (Label, String) {
     match own.max(signed_trust(i.slug, i.goal)) {
         Trust::Guarded => (Label::Verified, "Every criterion passed on the delivered commit.".into()),
         Trust::GuardedByApproval if i.approval_consumed => (Label::VerifiedApproved, "Every criterion passed. You approved the check commands for this run.".into()),
+        Trust::GuardedByApproval if i.approval_unheld => (Label::NotVerified, RESTART_REASON.into()),
         Trust::GuardedByApproval => (Label::NotVerified, "The check commands were not approved for this run.".into()),
         Trust::OutsideGuard => (Label::EvidenceUnguarded, "Every criterion passed, but the evidence ran outside the guard.".into()),
     }
 }
+
+/// The reason under Not verified when an approval was used before Vajra restarted (bhishma on #226).
+pub const RESTART_REASON: &str = "Approved before Vajra restarted, so the approval can't be checked. Run the evidence step again.";
+
+/// What the evidence check needs from the Mac, shown on the card (the runner uses the system jq, which macOS ships from
+/// version 15; on an older Mac the check fails closed).
+pub const MACOS_NEED: &str = "The evidence check needs macOS 15 or later.";
 
 /// The one capability check for the export (D4: the signed shareable record is the planned paid feature). Proof on
 /// screen stays free and never calls this.
@@ -349,6 +360,7 @@ pub fn proof_json(p: &Proof, markdown_text: &str) -> Value {
         "integrity": p.integrity,
         "record_sha256": p.record_sha256,
         "record_note": record_note(p.label),
+        "requires": MACOS_NEED,
         "export": export_allowed(),
         "markdown": markdown_text,
         // A row whose check hasn't finished: the UI asks again (bounded), since a finished sweep sends no event.
