@@ -62,6 +62,8 @@ fn main() {
     for (i, sid) in SIDS.iter().enumerate().take(runs) {
         let repo = home.join(format!("repo{i}"));
         std::fs::create_dir_all(&repo).unwrap();
+        // A run starts only in a registered project; a loose folder is refused (`not_a_project`).
+        app.project_add(&repo.display().to_string(), false).unwrap();
         let (h, r) = (home.display().to_string(), repo.display().to_string());
         let rate = if workers > 0 { 20.0 } else { 0.0 };
         let argv = vec!["env".to_string(), format!("FG12_FIXTURE={fixture}"), "python3".into(), agent.clone(), h, r, (*sid).into(), workers.to_string(), rate.to_string(), secs.to_string()];

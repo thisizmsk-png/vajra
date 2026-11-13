@@ -273,6 +273,135 @@ describe("Director-General conversation", () => {
     expect(screen.queryByText("An old answer.")).toBeNull();
   });
 
+  it("Given the reader is at the end, When the conversation grows, Then the newest turn stays in view; after they scroll up, nothing moves them", async () => {
+    const proto = Element.prototype as { scrollIntoView?: unknown };
+    const g = globalThis as { ResizeObserver?: unknown };
+    const was = { scroll: proto.scrollIntoView, ro: g.ResizeObserver };
+    let grew: () => void = () => {};
+    let scrolls = 0;
+    proto.scrollIntoView = () => { scrolls++; };
+    g.ResizeObserver = class { constructor(cb: () => void) { grew = cb; } observe() {} disconnect() {} };
+    try {
+      const { container } = mount({});
+      await screen.findByText("What is left?");
+      const pane = container.querySelector(".v-dgv__scroll") as HTMLElement;
+      const at = (top: number, height = 1000) => { for (const [k, v] of Object.entries({ scrollHeight: height, clientHeight: 400, scrollTop: top })) Object.defineProperty(pane, k, { value: v, configurable: true }); fireEvent.scroll(pane); };
+
+      at(600);
+      let before = scrolls;
+      grew();
+      expect(scrolls).toBe(before + 1);
+
+      // Our own scroll's event lands after more content arrived: far from the end, but not a scroll up. Still pinned.
+      at(600, 1500);
+      before = scrolls;
+      grew();
+      expect(scrolls).toBe(before + 1);
+
+      at(200, 1500);
+      before = scrolls;
+      grew();
+      expect(scrolls).toBe(before);
+
+      at(1090, 1500);
+      grew();
+      expect(scrolls).toBe(before + 1);
+    } finally {
+      proto.scrollIntoView = was.scroll;
+      g.ResizeObserver = was.ro;
+    }
+  });
+
+  it("Given the reader scrolled up, When a new line arrives, Then nothing moves them; their own question, or scrolling back to the end, follows again", async () => {
+    const proto = Element.prototype as { scrollIntoView?: unknown };
+    const was = proto.scrollIntoView;
+    let scrolls = 0;
+    proto.scrollIntoView = () => { scrolls++; };
+    try {
+      let texts = ["you\tWhat is left?", "lead\tTwo tasks: the limiter and the docs."];
+      const { container, f } = mount({
+        stream_window: () => win(texts),
+        ask_lead: { ask_id: "k1", state: "running", stream: STREAM, lead_session_id: "s", project_id: "p_X", generation: 3, name: "Director-General" },
+      });
+      await screen.findByText("What is left?");
+      // Opening the conversation shows its end.
+      expect(scrolls).toBeGreaterThan(0);
+      const pane = container.querySelector(".v-dgv__scroll") as HTMLElement;
+      const at = (top: number, height = 1000) => { for (const [k, v] of Object.entries({ scrollHeight: height, clientHeight: 400, scrollTop: top })) Object.defineProperty(pane, k, { value: v, configurable: true }); fireEvent.scroll(pane); };
+      const arrives = async (line: string, shown: string) => {
+        texts = [...texts, line];
+        act(() => { f.emit("changed", { streams: [STREAM] }); });
+        // A turn's lines are joined, so the new line is part of a longer text.
+        await screen.findByText((text) => text.includes(shown));
+      };
+
+      // At the end: a new line is followed.
+      at(600);
+      let before = scrolls;
+      await arrives("lead\tThe limiter is merged.", "The limiter is merged.");
+      expect(scrolls).toBe(before + 1);
+
+      // Scrolled up to read: a new line arrives and the view stays put.
+      at(200);
+      before = scrolls;
+      await arrives("lead\tThe docs are next.", "The docs are next.");
+      expect(scrolls).toBe(before);
+
+      // Their own question pins them to the end again, still scrolled up.
+      fireEvent.change(composer(), { target: { value: "And the tests?" } });
+      fireEvent.click(screen.getByRole("button", { name: S.dg.send }));
+      await screen.findByText("And the tests?");
+      expect(scrolls).toBeGreaterThan(before);
+
+      // Scrolled up once more, then back down to the end: the next line is followed.
+      at(100);
+      before = scrolls;
+      await arrives("lead\tOne is failing.", "One is failing.");
+      expect(scrolls).toBe(before);
+      at(600);
+      await arrives("lead\tIt is fixed.", "It is fixed.");
+      expect(scrolls).toBe(before + 1);
+    } finally {
+      proto.scrollIntoView = was;
+    }
+  });
+
+  it("Given the view opened before the project had a run, When a run starts and its conversation grows, Then the newest turn is brought into view", async () => {
+    const proto = Element.prototype as { scrollIntoView?: unknown };
+    const g = globalThis as { ResizeObserver?: unknown };
+    const was = { scroll: proto.scrollIntoView, ro: g.ResizeObserver };
+    const made: { grew: () => void; on: Element[]; off: boolean }[] = [];
+    let scrolls = 0;
+    proto.scrollIntoView = () => { scrolls++; };
+    g.ResizeObserver = class {
+      me: (typeof made)[number];
+      constructor(cb: () => void) { this.me = { grew: cb, on: [], off: false }; made.push(this.me); }
+      observe(el: Element) { this.me.on.push(el); }
+      disconnect() { this.me.off = true; }
+    };
+    try {
+      const r = mount({}, cur({ dgRun: null }));
+      expect(screen.getByText(S.dg.noRun)).toBeTruthy();
+      expect(made).toEqual([]);
+
+      r.rerender(<CurrentProject.Provider value={cur()}><DirectorGeneral /></CurrentProject.Provider>);
+      await screen.findByText("What is left?");
+      expect(made.length).toBe(1);
+      expect(made[0].on).toEqual([r.container.querySelector(".v-dgv__col")]);
+      const before = scrolls;
+      made[0].grew();
+      expect(scrolls).toBe(before + 1);
+
+      // The run goes away: the column is gone, and so is its observer.
+      r.rerender(<CurrentProject.Provider value={cur({ dgRun: null })}><DirectorGeneral /></CurrentProject.Provider>);
+      expect(made[0].off).toBe(true);
+      expect(made.length).toBe(1);
+    } finally {
+      proto.scrollIntoView = was.scroll;
+      g.ResizeObserver = was.ro;
+    }
+  });
+
   it("Given it cannot be asked, Then the reason shows and the composer is off", async () => {
     mount({ lead_status: { available: false, busy: false, name: "Director-General", read_only_reason: "Asking the Director-General needs the Claude Code sandbox." } });
     expect(await screen.findByText(/needs the Claude Code sandbox/)).toBeTruthy();

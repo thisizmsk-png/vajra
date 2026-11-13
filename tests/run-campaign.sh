@@ -100,6 +100,29 @@ C resume login-flow --from-checkpoint 1 >/dev/null; check "earlier valid checkpo
 C show --json | jq -e '.signature_valid == true and (.features | length) == 2' >/dev/null; check "show --json" $?
 C list | grep -q '^\* login-flow'; check "list marks active campaign" $?
 
+# --- the outside-guard label (N17, 6k): an -og slug or a goal that starts with the marker ---
+OGL="evidence ran outside the guard"
+C list | grep '^\* login-flow' | grep -qF "$OGL"; [ $? -ne 0 ]; check "list: an unmarked campaign has no label" $?
+C show | grep -qF "$OGL"; [ $? -ne 0 ]; check "show: an unmarked campaign has no label" $?
+C show --json | jq -e '.evidence_outside_guard == false' >/dev/null; check "show --json: unmarked is false" $?
+C create deliver-r1-og --goal "Users can log in" --feature "ac-1|x" >/dev/null 2>&1
+C create deliver-r2 --goal "[evidence ran outside the Vajra guard] Users can log in" --feature "ac-1|x" >/dev/null 2>&1
+C create deliver-r3 --goal "Users can log in [evidence ran outside the Vajra guard]" --feature "ac-1|x" >/dev/null 2>&1
+C resume login-flow >/dev/null 2>&1
+C list | grep ' deliver-r1-og ' | grep -qF "$OGL"; check "list: an -og slug carries the label" $?
+C list | grep ' deliver-r2 ' | grep -qF "$OGL"; check "list: a marked goal carries the label (list prints no goal)" $?
+C list | grep ' deliver-r3 ' | grep -qF "$OGL"; [ $? -ne 0 ]; check "list: the marker counts only at the start of the goal" $?
+S1="$(C show deliver-r1-og)"; printf '%s\n' "$S1" | grep -q "^label: $OGL\. A pass here is never plain Verified\.$"; check "show: an -og slug prints the label" $?
+S2="$(C show deliver-r2)"; printf '%s\n' "$S2" | grep -q "^label: $OGL"; check "show: a marked goal prints the label" $?
+C show deliver-r1-og --json | jq -e '.evidence_outside_guard == true' >/dev/null; check "show --json: -og slug is true" $?
+C show deliver-r2 --json | jq -e '.evidence_outside_guard == true' >/dev/null; check "show --json: marked goal is true" $?
+C show deliver-r3 --json | jq -e '.evidence_outside_guard == false' >/dev/null; check "show --json: a marker later in the goal is false" $?
+cp "$CD/deliver-r3/campaign.json" "$WORK/r3.json"; printf 'not json' > "$CD/deliver-r3/campaign.json"
+C list | grep ' deliver-r3 ' | grep -qF "$OGL"; check "list: an unreadable goal shows the label (when unsure)" $?
+cp "$WORK/r3.json" "$CD/deliver-r3/campaign.json"
+for s in deliver-r1-og deliver-r2 deliver-r3; do C close "$s" --status abandoned >/dev/null 2>&1; done
+C resume login-flow >/dev/null 2>&1
+
 # --- close ---
 C close >/dev/null; check "close" $?
 [ "$(jq -r .status "$D/campaign.json")" = "done" ]; check "status done" $?
