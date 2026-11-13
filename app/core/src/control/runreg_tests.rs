@@ -5,6 +5,7 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::Condvar;
 use std::time::Instant;
@@ -112,6 +113,24 @@ impl Drop for Kid {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// A whole process group this test started (`process_group(0)` on a child: the group id is its pid), killed on drop.
+/// It also reaches a descendant that was reparented away from the child, which keeps the group.
+struct Group(i32);
+
+impl Group {
+    fn spawn(c: &mut Command) -> (Group, Child) {
+        let k = c.process_group(0).spawn().unwrap();
+        (Group(k.id() as i32), k)
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        // SAFETY: a negative pid signals the group this test created; a group already gone is ESRCH, ignored.
+        unsafe { libc::kill(-self.0, libc::SIGKILL) };
     }
 }
 
@@ -551,17 +570,22 @@ fn the_schema_text_limits_are_the_protocols_and_a_plan_at_them_is_accepted() {
 
 /// A peer connects (a lead-tree process here: the ancestry check is faked to pass) and makes one Service call, then
 /// forks a child that keeps the socket and exits. Once the test has reaped it, the child sends a Service request on
-/// the inherited connection and writes the reply to `<dir>/reply`.
+/// the inherited connection and writes the reply to `<dir>/reply`. The child gives up by itself after 60 s (and a read
+/// after 30 s), so a failed test can never leave it polling.
 const HANDOFF: &str = r#"
 import json, os, socket, sys, time
 sock, d = sys.argv[1], sys.argv[2]
 c = socket.socket(socket.AF_UNIX)
+c.settimeout(30)
 c.connect(sock)
 f = c.makefile("rw")
 f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
 open(os.path.join(d, "first"), "w").write(f.readline())
 if os.fork() == 0:
+    end = time.monotonic() + 60
     while not os.path.exists(os.path.join(d, "go")):
+        if time.monotonic() > end:
+            os._exit(1)
         time.sleep(0.02)
     f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
     open(os.path.join(d, "reply.tmp"), "w").write(f.readline())
@@ -579,7 +603,8 @@ fn a_connection_handed_on_by_a_lead_tree_peer_that_exited_never_reaches_the_serv
         let (_k, lead) = lead_kid();
         let _token = registered(&reg, proto(), lead_tree.then_some(lead));
         let (sock, _svc) = serving(&t, Arc::new(reg));
-        let mut first = Command::new("/usr/bin/python3").args(["-I", "-c", HANDOFF, sock.to_str().unwrap(), t.0.to_str().unwrap()]).spawn().unwrap();
+        // The forked child stays in this group after `first` exits, so the guard ends it whatever the test does.
+        let (_group, mut first) = Group::spawn(Command::new("/usr/bin/python3").args(["-I", "-c", HANDOFF, sock.to_str().unwrap(), t.0.to_str().unwrap()]));
         // Reap it: its pid and start stamp are gone before the child speaks.
         assert!(first.wait().unwrap().success());
         let seen: Value = serde_json::from_str(&std::fs::read_to_string(t.0.join("first")).unwrap()).unwrap();
@@ -637,15 +662,21 @@ fn clients_that_stop_reading_replies_lose_their_slots_and_a_fresh_call_is_served
 /// socket and asks the Service route, writing the reply to `<dir>/reply`. Modes: `orphan` (the lead forks an
 /// intermediate that forks `D` and exits: `D` is reparented, the lead lives on), `lead_exits` (`D` is the lead's own
 /// child and the lead exits), `cleared` (as `orphan`'s shape but `D` is a direct child of the lead, which stays alive
-/// while the test clears it). `D` waits for `<dir>/go` before it connects; the lead writes `D`'s pid to `<dir>/d`.
+/// while the test clears it). `D` writes its pid to `<dir>/d` (whole, by rename) and waits for `<dir>/go` before it
+/// connects; it gives up by itself after 60 s (and a read after 30 s), so a failed test can never leave it polling.
 const LEAD: &str = r#"
 import json, os, socket, sys, time
 sock, d, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 def descendant():
-    open(os.path.join(d, "d"), "w").write(str(os.getpid()))
+    open(os.path.join(d, "d.tmp"), "w").write(str(os.getpid()))
+    os.rename(os.path.join(d, "d.tmp"), os.path.join(d, "d"))
+    end = time.monotonic() + 60
     while not os.path.exists(os.path.join(d, "go")):
+        if time.monotonic() > end:
+            os._exit(1)
         time.sleep(0.02)
     c = socket.socket(socket.AF_UNIX)
+    c.settimeout(30)
     c.connect(sock)
     f = c.makefile("rw")
     f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
@@ -675,7 +706,9 @@ fn a_lead_descendant_that_outlives_its_link_to_the_lead_never_reaches_the_servic
     for mode in ["orphan", "lead_exits", "cleared"] {
         let t = Tmp::new(mode);
         let reg = Arc::new(RunRegistry::default());
-        let mut lead = Kid(Command::new("/usr/bin/python3").args(["-I", "-c", LEAD]).arg(t.0.join("s").join("app.sock")).arg(&t.0).arg(mode).spawn().unwrap());
+        // `D` stays in the lead's group even once reparented, so the group guard ends it whatever the test does.
+        let (_group, lead) = Group::spawn(Command::new("/usr/bin/python3").args(["-I", "-c", LEAD]).arg(t.0.join("s").join("app.sock")).arg(&t.0).arg(mode));
+        let mut lead = Kid(lead);
         let l = LeadProc { pid: lead.0.id(), stamp: crate::procid::start_stamp(lead.0.id()).unwrap() };
         let _token = registered(&reg, proto(), Some(l));
         let (_sock, _svc) = serving(&t, reg.clone());
@@ -683,8 +716,7 @@ fn a_lead_descendant_that_outlives_its_link_to_the_lead_never_reaches_the_servic
         while !t.0.join("d").exists() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
-        let d: i32 = std::fs::read_to_string(t.0.join("d")).unwrap().trim().parse().unwrap();
-        match mode {
+        let d: i32 = std::fs::read_to_string(t.0.join("d")).unwrap().trim().parse().unwrap();        match mode {
             "lead_exits" => {
                 let _ = lead.0.wait();
                 // As the lead's watcher does once it has exited.
