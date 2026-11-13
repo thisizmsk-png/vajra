@@ -662,9 +662,40 @@ fn f4_reopening_a_rewritten_log_in_the_same_session_breaks_it() {
     }
     let body: Vec<u8> = l.entries().iter().flat_map(|e| [serde_json::to_vec(e).unwrap(), b"\n".to_vec()].concat()).collect();
     std::fs::write(&path, body).unwrap();
+    // A read-only reread (nothing holds the log) sees the same break.
+    assert_eq!(app.run_log_since(R, 0, 10)["broken"]["why"], "unanchored");
+    assert_eq!(app.run_log_verify(R)["standing"], "not_verified");
     let again = app.run_log(R).unwrap();
     assert_eq!(again.card().broken.map(|b| (b.seq, b.why)), Some((3, Why::Unanchored)));
-    assert_eq!(app.run_log_verify(R)["standing"], "not_verified");
+}
+
+#[test]
+fn reads_of_a_finished_log_never_change_its_file() {
+    const R: &str = "20261112-0930";
+    let d = scratch();
+    let app = crate::desktop::App::open(&d.join("data"), &d.join("home")).unwrap();
+    {
+        let log = app.run_log(R).unwrap();
+        for i in 1..=3 {
+            log.append(Source::Core, dispatched(i)).unwrap();
+        }
+        log.flush();
+    }
+    // The run is finished (nothing holds its log) and its last line is torn.
+    let path = d.join("data/runlog").join(R).join(runlog_store::FILE);
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut f, br#"{"v":1,"seq":4,"pr"#).unwrap();
+    drop(f);
+    let before = std::fs::read(&path).unwrap();
+    let a = app.run_log_since(R, 0, 10);
+    let b = app.run_log_since(R, 0, 10);
+    let _ = app.run_log_verify(R);
+    assert_eq!(std::fs::read(&path).unwrap(), before, "byte-identical after reads");
+    assert_eq!(a, b);
+    assert_eq!(a["head_seq"], 3);
+    assert_eq!(a["entries"].as_array().unwrap().len(), 3);
+    assert!(a["broken"].is_null(), "a torn tail isn't a break; it is just not read");
+    assert!(crate::desktop::lock(&app.live_logs).values().all(|w| w.upgrade().is_none()), "no writer was opened");
 }
 
 #[test]

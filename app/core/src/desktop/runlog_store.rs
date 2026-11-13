@@ -116,6 +116,45 @@ fn load(path: &Path, run_id: &str) -> io::Result<(Log, u64)> {
     Ok((log, torn))
 }
 
+/// A log this app doesn't hold open (a finished run), read for display or verification only: no writer thread, no
+/// repair, no append. A torn last line is left on disk and simply not read; only a live `RunLog::open` cuts it.
+pub struct Snapshot {
+    log: Log,
+    /// Bytes after the last newline, left as found.
+    pub torn: u64,
+}
+
+impl Snapshot {
+    pub fn read(dir: &Path, run_id: &str) -> Result<Self, String> {
+        // Read-only: the folder must already be a real directory (not a link); nothing is created or changed.
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Err("the run log's folder is not a directory".into()),
+            Err(e) => return Err(format!("the run log can't be read: {e}")),
+        }
+        let bytes = fsx::read_nofollow_capped(&dir.join(FILE), MAX_BYTES).map_err(|e| format!("the run log can't be read: {e}"))?;
+        let p = parse(&bytes);
+        Ok(Snapshot { log: Log::loaded(run_id, p.entries, p.unreadable), torn: p.torn })
+    }
+
+    pub fn since(&self, after: u64, limit: usize) -> (Vec<Entry>, u64) {
+        (self.log.since(after, limit.min(PAGE_MAX)).to_vec(), self.log.head_seq())
+    }
+
+    pub fn entries(&self) -> Vec<Entry> {
+        self.log.entries().to_vec()
+    }
+
+    /// Require the chain to hold an anchor this app session sent (F4); a mismatch marks this snapshot broken there.
+    pub fn require(&mut self, a: &runlog::Anchor) -> bool {
+        self.log.require(a)
+    }
+
+    pub fn card(&self) -> LogCard {
+        LogCard { head_seq: self.log.head_seq(), written_seq: self.log.head_seq(), broken: self.log.broken().cloned(), io_error: None }
+    }
+}
+
 enum Msg {
     Write { entry: Box<Entry>, critical: bool },
     Anchor,

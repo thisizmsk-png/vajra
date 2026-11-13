@@ -15,6 +15,33 @@ use super::runlog_store::{self, RunLog};
 /// The named event the UI hears: `{run_id, seq}`, the written head. It then asks `run_log_since`.
 pub const EVENT: &str = "run_log";
 
+/// A log as a read sees it: the live one this app holds, or a read-only snapshot of the file.
+enum Read {
+    Live(Arc<RunLog>),
+    Snapshot(runlog_store::Snapshot),
+}
+
+impl Read {
+    fn since(&self, after: u64, limit: usize) -> (Vec<runlog::Entry>, u64) {
+        match self {
+            Read::Live(l) => l.since(after, limit),
+            Read::Snapshot(s) => s.since(after, limit),
+        }
+    }
+    fn entries(&self) -> Vec<runlog::Entry> {
+        match self {
+            Read::Live(l) => l.entries(),
+            Read::Snapshot(s) => s.entries(),
+        }
+    }
+    fn card(&self) -> runlog_store::LogCard {
+        match self {
+            Read::Live(l) => l.card(),
+            Read::Snapshot(s) => s.card(),
+        }
+    }
+}
+
 impl App {
     fn run_log_dir(&self, run_id: &str) -> Result<PathBuf, String> {
         if !crate::ids::valid_run_id(run_id) {
@@ -49,17 +76,23 @@ impl App {
         Ok(log)
     }
 
-    /// The held log, or the one on disk read once (a finished run): never a second writer for a live one.
-    fn run_log_read(&self, run_id: &str) -> Result<Arc<RunLog>, Value> {
+    /// The held live log, else a read-only snapshot of the file (a finished run). A read never opens a writer, never
+    /// repairs or appends, and never spawns a thread, so reads can't race each other or change a finished run's file.
+    fn run_log_read(&self, run_id: &str) -> Result<Read, Value> {
         let bad = |d: String| json!({"error": "invalid", "detail": d});
         let dir = self.run_log_dir(run_id).map_err(bad)?;
         if let Some(l) = super::lock(&self.live_logs).get(run_id).and_then(std::sync::Weak::upgrade) {
-            return Ok(l);
+            return Ok(Read::Live(l));
         }
-        if !dir.join(runlog_store::FILE).exists() {
+        if std::fs::symlink_metadata(dir.join(runlog_store::FILE)).is_err() {
             return Err(json!({"error": "not_found", "detail": "that run has no log"}));
         }
-        self.run_log(run_id).map_err(|d| json!({"error": "io", "detail": d}))
+        let mut snap = runlog_store::Snapshot::read(&dir, run_id).map_err(|d| json!({"error": "io", "detail": d}))?;
+        // A log reread in this app's life must still hold the last anchor this session sent (F4).
+        if let Some(last) = super::lock(&self.log_anchors).get(run_id).and_then(|v| v.last().cloned()) {
+            snap.require(&last);
+        }
+        Ok(Read::Snapshot(snap))
     }
 
     /// The UI's delta read: the written entries after `after_seq` (at most `limit`, capped), the written head, and the
