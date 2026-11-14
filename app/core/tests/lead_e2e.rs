@@ -58,7 +58,16 @@ WT=$(pwd -P)
 TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
 D="${{CODEX_HOME:-{home}}}/sessions/2026/11/12"
 mkdir -p "$D"
-printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"m","sandbox_policy":{{"type":"workspace-write","network_access":false,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":["%s"]}}}}}}\n' "$WT" "$TMPDIR" > "$D/rollout-x-$TID.jsonl"
+# 6k: like codex 0.166, report each `"<dir>"="none"` of the launch's permission profile as a `deny` entry.
+ENT='{{"path":{{"type":"path","path":"/"}},"access":"read"}}'
+for a in "$@"; do
+  case "$a" in permissions.vajra-*.filesystem=*)
+    for p in $(printf '%s' "$a" | grep -o '"[^"]*"="none"' | sed 's/"="none"$//; s/^"//'); do
+      ENT="$ENT,{{\"path\":{{\"type\":\"path\",\"path\":\"$p\"}},\"access\":\"deny\"}}"
+    done ;;
+  esac
+done
+printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"m","sandbox_policy":{{"type":"workspace-write","network_access":false,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":["%s"]}},"file_system_sandbox_policy":{{"kind":"restricted","entries":[%s]}}}}}}\n' "$WT" "$TMPDIR" "$ENT" > "$D/rollout-x-$TID.jsonl"
 echo '{{"type":"thread.started","thread_id":"'$TID'"}}'
 for a in "$@"; do LAST=$a; done
 F=$(printf '%s' "$LAST" | sed -n 's/.*touch:\([a-z0-9.]*\).*/\1/p' | head -n 1)
@@ -89,8 +98,15 @@ else:
     tid = str(uuid.uuid4())
     d = os.path.join(CODEX_HOME, "sessions/2026/11/12")
     os.makedirs(d, exist_ok=True)
+    # 6k: like codex 0.166, report each "<dir>"="none" of the launch's permission profile as a deny entry.
+    entries = [{"path": {"type": "path", "path": "/"}, "access": "read"}]
+    for i, x in enumerate(argv[:-1]):
+        if x == "-c" and argv[i + 1].startswith("permissions.") and ".filesystem=" in argv[i + 1]:
+            for k, v in re.findall(r'"([^"]+)"="([a-z]+)"', argv[i + 1]):
+                if v == "none":
+                    entries.append({"path": {"type": "path", "path": k}, "access": "deny"})
     with open(os.path.join(d, "rollout-x-%s.jsonl" % tid), "w") as f:
-        f.write(json.dumps({"type": "turn_context", "payload": {"approval_policy": "never", "cwd": lead_dir, "sandbox_policy": {"type": "read-only"}}}) + "\n")
+        f.write(json.dumps({"type": "turn_context", "payload": {"approval_policy": "never", "cwd": lead_dir, "sandbox_policy": {"type": "read-only"}, "file_system_sandbox_policy": {"kind": "restricted", "entries": entries}}}) + "\n")
     print(json.dumps({"type": "thread.started", "thread_id": tid}), flush=True)
     srv = [a for a in argv if a.startswith("mcp_servers=")][0]
     g = lambda k: re.search(k + '="([^"]+)"', srv).group(1)
