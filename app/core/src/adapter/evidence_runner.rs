@@ -27,6 +27,11 @@
 //! git inside the runner (S9): `write-tree` needs the object dir, which lives in the repo's common dir outside the
 //! worktree. The 6i-e contract copies the index into the ticket tmp, and the runner gives git `GIT_INDEX_FILE` plus a
 //! private object dir with the real one as an alternate (`git_env`), so no write ever reaches the shared repo.
+//!
+//! A repository can't steer the run's git (plan #214 L1): every git runs with fsmonitor and hooks off
+//! (`GIT_RUN_CONFIG`), a run is refused when the repo's own config sets a filter driver or an include
+//! (`repo_config_ok`), and the worktree's `.git` is never writable, so neither can be added mid-run. A filter driver
+//! from the user's own config (git-lfs, say) still runs: it is the user's tool, trusted like the check's toolchain.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -151,6 +156,12 @@ impl Profile {
         // Writes: only the worktree, the run's tmp dir (which holds every build cache), and the null and tty devices.
         p.push_str("(deny file-write*)\n");
         p.push_str(&format!("(allow file-write*{run_dirs} (literal \"/dev/null\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n"));
+        // Never the worktree's `.git` (plan #214 L1): a linked worktree's `.git` file names the repo the run's git
+        // reads, and a main checkout's `.git` folder holds its config. Either rewritten mid-run could add a filter
+        // driver after the core checked for one. The run's git writes only into the tmp (`git_env`).
+        let dotgit = self.worktree.join(".git");
+        let l = lit(&dotgit).ok_or_else(|| format!("a runner path isn't a plain absolute path: {}", dotgit.display()))?;
+        p.push_str(&format!("(deny file-write* (literal {l}) (subpath {l}))\n"));
         // Mach services that start or reach processes outside the sandbox (M1), and new launchd jobs.
         let mach: String = DENIED_MACH.iter().map(|(kind, name)| format!(" ({kind} \"{name}\")")).collect();
         p.push_str(&format!("(deny mach-lookup{mach})\n(deny job-creation)\n"));
@@ -160,14 +171,19 @@ impl Profile {
         // binds and is reached, names still resolve through the resolver socket, but no connection leaves the Mac.
         // A `network*` allow with `local ip` matches every outbound socket (it is bound locally), so allows name only
         // the remote end.
-        // Binds and inbound connections: unix sockets only under the run's own dirs; IP on any address with a network
-        // seat, else on loopback only (a server on every address would let a machine on the LAN connect in and read).
+        // Binds and inbound connections: unix sockets only under the run's own dirs; IP, either seat. Seatbelt can't
+        // keep a server on loopback (bhishma L2 on 6dfca73): its `localhost` in a local-address filter matches every
+        // address of the Mac, 0.0.0.0 and the LAN address included, and it takes no literal address. A test server a
+        // check starts can therefore be reached from the LAN while the run lasts. What the seat changes is where a
+        // command may connect out: without one, only to this Mac. The bind rule still names `localhost`, so it narrows
+        // by itself if Seatbelt ever does; the test pins what it does today.
         if self.network {
-            p.push_str("(allow network-outbound (remote ip))\n(allow network-bind network-inbound (local ip))\n");
+            p.push_str("(allow network-outbound (remote ip))\n");
             p.push_str(&format!("(allow mach-lookup (global-name \"{SEAT_MACH}\"))\n"));
         } else {
-            p.push_str("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
+            p.push_str("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n");
         }
+        p.push_str("(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
         p.push_str(&format!("(allow network-outbound{resolver}{run_dirs})\n(allow network-bind network-inbound{run_dirs})\n"));
         // Last, so nothing above can re-open them: the Vajra dirs and the credentials, neither read nor written.
         p.push_str(&format!("(deny file-read* file-write*{deny})\n"));
@@ -440,7 +456,7 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
         return RunOutcome::Failed("Vajra's signing key has a second name somewhere, so the runner can't keep it out of reach".into());
     }
     if let Err(why) = make_tmp(profile, r.git_common) {
-        return RunOutcome::Failed(why.into());
+        return RunOutcome::Failed(why);
     }
     // bash gets the script's text, read here once, never its path: the engine folder is denied inside the profile,
     // and a copy anywhere a command can write could be rewritten while bash reads it, so a command could print a
@@ -477,6 +493,7 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     for (k, v) in git_env(&profile.tmp, r.git_common).into_iter().chain(cache_env(&profile.tmp)) {
         cmd.env(k, v);
     }
+    cmd.envs(git_run_config_env());
     cmd.process_group(0);
     // SAFETY: async-signal-safe calls only (dup2, fcntl) between fork and exec. The write end becomes an inheritable fd
     // 3 (dup2 clears close-on-exec on the copy; if the write end already is fd 3, dup2 would be a no-op, so its flag is
@@ -627,52 +644,100 @@ fn tmp_hook(_stage: &str) {
 /// refuses a link anywhere on the way, and checked to be a plain folder at its resolved path; every folder in it is
 /// made relative to that descriptor. A swap afterwards can't widen anything: the profile names only the literal tmp,
 /// and Seatbelt judges a write by the path it resolves to.
-fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), &'static str> {
+fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), String> {
     let resolved = |p: &Path| p.canonicalize().ok().as_deref() == Some(p);
     if !resolved(&profile.worktree) || !profile.tmp.parent().is_some_and(resolved) {
-        return Err("the run's folders aren't plain, resolved paths");
+        return Err("the run's folders aren't plain, resolved paths".into());
     }
     tmp_hook("before-create");
     // A fresh tmp for every run (L2): a process an earlier run left behind can't have prepared this one's files.
     if std::fs::create_dir(&profile.tmp).is_err() {
-        return Err("the run's temp folder already exists; each run needs a fresh one");
+        return Err("the run's temp folder already exists; each run needs a fresh one".into());
     }
     tmp_hook("after-create");
     let replaced = "the run's temp folder was replaced as it was made";
     let tmp = walk(None, &profile.tmp, false).map_err(|_| replaced)?;
     let plain = std::fs::symlink_metadata(&profile.tmp).is_ok_and(|m| m.file_type().is_dir()) && resolved(&profile.tmp);
     if !plain {
-        return Err(replaced);
+        return Err(replaced.into());
     }
     let rel = |d: &Path| d.strip_prefix(&profile.tmp).map(Path::to_path_buf).map_err(|_| replaced);
     for d in std::iter::once(profile.tmp.join("objects")).chain(cache_env(&profile.tmp).into_iter().map(|(_, d)| d)) {
         walk(Some(&tmp), &rel(&d)?, true).map_err(|_| "couldn't prepare the run's folders")?;
     }
+    let Some(repo) = repo_admin(&profile.worktree, git_common)? else { return Ok(()) };
+    // No repo-configured filter driver and no include (plan #214 L1), checked before the index is copied.
+    for name in ["config", "config.worktree"] {
+        repo_config_ok(&tmp, &profile.tmp, &repo.admin, name)?;
+        repo_config_ok(&tmp, &profile.tmp, &repo.common, name)?;
+    }
     // git's private index (`git_env`) starts as a copy of the worktree's own (codex P2 on f95df103): a missing one
     // reads as empty, so every tracked file would look deleted and untracked. Written through the pinned tmp.
-    if let Some(index) = worktree_index(&profile.worktree, git_common)? {
+    if let Some(index) = worktree_index(&repo.admin)? {
         tmp.write_atomic("index", &index).map_err(|_| "couldn't copy the worktree's git index")?;
     }
     Ok(())
 }
 
-/// The evidence worktree's git index, found from protected data only (bhishma F1 on b04316cb). The worktree's own
-/// `.git` file is writable, so it could point anywhere; its content, and git's answer from it, are never used. The
-/// index is the one in the run's git common dir (`common`, which must be resolved): for a main checkout, `common` is
-/// the worktree's `.git` folder; for a linked worktree, it's the admin folder `<common>/worktrees/<name>` whose own
-/// `gitdir` back-link (kept in `common`, outside the worktree) names exactly this worktree's `.git`. It is read through
-/// a pinned walk that follows no link, and must be a plain file with exactly one link, at most 512 MiB. `None` when
-/// the worktree isn't in git, or nothing was ever staged.
-fn worktree_index(worktree: &Path, common: &Path) -> Result<Option<Vec<u8>>, &'static str> {
-    const CAP: u64 = 512 << 20;
-    let Some(admin) = git_admin(worktree, common)? else { return Ok(None) };
-    // A regular file only (#234 follow-up): the pinned open uses O_NOFOLLOW (a symlink fails), O_NONBLOCK (a FIFO
-    // can't stall the run) and checks the opened file is regular (a directory, FIFO or device fails).
-    match admin.read_single_link("index", CAP) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err("the worktree's git index isn't a plain file with one link"),
+/// The repo config keys that let a repository change what git records, or run code, inside the runner's git (plan
+/// #214 L1): a filter driver's clean, smudge or process command (`.gitattributes`, which the worktree holds, picks
+/// the driver), and an include, which could pull a later-written file from the worktree into the config mid-run.
+/// fsmonitor and hooks need no refusal: `GIT_RUN_CONFIG` turns them off for every git in the run.
+/// Also refused (bhishma L4 on 8ca4e0a): `core.worktree` and `core.attributesFile`, which redirect what git adds and
+/// which attributes pick a driver, and the external diff and textconv commands, programs any diff in the run would
+/// start. Keys come back from git in canonical form (section and key lowercase), so the pattern is lowercase. A
+/// subsection name may be empty (codex P1 on #251): git accepts `[filter ""]` and a `filter=` attribute with no value
+/// picks it, so each subsection matches zero or more characters (`filter..clean`).
+const REFUSED_CONFIG: &str = r"^(filter\..*\.(clean|smudge|process)|include\.path|includeif\..*\.path|core\.worktree|core\.attributesfile|diff\.external|diff\..*\.(textconv|command))$";
+
+/// The refusal for a repo config that sets `key`: what was found, why, and the way out (bhishma L2 on 8ca4e0a). The
+/// key is shown as plain text only (printable, at most 80 characters): a subsection name is the repo's own text.
+fn refused_key(key: &str) -> String {
+    let shown: String = key.chars().filter(|c| !c.is_control()).take(80).collect();
+    format!(
+        "the repository's own git config sets {shown}, which could change what this run records or start a program inside it. Move it to your global git config, or run the check outside Vajra. A repository that uses git-crypt or a repository-local git-lfs install isn't supported for evidence runs yet."
+    )
+}
+
+/// Refuse the run if the repo config file `name` in `dir` sets a `REFUSED_CONFIG` key. The file is read through the
+/// pinned folder (no link followed, one link only), copied into the run's fresh tmp and parsed there by git itself
+/// (`--file`, no includes, no system or user config), so git's own syntax decides and the worktree can't redirect it.
+/// A file git can't parse refuses the run too.
+fn repo_config_ok(tmp: &crate::projects::pinned::Pinned, tmp_path: &Path, dir: &crate::projects::pinned::Pinned, name: &str) -> Result<(), String> {
+    let unreadable = || "the repository's git config couldn't be read as git config, so the run can't prove it starts no program".to_string();
+    let bytes = match dir.read_single_link(name, 1 << 20) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("the repository's git config isn't a plain file with one link".into()),
+    };
+    const COPY: &str = "repo-config-check";
+    tmp.write_atomic(COPY, &bytes).map_err(|_| "couldn't check the repository's git config")?;
+    let copy = tmp_path.join(COPY);
+    let argv: Vec<std::ffi::OsString> = ["config", "--file"].iter().map(Into::into).chain([copy.clone().into_os_string()]).chain(["--no-includes", "--name-only", "--get-regexp", REFUSED_CONFIG].iter().map(Into::into)).collect();
+    let env = [("GIT_CONFIG_NOSYSTEM", "1".into()), ("HOME", "/var/empty".into()), ("PATH", SCRIPT_PATH.into())];
+    let o = crate::vajra::bridge::run_process_exact(Path::new("/usr/bin/git"), &argv, tmp_path, PROBE_MAX, &env);
+    let _ = std::fs::remove_file(&copy);
+    match o {
+        // Exit 1: no key matched. 0 is a match; anything else (a parse error, a timeout) isn't proven clean.
+        Ok(o) if !o.timed_out && o.code == Some(1) && o.stdout.is_empty() => Ok(()),
+        Ok(o) if !o.timed_out && o.code == Some(0) => Err(refused_key(o.stdout.lines().next().unwrap_or("a refused key"))),
+        _ => Err(unreadable()),
     }
+}
+
+/// Every git in the run (the script's and the checks') gets these as command-line config, which outranks every config
+/// file (plan #214 L1): no fsmonitor (a hook program, or the daemon, whose answer could hide a change from `git add`)
+/// and no hooks.
+const GIT_RUN_CONFIG: &[(&str, &str)] = &[("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null")];
+
+/// `GIT_RUN_CONFIG` as git's `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` variables.
+fn git_run_config_env() -> Vec<(String, String)> {
+    let mut out = vec![("GIT_CONFIG_COUNT".to_string(), GIT_RUN_CONFIG.len().to_string())];
+    for (i, (k, v)) in GIT_RUN_CONFIG.iter().enumerate() {
+        out.push((format!("GIT_CONFIG_KEY_{i}"), k.to_string()));
+        out.push((format!("GIT_CONFIG_VALUE_{i}"), v.to_string()));
+    }
+    out
 }
 
 /// The commit `worktree` has checked out, read from protected data only, through the same pinned walk as its index
@@ -732,18 +797,36 @@ pub(crate) fn worktree_head(worktree: &Path, common: &Path) -> Result<String, &'
         .ok_or(unreadable)
 }
 
-/// The worktree's admin folder inside the run's git common dir, pinned; `None` when the worktree isn't in git. See
-/// `worktree_index` for how it is found without trusting anything the worktree can write.
+/// The worktree's admin folder inside the run's git common dir, pinned; `None` when the worktree isn't in git. Found by
+/// `repo_admin`, with the same checks the run's own git relies on.
 fn git_admin(worktree: &Path, common: &Path) -> Result<Option<crate::projects::pinned::Pinned>, &'static str> {
+    Ok(repo_admin(worktree, common)?.map(|r| r.admin))
+}
+
+/// The run's repository folders, opened by pinned walks: the common git dir and this worktree's admin folder (the
+/// same folder for a main checkout).
+struct Repo {
+    common: crate::projects::pinned::Pinned,
+    admin: crate::projects::pinned::Pinned,
+}
+
+/// The evidence worktree's repository folders, found from protected data only (bhishma F1 on b04316cb). The
+/// worktree's own `.git` file is writable, so it could point anywhere; its content, and git's answer from it, are never
+/// used. The admin folder is in the run's git common dir (`common`, which must be resolved): for a main checkout,
+/// `common` is the worktree's `.git` folder; for a linked worktree, it's `<common>/worktrees/<name>` whose own `gitdir`
+/// back-link (kept in `common`, outside the worktree) names exactly this worktree's `.git`. Every folder is opened by
+/// a pinned walk that follows no link. `None` when the worktree isn't in git.
+fn repo_admin(worktree: &Path, common: &Path) -> Result<Option<Repo>, &'static str> {
     let dotgit = worktree.join(".git");
     let Ok(kind) = std::fs::symlink_metadata(&dotgit).map(|m| m.file_type()) else { return Ok(None) };
     let not_ours = "the worktree's git folder isn't the run's repository";
     if common.canonicalize().ok().as_deref() != Some(common) {
         return Err(not_ours);
     }
-    let common_dir = walk(None, common, false).map_err(|_| not_ours)?;
+    let open_common = || walk(None, common, false).map_err(|_| not_ours);
+    let common_dir = open_common()?;
     let admin = if kind.is_dir() && dotgit == common {
-        common_dir
+        open_common()?
     } else if kind.is_file() {
         let worktrees = common_dir.child("worktrees", false).map_err(|_| not_ours)?;
         let want = dotgit.to_str().ok_or(not_ours)?;
@@ -755,14 +838,82 @@ fn git_admin(worktree: &Path, common: &Path) -> Result<Option<crate::projects::p
                 if found.is_some() {
                     return Err(not_ours);
                 }
-                found = Some(dir);
+                found = Some((name, dir));
             }
         }
-        found.ok_or(not_ours)?
+        let (name, dir) = found.ok_or(not_ours)?;
+        // The run's git finds its repository through this `.git` file, not through the admin folder the core checked
+        // (bhishma M1 on 8ca4e0a): a `.git` rewritten to name a gitdir planted inside the worktree (a filter in its
+        // config, a commondir back to the real repo) would pass every check and still run the filter. So the file
+        // must name exactly the admin folder found above; the profile then keeps it unwritable for the whole run.
+        let admin_path = common.join("worktrees").join(&name);
+        let wt = walk(None, worktree, false).map_err(|_| not_ours)?;
+        let line = wt.read_single_link(".git", 4096).ok().and_then(|b| String::from_utf8(b).ok()).ok_or(not_ours)?;
+        let target = line.strip_suffix('\n').unwrap_or(&line).strip_prefix("gitdir: ").ok_or(not_ours)?;
+        // An absolute line as git writes it, or a relative one (`worktree.useRelativePaths`) naming the same folder.
+        let resolved = if target.contains('\n') { None } else { gitdir_line_target(worktree, Path::new(target)) };
+        if resolved.as_deref() != Some(admin_path.as_path()) {
+            return Err("the worktree's .git file doesn't name this worktree's own folder in the repository, so the run's git would read another repository");
+        }
+        dir
     } else {
         return Err(not_ours);
     };
-    Ok(Some(admin))
+    Ok(Some(Repo { common: common_dir, admin }))
+}
+
+/// The folder a `.git` file's `gitdir:` line names, worked out as text only, never through the file system
+/// (bhishma M1 on e84cc21). Anything inside the worktree is writable during the run, so a link there can be re-pointed
+/// after this check: a line that steps through a worktree name (`gitdir: hop`, or `gitdir: sub/../../x`) would be
+/// followed by the run's later git through whatever that name then is. So:
+/// - an absolute line must have no `.` or `..` step, and is taken as written;
+/// - a relative line must be `..` steps only, then plain names: it leaves the worktree before naming anything, which is
+///   the form git writes. Its `..` steps are folded against `worktree`, which must itself be fully resolved so that the
+///   text folding is the folder git reaches.
+///
+/// `None` when the line is any other shape. The caller compares the result with the admin folder it found.
+fn gitdir_line_target(worktree: &Path, line: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    if line.as_os_str().is_empty() || line.to_str().is_none_or(|s| s.split('/').any(|p| p == ".")) {
+        return None;
+    }
+    if line.is_absolute() {
+        return line.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_))).then(|| line.to_path_buf());
+    }
+    // A relative line names nothing inside the worktree: it starts by leaving it.
+    if line.components().next() != Some(Component::ParentDir) || worktree.canonicalize().ok().as_deref() != Some(worktree) {
+        return None;
+    }
+    let mut out = worktree.to_path_buf();
+    let mut named = false;
+    for c in line.components() {
+        match c {
+            Component::ParentDir if !named => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(n) => {
+                named = true;
+                out.push(n);
+            }
+            _ => return None, // a `..` after a name steps back through a name inside the worktree
+        }
+    }
+    named.then_some(out)
+}
+
+/// The worktree's git index from its admin folder: a plain file with exactly one link, at most 512 MiB. `None` when
+/// nothing was ever staged.
+fn worktree_index(admin: &crate::projects::pinned::Pinned) -> Result<Option<Vec<u8>>, &'static str> {
+    const CAP: u64 = 512 << 20;
+    // A regular file only (#234 follow-up): the pinned open uses O_NOFOLLOW (a symlink fails), O_NONBLOCK (a FIFO
+    // can't stall the run) and checks the opened file is regular (a directory, FIFO or device fails).
+    match admin.read_single_link("index", CAP) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("the worktree's git index isn't a plain file with one link"),
+    }
 }
 
 /// bhishma M1 on 7c09e27: the walkthrough folder is left out of the worktree's tree, so nothing in it may be there
