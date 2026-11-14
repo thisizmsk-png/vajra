@@ -73,9 +73,10 @@ pub(crate) struct Held {
 /// (CR, ESC and the other C0 and C1 codes), and every Unicode Default_Ignorable_Code_Point (DerivedCoreProperties.txt,
 /// Unicode 16): the bidi controls, zero-width and joiner characters, soft hyphen, the combining grapheme joiner,
 /// variation selectors, Hangul fillers, tag characters and the reserved ignorable ranges. A renderer may draw none of
-/// these, so none can reach the dialog.
+/// these, so none can reach the dialog. Also the line and paragraph separators U+2028 and U+2029 (bhishma on #226):
+/// they are neither, but a renderer breaks the line at them, so one command could show as two.
 fn hides_text(c: char) -> bool {
-    (c.is_control() && c != '\t') || default_ignorable(c)
+    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') || default_ignorable(c)
 }
 
 /// Unicode's Default_Ignorable_Code_Point property, in full (Unicode 16.0 DerivedCoreProperties.txt).
