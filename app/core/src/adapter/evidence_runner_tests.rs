@@ -97,6 +97,32 @@ fn the_profile_denies_the_vajra_dirs_last_and_limits_writes() {
     }
 }
 
+/// bhishma's ruling B on #250: the trust-evaluation agent is allowed by its exact name only with a network seat. Either
+/// way the security server's denies and the Keychains read deny stay, and the three other denials the https fetch
+/// printed (the dtrace helper, the notify shared memory, the kernel-control socket) stay denied.
+#[test]
+fn the_trust_evaluation_agent_is_allowed_only_with_a_network_seat_and_keychain_denies_stay() {
+    let t = Tmp::new("seat-mach");
+    let agent = "(global-name \"com.apple.TrustEvaluationAgent\")";
+    let (off, on) = (t.profile(false).sbpl().unwrap(), t.profile(true).sbpl().unwrap());
+    assert!(!off.contains("TrustEvaluationAgent"), "no seat, no trust agent: {off}");
+    assert_eq!(on.matches("TrustEvaluationAgent").count(), 1, "{on}");
+    assert!(on.contains(&format!("(allow mach-lookup {agent})\n")), "exact name, not a prefix: {on}");
+    let keychains = format!("(subpath \"{}\")", t.home().join("Library/Keychains").display());
+    for text in [&off, &on] {
+        let deny = text.lines().find(|l| l.starts_with("(deny mach-lookup")).unwrap();
+        for name in ["(global-name \"com.apple.SecurityServer\")", "(global-name-prefix \"com.apple.securityd\")", "(global-name \"com.apple.secd\")"] {
+            assert!(deny.contains(name), "{name} stays denied: {text}");
+        }
+        let last = text.rfind("(deny file-read* file-write*").unwrap();
+        assert!(text[last..].contains(&keychains), "the Keychains read deny stays last: {text}");
+        let allows: Vec<&str> = text.lines().filter(|l| l.starts_with("(allow")).collect();
+        for kept in ["dtracehelper", "ipc-posix-shm", "system-socket"] {
+            assert!(allows.iter().all(|l| !l.contains(kept)), "{kept} stays denied: {text}");
+        }
+    }
+}
+
 #[test]
 fn a_path_that_could_break_out_of_the_profile_text_is_refused() {
     let t = Tmp::new("lit");

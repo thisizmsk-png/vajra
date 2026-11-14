@@ -96,6 +96,11 @@ const ALLOWED_MACH: &[&str] = &[
     "com.apple.trustd.agent",
 ];
 
+/// Allowed only when the run has a network seat (bhishma's ruling B on #250): the agent that finishes a TLS chain check.
+/// Without it curl's https fetch fails with "unable to get local issuer certificate". It evaluates trust; it is not the
+/// security server, so Keychain items stay denied. A run with no seat has no use for it and never reaches it.
+const SEAT_MACH: &str = "com.apple.TrustEvaluationAgent";
+
 /// A path as a Seatbelt string literal: absolute, no NUL, quotes and backslashes escaped. `None` refuses it.
 fn lit(p: &Path) -> Option<String> {
     let s = p.to_str()?;
@@ -174,6 +179,7 @@ impl Profile {
         // by itself if Seatbelt ever does; the test pins what it does today.
         if self.network {
             p.push_str("(allow network-outbound (remote ip))\n");
+            p.push_str(&format!("(allow mach-lookup (global-name \"{SEAT_MACH}\"))\n"));
         } else {
             p.push_str("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n");
         }
