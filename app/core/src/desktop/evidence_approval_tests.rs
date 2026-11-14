@@ -45,6 +45,7 @@ fn ask() -> Ask {
         account: "codex (work)".into(),
         commands: vec!["npm ci".into(), "npm test".into()],
         network: false,
+        repo: "/tmp/no-repo/.git".into(),
     }
 }
 
@@ -566,7 +567,7 @@ mod runner_wiring {
         }
         /// The approval for this repository's worktree: the module's ask at `c1`.
         fn ask(&self) -> Ask {
-            Ask { commit: self.c1.clone(), ..super::ask() }
+            Ask { commit: self.c1.clone(), repo: self.common(), ..super::ask() }
         }
     }
 
@@ -614,6 +615,31 @@ mod runner_wiring {
 
     fn go(app: &App, g: &Git, a: Ask, network: bool, now: SystemTime, seen: &Seen) -> Result<(String, RunOutcome), String> {
         go_at(app, &g.here(), a, network, now, seen)
+    }
+
+    /// Codex P1 on #249: an approval asked for repository A, run in a second repository B at the same commit, with B as
+    /// both the worktree and the git common dir and the approved ask and slug kept, runs nothing and stays unused. Nor
+    /// does an ask that names B, since the held one names A.
+    #[test]
+    fn an_approval_for_one_repository_never_runs_in_another_at_the_same_commit() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        let (b_c1, _) = make_repo(&g.root.join("other"), true);
+        assert_eq!(b_c1, g.c1, "the same files and dates give the same commit");
+        let b_work = g.root.join("other-work");
+        git_in(&g.root.join("other"), &["worktree", "add", "-q", "--detach", b_work.to_str().unwrap(), &b_c1]);
+        let b = Where { worktree: b_work, common: g.root.join("other/.git"), slug: format!("deliver-{RUN}") };
+        let a = g.ask();
+        approved(&app, &a);
+        let seen = Seen::default();
+        let err = go_at(&app, &b, a.clone(), false, at(T0 + 2), &seen).unwrap_err();
+        assert!(err.contains("isn't the one the approval was asked for"), "{err}");
+        let err = go_at(&app, &b, Ask { repo: b.common.clone(), ..a.clone() }, false, at(T0 + 2), &seen).unwrap_err();
+        assert!(err.contains("repository changed after approval"), "{err}");
+        assert!(seen.borrow().is_empty(), "nothing ran in B");
+        // The first refusal left the approval unused; the second voided it, as any changed ask does.
+        assert!(app.evidence_approval_consumed(RUN).is_none());
     }
 
     fn approved(app: &App, a: &Ask) -> String {
@@ -769,7 +795,19 @@ mod runner_wiring {
         let g = repo(&t);
         approved(&app, &g.ask());
         make_repo(&g.root.join("other"), false);
+        // Its git dir isn't the approval's repository (codex P1 on #249).
         let w = Where { common: g.root.join("other/.git"), ..g.here() };
+        refused_where(&app, &g, &w, "isn't the one the approval was asked for");
+    }
+
+    #[test]
+    fn another_repositorys_worktree_with_this_git_dir_never_runs() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        approved(&app, &g.ask());
+        make_repo(&g.root.join("other"), false);
+        let w = Where { worktree: g.root.join("other"), ..g.here() };
         refused_where(&app, &g, &w, "isn't the run's repository");
     }
 
@@ -821,7 +859,7 @@ mod runner_wiring {
                 git_in(&repo_dir, &["pack-refs", "--all", "--prune"]);
                 assert!(!g.common().join("refs/heads/main").exists(), "the ref is only in packed-refs");
             }
-            let a = Ask { commit: g.c2.clone(), ..super::ask() };
+            let a = Ask { commit: g.c2.clone(), ..g.ask() };
             approved(&app, &a);
             let w = Where { worktree: repo_dir, ..g.here() };
             let seen = Seen::default();
@@ -942,7 +980,7 @@ mod runner_wiring {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(&p, "x\n").unwrap();
         }
-        let a = Ask { commit, commands: commands.iter().map(|c| c.to_string()).collect(), ..super::ask() };
+        let a = Ask { commit, commands: commands.iter().map(|c| c.to_string()).collect(), ..g.ask() };
         approved(&app, &a);
         let seen = Seen::default();
         let got = go(&app, &g, a, false, at(T0 + 2), &seen);
@@ -974,7 +1012,7 @@ mod runner_wiring {
             fs::create_dir_all(&sub).unwrap();
         }
         fs::write(sub.join("test_evil.py"), "def test_x(): pass\n").unwrap();
-        let a = Ask { commit, commands: vec!["pytest".into()], ..super::ask() };
+        let a = Ask { commit, commands: vec!["pytest".into()], ..g.ask() };
         approved(&app, &a);
         let seen = Seen::default();
         let got = go(&app, &g, a, false, at(T0 + 2), &seen);
@@ -1167,7 +1205,7 @@ mod runner_wiring {
         git_in(&w, &["add", "data"]);
         git_in(&w, &["commit", "-qm", "w"]);
         let c3 = git_in(&w, &["rev-parse", "HEAD"]);
-        let a = Ask { commit: c3, ..super::ask() };
+        let a = Ask { commit: c3, ..g.ask() };
         approved(&app, &a);
         let seen = Seen::default();
         let err = go(&app, &g, a.clone(), false, at(T0 + 2), &seen).unwrap_err();
@@ -1217,10 +1255,34 @@ mod runner_wiring {
     #[test]
     fn a_loose_ref_that_is_there_but_unreadable_is_refused_not_read_from_packed_refs() {
         // The main checkout is on branch main; its packed value is c2. A loose main that can't be read must refuse.
-        let breakers: [Step<Path>; 3] = [
+        use std::os::unix::fs::PermissionsExt;
+        // Codex P2 on #249: every way a loose ref can be there but unreadable, at the ref or at a folder on its way.
+        let other_c1 = |r: &Path| fs::write(r, format!("{}\n", git_in(r.parent().unwrap(), &["rev-parse", "HEAD~1"]))).unwrap();
+        let breakers: [Step<Path>; 9] = [
             ("a link", &|r| std::os::unix::fs::symlink("../../packed-refs", r).unwrap()),
             ("a folder", &|r| fs::create_dir(r).unwrap()),
             ("not a sha", &|r| fs::write(r, "garbage\n").unwrap()),
+            ("not UTF-8", &|r| fs::write(r, b"\xff\xfe\n").unwrap()),
+            ("too big", &|r| fs::write(r, "a".repeat(8192)).unwrap()),
+            ("a second name", &|r| {
+                other_c1(r);
+                fs::hard_link(r, r.with_file_name("twin")).unwrap();
+            }),
+            ("unreadable", &|r| {
+                other_c1(r);
+                fs::set_permissions(r, fs::Permissions::from_mode(0o000)).unwrap();
+            }),
+            ("its folder unreadable", &|r| {
+                other_c1(r);
+                fs::set_permissions(r.parent().unwrap(), fs::Permissions::from_mode(0o000)).unwrap();
+            }),
+            ("its folder a link", &|r| {
+                let heads = r.parent().unwrap();
+                let real = heads.with_file_name("real-heads");
+                fs::rename(heads, &real).unwrap();
+                other_c1(&real.join("main"));
+                std::os::unix::fs::symlink("real-heads", heads).unwrap();
+            }),
         ];
         for (what, breaker) in breakers {
             let t = Tmp::new();
@@ -1229,11 +1291,14 @@ mod runner_wiring {
             let repo_dir = g.root.join("repo");
             git_in(&repo_dir, &["pack-refs", "--all", "--prune"]);
             breaker(&g.common().join("refs/heads/main"));
-            let a = Ask { commit: g.c2.clone(), ..super::ask() };
+            let a = Ask { commit: g.c2.clone(), ..g.ask() };
             approved(&app, &a);
             let w = Where { worktree: repo_dir, ..g.here() };
             let seen = Seen::default();
             let err = go_at(&app, &w, a, false, at(T0 + 2), &seen).unwrap_err();
+            let heads = g.common().join("refs/heads");
+            let _ = fs::set_permissions(&heads, fs::Permissions::from_mode(0o755));
+            let _ = fs::set_permissions(heads.join("main"), fs::Permissions::from_mode(0o644));
             assert!(err.contains("can't be read"), "{what}: {err}");
             assert!(seen.borrow().is_empty(), "{what}: nothing ran");
         }
