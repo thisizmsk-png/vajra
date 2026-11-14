@@ -481,10 +481,10 @@ fn term_open(
 ) -> Res {
     let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
     // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
-    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        if own.record {
-            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
-        }
+    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid)
+        && own.record
+    {
+        let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
     }
     Ok(term_value(&i))
 }
@@ -528,10 +528,10 @@ fn setup_sign_in(
 ) -> Res {
     let cmd = app.setup_sign_in_command(&id)?;
     let i = terms.open_sign_in(&cmd, rows, cols, term_sink(on_event)).map_err(term_err)?;
-    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        if own.record {
-            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
-        }
+    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid)
+        && own.record
+    {
+        let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
     }
     Ok(term_value(&i))
 }
