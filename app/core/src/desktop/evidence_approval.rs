@@ -290,7 +290,13 @@ impl ApprovalDesk {
                 let _ = self.void_evidence_approval(&ask.run_id, "the run ended");
                 return Err("the run ended before you answered".into());
             }
-            let state = self.evidence_approval_at(&ask.run_id, SystemTime::now()).map_err(|e| e["reason"].as_str().unwrap_or("the approval can't be read").to_string())?;
+            // Under the record lock: an answer writes the file before it sets the held answer, and a read between the
+            // two would see an approved file with no held answer, which reads as expired.
+            let state = {
+                let _g = crate::lock(&LOCK);
+                self.evidence_approval_at(&ask.run_id, SystemTime::now())
+            }
+            .map_err(|e| e["reason"].as_str().unwrap_or("the approval can't be read").to_string())?;
             if state["sha256"].as_str() != Some(asked.as_str()) {
                 return Err("the approval is for another list".into());
             }
