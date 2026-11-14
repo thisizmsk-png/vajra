@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// Name of the key file that must never be opened. Only this module names it.
-const DENIED_NAME: &str = ".hmac-key";
+pub(crate) const DENIED_NAME: &str = ".hmac-key";
 
 #[derive(Debug)]
 pub enum Denied {
@@ -187,6 +187,18 @@ impl Allowlist {
 
 fn safe_name(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && s != DENIED_NAME
+}
+
+/// Whether the key file in `state_dir` has no second name. lstat only: nothing is opened or read. Seatbelt checks the
+/// path a process uses, so a hard link to the key made anywhere else (by any unsandboxed process) would reach it through
+/// a path no deny rule names; the evidence runner refuses to start then (bhishma M4 on #234). A key that is a symlink
+/// or not a plain file fails too. A missing key passes: there is nothing to reach, and signing then ends "no key".
+pub fn key_has_one_link(state_dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(state_dir.join(DENIED_NAME)) {
+        Ok(m) => m.file_type().is_file() && m.nlink() == 1,
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+    }
 }
 
 /// The path an open descriptor refers to, as the OS reports it (not the name it was opened by).

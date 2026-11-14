@@ -1,4 +1,6 @@
 // Shell B (FG-03): project tabs in the title bar, the project column, view tabs, the inspector, the status bar.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
@@ -104,6 +106,28 @@ describe("Shell B frame (FG-03)", () => {
     expect(within(web).getAllByText("Fix the login loop").length).toBeGreaterThan(0);
     expect(within(web).queryAllByText("Add rate limits")).toHaveLength(0);
     expect(within(web).getByText(S.column.noRun)).toBeTruthy();
+  });
+
+  it("shows a folder path on one line with a tooltip, and the Unsorted sentence as a paragraph that wraps", async () => {
+    boot();
+    const col = await screen.findByRole("complementary", { name: S.column.label("api") });
+    const path = within(col).getByText("/src/api");
+    expect(path.className).toBe("v-pcol__path");
+    expect(path.parentElement?.getAttribute("title")).toBe("/src/api");
+    fireEvent.click(tabs().getByRole("link", { name: new RegExp(`^${S.projects.unsorted}`) }));
+    const loose = await screen.findByRole("complementary", { name: S.column.label(S.projects.unsorted) });
+    const hint = within(loose).getByText(S.projects.unsortedHint);
+    expect(hint.tagName).toBe("P");
+    expect(hint.className).toContain("v-pcol__meta--hint");
+    expect(loose.querySelector(".v-pcol__path")).toBeNull();
+  });
+
+  it("lets the Unsorted sentence wrap: its rule undoes the one-line row and never cuts the text", () => {
+    const css = readFileSync(resolve(__dirname, "../src/shell/frame.css"), "utf8");
+    const rule = /\.v-pcol__meta--hint\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(rule).toMatch(/height:\s*auto/);
+    expect(rule).toMatch(/display:\s*block/);
+    expect(rule).not.toMatch(/nowrap|ellipsis|overflow:\s*hidden/);
   });
 
   it("Cmd+1..n switch projects in tab order", async () => {

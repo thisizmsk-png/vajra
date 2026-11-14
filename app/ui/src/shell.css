@@ -50,6 +50,8 @@
 .v-launch .v-button--primary .v-kbd-group { display: none; }
 .v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
+/* The page title stands clear of the first section heading; flush, the two read as one two-line title. */
+h1.v-run__name { margin-bottom: var(--space-lg); }
 .v-run__row { display: flex; align-items: center; gap: var(--space-md); height: 100%; border-bottom: 1px solid var(--c-border); }
 .v-run__row > span { flex: 1; }
 .v-run__row > .v-badge { flex: none; }
@@ -63,6 +65,16 @@
 .v-run__who .v-wp__ran, .v-run__who .v-wp__err { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v-run__cmd { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); margin-bottom: var(--space-sm); }
 .v-run__cmd pre { margin: 0; max-width: 100%; max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/16px var(--font-mono); color: var(--c-text-secondary); }
+/* Proof (6i): the label first, then the record and the export, all left-aligned on one column. */
+.v-proof { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-sm); }
+.v-proof__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); }
+.v-proof__why { display: flex; flex-direction: column; gap: var(--space-xs); padding-left: var(--space-md); border-left: 2px solid var(--c-border-strong); }
+.v-proof__record { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: var(--space-md); row-gap: var(--space-xs); margin: 0; font: 12px/16px var(--font-ui); }
+.v-proof__record dt { color: var(--c-text-secondary); }
+.v-proof__record dd { margin: 0; min-width: 0; }
+.v-proof__hash { overflow-wrap: anywhere; }
+.v-proof__acts, .v-proof__post { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-sm); }
+.v-proof__post .v-field { min-width: min(100%, 360px); }
 .v-home__report { margin: 0; padding: var(--space-md); max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/16px var(--font-mono); color: var(--c-text-secondary); border: 1px solid var(--c-border); }
 .v-home__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .v-home__list li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); border-bottom: 1px solid var(--c-border); }
@@ -91,6 +103,10 @@
 .v-crew__err { padding: var(--space-sm) var(--space-lg); border-bottom: 1px solid var(--c-border); }
 .v-crew__body { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px minmax(0, 1fr) 280px; }
 .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 320px minmax(0, 1fr); }
+/* A worker's own tab is the same pane and Details as Crew, without the tree: Details sits beside the stream, not under it. */
+/* It fills the screen's height (the screen is a flex column inside an overflow-hidden main), and its single row is capped
+   at that height, so the stream and Details scroll inside their panes instead of running off the window. */
+.v-worker { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 280px; grid-template-rows: minmax(0, 1fr); }
 .v-crew__tree { min-height: 0; overflow: auto; padding: 6px var(--space-sm); border-right: 1px solid var(--c-border); }
 .v-crew__pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }
 .v-crew__pane--facts { padding: var(--space-xl); gap: var(--space-lg); max-width: 760px; }
@@ -147,6 +163,13 @@
 .v-history__meter > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--c-text-secondary); }
 /* With the report open, Status and Updated give their room to the campaign (the report names its status). */
 .v-history__body--open .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
+/* With a report open the list has about 560 px at 1280. The run name gets what is left, so the count loses its
+   meter and its column shrinks to the count. 64 px holds the sortable "Passing" header and a three-digit count beside
+   16 px of cell padding. Integrity (168) and Actions (140) keep their full widths: they hold "Integrity check failed"
+   and the Report and Verify buttons. */
+.v-history__body--open .v-history__main { padding-inline: var(--space-lg); }
+.v-history__body--open .v-history__meter { display: none; }
+.v-history__body--open .v-table th:nth-child(3) { width: 64px; }
 .v-history__main { padding: var(--space-xl); display: flex; flex-direction: column; gap: var(--space-xl); }
 .v-history__muted { color: var(--c-text-secondary); font-size: 12px; }
 .v-history__acts { display: inline-flex; gap: var(--space-xs); }
@@ -181,13 +204,25 @@
 .v-loading { display: flex; flex-direction: column; gap: 10px; padding: var(--space-xs) 0; }
 .v-loading .v-skeleton { height: 12px; max-width: 420px; }
 .v-loading .v-skeleton:nth-child(2n) { max-width: 300px; }
+/* Loading rows wait 100 ms before they show, so a load that finishes sooner (a view's first open) never flashes them. */
+.v-loading { visibility: hidden; animation: v-loading-show 0s linear 100ms forwards; }
+@keyframes v-loading-show { to { visibility: visible; } }
 .v-crew__state { padding: 48px var(--space-xl); }
 .v-crew__tree--loading { border: 0; padding: 0; max-width: 320px; }
 
 /* Under 1200 px (UX.md section 3): Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */
 @media (max-width: 1199px) {
-  .v-crew__body { grid-template-columns: 240px minmax(0, 1fr) 220px; }
-  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 240px minmax(0, 1fr); }
+  /* 260 leaves the middle its 480 px minimum at 960 with the details column open. Every row keeps its chevron slot,
+     shrunk to 16 px, which is the indent step, so a leaf's icon stays in the same column as its siblings' and under
+     its parent's label. Dropping the slot only on leaf rows would pull a leaf left of its own parent. A longer
+     status still clips, and the tree gives it a tooltip. */
+  .v-crew__body { grid-template-columns: 260px minmax(0, 1fr) 220px; }
+  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 260px minmax(0, 1fr); }
+  .v-crew__tree .v-tree__twisty { min-width: 16px; }
+  .v-worker { grid-template-columns: minmax(0, 1fr) 220px; }
+  /* The narrow Details column: each label sits over its value, so a path and its Copy button get the whole width. */
+  .v-crew__aside .v-crew__facts { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .v-crew__aside .v-crew__facts dd { margin-bottom: var(--space-sm); }
   .v-crew__head { padding: 0 var(--space-md); }
   .v-history .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
   .v-history__body--open { grid-template-columns: minmax(0, 1fr); }

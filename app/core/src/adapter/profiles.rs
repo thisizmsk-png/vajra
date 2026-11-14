@@ -6,7 +6,7 @@
 //! `CODEX_HOME` holding hostile settings, a real `codex exec` against a loopback stub) decided the Codex keys:
 //! - `--sandbox`, `approval_policy`, `sandbox_workspace_write.*`, `notify` and `model_provider` given with `-c` win over
 //!   the user's `config.toml`; `writable_roots` replaces the user's list;
-//! - `tools.web_search=false` does NOT hold (the tool is still offered); `web_search="disabled"` does, so it is used;
+//! - `tools.web_search=false` does NOT hold (the tool is still offered); `web_search="disabled"` does (no longer passed: the user's own web search setting applies, and network follows the seat's switch, vajra-1 2026-11-13);
 //! - the built-in `openai` provider cannot be overridden at all (codex refuses to load), so the login route passes no
 //!   retry keys; Codex's own retry default stays, and the card does not claim otherwise;
 //! - a legacy `profile = ...` key makes codex refuse to start (fails closed); a `<name>.config.toml` profile loads only
@@ -73,18 +73,19 @@ pub struct Profile {
 
 const CODEX_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`codex exec --json`, stdin /dev/null" },
-    Always { setting: "sandbox", how: "`--sandbox workspace-write`" },
-    Always { setting: "network", how: "`-c sandbox_workspace_write.network_access=<seat.network>`" },
-    Always { setting: "writable_roots", how: "`-c sandbox_workspace_write.writable_roots=[<ticket tmp>]` (replaces the user's list)" },
-    Always { setting: "tmp", how: "`-c sandbox_workspace_write.exclude_slash_tmp=true`, `exclude_tmpdir_env_var=true`" },
-    Always { setting: "web_search", how: "`-c web_search=\"disabled\"` unless the seat has network" },
+    Always { setting: "sandbox", how: "a fresh `vajra-<16 hex>` permission profile per launch (`-c default_permissions=...`), replacing the user's sandbox" },
+    Always { setting: "vajra_dirs", how: "the Vajra state dir and the app data dir are `none` in the profile, as defense in depth; the user's own Codex tools run outside it, so nothing is claimed about the key (owner 2026-11-13)" },
+    Always { setting: "writable_roots", how: "only the worktree and the ticket tmp are `write`; `/tmp` and `$TMPDIR` aren't" },
+    Always { setting: "network", how: "`-c permissions.vajra-<16 hex>.network={enabled=<seat.network>}`: network follows the seat's switch (vajra-1 2026-11-13)" },
+    Always { setting: "web_search", how: "not overridden: the user's own Codex web search setting applies (vajra-1 2026-11-13)" },
     Always { setting: "approval", how: "`-c approval_policy=\"never\"`" },
     Always { setting: "working_dir", how: "the core's worktree under <work>" },
     Always { setting: "model_and_effort", how: "`-m`, `-c model_reasoning_effort` when the seat names them" },
     Always { setting: "provider_route", how: "gateway: a Vajra-owned CODEX_HOME and zero retries; login: the user's own" },
 ];
 
-const CODEX_WORKER_USER: &[&str] = &["login", "mcp_servers", "notify", "AGENTS.md", "history", "default model"];
+/// Owner 2026-11-13, "keep my extras": the user's own hooks, plugins, apps, MCP servers and notify stay on.
+const CODEX_WORKER_USER: &[&str] = &["login", "hooks", "plugins", "apps", "mcp_servers", "notify", "AGENTS.md", "history", "default model"];
 
 const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
@@ -139,8 +140,10 @@ pub const CLAUDE_UNPROVEN: Unsupported = Unsupported {
 pub fn claude_worker_shape_input() -> Result<String, String> {
     let p = |s: &str| PathBuf::from(format!("/vajra-flag-shape/{s}"));
     let tmp = p("tmp");
-    let body = claude_worker_flag(&p("home"), &p("work"), &[p("repo")], &p("data"), &tmp)?;
-    let l = WorkerLaunch { kind: RoleKind::Worker, prompt: "vajra flag shape", model: None, effort: None, network: false, ticket_tmp: &tmp };
+    let work = p("work");
+    let body = claude_worker_flag(&p("home"), &work, &[p("repo")], &p("data"), &tmp)?;
+    // `worktree`, `deny` and `profile` are Codex's (its permission profile); the Claude argv reads none of them.
+    let l = WorkerLaunch { kind: RoleKind::Worker, prompt: "vajra flag shape", model: None, effort: None, network: false, ticket_tmp: &tmp, worktree: &work, deny: &[], profile: "" };
     let (claude, settings) = (p("claude"), p("flag.json"));
     let c = ClaudeWorker { claude: &claude, session_id: "00000000-0000-4000-8000-000000000000", settings: &settings, tools: "Read,Grep,Glob,Bash,Edit,Write" };
     let argv = claude_worker_argv(&l, &c).map_err(|e| format!("{}: {}", e.field, e.reason))?;
@@ -244,6 +247,106 @@ pub struct WorkerLaunch<'a> {
     pub network: bool,
     /// `<work>/<project>/<run>/tmp/<task>-r<n>`: the only writable root besides the worktree, and the `TMPDIR`.
     pub ticket_tmp: &'a Path,
+    /// The worktree, the session's cwd: writable.
+    pub worktree: &'a Path,
+    /// Dirs the session may not even read (6k): the Vajra state dir and the app data dir, from `vajra_deny_dirs`.
+    pub deny: &'a [PathBuf],
+    /// This launch's permission profile name, a fresh `codex_profile_name` (unused by other harnesses).
+    pub profile: &'a str,
+}
+
+/// 6k (S11): what a Codex session's profile denies, as defense in depth only: the user's own Codex tools run outside
+/// it, so no claim is made about the key (owner 2026-11-13). The Vajra state dir holds the signing key and the stores;
+/// the app data dir holds seats, ledgers and control files. Seatbelt matches real paths, so each dir is given as written and, when
+/// that differs, as its canonical form (`/var` is `/private/var`). A dir that doesn't exist yet is resolved through
+/// its parent.
+pub fn vajra_deny_dirs(home: &Path, data: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in [home.join(".claude").join("vajra"), data.to_path_buf()] {
+        let real = d.canonicalize().ok().or_else(|| Some(d.parent()?.canonicalize().ok()?.join(d.file_name()?)));
+        for p in std::iter::once(d.clone()).chain(real) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+pub const CODEX_PROJECT_TOOLS: &str = "The worktree has its own .codex or .agents folder, which Codex would load outside its sandbox.";
+
+/// bhishma #216 M1-b: Codex loads a worktree's own `.codex` (config, hooks.json, agents) and `.agents` (skills), and an
+/// earlier session there can write them. A Codex launch over either one, unless it is an empty folder, is refused.
+pub fn codex_project_outside(worktree: &Path) -> Option<String> {
+    for d in [".codex", ".agents"] {
+        let p = worktree.join(d);
+        match std::fs::symlink_metadata(&p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(m) if m.is_dir() => {
+                if !std::fs::read_dir(&p).is_ok_and(|mut r| r.next().is_none()) {
+                    return Some(CODEX_PROJECT_TOOLS.into());
+                }
+            }
+            _ => return Some(CODEX_PROJECT_TOOLS.into()),
+        }
+    }
+    None
+}
+
+/// A fresh name for one launch's Codex permission profile: `vajra-` and 16 random hex digits. A user's `config.toml`
+/// table of the same name would merge into ours and could add write roots (S11 hostile-config check), so the name is
+/// one the user can't know in advance.
+pub fn codex_profile_name() -> std::io::Result<String> {
+    Ok(format!("vajra-{}", crate::control::nonce::random_hex(8)?))
+}
+
+fn valid_profile_name(n: &str) -> bool {
+    n.strip_prefix("vajra-").is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+}
+
+/// The profile's `-c` values (S11): the whole disk readable, each deny dir unreadable, only the `write` dirs writable,
+/// network as given. Under a profile, Codex ignores `--sandbox` and the `sandbox_workspace_write` keys, and the
+/// profile wins over the user's own `sandbox_mode` and `default_permissions` (S11, codex 0.166). `name` is a fresh
+/// `codex_profile_name`, so no user table merges into it.
+pub fn codex_profile_overrides(name: &str, deny: &[PathBuf], write: &[&Path], network: bool) -> Result<Vec<String>, InvalidInput> {
+    if !valid_profile_name(name) {
+        return Err(bad("profile", "must be a fresh vajra-<16 hex> name"));
+    }
+    if deny.is_empty() {
+        return Err(bad("deny", "a Codex session always has the Vajra dirs denied"));
+    }
+    let mut fs = vec!["\"/\"=\"read\"".to_string()];
+    for d in deny {
+        fs.push(format!("\"{}\"=\"none\"", toml_path(d, "deny")?));
+    }
+    for w in write {
+        fs.push(format!("\"{}\"=\"write\"", toml_path(w, "write")?));
+    }
+    Ok(vec![
+        format!("permissions.{name}.filesystem={{{}}}", fs.join(",")),
+        format!("permissions.{name}.network={{enabled={network}}}"),
+        format!("default_permissions=\"{name}\""),
+    ])
+}
+
+/// bhishma #216 H1: the plain Codex run Lead (`start_run` with provider `codex`), `codex -c ... -- <ask>`. It runs under
+/// a fresh permission profile like a worker's: the Vajra dirs unreadable, writes only in the project folder and the
+/// system temp dir, no network (a Lead has no seat switch) and no approvals; web search is the user's own setting. The user's own Codex tools stay on (owner 2026-11-13). A Codex Lead's
+/// run is never counted guarded (`evidence_of`): it is the user's own interactive session.
+pub fn codex_run_lead_argv(codex: &Path, ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path) -> Result<Vec<String>, InvalidInput> {
+    argv::check_ask(ask)?;
+    // bhishma #216 Low 1: the binary Vajra found, by its absolute path, never the bare word looked up on PATH again.
+    let codex = codex.to_str().filter(|c| codex.is_absolute() && !c.is_empty()).ok_or_else(|| bad("codex", "codex must be an absolute UTF-8 path"))?;
+    let mut a = vec![codex.to_string()];
+    // bhishma #216 M-Lead (vajra-1's decision): the Lead gets a worker's approvals and sandbox, with no way to run a
+    // command outside it.
+    let mut kv = vec!["approval_policy=\"never\"".to_string()];
+    kv.extend(codex_profile_overrides(profile, deny, &[project, tmp], false)?);
+    for o in kv {
+        a.extend(["-c".to_string(), o]);
+    }
+    a.extend(["--".to_string(), ask.to_string()]);
+    Ok(a)
 }
 
 fn bad(field: &'static str, reason: &'static str) -> InvalidInput {
@@ -272,20 +375,13 @@ fn worker_kind(l: &WorkerLaunch<'_>) -> Result<(), InvalidInput> {
 
 /// The confinement overrides every Codex worker and verifier gets, in a fixed order. `tmp_excludes` is false only on
 /// the gateway route, whose base argv already excludes `/tmp` and `$TMPDIR`.
-fn codex_confinement(l: &WorkerLaunch<'_>, tmp_excludes: bool) -> Result<Vec<String>, InvalidInput> {
+fn codex_confinement(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> {
     worker_kind(l)?;
-    let tmp = toml_path(l.ticket_tmp, "ticket_tmp")?;
-    let mut kv = vec![
-        "approval_policy=\"never\"".to_string(),
-        format!("sandbox_workspace_write.network_access={}", l.network),
-        format!("sandbox_workspace_write.writable_roots=[\"{tmp}\"]"),
-    ];
-    if tmp_excludes {
-        kv.extend(["sandbox_workspace_write.exclude_slash_tmp=true".into(), "sandbox_workspace_write.exclude_tmpdir_env_var=true".into()]);
-    }
-    if !l.network {
-        kv.push("web_search=\"disabled\"".into());
-    }
+    toml_path(l.ticket_tmp, "ticket_tmp")?;
+    toml_path(l.worktree, "worktree")?;
+    let mut kv = vec!["approval_policy=\"never\"".to_string()];
+    // vajra-1 2026-11-13: network follows the seat's switch; web search is left to the user's own Codex setting.
+    kv.extend(codex_profile_overrides(l.profile, l.deny, &[l.worktree, l.ticket_tmp], l.network)?);
     Ok(kv.into_iter().flat_map(|v| ["-c".to_string(), v]).collect())
 }
 
@@ -301,15 +397,27 @@ fn before_prompt(mut argv: Vec<String>, extra: Vec<String>) -> Vec<String> {
 /// of `providers::codex_home`) and `TMPDIR` through `worker_env`. The gateway route always names a model.
 pub fn codex_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> {
     let model = l.model.ok_or(bad("model", "a gateway seat names a model"))?;
-    let base = argv::build_gateway_argv(l.prompt, model, l.effort)?;
-    Ok(before_prompt(base, codex_confinement(l, false)?))
+    let mut base = argv::build_gateway_argv(l.prompt, model, l.effort)?;
+    // 6k: the permission profile sets the sandbox; `--sandbox` would switch the profile off (S11).
+    drop_sandbox_flag(&mut base);
+    Ok(before_prompt(base, codex_confinement(l)?))
+}
+
+/// Remove `--sandbox <mode>` and the `sandbox_workspace_write.*` overrides, which a permission profile replaces.
+fn drop_sandbox_flag(a: &mut Vec<String>) {
+    if let Some(i) = a.iter().position(|x| x == "--sandbox") {
+        a.drain(i..(i + 2).min(a.len()));
+    }
+    while let Some(i) = a.windows(2).position(|w| w[0] == "-c" && w[1].starts_with("sandbox_workspace_write.")) {
+        a.drain(i..i + 2);
+    }
 }
 
 /// A Codex worker or verifier under the user's own Codex login (`~/.codex`). No retry override (S3: the built-in
 /// provider cannot be overridden) and no `CODEX_HOME`.
 pub fn codex_login_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> {
     argv::check_ask(l.prompt)?;
-    let mut a: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "exec", "--json", "--sandbox", "workspace-write"].map(String::from).into();
+    let mut a: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "exec", "--json"].map(String::from).into();
     if let Some(m) = l.model {
         if !crate::providers::contract::valid_model_id(m) || m.starts_with('-') {
             return Err(bad("model", "must be a model id"));
@@ -322,7 +430,7 @@ pub fn codex_login_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, Inva
         }
         a.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]);
     }
-    a.extend(codex_confinement(l, true)?);
+    a.extend(codex_confinement(l)?);
     a.extend(["--".into(), l.prompt.into()]);
     Ok(a)
 }
@@ -695,6 +803,8 @@ pub struct CodexWant {
     pub cwd: PathBuf,
     pub ticket_tmp: PathBuf,
     pub network: bool,
+    /// 6k: every one of these must be an unreadable (`none` or `deny`) entry of the session's file-system policy.
+    pub deny: Vec<PathBuf>,
 }
 
 /// Check the first `turn_context` of a rollout against the profile. Anything missing, unknown or wider fails: the
@@ -728,6 +838,8 @@ pub fn check_codex_applied(rollout: &str, want: &CodexWant) -> Result<(), NotApp
     if net && !want.network {
         return no("network is on");
     }
+    // 6k: the Vajra dirs are unreadable, or the session doesn't run.
+    check_denied(p, &want.deny)?;
     if read_only {
         return check_fs_entries(p, &[]);
     }
@@ -743,6 +855,19 @@ pub fn check_codex_applied(rollout: &str, want: &CodexWant) -> Result<(), NotApp
     check_fs_entries(p, &allowed)
 }
 
+/// 6k: each deny dir has an entry whose access is `none` or `deny` (Codex reports `none` as `deny`). The policy must be
+/// present: an older layout with no file-system entries can't show the dirs are locked, so it fails.
+fn check_denied(p: &Value, deny: &[PathBuf]) -> Result<(), NotApplied> {
+    let entries = p.pointer("/file_system_sandbox_policy/entries").and_then(Value::as_array);
+    for d in deny {
+        let locked = entries.is_some_and(|es| es.iter().any(|e| matches!(e["access"].as_str(), Some("none" | "deny")) && e.pointer("/path/path").and_then(Value::as_str).is_some_and(|s| Path::new(s) == d)));
+        if !locked {
+            return Err(NotApplied(format!("the Vajra dir {} is readable", d.display())));
+        }
+    }
+    Ok(())
+}
+
 /// The file-system policy lists the effective entries; it is absent on an older layout, never ignored when present.
 /// `read` and `none` pass; `write` only to an `allowed` path (a special entry such as `slash_tmp`, `tmpdir` or `root`
 /// has no path and fails); an access value Vajra doesn't know fails.
@@ -751,7 +876,7 @@ fn check_fs_entries(p: &Value, allowed: &[PathBuf]) -> Result<(), NotApplied> {
     let Some(entries) = entries.as_array() else { return Err(NotApplied("the file-system policy is not a list".into())) };
     for e in entries {
         match e["access"].as_str() {
-            Some("read" | "none") => {}
+            Some("read" | "none" | "deny") => {}
             Some("write") => match e.pointer("/path/path").and_then(Value::as_str) {
                 Some(s) if allowed.iter().any(|a| a == Path::new(s)) => {}
                 _ => return Err(NotApplied("a write entry is outside the worktree and the ticket temp dir".into())),
