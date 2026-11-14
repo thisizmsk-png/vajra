@@ -48,7 +48,11 @@ describe("FindRepos", () => {
     fireEvent.click(btn);
     await waitFor(() => expect(screen.getByRole("button", { name: W.scanning })).toBeTruthy());
     expect(screen.getByRole("alert")).toBeTruthy();
-    expect(screen.getByRole("button", { name: W.scanning }).hasAttribute("disabled")).toBe(true);
+    const busy = screen.getByRole("button", { name: W.scanning });
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(busy.hasAttribute("disabled")).toBe(false);
+    expect(document.activeElement).toBe(busy);
+    fireEvent.click(busy); // a press while looking does nothing
     release();
   });
 

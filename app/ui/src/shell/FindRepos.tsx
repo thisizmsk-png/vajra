@@ -53,7 +53,7 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
     return (
       <span role="alert" className="v-find__failed">
         <span>{W.scanFailed}</span>
-        <button type="button" className="v-tb__add" disabled={looking} onClick={() => setScan((n) => n + 1)}>
+        <button type="button" className="v-tb__add" aria-disabled={looking} onClick={() => { if (!looking) setScan((n) => n + 1); }}>
           {looking ? W.scanning : W.scanAgain}
         </button>
       </span>
