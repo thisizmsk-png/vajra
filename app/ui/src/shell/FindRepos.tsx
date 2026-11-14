@@ -17,24 +17,42 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
+  const [failed, setFailed] = useState(false);
+  /** Bumped by "Look again" to run the scan once more. */
+  const [scan, setScan] = useState(0);
   const added = useRef(0);
 
   useEffect(() => {
     let live = true;
+    setFailed(false);
     api.projectDiscover().then(
       (r) => {
-        if (live && Array.isArray(r?.found)) {
+        if (!live) return;
+        if (Array.isArray(r?.found)) {
           setFound(r.found);
           setTruncated(r.truncated === true);
-        }
+        } else setFailed(true);
       },
-      () => {},
+      () => {
+        if (live) setFailed(true);
+      },
     );
     return () => {
       live = false;
     };
-  }, []);
+  }, [scan]);
 
+  // A failed look is not "no repositories": say so, and offer the look again. Finding none stays silent.
+  if (failed && found.length === 0) {
+    return (
+      <span role="alert" className="v-find__failed">
+        <span>{W.scanFailed}</span>
+        <button type="button" className="v-tb__add" onClick={() => setScan((n) => n + 1)}>
+          {W.scanAgain}
+        </button>
+      </span>
+    );
+  }
   if (found.length === 0) return null;
   const show = () => {
     setPicked(new Set(found.map((f) => f.root)));
