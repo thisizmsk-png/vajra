@@ -608,6 +608,7 @@ export const S = {
       nonAscii: "Highlighted characters are outside plain ASCII. Check each one is the letter you expect: some look like ASCII letters but aren't.",
       list: (n: number) => (n === 1 ? "1 command, run in this order" : `${n} commands, run in this order`),
       scope: "This approval covers this run and round only. It is used once and never saved as a rule. A redo, a new round or any changed command needs a new approval.",
+      filesScope: "The commands run on this commit's files: every tracked and untracked file must match it. Ignored files, such as installed dependencies and build output, aren't checked against the commit. Vajra counts them in the evidence and refuses ignored files that look like tests.",
       declineNote: "Declining ends the run as Not verified.",
       notNow: "Not now",
       decline: "Decline",

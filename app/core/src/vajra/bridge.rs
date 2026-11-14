@@ -302,6 +302,24 @@ impl Bridge {
     /// there. `None` if any step fails, the total `timeout` runs out, or the repo's own config defines an executable filter
     /// (`repo_filters`: `add` would run it). Same git hardening as `Request::Git`.
     pub fn tree_id(&self, repo: &Path, exclude: &[&str]) -> Option<String> {
+        self.snapshot(repo, exclude, false).map(|s| s.tree)
+    }
+
+    /// `tree_id`'s tree, plus what it leaves out by the ignore rules (bhishma M2 on 7c09e27): `add -A` honours the
+    /// `.gitignore` files, the repo's `info/exclude` and the user's excludes file, so ignored files (installed
+    /// dependencies, build output, `.env`) are never in the tree. Listed in the same private session, with the same
+    /// excludes:
+    /// - `ignored`: `ls-files --others --ignored --exclude-standard --directory`, an ignored folder as one entry,
+    ///   for the evidence's count and hash;
+    /// - `test_like`: the ignored files a test runner's default discovery collects (`TEST_LIKE`), outside the
+    ///   dependency folders each runner skips by default (`TEST_SKIP`).
+    ///
+    /// `None` as for `tree_id`, and when a listing is cut at `OUTPUT_CAP`: never a partial answer.
+    pub fn worktree_snapshot(&self, repo: &Path, exclude: &[&str]) -> Option<Snapshot> {
+        self.snapshot(repo, exclude, true)
+    }
+
+    fn snapshot(&self, repo: &Path, exclude: &[&str], ignored: bool) -> Option<Snapshot> {
         let start = Instant::now();
         // The one read of the config this snapshot uses; the steps below never read the repo's config files again.
         let frozen = self.frozen_config(repo, self.timeout)?;
@@ -378,22 +396,102 @@ impl Bridge {
             // Both exclude the directory LITERALLY (`literal` magic): a base whose name holds `*`, `?` or `[` never leaves out a
             // neighbour it would match as a glob, whose edits would then be missing from both trees (#134 review).
             let top_dir = top.borrow().clone();
-            add.extend(exclude.iter().filter_map(|d| {
-                let abs = if Path::new(d).is_absolute() { PathBuf::from(d) } else { repo.join(d) };
-                let abs = abs.canonicalize().unwrap_or(abs);
-                abs.strip_prefix(&top_dir).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| format!(":(exclude,literal){}", r.display()))
-            }));
+            let excluded: Vec<String> = exclude
+                .iter()
+                .filter_map(|d| {
+                    let abs = if Path::new(d).is_absolute() { PathBuf::from(d) } else { repo.join(d) };
+                    let abs = abs.canonicalize().unwrap_or(abs);
+                    abs.strip_prefix(&top_dir).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| format!(":(exclude,literal){}", r.display()))
+                })
+                .collect();
+            add.extend(excluded.iter().cloned());
             let add: Vec<&str> = add.iter().map(String::as_str).collect();
             #[cfg(test)]
             BEFORE_ADD.with(|h| if let Some(f) = h.borrow().as_ref() { f() });
             git(&add, true)?;
             let tree = git(&["write-tree"], true)?.stdout.trim().to_string();
-            (tree.len() >= 40).then_some(tree)
+            if tree.len() < 40 {
+                return None;
+            }
+            if !ignored {
+                return Some(Snapshot { tree, ..Snapshot::default() });
+            }
+            let names = |o: Output| -> Vec<String> { o.stdout_raw.split(|b| *b == 0).filter(|n| !n.is_empty()).map(|n| String::from_utf8_lossy(n).into_owned()).collect() };
+            let mut list: Vec<String> = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", "."].map(String::from).to_vec();
+            list.extend(excluded.iter().cloned());
+            let listed = git(&list.iter().map(String::as_str).collect::<Vec<_>>(), true)?;
+            let ignored_sha256 = crate::control::sha256::hex_digest(&listed.stdout_raw);
+            let ignored = names(listed);
+            let mut tests: Vec<String> = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--"].map(String::from).to_vec();
+            tests.extend(TEST_LIKE.iter().map(|g| format!(":(glob){g}")));
+            tests.extend(TEST_SKIP.iter().map(|g| format!(":(exclude,glob){g}")));
+            tests.extend(excluded.iter().cloned());
+            let test_like = names(git(&tests.iter().map(String::as_str).collect::<Vec<_>>(), true)?);
+            Some(Snapshot { tree, ignored, ignored_sha256, test_like })
         })();
         let _ = std::fs::remove_dir_all(&dir);
         result
     }
+
+    /// The tree of commit `commit`, read from the git dir `git_dir` alone (bhishma M3 on 7c09e27): `GIT_DIR` set, so
+    /// no `.git` file or folder is looked up; replace objects off, so `refs/replace` can't swap the commit; and the
+    /// raw object's own hash must be `commit`, so whatever git's object lookup did, the bytes are that commit's.
+    /// `None` when any of it fails.
+    pub fn commit_tree(&self, git_dir: &Path, commit: &str) -> Option<String> {
+        if !(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
+            return None;
+        }
+        let raw = self.pinned_git(git_dir, &["cat-file", "commit", commit], None)?.stdout_raw;
+        let hashed = self.pinned_git(git_dir, &["hash-object", "-t", "commit", "--no-filters", "--stdin"], Some(&raw))?;
+        if hashed.stdout.trim() != commit {
+            return None;
+        }
+        let first = raw.split(|b| *b == b'\n').next()?;
+        let tree = std::str::from_utf8(first.strip_prefix(b"tree ")?).ok()?;
+        (tree.len() == 40 && tree.bytes().all(|b| b.is_ascii_hexdigit())).then(|| tree.to_string())
+    }
+
+    /// Whether `tree` (a tree id from `commit_tree`) has an entry at `rel`, read the same pinned way. `None` when git
+    /// can't answer.
+    pub fn tree_has(&self, git_dir: &Path, tree: &str, rel: &str) -> Option<bool> {
+        let o = self.pinned_git(git_dir, &["ls-tree", "-z", "--name-only", tree, "--", rel], None)?;
+        Some(!o.stdout_raw.is_empty())
+    }
+
+    /// Git on `git_dir` alone, with replace objects off and no fsmonitor or hook; exit 0 only.
+    fn pinned_git(&self, git_dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Option<Output> {
+        let argv: Vec<String> = ["--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"]
+            .iter()
+            .chain(args)
+            .map(|a| a.to_string())
+            .collect();
+        let env = [("GIT_DIR", git_dir), ("GIT_NO_REPLACE_OBJECTS", Path::new("1")), ("GIT_CONFIG_GLOBAL", Path::new("/dev/null"))];
+        run_process_env(&self.git, &argv, Some(git_dir), self.timeout, self.home.as_deref(), stdin, &env).ok().filter(|o| o.exit() == Some(0))
+    }
 }
+
+/// `Bridge::worktree_snapshot`'s answer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub tree: String,
+    /// The ignored entries, an ignored folder as one entry ending in `/`.
+    pub ignored: Vec<String>,
+    /// sha256 of that listing's exact bytes (NUL-separated, git's order).
+    pub ignored_sha256: String,
+    /// Ignored files a test runner would collect by default.
+    pub test_like: Vec<String>,
+}
+
+/// Names test runners collect by default: pytest (`conftest.py`, `test_*.py`, `*_test.py`), Go (`*_test.go`), jest,
+/// vitest and mocha (`*.test.*`, `*.spec.*`, `__tests__`), and anything in a test folder (cargo's `tests/`, the
+/// common `test/` and `spec/`).
+pub const TEST_LIKE: [&str; 10] =
+    ["**/conftest.py", "**/test_*.py", "**/*_test.py", "**/*_test.go", "**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/tests/**", "**/test/**", "**/spec/**"];
+
+/// Dependency and tool folders left out of the test-like check: the runners skip them by default (jest and pytest
+/// `node_modules`, pytest a virtualenv and dot folders like `.tox`, cargo its `target`), and installed packages ship
+/// their own tests, which would refuse almost every project.
+pub const TEST_SKIP: [&str; 6] = ["**/node_modules/**", "**/.venv/**", "**/venv/**", "**/target/**", "**/.tox/**", "**/.nox/**"];
 
 /// A repo config as read once by `frozen_config`: the entries `git add` gets, and the repository format.
 #[derive(Debug, Default)]

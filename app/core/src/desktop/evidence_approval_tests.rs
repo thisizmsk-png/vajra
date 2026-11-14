@@ -904,16 +904,163 @@ mod runner_wiring {
         }
     }
 
+    /// bhishma M1 on 7c09e27: the walkthrough folder is left out of the tree, so nothing may be in it for a runner to
+    /// collect. Only this run's own empty folder may be there, before the approval is used and again at spawn.
     #[test]
-    fn the_walkthrough_folder_is_left_out_of_the_comparison() {
+    fn a_file_planted_in_the_walkthrough_folder_never_runs() {
+        let slug = format!("deliver-{RUN}");
+        let plants: [(&str, String); 3] = [
+            ("a conftest in the run's own folder", format!("data/walkthroughs/{slug}/conftest.py")),
+            ("a test file beside it", "data/walkthroughs/test_forced_pass.py".into()),
+            ("another run's old bundle", "data/walkthroughs/deliver-old/evidence.json".into()),
+        ];
+        for (what, rel) in plants {
+            let t = Tmp::new();
+            let app = t.app();
+            let g = repo(&t);
+            approved(&app, &g.ask());
+            let f = g.work().join(&rel);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(&f, "def test_x(): pass\n").unwrap();
+            let seen = Seen::default();
+            let err = go(&app, &g, g.ask(), false, at(T0 + 2), &seen).unwrap_err();
+            assert!(err.contains("walkthrough folder holds files"), "{what}: {err}");
+            assert!(seen.borrow().is_empty(), "{what}: nothing ran");
+            assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "approved", "{what}: the approval isn't used");
+            // Removed, leaving only this run's own empty folder: it runs.
+            fs::remove_file(&f).unwrap();
+            if f.parent().unwrap().file_name().unwrap() != slug.as_str() && f.parent().unwrap().file_name().unwrap() != "walkthroughs" {
+                fs::remove_dir(f.parent().unwrap()).unwrap();
+            }
+            fs::create_dir_all(g.work().join("data/walkthroughs").join(&slug)).unwrap();
+            assert!(go(&app, &g, g.ask(), false, at(T0 + 3), &seen).is_ok(), "{what}: clear again");
+        }
+    }
+
+    #[test]
+    fn a_file_planted_in_the_walkthrough_folder_after_the_check_runs_nothing() {
         let t = Tmp::new();
         let app = t.app();
         let g = repo(&t);
         approved(&app, &g.ask());
-        let bundle = g.work().join("data/walkthroughs/deliver-old/evidence.json");
-        fs::create_dir_all(bundle.parent().unwrap()).unwrap();
-        fs::write(&bundle, "{}\n").unwrap();
-        assert!(go(&app, &g, g.ask(), false, at(T0 + 2), &Seen::default()).is_ok());
+        let seen = Seen::default();
+        let w = g.here();
+        let prof = Profile { worktree: w.worktree.clone(), tmp: w.worktree.with_file_name("run-tmp"), deny: vec![], network: false };
+        let base = w.worktree.join("data/walkthroughs");
+        let caller: Vec<String> = vec![];
+        let p: &Path = &w.worktree;
+        let run = EvidenceRun { script: p, slug: &w.slug, commands: &caller, base: &base, git_common: &w.common, home: p, state_dir: p, tool_path: &[], limit: Duration::from_secs(60), at_spawn: None };
+        let (_, out) = app
+            .run_approved_evidence_with(g.ask(), &prof, &run, at(T0 + 2), |p, r| {
+                fs::create_dir_all(base.join(&w.slug)).unwrap();
+                fs::write(base.join(&w.slug).join("conftest.py"), "import os\n").unwrap();
+                record(&seen, p, r)
+            })
+            .unwrap();
+        assert!(matches!(&out, RunOutcome::Failed(why) if why.contains("walkthrough folder holds files")), "{out:?}");
+        assert!(seen.borrow().is_empty(), "nothing ran");
+    }
+
+    /// bhishma M2 on 7c09e27: ignored files aren't in the compared tree. The check says so in the signed bundle (their
+    /// listing's count and hash) and refuses an ignored file a test runner would collect.
+    #[test]
+    fn ignored_files_are_counted_in_the_bundle_and_an_ignored_test_file_never_runs() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        // The ignore rules come from the repository's exclude file, so the commit itself is unchanged.
+        fs::write(g.common().join("info/exclude"), "node_modules/\nbuild/\n.env\n*.log\n").unwrap();
+        let w = g.work();
+        fs::create_dir_all(w.join("node_modules/pkg/test")).unwrap();
+        fs::write(w.join("node_modules/pkg/index.js"), "module.exports = 1\n").unwrap();
+        fs::write(w.join("node_modules/pkg/test/a.test.js"), "test('x', () => {})\n").unwrap();
+        fs::write(w.join(".env"), "TOKEN=x\n").unwrap();
+        approved(&app, &g.ask());
+        let cores: RefCell<Vec<Value>> = RefCell::default();
+        let seen = Seen::default();
+        let base = w.join("data/walkthroughs");
+        let wh = g.here();
+        let prof = Profile { worktree: w.clone(), tmp: w.with_file_name("run-tmp"), deny: vec![], network: false };
+        let caller: Vec<String> = vec![];
+        let run = EvidenceRun { script: &w, slug: &wh.slug, commands: &caller, base: &base, git_common: &wh.common, home: &w, state_dir: &w, tool_path: &[], limit: Duration::from_secs(60), at_spawn: None };
+        let exec = |p: &Profile, r: &EvidenceRun| {
+            let Some(crate::adapter::evidence_runner::AtSpawn(check)) = r.at_spawn else { panic!("no check") };
+            match check() {
+                Ok(c) => cores.borrow_mut().push(c.unwrap()),
+                Err(why) => return RunOutcome::Failed(why),
+            }
+            seen.borrow_mut().push((r.commands.to_vec(), p.network));
+            RunOutcome::Ran { passed: true, sha256: "e".repeat(64) }
+        };
+        assert!(app.run_approved_evidence_with(g.ask(), &prof, &run, at(T0 + 2), exec).is_ok());
+        // A test file inside an ignored dependency folder is a runner's to skip, not refused; it is still counted.
+        let c = cores.borrow()[0].clone();
+        assert_eq!(c["ignored"]["count"], 2, "node_modules/ as one entry, and .env: {c}");
+        assert_eq!(c["ignored"]["sha256"], crate::control::sha256::hex_digest(b".env\0node_modules/\0"));
+        assert_eq!(c["approvedTree"].as_str().map(str::len), Some(40));
+        assert_eq!(c["bound"], "tracked and untracked files; ignored files are not bound");
+        // An ignored file a runner would collect is refused before the approval is used.
+        for (what, rel) in [("a conftest under build", "build/conftest.py"), ("a jest test", "build/x.test.js"), ("a file in a tests folder", "tests/helper.log")] {
+            let t = Tmp::new();
+            let app = t.app();
+            let g = repo(&t);
+            fs::write(g.common().join("info/exclude"), "build/\n*.log\n").unwrap();
+            let f = g.work().join(rel);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(&f, "x\n").unwrap();
+            approved(&app, &g.ask());
+            let seen = Seen::default();
+            let err = go(&app, &g, g.ask(), false, at(T0 + 2), &seen).unwrap_err();
+            assert!(err.contains("ignored file a test runner would collect") && err.contains(rel), "{what}: {err}");
+            assert!(seen.borrow().is_empty(), "{what}: nothing ran");
+            assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "approved", "{what}");
+        }
+    }
+
+    /// bhishma M3 on 7c09e27: the approved commit's tree is read from the run's own git dir, with replace objects off,
+    /// from a commit object whose own hash is the commit. A replace ref can't make a dirty worktree read as the commit.
+    #[test]
+    fn a_replace_ref_cannot_make_a_changed_worktree_read_as_the_approved_commit() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        approved(&app, &g.ask());
+        let w = g.work();
+        // The worktree gets a change, and a commit is made of exactly that tree; then c1 is replaced by it.
+        fs::write(w.join("a.txt"), "forged\n").unwrap();
+        git_in(&w, &["add", "a.txt"]);
+        let tree = git_in(&w, &["write-tree"]);
+        let forged = git_in(&w, &["commit-tree", &tree, "-m", "forged"]);
+        git_in(&w, &["reset", "-q", "--mixed", &g.c1]);
+        git_in(&w, &["replace", &g.c1, &forged]);
+        // Plain git now believes c1's tree is the dirty one.
+        assert_eq!(git_in(&w, &["rev-parse", &format!("{}^{{tree}}", g.c1)]), tree);
+        let seen = Seen::default();
+        let err = go(&app, &g, g.ask(), false, at(T0 + 2), &seen).unwrap_err();
+        assert!(err.contains("changes that aren't in the approved commit"), "{err}");
+        assert!(seen.borrow().is_empty(), "nothing ran");
+    }
+
+    #[test]
+    fn the_commit_is_read_from_the_runs_own_git_dir_never_through_the_worktrees_git_file() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        approved(&app, &g.ask());
+        // Pinned at its own common dir, the read works.
+        let want = app.bridge.commit_tree(&g.common(), &g.c1).expect("the commit's tree");
+        assert_eq!(want, git_in(&g.root.join("repo"), &["rev-parse", &format!("{}^{{tree}}", g.c1)]));
+        // A planted repository whose c1 lookup would say anything else is never asked: another git dir answers nothing
+        // for c1 (it has no such object), and the read never falls back to the worktree's own .git file.
+        let other = t.0.canonicalize().unwrap().join("planted");
+        fs::create_dir_all(&other).unwrap();
+        git_in(&other, &["init", "-q", "-b", "main"]);
+        fs::write(other.join("p.txt"), "planted\n").unwrap();
+        git_in(&other, &["add", "p.txt"]);
+        git_in(&other, &["commit", "-qm", "p"]);
+        assert_eq!(app.bridge.commit_tree(&other.join(".git"), &g.c1), None);
+        // An object whose bytes don't hash to the name asked for is refused: here, a tree id passed as the commit.
+        assert_eq!(app.bridge.commit_tree(&g.common(), &want), None);
     }
 
     #[test]
@@ -930,8 +1077,12 @@ mod runner_wiring {
         let a = Ask { commit: c3, ..super::ask() };
         approved(&app, &a);
         let seen = Seen::default();
-        let err = go(&app, &g, a, false, at(T0 + 2), &seen).unwrap_err();
+        let err = go(&app, &g, a.clone(), false, at(T0 + 2), &seen).unwrap_err();
         assert!(err.contains("walkthrough folder"), "{err}");
+        // With those files deleted from the worktree, the commit itself still has them: refused, read the pinned way.
+        fs::remove_file(w.join("data/walkthroughs/kept.json")).unwrap();
+        let err = go(&app, &g, a, false, at(T0 + 3), &seen).unwrap_err();
+        assert!(err.contains("the approved commit has files in the walkthrough folder"), "{err}");
         assert!(seen.borrow().is_empty());
         assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "approved");
     }

@@ -140,6 +140,7 @@ export function EvidenceApproval({ runId }: { runId: string }) {
               ))}
             </ol>
             <Text variant="body-sm" muted>{L.scope}</Text>
+            <Text variant="body-sm" muted>{L.filesScope}</Text>
             <Text variant="body-sm" muted>{L.declineNote}</Text>
             {blockedWhy && (
               <div id="v-approval-why" role="alert" className="v-approval__line">

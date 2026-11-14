@@ -492,45 +492,62 @@ impl ApprovalDesk {
         if super::proof_app::run_of(run.slug) != Some(ask.run_id.as_str()) {
             return Err("the evidence folder belongs to another run".into());
         }
-        let at_commit = || self.at_approved_commit(&profile.worktree, run.git_common, run.base, &ask.commit);
+        let at_commit = || self.at_approved_commit(&profile.worktree, run.git_common, run.base, run.slug, &ask.commit).map(Some);
         at_commit()?;
         let sha = self.consume_evidence_approval(&ask, now)?;
         // Checked again by the runner immediately before it spawns (bhishma L1 on 07a0ee4): a change made after the check
-        // above, by anything outside the sandbox, runs nothing.
+        // above, by anything outside the sandbox, runs nothing. That check's account of the ignored files goes into the
+        // signed bundle (bhishma M2 on 7c09e27).
         let approved = EvidenceRun { commands: &ask.commands, at_spawn: Some(runner::AtSpawn(&at_commit)), ..run.clone() };
         Ok((sha, exec(profile, &approved)))
     }
 
-    /// The worktree is exactly `commit` (bhishma M1 on the wiring, L1 on 07a0ee4): its HEAD, read through the pinned
-    /// walk in the run's git common dir `common` (which proves that dir is its own), is `commit`; and the tree of its
-    /// files, tracked edits and untracked files alike, equals `commit`'s tree. A dirty worktree is refused rather than
-    /// run and labelled: the person approved the commands for that commit, so the proof must be about that commit's
-    /// files. The tree is the one `vajra-verify-work.sh` records as `git.worktreeTree` (the bridge's `tree_id`: the
-    /// repository's config read once, no filter, hook or fsmonitor ever run), with the walkthrough folder `base` left
-    /// out; a commit that itself has files under `base` is refused, since the two trees could then never be compared.
-    fn at_approved_commit(&self, worktree: &Path, common: &Path, base: &Path, commit: &str) -> Result<(), String> {
+    /// The worktree's files are the approved `commit`'s (bhishma M1 on the wiring, L1 on 07a0ee4, M1 to M3 on
+    /// 7c09e27). What is bound, and what isn't:
+    /// - **HEAD** is `commit`, read through the pinned walk in the run's git common dir `common` (which proves that dir
+    ///   is its own).
+    /// - **Every tracked and untracked file** matches: the worktree's tree equals `commit`'s. The worktree's tree is
+    ///   the one `vajra-verify-work.sh` records as `git.worktreeTree` (the bridge's `tree_id`: the repository's config
+    ///   read once, no filter, hook or fsmonitor ever run). `commit`'s tree is read from `common` alone, with replace
+    ///   objects off, from a commit object whose own hash is `commit` (`Bridge::commit_tree`), so neither a planted
+    ///   `.git` nor `refs/replace` can choose it. A dirty worktree is refused rather than run and labelled: the person
+    ///   approved the commands for that commit.
+    /// - **The walkthrough folder** `base` is left out of the tree, as verify-work does, so inside the worktree it must
+    ///   hold nothing but this run's empty `slug` folder (`runner::base_is_clear`); a commit with files there is refused.
+    /// - **Ignored files are not bound.** The ignore rules keep installed dependencies, build output and `.env` files
+    ///   out of the tree. Their listing's count and hash are returned for the signed bundle, and an ignored file a test
+    ///   runner would collect (`bridge::TEST_LIKE`) is refused.
+    ///
+    /// Returns the bundle's `core` field: the bound tree and the ignored listing.
+    fn at_approved_commit(&self, worktree: &Path, common: &Path, base: &Path, slug: &str, commit: &str) -> Result<Value, String> {
         let head = runner::worktree_head(worktree, common).map_err(String::from)?;
         if head != commit {
             return Err("the worktree isn't at the approved commit".into());
         }
+        runner::base_is_clear(base, worktree, slug).map_err(String::from)?;
         let mut bridge = self.bridge.clone();
         bridge.timeout = TREE_TIMEOUT;
-        let git = |args: &[&str]| {
-            let req = crate::vajra::bridge::Request::Git { cwd: worktree.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() };
-            bridge.run(&req).ok().filter(|o| o.exit() == Some(0)).map(|o| o.stdout.trim().to_string()).filter(|s| !s.is_empty())
-        };
-        let want = git(&["rev-parse", "--verify", "--quiet", &format!("{commit}^{{tree}}")]).ok_or("the approved commit's tree can't be read")?;
+        let want = bridge.commit_tree(common, commit).ok_or("the approved commit's tree can't be read from the repository's own git folder")?;
         if let Ok(rel) = base.strip_prefix(worktree) {
-            if !rel.as_os_str().is_empty() && git(&["rev-parse", "--verify", "--quiet", &format!("{commit}:{}", rel.display())]).is_some() {
+            let rel = rel.to_str().ok_or("the walkthrough folder's name isn't plain text")?;
+            if !rel.is_empty() && bridge.tree_has(common, &want, rel) != Some(false) {
                 return Err("the approved commit has files in the walkthrough folder, so its tree can't be compared".into());
             }
         }
         let base_str = base.to_string_lossy();
-        let tree = bridge.tree_id(worktree, &[base_str.as_ref()]).ok_or("the worktree's files couldn't be read as one tree (the repository's config defines a filter, or git took too long)")?;
-        if tree != want {
+        let snap = bridge.worktree_snapshot(worktree, &[base_str.as_ref()]).ok_or("the worktree's files couldn't be read as one tree (the repository's config defines a filter, or git took too long)")?;
+        if snap.tree != want {
             return Err("the worktree has changes that aren't in the approved commit".into());
         }
-        Ok(())
+        if let Some(t) = snap.test_like.first() {
+            let more = if snap.test_like.len() > 1 { format!(" and {} more", snap.test_like.len() - 1) } else { String::new() };
+            return Err(format!("an ignored file a test runner would collect is in the worktree ({}{more}), and it isn't part of the approved commit", super::plan::one_line(t, 200)));
+        }
+        Ok(json!({
+            "approvedTree": want,
+            "bound": "tracked and untracked files; ignored files are not bound",
+            "ignored": {"count": snap.ignored.len(), "sha256": snap.ignored_sha256, "listing": "git ls-files --others --ignored --exclude-standard --directory"},
+        }))
     }
 
     /// The run's approval, for the UI: the state, and while pending the exact list to show. A pending or approved
