@@ -800,7 +800,7 @@ fn a_refusing_at_spawn_check_starts_no_process() {
     let ran = t.0.join("work/ran");
     let cmds = vec![format!("touch '{}'", ran.display())];
     let asked = std::cell::Cell::new(0);
-    let refuse = || -> Result<(), String> {
+    let refuse = || -> Result<Option<serde_json::Value>, String> {
         asked.set(asked.get() + 1);
         Err("the worktree isn't at the approved commit".into())
     };
@@ -810,11 +810,71 @@ fn a_refusing_at_spawn_check_starts_no_process() {
     assert!(matches!(&out, RunOutcome::Failed(why) if why.contains("approved commit")), "{out:?}");
     assert_eq!(asked.get(), 1, "asked once");
     assert!(!ran.exists(), "no command ran");
-    let pass = || -> Result<(), String> { Ok(()) };
+    // A passing check's facts go into the saved bundle as `core` (bhishma M2 on 7c09e27), and the sha the run returns,
+    // the one sign checks, is of exactly those bytes.
+    let core = serde_json::json!({"ignored": {"count": 2, "sha256": "ab"}});
+    let pass = || -> Result<Option<serde_json::Value>, String> { Ok(Some(core.clone())) };
     let p = t.fresh(false, "run-atspawn-yes");
     let r = EvidenceRun { at_spawn: Some(AtSpawn(&pass)), ..evidence_run(&script, &base, &cmds, &common, &home) };
-    assert!(matches!(run(&p, &r), RunOutcome::Ran { .. }), "a passing check lets the run go ahead");
+    let RunOutcome::Ran { sha256, .. } = run(&p, &r) else { panic!("a passing check lets the run go ahead") };
     assert!(ran.exists(), "the command ran");
+    let saved = fs::read(base.join(SLUG).join("evidence.json")).unwrap();
+    assert_eq!(crate::control::sha256::hex_digest(&saved), sha256);
+    let v: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!((v["core"].clone(), v["slug"].as_str()), (core, Some(SLUG)), "the script's own fields are kept");
+}
+
+/// The script's line can't set the core's own facts: a bundle that already has `core` is refused, nothing saved.
+#[test]
+fn a_bundle_that_sets_the_cores_field_itself_is_refused() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("corefield");
+    let forged = r#"{"slug":"deliver-20261113-0800","core":{"ignored":{"count":0}},"git":{"head":"x"}}\n"#;
+    let (script, base, home, common) = (fake(&t, "ok", forged, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["true".to_string()];
+    let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
+    assert!(matches!(&out, RunOutcome::Failed(why) if why.contains("unsigned bundle")), "{out:?}");
+    assert!(!base.join(SLUG).join("evidence.json").exists());
+}
+
+/// bhishma M1 on 7c09e27: a walkthrough folder inside the worktree holds nothing but this run's empty folder.
+#[test]
+fn the_walkthrough_folder_must_hold_nothing_a_check_could_run() {
+    let t = Tmp::new("baseclear");
+    fs::create_dir_all(t.0.join("work")).unwrap();
+    let wt = t.0.join("work").canonicalize().unwrap();
+    let base = wt.join("data/walkthroughs");
+    fs::create_dir_all(&base).unwrap();
+    assert_eq!(base_is_clear(&base, &wt, SLUG), Ok(()), "empty");
+    fs::create_dir(base.join(SLUG)).unwrap();
+    assert_eq!(base_is_clear(&base, &wt, SLUG), Ok(()), "only this run's empty folder");
+    let refused = Err("the walkthrough folder holds files from before the run, which the check commands could run");
+    fs::write(base.join(SLUG).join("conftest.py"), "import os").unwrap();
+    assert_eq!(base_is_clear(&base, &wt, SLUG), refused, "a file planted in the run's own folder");
+    fs::remove_file(base.join(SLUG).join("conftest.py")).unwrap();
+    fs::write(base.join("test_pass.py"), "def test_x(): pass").unwrap();
+    assert_eq!(base_is_clear(&base, &wt, SLUG), refused, "a test file beside it");
+    fs::remove_file(base.join("test_pass.py")).unwrap();
+    fs::create_dir(base.join("old-run")).unwrap();
+    assert_eq!(base_is_clear(&base, &wt, SLUG), refused, "another run's folder, even empty");
+    fs::remove_dir(base.join("old-run")).unwrap();
+    // A name that isn't UTF-8 is still seen.
+    use std::os::unix::ffi::OsStrExt;
+    if fs::write(base.join(std::ffi::OsStr::from_bytes(b"x\xff.py")), "").is_ok() {
+        assert_eq!(base_is_clear(&base, &wt, SLUG), refused, "a non-UTF-8 name");
+        fs::remove_file(base.join(std::ffi::OsStr::from_bytes(b"x\xff.py"))).unwrap();
+    }
+    // A link in place of the run's folder, or of the base itself, is refused.
+    std::os::unix::fs::symlink(&t.0, base.join(SLUG).with_extension("lnk")).unwrap();
+    assert!(base_is_clear(&base, &wt, SLUG).is_err(), "a link beside it");
+    fs::remove_file(base.join(SLUG).with_extension("lnk")).unwrap();
+    fs::remove_dir(base.join(SLUG)).unwrap();
+    std::os::unix::fs::symlink(&t.0, base.join(SLUG)).unwrap();
+    assert!(base_is_clear(&base, &wt, SLUG).is_err(), "a link as the run's folder");
+    // Outside the worktree, it isn't the worktree's to check.
+    assert_eq!(base_is_clear(&t.0.join("elsewhere"), &wt, SLUG), Ok(()));
 }
 
 /// The BASH_ENV file every check's bash sources is out of every check's reach (codex P1 on d85a04a2): a first command

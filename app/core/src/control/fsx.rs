@@ -84,6 +84,11 @@ impl DirHandle {
 
     /// The entry names (UTF-8 only, no `.` or `..`), read from the held descriptor.
     pub fn names(&self) -> io::Result<Vec<String>> {
+        Ok(self.raw_names()?.into_iter().filter_map(|n| String::from_utf8(n).ok()).collect())
+    }
+
+    /// Every entry name as bytes (no `.` or `..`), UTF-8 or not: for a check that must see everything there.
+    pub fn raw_names(&self) -> io::Result<Vec<Vec<u8>>> {
         use std::os::fd::AsRawFd;
         // SAFETY: dup gives fdopendir its own descriptor to own; the DIR is closed before returning.
         let fd = unsafe { libc::dup(self.0.as_raw_fd()) };
@@ -105,11 +110,9 @@ impl DirHandle {
                 let code = unsafe { *errno_location() };
                 break if code == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(code)) };
             }
-            let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
-            if let Ok(n) = name.to_str() {
-                if n != "." && n != ".." {
-                    out.push(n.to_string());
-                }
+            let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
+            if name != b"." && name != b".." {
+                out.push(name.to_vec());
             }
         };
         unsafe { libc::closedir(dir) };
