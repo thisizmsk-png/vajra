@@ -648,13 +648,14 @@ impl App {
         if self.workers.install_action().is_none() {
             return Err(fail("not_needed", "git is already installed"));
         }
-        let child = std::process::Command::new("/usr/bin/xcode-select")
-            .arg("--install")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| fail("spawn_failed", e))?;
+        let child = crate::spawnlock::spawn(
+            std::process::Command::new("/usr/bin/xcode-select")
+                .arg("--install")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .map_err(|e| fail("spawn_failed", e))?;
         // It returns once the dialog is up; reaped off the caller.
         std::thread::spawn(move || {
             let mut child = child;

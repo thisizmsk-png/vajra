@@ -82,6 +82,8 @@ fn the_profile_denies_the_vajra_dirs_last_and_limits_writes() {
     assert!(p[deny_at..].contains(&format!("(subpath \"{}\")", t.0.join("data").display())));
     assert!(p.contains("(deny file-write*)\n"));
     assert!(p.contains("(deny network-outbound)"));
+    // Deny-default (#234 follow-up): nothing is allowed that no rule names.
+    assert!(p.starts_with("(version 1)\n(deny default)\n") && !p.contains("(allow default)"), "{p}");
     let net = t.profile(true).sbpl().unwrap();
     assert!(!net.contains("(deny network-outbound)"), "a network seat keeps the network");
     for text in [&p, &net] {
@@ -92,6 +94,32 @@ fn the_profile_denies_the_vajra_dirs_last_and_limits_writes() {
         assert!(text.contains("(deny job-creation)"), "{text}");
         // The Mach and network rules come before the final deny, which still comes last.
         assert!(text.rfind("(deny file-read* file-write*").unwrap() > text.rfind("(allow network-outbound").unwrap());
+    }
+}
+
+/// bhishma's ruling B on #250: the trust-evaluation agent is allowed by its exact name only with a network seat. Either
+/// way the security server's denies and the Keychains read deny stay, and the three other denials the https fetch
+/// printed (the dtrace helper, the notify shared memory, the kernel-control socket) stay denied.
+#[test]
+fn the_trust_evaluation_agent_is_allowed_only_with_a_network_seat_and_keychain_denies_stay() {
+    let t = Tmp::new("seat-mach");
+    let agent = "(global-name \"com.apple.TrustEvaluationAgent\")";
+    let (off, on) = (t.profile(false).sbpl().unwrap(), t.profile(true).sbpl().unwrap());
+    assert!(!off.contains("TrustEvaluationAgent"), "no seat, no trust agent: {off}");
+    assert_eq!(on.matches("TrustEvaluationAgent").count(), 1, "{on}");
+    assert!(on.contains(&format!("(allow mach-lookup {agent})\n")), "exact name, not a prefix: {on}");
+    let keychains = format!("(subpath \"{}\")", t.home().join("Library/Keychains").display());
+    for text in [&off, &on] {
+        let deny = text.lines().find(|l| l.starts_with("(deny mach-lookup")).unwrap();
+        for name in ["(global-name \"com.apple.SecurityServer\")", "(global-name-prefix \"com.apple.securityd\")", "(global-name \"com.apple.secd\")"] {
+            assert!(deny.contains(name), "{name} stays denied: {text}");
+        }
+        let last = text.rfind("(deny file-read* file-write*").unwrap();
+        assert!(text[last..].contains(&keychains), "the Keychains read deny stays last: {text}");
+        let allows: Vec<&str> = text.lines().filter(|l| l.starts_with("(allow")).collect();
+        for kept in ["dtracehelper", "ipc-posix-shm", "system-socket"] {
+            assert!(allows.iter().all(|l| !l.contains(kept)), "{kept} stays denied: {text}");
+        }
     }
 }
 
@@ -538,14 +566,53 @@ fn a_command_can_reach_no_mach_service_that_starts_an_unsandboxed_process() {
     for n in &reachable {
         assert_eq!(inside.iter().find(|(m, _)| m == *n).map(|(_, ok)| *ok), Some(false), "{n} answered inside: {}", text(&o));
     }
-    // A service the tools need still answers: the denial is the list, not every lookup.
+    // A service the tools need still answers: the allow-list works.
     let o = t.run(&p, &format!("python3 '{}' com.apple.system.notification_center", probe.display()), &[]);
     assert_eq!(answers(&text(&o)), vec![("com.apple.system.notification_center".to_string(), true)], "{}", text(&o));
+    // Deny-default: a service on neither list (the window server, the Dock, privacy consent) answers outside but not
+    // inside, so a service nobody thought to deny stays shut.
+    let unlisted = ["com.apple.windowserver.active", "com.apple.dock.server", "com.apple.tccd"];
+    let outside = answers(&String::from_utf8_lossy(&Command::new("python3").arg(&probe).args(unlisted).output().unwrap().stdout));
+    let o = t.run(&p, &format!("python3 '{}' {}", probe.display(), unlisted.join(" ")), &[]);
+    let inside = answers(&text(&o));
+    for (n, _) in outside.iter().filter(|(_, ok)| *ok) {
+        assert_eq!(inside.iter().find(|(m, _)| m == n).map(|(_, ok)| *ok), Some(false), "unlisted {n} answered inside: {}", text(&o));
+    }
     // LaunchServices names no app from inside (the launch-time probe's check), but does outside.
     let front = |o: &std::process::Output| String::from_utf8_lossy(&o.stdout).contains("ASN:");
     if front(&Command::new("/usr/bin/lsappinfo").arg("front").output().unwrap()) {
         assert!(!front(&t.run(&p, "/usr/bin/lsappinfo front", &[])));
     }
+}
+
+/// Deny-default still lets a network seat do what a check needs: resolve a name and fetch over HTTPS with certificate
+/// trust (curl's TLS goes through the trust daemons on the allow-list). Skipped when the Mac itself is offline.
+#[test]
+fn a_network_seat_resolves_and_fetches_over_https_under_deny_default() {
+    if !macos() || !have("curl") {
+        return eprintln!("skipped: sandbox-exec or curl");
+    }
+    let get = "/usr/bin/curl -sS -o /dev/null --max-time 15 https://example.com/";
+    if !Command::new("/bin/sh").args(["-c", get]).output().is_ok_and(|o| o.status.success()) {
+        return eprintln!("skipped: no internet here");
+    }
+    let t = Tmp::new("netseat");
+    // curl is exec'd by the shell, so it keeps the pid the shell prints: on a failure the sandbox's own denial lines for
+    // that pid are read from the system log and shown, naming exactly what the profile refused (it failed once on a CI
+    // image and never locally). Strict either way: no skip, no retry.
+    let o = t.run(&t.profile(true), &format!("echo VAJRA_PID=$$; exec {get}"), &[]);
+    if !o.status.success() {
+        let out = text(&o);
+        let pid = out.lines().find_map(|l| l.strip_prefix("VAJRA_PID=")).unwrap_or("?").trim().to_string();
+        std::thread::sleep(std::time::Duration::from_secs(2)); // the kernel's sandbox lines reach the log a moment later
+        let log = Command::new("/usr/bin/log").args(["show", "--style", "compact", "--last", "3m", "--predicate", "eventMessage CONTAINS \"deny(\""]).output();
+        let denials: Vec<String> = log
+            .map(|l| String::from_utf8_lossy(&l.stdout).lines().filter(|l| l.contains(&format!("({pid})"))).map(str::to_string).collect())
+            .unwrap_or_default();
+        panic!("a network seat couldn't fetch: {out}\nsandbox denials for pid {pid} ({}):\n{}", denials.len(), denials.join("\n"));
+    }
+    // And without one, the same fetch is refused.
+    assert!(!t.run(&t.profile(false), get, &[]).status.success());
 }
 
 /// M1: launchd starts no job for a sandboxed caller. The job would only run `/usr/bin/true`, and is removed either way.
@@ -637,6 +704,79 @@ fn a_held_open_or_oversized_evidence_channel_fails_fast() {
     let big = script(&t, "big", "head -c 1100000 /dev/zero | tr '\\0' a >&3\necho >&3\nexit 0");
     assert!(matches!(go(&t, &evidence_run(&big, &base, &cmds, &common, &home)), RunOutcome::Failed(_)));
     assert!(!base.join(SLUG).join("evidence.json").exists());
+}
+
+/// The #234 follow-up (before key A): a process another thread starts while the runner is between `pipe()` and the
+/// close-on-exec flags never holds the evidence write end. A child that did would keep the channel open after the
+/// script ends, and the run would fail. The racer goes through the app's spawn lock, so it waits out the window; the
+/// control run starts a bare child in the same window, which does inherit the write end and fails the run.
+///
+/// It runs alone, in a fresh run of this test binary: in the shared one, other tests start children with a bare
+/// `spawn` (test code is exempt from the lock), and one landing in this window would hold the channel too.
+#[test]
+fn a_process_started_during_the_evidence_pipe_window_never_holds_the_write_end() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let name = "adapter::evidence_runner::tests::spawn_race_body";
+    let o = Command::new(std::env::current_exe().unwrap()).args(["--exact", name, "--ignored", "--nocapture", "--test-threads=1"]).env("VAJRA_SPAWN_RACE_BODY", "1").output().unwrap();
+    let out = text(&o);
+    assert!(o.status.success() && out.contains("1 passed"), "{out}");
+}
+
+#[test]
+#[ignore = "run alone by a_process_started_during_the_evidence_pipe_window_never_holds_the_write_end"]
+fn spawn_race_body() {
+    if std::env::var_os("VAJRA_SPAWN_RACE_BODY").is_none() {
+        return eprintln!("skipped: runs only from its parent test");
+    }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let t = Tmp::new("spawnrace");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["true".to_string()];
+    let kids: Arc<Mutex<Vec<std::process::Child>>> = Arc::default();
+    let sleeper = || {
+        let mut c = Command::new("/bin/sleep");
+        c.arg("8").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        c
+    };
+    let hook = |f: Box<dyn Fn([libc::c_int; 2]) + Send>| *crate::spawnlock::PIPE_HOOK.lock().unwrap() = Some((std::thread::current().id(), f));
+    // The routed racer, from another thread, while the runner holds the window.
+    let (k, ran_early) = (kids.clone(), Arc::new(AtomicBool::new(false)));
+    let early = ran_early.clone();
+    let racer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+    let r = racer.clone();
+    hook(Box::new(move |_| {
+        let (k, e) = (k.clone(), early.clone());
+        let started = Arc::new(AtomicBool::new(false));
+        let s = started.clone();
+        *r.lock().unwrap() = Some(std::thread::spawn(move || {
+            let c = crate::spawnlock::spawn(&mut sleeper()).unwrap();
+            s.store(true, Ordering::SeqCst);
+            k.lock().unwrap().push(c);
+        }));
+        std::thread::sleep(Duration::from_millis(300));
+        e.store(started.load(Ordering::SeqCst), Ordering::SeqCst);
+    }));
+    let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
+    *crate::spawnlock::PIPE_HOOK.lock().unwrap() = None;
+    racer.lock().unwrap().take().unwrap().join().unwrap();
+    assert!(!ran_early.load(Ordering::SeqCst), "a routed spawn ran inside the evidence pipe window");
+    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "a racing child held the evidence channel: {out:?}");
+    // The control: a bare spawn in the same window inherits the write end, so the channel stays open and the run fails.
+    let k = kids.clone();
+    hook(Box::new(move |_| {
+        let k = k.clone();
+        std::thread::spawn(move || k.lock().unwrap().push(sleeper().spawn().unwrap())).join().unwrap();
+    }));
+    let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
+    *crate::spawnlock::PIPE_HOOK.lock().unwrap() = None;
+    for mut c in kids.lock().unwrap().drain(..) {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    assert_eq!(out, RunOutcome::Failed("the evidence channel stayed open after the script ended".into()), "control: a bare spawn in the window should hold the channel");
 }
 
 /// The script runs from its real place in the engine folder, which the profile denies: bash gets its text, never its
@@ -1052,6 +1192,24 @@ fn the_copied_index_is_only_ever_the_run_repositorys_own() {
     fs::hard_link(elsewhere.join("index"), &admin_index).unwrap();
     let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
     assert_eq!(out, RunOutcome::Failed("the worktree's git index isn't a plain file with one link".into()));
+    // #234 follow-up: the index must be a regular file. A symlink (even to a real index), a directory and a FIFO are
+    // each refused, and the FIFO doesn't hang the run (the open never blocks).
+    let not_plain = RunOutcome::Failed("the worktree's git index isn't a plain file with one link".into());
+    let real_index = t.0.join("real-index");
+    fs::copy(repo.join(".git/index"), &real_index).unwrap();
+    fs::remove_file(&admin_index).unwrap();
+    std::os::unix::fs::symlink(&real_index, &admin_index).unwrap();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), not_plain, "a symlinked index");
+    fs::remove_file(&admin_index).unwrap();
+    fs::create_dir(&admin_index).unwrap();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), not_plain, "a directory index");
+    fs::remove_dir(&admin_index).unwrap();
+    let c = std::ffi::CString::new(admin_index.to_str().unwrap()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let start = std::time::Instant::now();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), not_plain, "a FIFO index");
+    assert!(start.elapsed() < Duration::from_secs(5), "a FIFO index stalled the run");
 }
 
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.

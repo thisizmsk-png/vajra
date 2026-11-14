@@ -273,7 +273,7 @@ pub fn spawn(
         .stderr(Stdio::null())
         // Its own process group, so one signal reaches the CLI, its MCP server and its hooks.
         .process_group(0);
-    let mut child = cmd.spawn()?;
+    let mut child = crate::spawnlock::spawn(&mut cmd)?;
     // Hold the lock across publishing the pid, so a cancel that raced the spawn kills the group right here.
     {
         // A handle can drive several processes in a row (the self-test turns, then the ask): re-arm it.

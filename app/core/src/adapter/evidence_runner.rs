@@ -2,6 +2,8 @@
 //! macOS Seatbelt (`/usr/bin/sandbox-exec -p <profile>`), never in an agent session (PR #135 review, codex).
 //!
 //! The profile (owner answers N19 to N23, the 6i brief, 6k's dir list):
+//! - deny-default (#234 follow-up): only what a rule names is allowed (processes, reads, the writes and sockets
+//!   below, and a short list of system Mach services), so a service or IPC kind nobody listed stays shut;
 //! - every read and write of the Vajra state dir (it holds the signing key) and the app's data dir is denied: the
 //!   list is 6k's `vajra_deny_dirs`, the same one a Codex session gets (#216), plus the config's `denyRead` credential
 //!   dirs;
@@ -59,7 +61,8 @@ const RESOLVER_SOCKET: &str = "/var/run/mDNSResponder";
 /// - the pasteboard: read what the user copied.
 ///
 /// launchd refuses `launchctl submit`, `bootstrap` and `load` from a sandboxed caller by itself; `job-creation` is denied
-/// too, and the tests prove launchd's refusal.
+/// too, and the tests prove launchd's refusal. Under deny-default none of these is on the allow-list anyway; the named
+/// denies stay so a later, broader allow can't re-open them by accident.
 const DENIED_MACH: &[(&str, &str)] = &[
     ("global-name", "com.apple.coreservices.launchservicesd"),
     ("global-name-prefix", "com.apple.lsd."),
@@ -69,6 +72,29 @@ const DENIED_MACH: &[(&str, &str)] = &[
     ("global-name", "com.apple.secd"),
     ("global-name-prefix", "com.apple.pasteboard."),
 ];
+
+/// The only Mach services a command may look up (deny-default, #234 follow-up). Each is a system lookup a toolchain
+/// needs and none starts a process or hands back user data: user and group names, the notification and logging
+/// daemons, the per-user temp dir, network configuration (DNS and proxies) and certificate trust (TLS with a network
+/// seat). Everything else, LaunchServices, Apple Events, the security server and the pasteboard included, is refused.
+const ALLOWED_MACH: &[&str] = &[
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
+    "com.apple.system.notification_center",
+    "com.apple.system.logger",
+    "com.apple.logd",
+    "com.apple.diagnosticd",
+    "com.apple.bsd.dirhelper",
+    "com.apple.SystemConfiguration.configd",
+    "com.apple.SystemConfiguration.DNSConfiguration",
+    "com.apple.trustd",
+    "com.apple.trustd.agent",
+];
+
+/// Allowed only when the run has a network seat (bhishma's ruling B on #250): the agent that finishes a TLS chain check.
+/// Without it curl's https fetch fails with "unable to get local issuer certificate". It evaluates trust; it is not the
+/// security server, so Keychain items stay denied. A run with no seat has no use for it and never reaches it.
+const SEAT_MACH: &str = "com.apple.TrustEvaluationAgent";
 
 /// A path as a Seatbelt string literal: absolute, no NUL, quotes and backslashes escaped. `None` refuses it.
 fn lit(p: &Path) -> Option<String> {
@@ -112,7 +138,16 @@ impl Profile {
         }
         let resolver = both(Path::new(RESOLVER_SOCKET)).iter().map(|p| lit(p).map(|l| format!(" (literal {l})"))).collect::<Option<String>>().ok_or("the resolver socket path")?;
         let deny = subpaths(&self.deny)?;
-        let mut p = String::from("(version 1)\n(allow default)\n");
+        // Deny-default (#234 follow-up): an operation is refused unless a rule below names it, so a Mach service, an
+        // IPC kind or a device nobody listed stays shut, not open.
+        let mut p = String::from("(version 1)\n(deny default)\n");
+        // Processes: start and run programs; signal and inspect only processes inside this run's sandbox.
+        p.push_str("(allow process-fork process-exec file-map-executable)\n");
+        p.push_str("(allow signal process-info* (target same-sandbox))\n(allow process-info-pidinfo process-info-setcontrol (target self))\n");
+        p.push_str("(allow sysctl-read)\n(allow ipc-posix-sem)\n");
+        // Reads: anything (toolchains live anywhere the user put them), except the final deny below.
+        p.push_str("(allow file-read*)\n");
+        p.push_str(&format!("(allow mach-lookup{})\n", ALLOWED_MACH.iter().map(|n| format!(" (global-name \"{n}\")")).collect::<String>()));
         // Writes: only the worktree, the run's tmp dir (which holds every build cache), and the null and tty devices.
         p.push_str("(deny file-write*)\n");
         p.push_str(&format!("(allow file-write*{run_dirs} (literal \"/dev/null\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n"));
@@ -125,12 +160,15 @@ impl Profile {
         // binds and is reached, names still resolve through the resolver socket, but no connection leaves the Mac.
         // A `network*` allow with `local ip` matches every outbound socket (it is bound locally), so allows name only
         // the remote end.
+        // Binds and inbound connections: unix sockets only under the run's own dirs; IP on any address with a network
+        // seat, else on loopback only (a server on every address would let a machine on the LAN connect in and read).
         if self.network {
-            p.push_str("(deny network-outbound (remote unix-socket))\n");
+            p.push_str("(allow network-outbound (remote ip))\n(allow network-bind network-inbound (local ip))\n");
+            p.push_str(&format!("(allow mach-lookup (global-name \"{SEAT_MACH}\"))\n"));
         } else {
-            p.push_str("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n");
+            p.push_str("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
         }
-        p.push_str(&format!("(allow network-outbound{resolver}{run_dirs})\n"));
+        p.push_str(&format!("(allow network-outbound{resolver}{run_dirs})\n(allow network-bind network-inbound{run_dirs})\n"));
         // Last, so nothing above can re-open them: the Vajra dirs and the credentials, neither read nor written.
         p.push_str(&format!("(deny file-read* file-write*{deny})\n"));
         Ok(p)
@@ -390,7 +428,7 @@ fn known_refusal(reason: &str, slug: &str) -> bool {
 /// core never re-reads a file a command could rewrite) and returns its sha256 for `sign`.
 pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     use std::io::Read;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     if !crate::bus::valid_stream_id(r.slug) || r.commands.is_empty() {
         return RunOutcome::Failed("not a runnable evidence check".into());
@@ -417,24 +455,11 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
         Ok(a) => a,
         Err(e) => return RunOutcome::Failed(e),
     };
-    let mut fds = [0i32; 2];
-    // SAFETY: a fresh pipe; both ends are owned below.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return RunOutcome::Failed("couldn't open the evidence pipe".into());
-    }
-    // SAFETY: the pipe just made; each fd is owned once.
-    let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    // Close-on-exec on both ends, so no other child the app spawns later inherits either end. The child gets only fd
-    // 3, made inheritable below. macOS has no pipe2, so a child another thread forks between pipe() and these fcntls
-    // could still inherit both ends (L1). Agent sessions can't: portable-pty closes every fd above 2 in a PTY child.
-    // What's left is the core's own short-lived helpers; a held write end is bounded by EOF_GRACE and the deadline,
-    // and a stray byte breaks the one-line rule, so either ends the run Failed, never with evidence it didn't write.
-    for fd in fds {
-        // SAFETY: fcntl on an fd this function owns.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-            return RunOutcome::Failed("couldn't open the evidence pipe".into());
-        }
-    }
+    // Both ends close-on-exec before any process can start (L1): macOS has no pipe2, so `cloexec_pipe` holds the
+    // app-wide spawn lock exclusive from pipe() until both flags are set, and every spawn in the app takes it shared.
+    // No child another thread starts can inherit either end. The runner's own child gets only fd 3, made inheritable
+    // below. A held write end is still bounded by EOF_GRACE and the deadline (a background process of a check).
+    let Ok((rd, wr)) = crate::spawnlock::cloexec_pipe() else { return RunOutcome::Failed("couldn't open the evidence pipe".into()) };
     let wfd = wr.as_raw_fd();
     let mut cmd = std::process::Command::new(SANDBOX_EXEC);
     cmd.args(&argv).current_dir(&profile.worktree).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
@@ -473,7 +498,7 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
             Err(why) => return RunOutcome::Failed(why),
         }
     }
-    let mut child = match cmd.spawn() {
+    let mut child = match crate::spawnlock::spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => return RunOutcome::Failed(format!("the evidence runner didn't start: {e}")),
     };
@@ -641,6 +666,8 @@ fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), &'static str> {
 fn worktree_index(worktree: &Path, common: &Path) -> Result<Option<Vec<u8>>, &'static str> {
     const CAP: u64 = 512 << 20;
     let Some(admin) = git_admin(worktree, common)? else { return Ok(None) };
+    // A regular file only (#234 follow-up): the pinned open uses O_NOFOLLOW (a symlink fails), O_NONBLOCK (a FIFO
+    // can't stall the run) and checks the opened file is regular (a directory, FIFO or device fails).
     match admin.read_single_link("index", CAP) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

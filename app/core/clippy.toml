@@ -1,0 +1,11 @@
+# Every process the app starts goes through the app-wide spawn lock (src/spawnlock.rs), and every inheritable fd is
+# made under it, so a child can't inherit a pipe another thread is still setting close-on-exec on (the evidence runner's
+# fd 3). Test code may call these directly: it isn't the app.
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "use crate::spawnlock::spawn" },
+    { path = "std::process::Command::output", reason = "use crate::spawnlock::output" },
+    { path = "std::process::Command::status", reason = "use crate::spawnlock::status" },
+    { path = "portable_pty::SlavePty::spawn_command", reason = "use crate::spawnlock::spawn_pty" },
+    { path = "portable_pty::PtySystem::openpty", reason = "use crate::spawnlock::openpty" },
+    { path = "libc::pipe", reason = "use crate::spawnlock::cloexec_pipe" },
+]

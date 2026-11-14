@@ -125,7 +125,7 @@ impl Cli {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
-        let mut child = cmd.spawn().map_err(|_| Error::Unavailable)?;
+        let mut child = crate::spawnlock::spawn(&mut cmd).map_err(|_| Error::Unavailable)?;
         if let Some(bytes) = stdin {
             // The pipe is dropped at the end of the closure: EOF, so `security -i` exits after the line.
             if !child.stdin.take().is_some_and(|mut pipe| pipe.write_all(bytes).is_ok()) {

@@ -8,6 +8,7 @@
 //! authenticate (the CLI says "Not logged in"), so the CLI itself runs with the real HOME (auth only), while the
 //! guard hook is pointed at the temp HOME (`HOME=<temp> bash <temp>/.../pre-tool-use.sh`) and the deny rules are
 //! generated for the temp HOME, repo and data dir. That is the one change from the production settings text.
+#![allow(clippy::disallowed_methods)] // test code: the app's own spawns go through the spawn lock
 
 use std::ffi::OsString;
 use std::fs;

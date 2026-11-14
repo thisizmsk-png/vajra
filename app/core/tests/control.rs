@@ -4,6 +4,7 @@
 //!
 //! Tests sit at the crate top level (no wrapping mod) so that
 //! `cargo test queue_entry_matches_hook -- --exact` finds the test by name.
+#![allow(clippy::disallowed_methods)] // test code: the app's own spawns go through the spawn lock
 
 use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Write};

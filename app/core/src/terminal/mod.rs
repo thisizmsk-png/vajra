@@ -21,14 +21,14 @@ pub mod policy;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, PtySize};
 
 use crate::lock;
 pub use policy::{Limits, LoginEnv, Placement, UserPathEnv};
@@ -401,9 +401,7 @@ impl Terminals {
     }
 
     fn spawn_in(&self, place: Placement, argv: Vec<OsString>, sign_in: Option<SignInTag>, rows: u16, cols: u16, sink: Sink) -> Result<TermInfo, TermError> {
-        let pair = native_pty_system()
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| TermError::Io(e.to_string()))?;
+        let pair = crate::spawnlock::openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(TermError::Io)?;
         let mut cmd = CommandBuilder::from_argv(argv);
         cmd.env_clear();
         for k in policy::ENV_ALLOW {
@@ -432,7 +430,7 @@ impl Terminals {
             r.opening.push(place.root.clone());
             Slot(&self.map, Some(place.root.clone()))
         };
-        let mut child = pair.slave.spawn_command(cmd).map_err(|e| TermError::Spawn(e.to_string()))?;
+        let mut child = crate::spawnlock::spawn_pty(pair.slave.as_ref(), cmd).map_err(TermError::Spawn)?;
         drop(pair.slave); // so the reader sees EOF when the shell and its group are gone
         let pid = child.process_id().unwrap_or(0);
         let io = (pair.master.try_clone_reader(), pair.master.take_writer());
@@ -515,7 +513,7 @@ impl Terminals {
     /// Bounded to 2 s; a shell that cannot be asked in time, or at all, counts as busy. An ended shell is never busy.
     pub fn is_busy(&self, id: u32) -> bool {
         let Some(t) = self.list().into_iter().find(|t| t.id == id).filter(|t| t.alive) else { return false };
-        let Ok(mut ask) = std::process::Command::new("/usr/bin/pgrep").args(["-P", &t.pid.to_string()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() else { return true };
+        let Ok(mut ask) = crate::spawnlock::spawn(std::process::Command::new("/usr/bin/pgrep").args(["-P", &t.pid.to_string()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())) else { return true };
         let start = std::time::Instant::now();
         loop {
             match ask.try_wait() {
@@ -732,15 +730,8 @@ impl WakeReader {
     /// wake end when a descriptor is too large for an `fd_set` or the pipe cannot be made.
     fn wrap(inner: Box<dyn Read + Send>, watch: Option<RawFd>) -> (Box<dyn Read + Send>, Option<OwnedFd>) {
         let Some(watch) = watch.filter(|fd| (*fd as usize) < libc::FD_SETSIZE) else { return (inner, None) };
-        let mut fds = [0 as libc::c_int; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return (inner, None);
-        }
-        // Close-on-exec, so no other shell or child inherits the wake pipe.
-        for fd in fds {
-            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-        }
-        let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        // Close-on-exec before any process can start, so no other shell or child inherits the wake pipe.
+        let Ok((r, w)) = crate::spawnlock::cloexec_pipe() else { return (inner, None) };
         if r.as_raw_fd() as usize >= libc::FD_SETSIZE {
             return (inner, None);
         }

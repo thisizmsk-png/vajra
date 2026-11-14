@@ -1,4 +1,7 @@
 //! Vajra Desktop core.
+// Test code may spawn directly; the lib's non-test build is linted on its own, so every spawn in the app itself still
+// has to go through `spawnlock` (clippy.toml).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 // New with the MSRV raise to 1.88; one cleanup PR after batch-4 applies let-chains and removes this.
 #![allow(clippy::collapsible_if, clippy::chunks_exact_to_as_chunks)]
@@ -22,6 +25,7 @@ pub mod desktop;
 pub mod projects;
 pub mod providers;
 pub mod sessions;
+pub mod spawnlock;
 pub mod terminal;
 pub mod userpath;
 pub mod vajra;
