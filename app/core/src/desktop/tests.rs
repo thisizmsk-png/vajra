@@ -5823,9 +5823,11 @@ fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
     let d = t.0.join("fakebin-codex-lead");
     fs::create_dir_all(&d).unwrap();
     let argv_log = t.0.join("lead-argv");
+    // The argv is written to a temp name and renamed into place, so the log appears whole or not at all. Under full-suite
+    // load a test that saw `> file` create the file could read it before `printf` filled it (the flake: an argv of "-c").
     let body = format!(
-        "#!/bin/sh\ncase \"$1\" in --version) echo '0.166.0 (fake)';; login) echo 'Logged in';; *) printf '%s\\n' \"$@\" > '{}'; exec sleep 30;; esac\n",
-        argv_log.display()
+        "#!/bin/sh\ncase \"$1\" in --version) echo '0.166.0 (fake)';; login) echo 'Logged in';; *) printf '%s\\n' \"$@\" > '{log}.part' && mv '{log}.part' '{log}'; exec sleep 30;; esac\n",
+        log = argv_log.display()
     );
     fs::write(d.join("codex"), body).unwrap();
     fs::set_permissions(d.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -5834,13 +5836,12 @@ fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
     let r = app.start_run(input, &t.0.join("repo").to_string_lossy()).unwrap();
     let stream = r["stream"].as_str().unwrap().to_string();
     let c = lock(&app.lead_checks).get(&stream).cloned().expect("a Codex Lead registers its first-turn read-back");
-    for _ in 0..100 {
-        if argv_log.is_file() {
-            break;
-        }
+    // A deadline, not a fixed count of short sleeps: a loaded machine can take seconds to exec the fake.
+    let t0 = std::time::Instant::now();
+    while !argv_log.is_file() && t0.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let argv = fs::read_to_string(&argv_log).unwrap();
+    let argv = fs::read_to_string(&argv_log).unwrap_or_else(|e| panic!("the fake codex never wrote its argv within 20 s: {e}"));
     assert!(argv.contains(&format!("\"{}\"=\"none\"", c.marker.display())), "the marker is a deny entry of the launch: {argv}");
     assert!(!argv.lines().any(|l| l == "-s" || l == "--sandbox" || l.starts_with("--sandbox=")), "{argv}");
     assert!(c.want.deny.contains(&c.marker) && c.codex_home == t.home().join(".codex") && !c.want.network);
@@ -5880,10 +5881,8 @@ fn a_codex_lead_a_sandbox_flag_beat_is_ended_fail_closed() {
     assert!(lock(&app.lead_checks).contains_key(&stream));
     lead_rollout(&t, &c, "flag", r#"{"type":"danger-full-access"}"#, "null");
     app.check_codex_leads();
-    for _ in 0..100 {
-        if !app.sup.is_running(&stream).unwrap_or(false) {
-            break;
-        }
+    let t0 = std::time::Instant::now();
+    while app.sup.is_running(&stream).unwrap_or(false) && t0.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!app.sup.is_running(&stream).unwrap(), "the Lead is ended");
@@ -5899,10 +5898,85 @@ fn a_codex_lead_whose_profile_shows_runs_on() {
     let t = Tmp::new();
     let (app, stream, c) = codex_lead(&t);
     lead_rollout(&t, &c, "ours", r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#, &lead_entries(&c));
-    app.check_codex_leads();
-    assert!(app.sup.is_running(&stream).unwrap(), "the profile is in force");
-    assert!(!lock(&app.lead_checks).contains_key(&stream), "decided once");
+    // #241 re-check L2: Applied, then `LEAD_RECHECKS` more passes before the check is dropped.
+    for _ in 0..=crate::desktop::LEAD_RECHECKS {
+        app.check_codex_leads();
+        assert!(app.sup.is_running(&stream).unwrap(), "the profile is in force");
+    }
+    assert!(!lock(&app.lead_checks).contains_key(&stream), "decided after its re-checks");
     app.sup.kill(&stream).unwrap();
+}
+
+/// Wait up to 20 s for the Lead on `stream` to end; true if it did.
+fn lead_ended(app: &App, stream: &str) -> bool {
+    let t0 = std::time::Instant::now();
+    while app.sup.is_running(stream).unwrap_or(false) && t0.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    !app.sup.is_running(stream).unwrap_or(false)
+}
+
+const LEAD_SANDBOX: &str = r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#;
+
+/// #241 re-check L2: after Applied, an unmarked first turn in the project that shows up on a re-check pass ends the Lead
+/// (a forged marked file can't buy the real unmarked one time once it lands).
+#[test]
+fn a_codex_lead_an_unmarked_turn_after_applied_ends_it() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    lead_rollout(&t, &c, "ours", LEAD_SANDBOX, &lead_entries(&c));
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap() && lock(&app.lead_checks).contains_key(&stream), "Applied, still re-checking");
+    lead_rollout(&t, &c, "late", r#"{"type":"danger-full-access"}"#, "null");
+    app.check_codex_leads();
+    assert!(lead_ended(&app, &stream), "an unmarked turn after Applied ends the Lead");
+}
+
+/// #241 re-check L2: after Applied, the marked file vanishing ends the Lead.
+#[test]
+fn a_codex_lead_whose_marked_file_vanishes_after_applied_is_ended() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    lead_rollout(&t, &c, "ours", LEAD_SANDBOX, &lead_entries(&c));
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap());
+    fs::remove_file(t.home().join(".codex/sessions/2026/11/13/rollout-2026-11-13T16-38-01-ours.jsonl")).unwrap();
+    app.check_codex_leads();
+    assert!(lead_ended(&app, &stream), "the marked file vanished");
+}
+
+/// #241 re-check L1: more session files since the launch than one pass reads ends the Lead, even with a passing marked
+/// file among the newest: seventeen files of other folders (skipped kinds) plus the Lead's own.
+#[test]
+fn a_codex_lead_whose_window_overflows_the_file_cap_is_ended() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    let day = t.home().join(".codex/sessions/2026/11/13");
+    fs::create_dir_all(&day).unwrap();
+    for i in 0..=crate::providers::effective::LEAD_FILES_CAP {
+        fs::write(day.join(format!("rollout-2026-11-13T16-30-{i:02}-other{i:02}.jsonl")), "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/elsewhere\"}}\n").unwrap();
+    }
+    lead_rollout(&t, &c, "ours", LEAD_SANDBOX, &lead_entries(&c));
+    app.check_codex_leads();
+    assert!(lead_ended(&app, &stream), "a cap overflow fails closed");
+}
+
+/// #241 L2: no sessions folder in the Codex home at all: before `LEAD_NO_SESSIONS_WAIT` the Lead waits; past it, it is
+/// ended with the reason, instead of running unchecked for the full `LEAD_PROOF_WAIT`.
+#[test]
+fn a_codex_lead_whose_sessions_land_elsewhere_is_ended_after_a_minute() {
+    let t = Tmp::new();
+    let (app, stream, _c) = codex_lead(&t);
+    let _ = fs::remove_dir_all(t.home().join(".codex/sessions"));
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap(), "inside the first minute the Lead waits");
+    let back = std::time::SystemTime::now() - crate::desktop::LEAD_NO_SESSIONS_WAIT - Duration::from_secs(1);
+    lock(&app.lead_checks).get_mut(&stream).unwrap().since = back;
+    let sub = app.bus.subscribe();
+    app.check_codex_leads();
+    assert!(lead_ended(&app, &stream), "past a minute with no sessions folder, the Lead ends");
+    let said = collect_changes(&sub, Duration::from_secs(1)).map(|p| p.to_string()).unwrap_or_default();
+    assert!(said.contains(&stream), "the end is pushed on the Lead's own stream: {said}");
 }
 
 /// The marker shows but a Vajra dir is readable: ended with the check's reason.
@@ -5913,10 +5987,8 @@ fn a_codex_lead_with_a_readable_vajra_dir_is_ended() {
     let open = lead_entries(&c).replacen(r#""access":"deny""#, r#""access":"read""#, 1);
     lead_rollout(&t, &c, "open", r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#, &open);
     app.check_codex_leads();
-    for _ in 0..100 {
-        if !app.sup.is_running(&stream).unwrap_or(false) {
-            break;
-        }
+    let t0 = std::time::Instant::now();
+    while app.sup.is_running(&stream).unwrap_or(false) && t0.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!app.sup.is_running(&stream).unwrap(), "a readable Vajra dir ends the Lead");

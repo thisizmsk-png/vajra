@@ -198,6 +198,24 @@ fn every_form_of_the_sandbox_flag_is_dropped_but_never_the_prompt() {
     assert_eq!(b, ["codex", "--", "--sandbox"]);
 }
 
+/// #241 L3: the stripper also drops every other flag that would widen or replace the profile, in each spelling, and
+/// still keeps the shell's own `-c <script>`, an unrelated `-c` config, and anything after `--`.
+#[test]
+fn every_profile_widening_flag_is_dropped_in_every_spelling() {
+    let mut a: Vec<String> = [
+        "/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--yolo",
+        "--profile", "theirs", "-p", "theirs", "--profile=theirs", "-ptheirs",
+        "--config", "sandbox_mode=\"danger-full-access\"", "--config=sandbox_mode=\"danger-full-access\"",
+        "-csandbox_mode=\"danger-full-access\"", "-csandbox_workspace_write.network_access=true",
+        "-c", "model=\"x\"", "--config", "approval_policy=\"never\"", "--", "--yolo -p x",
+    ]
+    .map(String::from)
+    .into();
+    drop_sandbox_flag(&mut a);
+    let want: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "-c", "model=\"x\"", "--config", "approval_policy=\"never\"", "--", "--yolo -p x"].map(String::from).into();
+    assert_eq!(a, want);
+}
+
 #[test]
 fn worker_builders_refuse_bad_inputs() {
     let mut l = launch(RoleKind::Worker, false);
