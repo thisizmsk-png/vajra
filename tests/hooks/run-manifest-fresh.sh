@@ -9,7 +9,8 @@ command -v jq >/dev/null || { echo "SKIP: jq missing"; exit 77; }
 if command -v sha256sum >/dev/null 2>&1; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
 P=0; F=0
 while IFS= read -r f; do
-  case "$f" in app/*|manifest.json|manifest.json.sig|*/__pycache__/*|*.pyc|*.db|.DS_Store|*/.DS_Store) continue ;; esac
+  # docs/assets (the README media) is left out of the manifest, the same rule the generator follows (D7 O1).
+  case "$f" in app/*|docs/assets/*|manifest.json|manifest.json.sig|*/__pycache__/*|*.pyc|*.db|.DS_Store|*/.DS_Store) continue ;; esac
   [ -f "$f" ] && [ ! -L "$f" ] || continue
   want="$(jq -r --arg f "$f" '.files[$f] // "missing"' manifest.json)"
   have="$("${SHA[@]}" "$f" | cut -c1-64)"
