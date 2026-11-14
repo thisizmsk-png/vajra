@@ -401,7 +401,7 @@ impl App {
         if super::proof_app::run_of(run.slug) != Some(ask.run_id.as_str()) {
             return Err("the evidence folder belongs to another run".into());
         }
-        let at_commit = || self.at_approved_commit(&profile.worktree, run.git_common, run.base, run.slug, &ask.commit).map(Some);
+        let at_commit = || self.at_approved_commit(&profile.worktree, run.git_common, run.base, run.slug, &ask.commit, &ask.commands).map(Some);
         at_commit()?;
         let sha = self.consume_evidence_approval(&ask, now)?;
         // Checked again by the runner immediately before it spawns (bhishma L1 on 07a0ee4): a change made after the check
@@ -428,7 +428,8 @@ impl App {
     ///   runner would collect (`bridge::TEST_LIKE`) is refused.
     ///
     /// Returns the bundle's `core` field: the bound tree and the ignored listing.
-    fn at_approved_commit(&self, worktree: &Path, common: &Path, base: &Path, slug: &str, commit: &str) -> Result<Value, String> {
+    #[allow(clippy::too_many_arguments)]
+    fn at_approved_commit(&self, worktree: &Path, common: &Path, base: &Path, slug: &str, commit: &str, commands: &[String]) -> Result<Value, String> {
         let head = runner::worktree_head(worktree, common).map_err(String::from)?;
         if head != commit {
             return Err("the worktree isn't at the approved commit".into());
@@ -444,7 +445,7 @@ impl App {
             }
         }
         let base_str = base.to_string_lossy();
-        let snap = bridge.worktree_snapshot(worktree, &[base_str.as_ref()]).ok_or("the worktree's files couldn't be read as one tree (the repository's config defines a filter, or git took too long)")?;
+        let snap = bridge.worktree_snapshot(worktree, &[base_str.as_ref()], commands).ok_or("the worktree's files couldn't be read as one tree (the repository's config defines a filter, or git took too long)")?;
         if snap.tree != want {
             return Err("the worktree has changes that aren't in the approved commit".into());
         }
