@@ -179,6 +179,9 @@ impl Delivery {
         let ask = Ask {
             run_id: self.cfg.run.clone(), round: round.round, commit: round.head.clone(), seat: verifier.slot.clone(), account: verifier.account.clone(),
             commands: cmds.all.clone(), network: verifier.network,
+            // Set to the evidence worktree's git dir once the core has made it from the Start repository (`in_tree`);
+            // the root here only lets the list be checked before a worktree is made.
+            repo: std::path::PathBuf::from("/"),
         };
         if let Err(why) = ask.check() {
             return log.fail("The check commands", &why);
@@ -201,7 +204,10 @@ impl Delivery {
         out
     }
 
-    fn in_tree(&self, round: &RoundInput, ask: Ask, cmds: &Commands, tree: &Tree, life: &dyn RunLife, log: &mut Log) -> Delivered {
+    fn in_tree(&self, round: &RoundInput, mut ask: Ask, cmds: &Commands, tree: &Tree, life: &dyn RunLife, log: &mut Log) -> Delivered {
+        // The approval is bound to this repository (codex P1 on #249): the git dir of the worktree the core just made
+        // from the run's Start repository, never one a caller names.
+        ask.repo = tree.git_common.clone();
         let (slug, head) = (self.cfg.slug.as_str(), round.head.as_str());
         let approved = self.cfg.trust == Trust::GuardedByApproval;
         if approved {

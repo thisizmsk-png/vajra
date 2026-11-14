@@ -241,6 +241,8 @@ fn an_approval_run_asks_first_runs_through_the_approval_and_signs_its_progress_l
     // The person approved exactly the list that ran.
     let asks = crate::lock(&f.asks).clone();
     assert_eq!(asks[0], asks[1]);
+    // Bound to the repository of the worktree the core made, not one a caller names (codex P1 on #249).
+    assert_eq!(asks[0].repo, tree().git_common);
     let Request::CampaignProgress { text, .. } = &f.writes()[0] else { panic!() };
     assert_eq!(*text, progress_line(APPROVAL_SHA), "the proof needs this signed line (N20)");
 }
