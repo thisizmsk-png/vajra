@@ -133,6 +133,11 @@ export type RunOverview = {
   graph: { tasks: GraphTask[]; waves: number };
 };
 export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };
+/** N20: what the person approves for a `guarded_by_approval` run, from the core's memory (never from the file). */
+export type EvidenceAsk = { run_id: string; round: number; commit: string; seat: string; account: string; commands: string[] };
+export type EvidenceApprovalState = "none" | "pending" | "approved" | "consumed" | "declined" | "expired" | "void";
+/** `ask` and `sha256` are present only when the core holds the ask; the sha is what an answer must give back. */
+export type EvidenceApproval = { run_id: string; state: EvidenceApprovalState; sha256?: string; ask?: EvidenceAsk; asked_at?: number; hold_max_s?: number };
 export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
 /** ADR-15 2: one Director-General per project; `generation` is its conversation number (1, then +1 per "New conversation"). */
 export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string; project_id: string; project_name?: string | null; generation: number; name: string };
@@ -352,6 +357,11 @@ export const api = {
   evidenceList: (slug: string) => call<{ slug: string; stale: boolean; pending?: number; rows: EvidenceRow[] }>("evidence_list", { slug }),
   runOverview: (slug: string) => call<RunOverview>("run_overview", { slug }),
   evidenceDetail: (slug: string, taskId: string) => call<EvidenceDetail>("evidence_detail", { slug, taskId }),
+  /** The run's check-command approval (N20): its state, and while the core holds it the exact list. */
+  evidenceApproval: (runId: string) => call<EvidenceApproval>("evidence_approval", { runId }),
+  /** Approve or decline the list the dialog showed, by its sha: refused (`list_changed`) if the core now holds another. */
+  actAnswerEvidenceApproval: (envelope: Envelope, runId: string, sha256: string, approve: boolean) =>
+    call<ActResult>("act_answer_evidence_approval", { envelope, runId, sha256, approve }),
   // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
   termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
   termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),

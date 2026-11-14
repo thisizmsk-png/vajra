@@ -10,6 +10,7 @@ import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
 import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
 import { Problem } from "../states";
+import { EvidenceApproval } from "./EvidenceApproval";
 import { Proof } from "./Proof";
 import { RunLog } from "./RunLog";
 
@@ -124,6 +125,8 @@ export function Run() {
     <div className="v-home">
       <Text as="h1" variant="headline-lg" className="v-run__name">{S.run.title}</Text>
       <RunProvider slug={slug} />
+      {/* Keyed by run, so another run's dialog or answer never shows under this one. */}
+      {overview && <EvidenceApproval key={overview.run_id} runId={overview.run_id} />}
       <Proof slug={slug} />
       <Section title={S.run.timeline}>
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
