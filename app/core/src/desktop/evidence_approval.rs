@@ -85,11 +85,14 @@ fn hides_text(c: char) -> bool {
 
 /// bhishma L2 on PR 247: what a renderer may draw as nothing, as a private glyph, or over its neighbour (Unicode
 /// 16.0). Every format character (Cf) that isn't default-ignorable; all private use (Co); the noncharacters; and the
-/// combining marks that overlay or enclose the character before them (canonical combining class 1, and Me). Other
-/// unassigned code points (Cn) need Unicode data the core doesn't carry; the dialog's own check refuses them.
+/// combining marks that overlay or enclose the character before them (canonical combining class 1, and Me). And every
+/// code point unassigned in the Unicode data the core is built with (Cn, bhishma L1 on the wiring): one assigned later
+/// might draw as nothing.
 fn hides_or_overlays(c: char) -> bool {
+    use icu_properties::{props::GeneralCategory, CodePointMapData};
     let u = c as u32;
-    (u & 0xFFFE) == 0xFFFE
+    CodePointMapData::<GeneralCategory>::new().get(c) == GeneralCategory::Unassigned
+        || (u & 0xFFFE) == 0xFFFE
         || matches!(
             c,
             // Cf, not default-ignorable
@@ -388,6 +391,16 @@ impl App {
         F: FnOnce(&Profile, &EvidenceRun) -> RunOutcome,
     {
         ask.network = profile.network;
+        // Where the commands run must be what was approved (bhishma M1 on the wiring), checked before the approval is
+        // used, so a mismatch runs nothing and leaves it unused: the slug is this run's; the worktree has ask.commit
+        // checked out, read from its admin folder in the run's git common dir, which also proves that dir is its own.
+        if super::proof_app::run_of(run.slug) != Some(ask.run_id.as_str()) {
+            return Err("the evidence folder belongs to another run".into());
+        }
+        let head = runner::worktree_head(&profile.worktree, run.git_common).map_err(String::from)?;
+        if head != ask.commit {
+            return Err("the worktree isn't at the approved commit".into());
+        }
         let sha = self.consume_evidence_approval(&ask, now)?;
         let approved = EvidenceRun { commands: &ask.commands, ..run.clone() };
         Ok((sha, exec(profile, &approved)))

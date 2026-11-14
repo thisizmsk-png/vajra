@@ -27,6 +27,9 @@ toml = { version = "1", default-features = false, features = ["parse"] }
 flate2 = "1"
 sha2 = "0.10"
 tauri-plugin-dialog = "2"
+# Already in Cargo.lock through the Tauri build (url, idna): the Unicode general category, so an approved check
+# command can't carry an unassigned code point (bhishma L1 on the approval wiring). Its compiled data, no provider.
+icu_properties = "=2.1.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
