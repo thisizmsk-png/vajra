@@ -114,10 +114,10 @@ pub const CLAUDE_WORKER_S4_PASSED: bool = true;
 /// these deny rules and hooks, and users' CLIs auto-update. A new build, or any change to the rules, the hooks or the
 /// flag's fields, needs an S4 PASS on it first; `s4-claude-settings.sh` prints the pair to add. Fails closed.
 pub const CLAUDE_WORKER_PROVEN: &[(&str, &str)] = &[
-    // The owner's S4 PASS on the final sandbox tree (ao/vajra-70/s4-final 4c15508c, 2026-11-13): claude 2.1.296,
-    // both runs, 27 ok lines. The OS sandbox refused both name-free calls (Operation not permitted) and the stand-in
-    // key never reached a tool result. The shape covers the flag file, the argv and the repo's guard scripts' bytes.
-    ("2.1.296 (Claude Code)", "a85eeb6c73ce47783d3760fa0ec4634d97845b459ed7cbac717f16b63f418bb8"),
+    // The owner's S4 rerun on the final sandbox tree with batch-3 (ao/vajra-70/s4-final-2 a9180077, 2026-11-14):
+    // claude 2.1.296, S4 PASS, every check ok, including the data-dir run with the OS sandbox's key-read and data-write
+    // refusals. The shape covers the flag file, the argv and the repo's guard scripts' bytes.
+    ("2.1.296 (Claude Code)", "3006ecb90e00e8de3b6a5acdf8f0492949f969ae697a4606a09a9df843831425"),
 ];
 
 /// Canary A: a build not on `CLAUDE_WORKER_PROVEN` whose self-test on this Mac failed, timed out or could not run (no
