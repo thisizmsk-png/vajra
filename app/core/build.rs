@@ -104,6 +104,9 @@ const COMMANDS: &[&str] = &[
     "term_visible",
     "term_ack",
     "term_close",
+    "core_runs",
+    "labs_get",
+    "labs_set",
 ];
 
 fn main() {
