@@ -132,3 +132,40 @@ fn the_only_plugin_permission_is_the_open_dialog_for_the_main_window() {
     assert_eq!(main.matches(".plugin(").count(), 1, "one plugin is registered");
     assert!(main.contains(".plugin(tauri_plugin_dialog::init())"), "the dialog plugin is the one registered");
 }
+
+/// Plan #184 L3: no capability grants a file or shell permission, and the dialog stays open-only, so a later edit cannot
+/// widen the grant unseen. The fs plugin is compiled in (the dialog plugin depends on it) but never registered or
+/// granted, and the shell plugin is not a dependency at all. Every grant is checked in every form Tauri reads: string
+/// entries and object entries (which can carry a scope) in each capability file, and capabilities inline in the config.
+#[test]
+fn no_capability_grants_a_file_or_shell_permission_and_the_dialog_is_open_only() {
+    let security = &conf()["app"]["security"];
+    assert!(security.get("capabilities").is_none(), "no capability is defined inline in tauri.conf.json: {security}");
+    let file_or_shell = |id: &str| {
+        let plugin = id.split(':').next().unwrap_or(id);
+        plugin == "fs" || plugin == "shell" || plugin.starts_with("fs-") || plugin.starts_with("shell-")
+    };
+    let mut dialog = Names::new();
+    for (p, cap, perms) in capabilities() {
+        for v in cap["permissions"].as_array().unwrap() {
+            // An object entry (`{"identifier": .., "allow": [..]}`) carries a scope; the folder picker needs none.
+            assert!(v.is_string(), "{} has a non-string permission entry: {v}", p.display());
+        }
+        for x in &perms {
+            assert!(!file_or_shell(x), "{} grants a file or shell permission: {x}", p.display());
+            if x.starts_with("dialog:") {
+                dialog.insert(x.clone());
+            }
+        }
+    }
+    assert_eq!(dialog, Names::from(["dialog:allow-open".to_string()]), "the dialog is open-only (no save, message, ask or confirm)");
+    let main = std::fs::read_to_string(root().join("src/main.rs")).unwrap();
+    assert!(!main.contains("tauri_plugin_fs") && !main.contains("tauri_plugin_shell"), "neither the fs nor the shell plugin is registered");
+    let manifest = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    assert!(!manifest.contains("tauri-plugin-fs") && !manifest.contains("tauri-plugin-shell"), "neither is a direct dependency");
+    // The one call the UI makes: a single directory, opened (never saved over).
+    let ipc = std::fs::read_to_string(root().join("../ui/src/ipc.ts")).unwrap();
+    let calls: Vec<&str> = ipc.match_indices("\"plugin:").map(|(i, _)| &ipc[i + 1..i + 1 + ipc[i + 1..].find('"').unwrap()]).collect();
+    assert_eq!(calls, ["plugin:dialog|open"], "the UI calls only the open dialog");
+    assert!(ipc.contains("directory: true, multiple: false"), "it picks one folder");
+}

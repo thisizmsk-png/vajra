@@ -437,13 +437,15 @@ mod tests {
         let dev = d.join("tty");
         std::fs::write(&dev, "").unwrap();
         let f = std::fs::File::open(&dev).unwrap();
-        let mut c = Command::new("/bin/sleep").arg("600").stdin(f).spawn().unwrap();
+        // No TMPDIR, so only the terminal mark can tie it to the ticket: a platform binary's environment is hidden on
+        // a Mac with SIP on, but readable on CI runners (SIP off), where the inherited TMPDIR showed (#182 CI).
+        let mut c = Command::new("/bin/sleep").arg("600").env_remove("TMPDIR").stdin(f).spawn().unwrap();
         let t0 = Instant::now();
         while !open_paths(c.id()).iter().any(|p| p == &dev) {
             assert!(t0.elapsed() < Duration::from_secs(10), "its open file never became visible");
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(env_var(c.id(), "TMPDIR"), None, "a platform binary's environment is hidden on macOS");
+        assert_eq!(env_var(c.id(), "TMPDIR"), None, "no TMPDIR can be read for it, hidden or absent");
         let seen = holders(&dev, floor, c.id());
         assert_eq!(seen.iter().map(|h| h.0).collect::<Vec<_>>(), vec![c.id()], "the one holder, this user's, after the floor");
         // Named as anyone but itself, a process this app spawned (its parent is this test process) is never a holder:

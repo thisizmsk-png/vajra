@@ -321,11 +321,44 @@ fn a_record_whose_process_does_not_carry_its_mark_is_never_signalled() {
     assert!(!alive(&mut ours), "the one whose process carries its mark is ended");
 }
 
+/// #248 L1: a lead whose process is now a zombie (killed, not yet reaped) can't be read through `proc_pidinfo`, so its
+/// stamp is unreadable and it judges `Gone`. Its pid is still held and the zombie's own stamp is the recorded one, so it
+/// isn't proven gone or someone else's: it is never signalled, its record stays with one more try, and the next start
+/// tries again. Once the pid is free (reaped), the record is forgotten.
+#[test]
+fn a_lead_whose_pid_is_held_but_unproven_is_kept_for_the_next_start() {
+    let t = Tmp::new("unproven");
+    let ledger = Ledger::new(t.0.join("owned.jsonl"));
+    let mut z = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+    let o = Owner { pid: z.id(), stamp: crate::procid::start_stamp(z.id()).unwrap(), cwd: "/tmp".into(), kind: Kind::Lead, run: Some(RUN.into()), ticket: None, tries: 0, mark: Some(MARK.into()) };
+    z.kill().unwrap();
+    let t0 = std::time::Instant::now();
+    while !crate::procid::is_zombie(z.id()) && t0.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(crate::procid::is_zombie(z.id()), "the lead is a zombie: its pid is held");
+    ledger.record(o.clone()).unwrap();
+    let ended: Vec<Ended> = ledger.end_agents().into_iter().map(|(_, e)| e).collect();
+    assert_eq!(ended, vec![Ended::NotProven]);
+    let kept = ledger.load();
+    assert_eq!((kept.len(), kept[0].pid, kept[0].tries), (1, o.pid, 1), "kept, with one more try: {kept:?}");
+    let r = reconcile(&t.0, &ledger);
+    assert_eq!(r.not_proven, 1, "{r:?}");
+    // Reaped: the pid is free, so the record is proven gone and forgotten.
+    z.wait().unwrap();
+    let ended: Vec<Ended> = ledger.end_agents().into_iter().map(|(_, e)| e).collect();
+    assert_eq!(ended, vec![Ended::Gone]);
+    assert!(ledger.load().is_empty());
+}
+
 #[test]
 fn a_record_that_survives_its_kill_is_tried_a_few_times_then_dropped() {
     let t = Tmp::new("tries");
     let ledger = Ledger::new(t.0.join("owned.jsonl"));
-    let o = Owner { pid: 4242, stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: MAX_TRIES - 1, mark: Some(MARK.into()) };
+    // A pid that is free: a fixed number can be held by any process on a busy runner (it read Reused on CI, #182).
+    let mut done = Command::new("/usr/bin/true").spawn().unwrap();
+    done.wait().unwrap();
+    let o = Owner { pid: done.id(), stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: MAX_TRIES - 1, mark: Some(MARK.into()) };
     ledger.record(o).unwrap();
     // Gone (no such pid with that stamp): dropped at once whatever its count.
     assert_eq!(ledger.end_agents()[0].1, Ended::Gone);

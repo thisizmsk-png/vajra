@@ -801,6 +801,23 @@ check.
      is recorded in the app log. Resume of that campaign stays blocked until each listed process is killed
      or kept. The barrier is bounded at 20 s in total, excluding time spent waiting on that confirm, and its outcome is recorded in the app log. Only after
      it finishes does `vajra-campaign.sh verify` run for each campaign.
+  6b''. **Agent ownership records and what has none** (6d2d, #176 L3). Every lead and worker is started by the session
+     supervisor, which writes an ownership record (pid, start stamp, a random mark put in the agent's environment) to
+     `owned.jsonl` before it returns, and the next start's crash reconcile ends each record still provably ours. A
+     one-click install goes through the supervisor too but gets no record and no mark on purpose, so a reconcile never
+     kills an install midway. Two other paths start processes directly, not through the supervisor, so they get no
+     ownership record and no crash reconcile:
+     - the control lead runner, which runs the Director-General's asks;
+     - the evidence runner (batch-3), which runs a check's commands under macOS Seatbelt.
+     Neither is an agent seat. While the app is running, both are bounded by their own timeouts: the lead runner at 10
+     minutes per ask, and the evidence runner at `evidence_run_max_s`, 30 minutes. **Those limits hold only while the app
+     is alive.** A thread in the app enforces the lead runner's, and a polling loop in the app enforces the evidence
+     runner's. If the core crashes or is killed, both enforcers stop. Each runner's children are in their own process
+     group with no ownership record, so no start-up reconcile finds them, and they can keep running with no limit (a
+     silent, long-running check command is enough). This is a known limitation, not a bound. Removing it needs
+     enforcement that survives the app: a record and reconcile for these groups, or a watchdog outside the app. **No agent
+     path may start this way:** a new lead, worker or anything else that runs agent code goes through the supervisor and
+     gets a record.
   6c. When the last window closes, the webview is destroyed and only the core stays. Reopening rebuilds the
      UI from the core. This keeps a long-lived menu bar app from carrying webview growth (PM-6).
   7. While any run is active the core holds a macOS activity assertion, so App Nap does not throttle the

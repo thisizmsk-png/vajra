@@ -2,7 +2,8 @@
 name = "vajra-desktop"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# 1.88: the fixed plist (quick-xml 0.42) and time 0.3.55 need it (RUSTSEC-2026-0194, -0195, -0009; plan #184 L1).
+rust-version = "1.88"
 description = "Vajra Desktop: a local window onto Vajra runs and their crews"
 license = "MIT"
 publish = false

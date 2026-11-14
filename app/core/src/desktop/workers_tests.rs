@@ -104,7 +104,11 @@ WT=$(pwd -P)
 HARNESS=codex
 [ "$1" = -p ] && HARNESS=claude
 case "$1" in
-  -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
+  -p) printf '%s\n' "$@" > '{log}.argv'
+    # The tools it was given (`--tools a,b,c`), as the real CLI lists them: a checker's init must not list Edit or
+    # Write, or the read-back rightly fails it (that raced the test on a slow runner, #182 CI).
+    TOOLS=$(printf '%s\n' "$@" | sed -n '/^--tools$/{{n;p;q;}}' | sed 's/,/","/g')
+    echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["'"$TOOLS"'"]}}' ;;
   *)
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
@@ -1176,6 +1180,25 @@ fn a_pair_an_older_self_test_recorded_is_tested_again_and_a_build_with_no_sandbo
         assert!(v.worktree.is_none() && !r.d.join("log").exists(), "{tag}: the harness never ran: {v:?}");
         assert_eq!(selftests(&r), 1, "{tag}: the old pair was self-tested, not trusted");
     }
+}
+
+/// Plan #215 L1, option A: a list planted by a same-user agent passes every file check (this user's, 0600, one link)
+/// and holds a valid-looking pair for the current self-test, yet the self-test still runs, and a build with no OS
+/// sandbox is refused. Only a pass this app process saw counts.
+#[test]
+fn a_planted_private_list_with_a_valid_looking_pair_does_not_skip_the_self_test() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let r = canary_rig("canary-planted", true);
+    seed_pair(&r, Some(claude_selftest::VERSION));
+    let list = r.gw.data.join("control/claude-proven.json");
+    std::fs::set_permissions(&list, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let m = std::fs::symlink_metadata(&list).unwrap();
+    // SAFETY: getuid has no preconditions.
+    assert!(m.is_file() && m.nlink() == 1 && m.uid() == unsafe { libc::getuid() } && m.mode() & 0o777 == 0o600, "the plant passes every file check");
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    assert_eq!(selftests(&r), 1, "the planted pair skipped the self-test");
+    assert!(v.worktree.is_none() && !r.d.join("log").exists(), "the harness ran on a planted pair: {v:?}");
 }
 
 /// The same old pair for a build that does pass the current test: it is tested once more, then recorded with this

@@ -82,3 +82,41 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: app/core
         run: cargo test --test profile_harness
+
+  core-tests:
+    # The core Rust tests on macOS (owner decision, 2026-11-12). Every test runs: most in parallel, and the ones listed in
+    # app/core/ci/serial-tests.txt (time limits or a lock that parallel load crowds out) one at a time. None is retried.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the UI (tauri::generate_context! needs app/ui/dist)
+        working-directory: app/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Core Rust tests
+        run: bash app/core/ci/run-tests.sh
+
+  core-advisories:
+    # Plan #184 L1: fail on any crate in the core's Cargo.lock with a RustSec advisory, or that is yanked (the rules are in
+    # app/core/deny.toml). Reads the lockfile only, so it needs no build. cargo-deny is installed at a pinned version from
+    # crates.io with its own lockfile, not through a third-party action.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Advisories and yanked crates
+        working-directory: app/core
+        run: cargo deny --locked check advisories
