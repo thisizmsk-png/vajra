@@ -442,6 +442,36 @@ fn a_line_or_paragraph_separator_is_refused_in_a_command_seat_or_account() {
 }
 
 #[test]
+fn format_private_use_noncharacters_and_overlay_marks_are_refused_too() {
+    // bhishma L2 on PR 247: characters a renderer may hide, draw as nothing, or draw over the text beside them.
+    let refused = [
+        '\u{0600}', '\u{0605}', '\u{06DD}', '\u{070F}', '\u{0890}', '\u{08E2}', // Arabic and Syriac format marks
+        '\u{FFF9}', '\u{FFFA}', '\u{FFFB}', // interlinear annotation marks
+        '\u{110BD}', '\u{110CD}', '\u{13430}', '\u{1343F}', // Kaithi and Egyptian format marks
+        '\u{E000}', '\u{F8FF}', '\u{F0000}', '\u{10FFFD}', // private use
+        '\u{FDD0}', '\u{FDEF}', '\u{FFFE}', '\u{FFFF}', '\u{1FFFE}', '\u{10FFFF}', // noncharacters
+        '\u{0334}', '\u{0338}', '\u{20D2}', '\u{20E5}', '\u{1D167}', // overlay marks (the combining long solidus)
+        '\u{20DD}', '\u{20E0}', '\u{0488}', '\u{A670}', // enclosing marks
+    ];
+    let t = Tmp::new();
+    let app = t.app();
+    for c in refused {
+        for field in 0..3 {
+            let mut a = ask();
+            match field {
+                0 => a.commands = vec![format!("npm test /{c}etc")],
+                1 => a.seat = format!("verifier{c}"),
+                _ => a.account = format!("codex{c}"),
+            }
+            assert!(app.request_evidence_approval(&a, at(T0)).is_err(), "U+{:04X} in field {field}", c as u32);
+        }
+    }
+    // Ordinary non-ASCII text and an ordinary combining accent still pass (shown highlighted in the dialog).
+    let a = Ask { commands: vec!["echo caf\u{E9}".into(), "echo cafe\u{0301}".into(), "ls ./donn\u{E9}es".into()], ..ask() };
+    assert!(app.request_evidence_approval(&a, at(T0)).is_ok());
+}
+
+#[test]
 fn a_bad_ask_is_refused_before_anything_is_written() {
     let t = Tmp::new();
     let app = t.app();

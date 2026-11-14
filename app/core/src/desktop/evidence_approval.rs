@@ -80,7 +80,32 @@ pub(crate) struct Held {
 /// these, so none can reach the dialog. Also the line and paragraph separators U+2028 and U+2029 (bhishma on #226):
 /// they are neither, but a renderer breaks the line at them, so one command could show as two.
 fn hides_text(c: char) -> bool {
-    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') || default_ignorable(c)
+    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') || default_ignorable(c) || hides_or_overlays(c)
+}
+
+/// bhishma L2 on PR 247: what a renderer may draw as nothing, as a private glyph, or over its neighbour (Unicode
+/// 16.0). Every format character (Cf) that isn't default-ignorable; all private use (Co); the noncharacters; and the
+/// combining marks that overlay or enclose the character before them (canonical combining class 1, and Me). Other
+/// unassigned code points (Cn) need Unicode data the core doesn't carry; the dialog's own check refuses them.
+fn hides_or_overlays(c: char) -> bool {
+    let u = c as u32;
+    (u & 0xFFFE) == 0xFFFE
+        || matches!(
+            c,
+            // Cf, not default-ignorable
+            '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}' | '\u{08E2}'
+                | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}'
+                // Co
+                | '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+                // noncharacters (and U+nFFFE, U+nFFFF above)
+                | '\u{FDD0}'..='\u{FDEF}'
+                // overlay marks (ccc 1)
+                | '\u{0334}'..='\u{0338}' | '\u{1CD4}' | '\u{1CE2}'..='\u{1CE8}' | '\u{20D2}'..='\u{20D3}'
+                | '\u{20D8}'..='\u{20DA}' | '\u{20E5}'..='\u{20E6}' | '\u{20EA}'..='\u{20EB}' | '\u{10A39}'
+                | '\u{16AF0}'..='\u{16AF4}' | '\u{1BC9E}' | '\u{1D167}'..='\u{1D169}'
+                // enclosing marks (Me)
+                | '\u{0488}'..='\u{0489}' | '\u{1ABE}' | '\u{20DD}'..='\u{20E0}' | '\u{20E2}'..='\u{20E4}' | '\u{A670}'..='\u{A672}'
+        )
 }
 
 /// Unicode's Default_Ignorable_Code_Point property, in full (Unicode 16.0 DerivedCoreProperties.txt).
