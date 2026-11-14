@@ -199,7 +199,7 @@ mod tests {
     fn the_preview_has_the_facts_and_none_of_the_home_path() {
         let terms = [TermInfo { id: 1, pid: 77, cwd: "/Users/sam/code/app/wt".into(), root: "/Users/sam/code/app".into(), rows: 1, cols: 1, alive: true, sign_in: None }];
         let runs = [RunDiag { stream: "s1".into(), pid: 900 }];
-        let found = [Found { owner: Owner { pid: 55, stamp: 1, cwd: "/Users/sam/.ssh".into() }, verdict: Verdict::Reused }];
+        let found = [Found { owner: Owner::shell(55, 1, "/Users/sam/.ssh".into()), verdict: Verdict::Reused }];
         let p = preview(&report(&terms, &runs), &found, HOME);
         assert!(p.contains("pid 77") && p.contains("pid 900") && p.contains("pid 55") && p.contains("left alone"));
         assert!(!p.contains("/Users/sam"), "{p}");

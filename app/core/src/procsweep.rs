@@ -157,7 +157,7 @@ pub fn sweep_ticket(seen: &[(u32, u64)], tmp: &Path, since: u64) -> Swept {
 }
 
 /// SIGKILL each `(pid, stamp)` that is still that process, then wait up to a second for them to go.
-fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
+pub(crate) fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
     let mut watch = ExitWatch::new();
     let hits: Vec<(u32, u64)> = hits.into_iter().filter(|&(p, s)| watch.add(p) && running(p, s)).collect();
     for &(p, s) in &hits {
@@ -218,6 +218,11 @@ fn sweep(mark: &Mark, w: Window) -> Swept {
         }
     }
     total
+}
+
+/// Does `pid` run as this user?
+pub(crate) fn is_same_user(pid: u32) -> bool {
+    same_user(pid)
 }
 
 fn same_user(pid: u32) -> bool {
@@ -324,7 +329,7 @@ fn open_paths(pid: u32) -> Vec<PathBuf> {
 const MAX_ARGS: usize = 1 << 20;
 
 /// One variable of `pid`'s environment as it was at exec, or `None` (hidden, gone, or unset).
-fn env_var(pid: u32, name: &str) -> Option<OsString> {
+pub(crate) fn env_var(pid: u32, name: &str) -> Option<OsString> {
     use std::os::unix::ffi::OsStrExt;
     let block = env_block(pid)?;
     let key = format!("{name}=");

@@ -145,6 +145,11 @@ impl LeadState {
         }
     }
 
+    /// Was a `claude` binary found (the resume check's "is the provider installed")? Resolves it like `bin` does.
+    pub(super) fn claude_found(&self) -> bool {
+        self.bin().is_some()
+    }
+
     /// The claude binary. The first call reads the user PATH (and so waits for its first resolution); later calls
     /// return the same answer.
     fn bin(&self) -> Option<PathBuf> {

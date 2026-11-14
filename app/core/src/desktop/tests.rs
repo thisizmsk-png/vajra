@@ -3463,6 +3463,34 @@ fn two_projects_run_at_once_and_the_app_cap_holds_a_third() {
     }
 }
 
+/// #176 review: a core run recorded started whose lead then fails to launch is recorded ended at once (`lead_lost`,
+/// `start_failed`), so the next start's reconcile does not take it for a crash and call it `app_restarted`. The launch
+/// fails before any harness runs: the lead's folder is taken by a file.
+#[test]
+fn a_core_run_whose_lead_fails_to_launch_is_recorded_ended_not_left_for_the_crash_reconcile() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    let p = app.launch_project(&r[0]).unwrap().1.id;
+    let run = "20261112-0940";
+    let seats = json!({"seats": [{"seat": "lead", "account": "codex"}, {"slot": "w1", "role": "backend", "account": "codex"}]});
+    app.record_run_seats(run, &seats).unwrap();
+    let runs = t.0.join("data/runs");
+    fs::create_dir_all(runs.join(run)).unwrap();
+    fs::write(runs.join(run).join("lead"), "not a folder").unwrap();
+    let input = crate::sessions::argv::RunInput {
+        ask: "x".into(), max_rounds: 1, base: "0123456789abcdef0123456789abcdef01234567".into(), max_in_flight: 1, campaign: None, provider: None,
+    };
+    let e = app.start_lead_run(&p, input, r[0].to_str().unwrap(), run).unwrap_err();
+    assert_eq!(code(&e), "lead_failed", "{e}");
+    assert!(runs.join(run).join("core.json").is_file(), "the start was recorded first");
+    let ended: Value = serde_json::from_slice(&fs::read(runs.join(run).join("ended.json")).expect("the failed start is closed")).unwrap();
+    assert_eq!((ended["status"].as_str(), ended["reason"].as_str()), (Some("lead_lost"), Some(super::lead_start::START_FAILED)));
+    let left = super::recover::reconcile(&t.0.join("data"), &crate::owned::Ledger::new(crate::owned::ledger_path(&t.0.join("data"))));
+    assert!(left.runs.is_empty(), "the reconcile has nothing to call app_restarted: {:?}", left.runs);
+    assert_eq!(app.active_run_count(), 0, "nothing was left counted in the caps");
+}
+
 /// #175 review: a core run (a seated proposal's, under its lead) counts in the run caps beside classic runs. A second
 /// core run, or a classic run, in the same project is held, and so is a core start in a project a classic run holds.
 /// The app-wide cap counts both kinds. The hold is released when the core run ends.
@@ -5636,6 +5664,61 @@ fn the_lead_shutdown_with_no_leads_ends_nothing_and_after_it_no_run_lead_starts(
     let input = crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None, provider: None };
     let e = app.start_lead_run("p", input, t.0.to_str().unwrap(), "20261112-0930").unwrap_err();
     assert_eq!(e["error"], "quitting", "a quitting app refuses before it reads anything: {e}");
+}
+
+#[test]
+fn opening_the_app_after_a_crash_kills_the_earlier_lifes_recorded_lead_first() {
+    let t = Tmp::new();
+    let data = t.0.join("data");
+    fs::create_dir_all(&data).unwrap();
+    let mark = "feedfacefeedfacefeedfacefeedface";
+    let kid = super::recover::tests::marked_kid(mark);
+    let pid = kid.0.id();
+    let mut lead = kid;
+    let lead = &mut lead.0;
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None, tries: 0, mark: Some(mark.into()) };
+    crate::owned::Ledger::new(crate::owned::ledger_path(&data)).record(o).unwrap();
+    let app = t.app();
+    let gone = (0..150).any(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        lead.try_wait().unwrap().is_some()
+    });
+    if !gone {
+        let _ = lead.kill();
+    }
+    let _ = lead.wait();
+    assert!(gone, "App::open killed it before returning");
+    assert_eq!(app.swept_report()["crash_reconcile"]["killed"], 1);
+}
+
+#[test]
+fn a_second_app_on_the_same_data_folder_kills_nothing_and_starts_no_agent() {
+    use std::os::unix::process::CommandExt;
+    let t = Tmp::new();
+    let first = t.app();
+    let mut c = std::process::Command::new("/bin/sleep");
+    c.arg("60");
+    // SAFETY: setsid is async-signal-safe and has no preconditions.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut lead = c.spawn().unwrap();
+    let pid = lead.id();
+    // The first app's live lead, as its supervisor records it.
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None, tries: 0, mark: Some("feedface".into()) };
+    first.owned_ledger().record(o).unwrap();
+    let second = t.app();
+    std::thread::sleep(Duration::from_millis(300));
+    let alive = lead.try_wait().unwrap().is_none();
+    let _ = lead.kill();
+    let _ = lead.wait();
+    assert!(alive, "the first app's live lead is not the second app's crash to clean up");
+    assert_eq!(second.swept_report()["crash_reconcile"]["other_instance"], true);
+    let spec = crate::sessions::SpawnSpec { argv: vec!["/bin/true".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: vec![] };
+    assert!(matches!(second.sup.spawn("lead-x", spec), Err(crate::sessions::SessionError::Ledger(_))), "and it starts no agent");
 }
 
 /// 6c-3 pruning at app start: a stale control session dir goes; one the run index names (a run that may be resumed,

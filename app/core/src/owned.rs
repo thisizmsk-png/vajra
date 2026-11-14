@@ -1,11 +1,15 @@
-//! Recorded ownership of user shells across a crash (FG-24, ADR-9 item 6b').
+//! Recorded ownership of user shells, run leads and workers across a crash (FG-24, ADR-9 item 6b'; 6d2d).
 //!
-//! Each terminal is recorded as (pid, start stamp) when it opens and forgotten when it ends cleanly. After a crash or a
+//! Each terminal is recorded as (pid, start stamp) when it opens and forgotten when it ends cleanly. Every process the
+//! supervisor starts (a run lead, a worker) is recorded the same way, with its kind and its run or ticket, before the
+//! spawn returns, and forgotten when it is reaped; a spawn whose record cannot be written is refused. After a crash or a
 //! SIGKILL of the app the file still lists the shells that were running. At launch `reconcile` checks each against the
 //! live process table: a record is *owned* only if the pid is alive AND its start stamp is the recorded one. A pid that
 //! is gone is dropped; a pid that is alive with another start stamp was reused by someone else and is dropped too,
 //! untouched. `recover` signals only what `reconcile` proves is owned, re-proves it first, and never matches by name.
-//! Nothing here runs by itself: the human chooses to recover.
+//! For shells nothing here runs by itself: the human chooses to recover. Leads and workers are ended at start-up
+//! (`end_agents`), before any agent of this life starts, through the same proof, and only if the process itself carries
+//! the record's random mark in its environment (`AGENT_MARK`): a record alone never proves who started a process.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,6 +32,53 @@ pub struct Owner {
     pub pid: u32,
     pub stamp: u64,
     pub cwd: PathBuf,
+    /// What the process is. A record from before kinds existed is a shell.
+    #[serde(default)]
+    pub kind: Kind,
+    /// The run a lead or worker belongs to (or the supervisor session id when it has no run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// A worker's ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    /// Start-up reconciles that signalled it and could not end it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tries: u32,
+    /// A lead's or worker's mark: the random value the supervisor put in its environment as `AGENT_MARK` when it
+    /// started it. The start-up reconcile signals a recorded agent only if its environment still carries this value
+    /// (`could_be_ours`), so a damaged or forged record naming another of the user's processes ends nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<String>,
+}
+
+/// The environment variable that carries a lead's or worker's mark (`Owner::mark`).
+pub const AGENT_MARK: &str = "VAJRA_AGENT_MARK";
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// How many start-ups try to end a lead or worker that survives its kill before the record is dropped.
+pub const MAX_TRIES: u32 = 3;
+
+/// The kind of a recorded process.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// A user's terminal: recovered only when the human asks.
+    #[default]
+    Shell,
+    /// A process the supervisor started that is not a worker: a run lead, the Director-General, a classic run.
+    Lead,
+    /// A core worker, with its ticket.
+    Worker,
+}
+
+impl Owner {
+    /// A shell record.
+    pub fn shell(pid: u32, stamp: u64, cwd: PathBuf) -> Self {
+        Self { pid, stamp, cwd, kind: Kind::Shell, run: None, ticket: None, tries: 0, mark: None }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -112,14 +163,27 @@ impl Ledger {
         r
     }
 
-    /// Record a shell the moment it starts. Best effort: failing to record only means a crash cannot be recovered.
+    /// Record a process the moment it starts. For a shell this is best effort (a failure only means a crash cannot be
+    /// recovered). For a lead or worker a failure refuses the spawn, so a full ledger refuses rather than dropping the
+    /// oldest record: no lead or worker runs without one.
     pub fn record(&self, o: Owner) -> std::io::Result<()> {
+        // A line `read` would skip is a record that is not there after a crash: refused, so the spawn is too.
+        if serde_json::to_string(&o).map_err(std::io::Error::other)?.len() > MAX_LINE {
+            return Err(std::io::Error::other("the ownership record is too long"));
+        }
         let _g = lock(&self.guard);
         let mut all = self.read();
         all.retain(|x| !(x.pid == o.pid && x.stamp == o.stamp));
         all.push(o);
-        if all.len() > MAX_ENTRIES {
-            all.drain(..all.len() - MAX_ENTRIES);
+        // Over the cap, the oldest shells go first; a lead or worker record is never dropped to make room, so a record
+        // that would need one is refused.
+        while all.len() > MAX_ENTRIES {
+            match all.iter().position(|x| x.kind == Kind::Shell) {
+                Some(i) => {
+                    all.remove(i);
+                }
+                None => return Err(std::io::Error::other("the ownership ledger is full")),
+            }
         }
         self.write(&all)
     }
@@ -160,18 +224,65 @@ impl Ledger {
         r
     }
 
-    /// A clean quit ended every shell: nothing is left to recover.
+    /// At start-up, before any agent of this life starts: end every lead and worker an earlier life recorded that is
+    /// still provably ours (pid and start stamp, re-proved before each signal), and forget the ones that are gone or
+    /// whose pid another process now holds (never signalled). Shells are left for the human. Returns what was found,
+    /// with what happened to each, so the caller can write the tickets and runs they belonged to.
+    pub fn end_agents(&self) -> Vec<(Owner, Ended)> {
+        let entries: Vec<Owner> = self.load().into_iter().filter(|o| o.kind != Kind::Shell).collect();
+        let mut out = Vec::new();
+        for o in entries {
+            let mut ended = match judge(&o) {
+                Verdict::Gone => Ended::Gone,
+                Verdict::Reused => Ended::Reused,
+                // The stamp proves the record names a live process, not that this app started it: one that could not
+                // be a supervisor child of ours is never signalled.
+                Verdict::Owned { .. } if !could_be_ours(&o) => Ended::Reused,
+                Verdict::Owned { .. } => end_session(&o),
+            };
+            let _ = self.forget(o.pid, o.stamp);
+            if ended == Ended::Survived {
+                // Tried again at the next start, a few times at most: a record that never ends must not fill the ledger.
+                // Saturating: the count is read from the file.
+                ended = self.keep_survivor(&o);
+            }
+            out.push((o, ended));
+        }
+        out
+    }
+
+    /// A clean quit ended every shell: nothing is left to recover. A lead or worker record still here (one whose
+    /// process outlived the quit) stays, so the next start ends it.
+    /// A record whose session outlived the kill: written back with one more try, or given up after `MAX_TRIES`. One
+    /// that cannot be written back is `Unrecorded`, so the reconcile report says the next start cannot try it again.
+    pub(crate) fn keep_survivor(&self, o: &Owner) -> Ended {
+        if o.tries.saturating_add(1) >= MAX_TRIES {
+            Ended::GivenUp
+        } else if self.record(Owner { tries: o.tries.saturating_add(1), ..o.clone() }).is_err() {
+            Ended::Unrecorded
+        } else {
+            Ended::Survived
+        }
+    }
+
     pub fn clear(&self) {
         let _g = lock(&self.guard);
-        let _ = std::fs::remove_file(&self.path);
+        let agents: Vec<Owner> = self.read().into_iter().filter(|o| o.kind != Kind::Shell).collect();
+        if agents.is_empty() {
+            let _ = std::fs::remove_file(&self.path);
+        } else {
+            let _ = self.write(&agents);
+        }
     }
 
     /// Check every record against the live process table, drop the ones that are not ours any more, and return what is
     /// left to report. Kept records are those still `Owned`.
     pub fn settle(&self) -> Vec<Found> {
         let _g = lock(&self.guard);
-        let found = reconcile(&self.read());
-        let keep: Vec<Owner> = found.iter().filter(|f| matches!(f.verdict, Verdict::Owned { .. })).map(|f| f.owner.clone()).collect();
+        let (shells, agents): (Vec<Owner>, Vec<Owner>) = self.read().into_iter().partition(|o| o.kind == Kind::Shell);
+        let found = reconcile(&shells);
+        // Lead and worker records are the start-up reconcile's: kept as they are, never offered to the human.
+        let keep: Vec<Owner> = found.iter().filter(|f| matches!(f.verdict, Verdict::Owned { .. })).map(|f| f.owner.clone()).chain(agents).collect();
         let _ = self.write(&keep);
         found
     }
@@ -352,6 +463,50 @@ pub fn recover(o: &Owner) -> Recovery {
     }
 }
 
+/// What `end_agents` did with one record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ended {
+    /// It was ours and is gone now: killed here.
+    Killed,
+    /// It was ours, was signalled, and some of its session still runs (kept recorded, so the next start tries again).
+    Survived,
+    /// It had already exited.
+    Gone,
+    /// Its pid belongs to another process now, or one that could not be ours: left untouched.
+    Reused,
+    /// It survived `MAX_TRIES` start-ups' kills: the record is dropped.
+    GivenUp,
+    /// It survived, and its record could not be written back: the next start cannot try again.
+    Unrecorded,
+}
+
+/// Is the recorded process a lead or worker this app's supervisor started? Each is its own session's leader (the PTY
+/// child), runs as this user, is not this app, and carries the record's mark in its environment (`AGENT_MARK`), read
+/// from the process itself. A record says nothing about provenance on its own: one without a mark, or whose process
+/// does not carry it (another of the user's sessions, or a program whose environment macOS hides), is never signalled.
+fn could_be_ours(o: &Owner) -> bool {
+    let pid = o.pid;
+    // SAFETY: getsid has no preconditions.
+    let sid = unsafe { libc::getsid(pid as i32) };
+    let Some(mark) = o.mark.as_deref().filter(|m| !m.is_empty()) else { return false };
+    pid > 1
+        && pid != std::process::id()
+        && sid == pid as i32
+        && crate::procsweep::is_same_user(pid)
+        && crate::procsweep::env_var(pid, AGENT_MARK).is_some_and(|v| v.as_encoded_bytes() == mark.as_bytes())
+}
+
+/// SIGKILL a recorded agent's whole session through the 6c-3 sweep's proof (`procsweep::kill_proved`): the leader and
+/// each member are listed with their own stamps while the leader proves itself (`snapshot`), and each is re-proved
+/// immediately before its signal. An agent has no work to save, so there is no SIGHUP grace.
+fn end_session(o: &Owner) -> Ended {
+    let mut w = ExitWatch::new();
+    let Some(members) = snapshot(&mut w, o) else { return Ended::Gone };
+    drop(w);
+    if crate::procsweep::kill_proved(members).survived == 0 { Ended::Killed } else { Ended::Survived }
+}
+
 pub fn ledger_path(data: &Path) -> PathBuf {
     data.join("owned.jsonl")
 }
@@ -378,7 +533,7 @@ mod tests {
         while crate::terminal::kill::session_members(ch.id()).len() < 2 && t0.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(10));
         }
-        let o = Owner { pid: ch.id(), stamp: start_stamp(ch.id()).unwrap(), cwd: "/tmp".into() };
+        let o = Owner::shell(ch.id(), start_stamp(ch.id()).unwrap(), "/tmp".into());
         (ch, o)
     }
     fn alive(pid: u32) -> bool {
@@ -460,7 +615,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         std::thread::sleep(Duration::from_millis(150)); // the subshell has exec'd sleep with HUP ignored
-        let o = Owner { pid: ch.id(), stamp: start_stamp(ch.id()).unwrap(), cwd: "/tmp".into() };
+        let o = Owner::shell(ch.id(), start_stamp(ch.id()).unwrap(), "/tmp".into());
         (ch, o)
     }
 
@@ -520,8 +675,8 @@ mod tests {
     fn the_ledger_round_trips_forgets_and_is_private() {
         use std::os::unix::fs::PermissionsExt;
         let l = Ledger::new(tmp("rt"));
-        let a = Owner { pid: 4242, stamp: 1, cwd: "/a".into() };
-        let b = Owner { pid: 4243, stamp: 2, cwd: "/b".into() };
+        let a = Owner::shell(4242, 1, "/a".into());
+        let b = Owner::shell(4243, 2, "/b".into());
         l.record(a.clone()).unwrap();
         l.record(b.clone()).unwrap();
         l.record(a.clone()).unwrap(); // no duplicate
@@ -537,10 +692,10 @@ mod tests {
     fn closing_a_tab_forgets_only_the_owner_it_recorded_even_when_the_pid_was_reused() {
         let l = Ledger::new(tmp("reuse"));
         // An ended terminal (id 1) that is still in the tab list, and a newer shell (id 2) that got the same pid.
-        l.record_for(1, Owner { pid: 4242, stamp: 10, cwd: "/old".into() }).unwrap();
-        l.record_for(2, Owner { pid: 4242, stamp: 20, cwd: "/new".into() }).unwrap();
+        l.record_for(1, Owner::shell(4242, 10, "/old".into())).unwrap();
+        l.record_for(2, Owner::shell(4242, 20, "/new".into())).unwrap();
         l.forget_for(1).unwrap();
-        assert_eq!(l.load(), vec![Owner { pid: 4242, stamp: 20, cwd: "/new".into() }], "the newer shell stays recoverable");
+        assert_eq!(l.load(), vec![Owner::shell(4242, 20, "/new".into())], "the newer shell stays recoverable");
         l.forget_for(1).unwrap(); // closing it again, or a terminal that was never recorded, changes nothing
         l.forget_for(99).unwrap();
         assert_eq!(l.load().len(), 1);
@@ -559,7 +714,7 @@ mod tests {
         drop(f);
         let text = read_capped(&p).unwrap();
         assert!(text.len() as u64 <= MAX_BYTES, "read {} bytes", text.len());
-        assert_eq!(Ledger::new(p).load(), vec![Owner { pid: 4242, stamp: 7, cwd: "/a".into() }], "what is inside the cap still loads");
+        assert_eq!(Ledger::new(p).load(), vec![Owner::shell(4242, 7, "/a".into())], "what is inside the cap still loads");
     }
 
     #[test]
@@ -574,8 +729,8 @@ mod tests {
     #[test]
     fn a_recovery_that_left_members_running_keeps_the_record_and_the_retry_and_only_an_end_or_not_owned_settles_it() {
         let l = Ledger::new(tmp("survived"));
-        let o = Owner { pid: 4242, stamp: 7, cwd: "/a".into() };
-        let other = Owner { pid: 4243, stamp: 8, cwd: "/b".into() };
+        let o = Owner::shell(4242, 7, "/a".into());
+        let other = Owner::shell(4243, 8, "/b".into());
         l.record(o.clone()).unwrap();
         l.record(other.clone()).unwrap();
         let mut found = vec![Found { owner: o.clone(), verdict: Verdict::Owned { members: 3 } }, Found { owner: other.clone(), verdict: Verdict::Owned { members: 1 } }];
@@ -681,7 +836,7 @@ mod tests {
             symlink(&victim, dir.join(name)).unwrap();
         }
         let l = Ledger::new(path.clone());
-        l.record(Owner { pid: std::process::id(), stamp: start_stamp(std::process::id()).unwrap(), cwd: "/tmp".into() }).unwrap();
+        l.record(Owner::shell(std::process::id(), start_stamp(std::process::id()).unwrap(), "/tmp".into())).unwrap();
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "the link's target was not truncated or written");
         assert_eq!(l.load().len(), 1, "the ledger itself was written");
         let left: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp") && n.starts_with("owned.jsonl.") && n != "owned.jsonl.tmp").collect();
@@ -705,7 +860,7 @@ mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("reading a FIFO must not block"), 0);
         // a symlink to a real ledger is not followed
         let real = dir.join("real.jsonl");
-        std::fs::write(&real, format!("{}\n", serde_json::to_string(&Owner { pid: 4242, stamp: 1, cwd: "/tmp".into() }).unwrap())).unwrap();
+        std::fs::write(&real, format!("{}\n", serde_json::to_string(&Owner::shell(4242, 1, "/tmp".into())).unwrap())).unwrap();
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&real, &path).unwrap();
         assert_eq!(Ledger::new(path.clone()).load().len(), 0, "the link is refused");
@@ -720,7 +875,7 @@ mod tests {
         for outcome in [Ok(()), Err("not_found")] {
             let l = Ledger::new(tmp(&format!("close-{}", outcome.is_ok())));
             let me = std::process::id();
-            l.record_for(7, Owner { pid: me, stamp: start_stamp(me).unwrap(), cwd: "/tmp".into() }).unwrap();
+            l.record_for(7, Owner::shell(me, start_stamp(me).unwrap(), "/tmp".into())).unwrap();
             let r = l.close_then_forget(7, || {
                 assert_eq!(l.load().len(), 1, "the record is still recoverable while the shell is being stopped");
                 outcome

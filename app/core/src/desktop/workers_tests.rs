@@ -934,6 +934,7 @@ fn tickets_jsonl_records_dispatch_head_before_the_outcome_and_the_summary_is_red
     assert!(!s.to_string().contains("abcdef0123456789"), "the nonce never reaches the lead: {s}");
     let lines: Vec<Value> = std::fs::read_to_string(r.gw.data.join("runs/r1/tickets.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(lines.iter().map(|l| l["event"].as_str().unwrap()).collect::<Vec<_>>(), vec!["queued", "dispatch", "outcome"]);
+    assert_eq!(lines[0]["ticket"]["state"], "queued", "the first line is written when dispatch accepts the ticket");
     assert_eq!(lines[1]["ticket"]["dispatch_head"], json!(r.base));
     assert!(v.receipt.unwrap()["effective"]["model"] == "model-fake-1", "the receipt is read from the rollout");
 }
@@ -1441,12 +1442,69 @@ fn a_restart_replays_every_ticket_and_a_crashed_running_one_ends_abandoned() {
     assert_eq!((d.state, d.outcome, d.commit.as_deref()), (State::Ended, Some(Outcome::Done), done.commit.as_deref()));
     let c = life2.view(&id).unwrap();
     assert_eq!((c.state, c.outcome, c.reason.as_deref(), c.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_restarted")), "{c:?}");
+    // Both are an earlier life's: the run protocol never integrates them, even the one whose record says done.
+    assert!(life2.from_earlier_life(&done.id) && life2.from_earlier_life(&id));
+    assert!(!r.rt.from_earlier_life(&id), "the life that dispatched it holds it as its own");
     assert!(wt.is_dir(), "its worktree is kept for the user to look at");
     let lines = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap();
     assert_eq!(lines.matches("app_restarted").count(), 1, "{lines}");
     let life3 = next_life(&r);
     assert_eq!(life3.view(&id).unwrap().detail.as_deref(), Some("app_restarted"));
     assert_eq!(std::fs::read_to_string(tickets_file(&r, "r1")).unwrap(), lines, "nothing more is written");
+    r.rt.quit(WAIT);
+}
+
+/// #176 review: a tickets.jsonl over the replay cap is not recovered from its prefix. Its ticket's running line comes
+/// first and its done outcome only past 16 MiB: the crash reconcile writes nothing to the file (`record_crashed`), the
+/// next life ends the ticket in memory only (`history_incomplete`, never `app_restarted`) and writes nothing, and the run
+/// takes no new dispatch. Another run still replays.
+#[test]
+fn a_tickets_file_over_the_replay_cap_is_not_recovered_from_its_prefix_and_its_run_takes_no_dispatch() {
+    let r = rig("replay-cap", Opts::default());
+    let ok = r.done(&r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
+    let path = tickets_file(&r, "r1");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let ticket = |state: &str, outcome: Value| json!({"id": "r1.t1.r1", "run": "r1", "task": "t1", "round": 1, "kind": "writer", "slot": "w1", "account": "codex", "state": state, "outcome": outcome});
+    let filler = format!("{}\n", json!({"v": 1, "event": "x", "ticket": {"pad": "x".repeat(200 << 10)}}));
+    let mut text = format!("{}\n", json!({"v": 1, "event": "dispatch", "ticket": ticket("running", Value::Null)}));
+    while text.len() <= (16 << 20) {
+        text.push_str(&filler);
+    }
+    text.push_str(&format!("{}\n", json!({"v": 1, "event": "outcome", "ticket": ticket("ended", json!("done"))})));
+    std::fs::write(&path, &text).unwrap();
+    assert!(!super::record_crashed(&r.gw.data, "r1", "r1.t1.r1"), "the reconcile writes nothing to it");
+    let life2 = next_life(&r);
+    let t1 = life2.view("r1.t1.r1").expect("shown, from the prefix");
+    assert_eq!(t1.detail.as_deref(), Some("history_incomplete"), "never written ended app_restarted: {t1:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "nothing is appended");
+    assert!(life2.replay_gaps() >= 1, "the unread file is counted");
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)));
+    assert_eq!(life2.view(&ok.id).unwrap().outcome, Some(Outcome::Done), "another run still replays");
+}
+
+/// #176 review: a ticket still waiting for a seat (account cap 1, the seat held by a hanging worker) when the app
+/// crashes has its line from dispatch, so the next life replays it ended `abandoned`/`app_restarted`, lists it and
+/// keeps its id taken, instead of losing it.
+#[test]
+fn a_ticket_still_queued_for_a_seat_at_a_crash_is_replayed_ended_and_its_id_stays_taken() {
+    let caps: BTreeMap<String, u32> = [("codex".to_string(), 1)].into();
+    let r = rig("replay-queued", Opts { mode: "hang", caps, ..Opts::default() });
+    let held = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let queued = r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap();
+    let t0 = Instant::now();
+    while r.rt.view(&held).unwrap().attempt == 0 {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.rt.view(&queued).unwrap().state, State::Queued, "the cap holds it");
+    // The crash: the first life just stops.
+    let life2 = next_life(&r);
+    let ids: Vec<String> = life2.list("r1").into_iter().map(|v| v.id).collect();
+    assert_eq!(ids, vec![held.clone(), queued.clone()]);
+    let q = life2.view(&queued).expect("the queued ticket is replayed");
+    assert_eq!((q.state, q.outcome, q.reason.as_deref(), q.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_restarted")), "{q:?}");
+    assert!(life2.from_earlier_life(&queued));
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w2", "codex")), Err(DispatchError::Exists)), "its id stays taken");
     r.rt.quit(WAIT);
 }
 

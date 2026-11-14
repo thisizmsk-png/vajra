@@ -78,7 +78,37 @@ fn a_second_app_with_its_own_data_folder_does_not_sweep_the_first_apps_live_work
     let line = text.lines().find_map(|l| l.split_once("REPORT ").map(|(_, r)| r)).unwrap_or_else(|| panic!("no report from the second app: {text}{}", String::from_utf8_lossy(&out.stderr)));
     let report: serde_json::Value = serde_json::from_str(line).unwrap();
     assert_eq!(report["other_instance"], true, "{report}");
+    assert_eq!(report["crash_reconcile"]["other_instance"], true, "the ledger reconcile did not run either: {report}");
     assert_eq!(report["at_startup"]["killed"], 0, "{report}");
     assert!(alive, "a running app's worker is not an earlier life's: {report}");
     drop(first);
+}
+
+/// A second app's quit leaves the first app's ledger alone: its shell record is still there to recover after a crash,
+/// and only the first app's own quit clears it.
+#[test]
+fn a_second_apps_quit_leaves_the_first_apps_ledger_alone() {
+    if std::env::var_os(CHILD).is_some() {
+        return;
+    }
+    let d = PathBuf::from(format!("/tmp/vsi-quit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let (data, home) = (d.join("data"), d.join("h"));
+    std::fs::create_dir_all(&home).unwrap();
+    let first = vajra_desktop::desktop::App::open(&data, &home).unwrap();
+    assert!(!first.other_instance());
+    let me = std::process::id();
+    let stamp = vajra_desktop::procid::start_stamp(me).unwrap();
+    first.owned_ledger().record(vajra_desktop::owned::Owner::shell(me, stamp, home.clone())).unwrap();
+    let second = vajra_desktop::desktop::App::open(&data, &home).unwrap();
+    assert!(second.other_instance(), "the same data folder is held");
+    second.clear_ledger_on_quit();
+    drop(second);
+    let left = first.owned_ledger().load();
+    first.clear_ledger_on_quit();
+    let after = first.owned_ledger().load();
+    drop(first);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(left.len(), 1, "a second app's quit wiped the first app's record: {left:?}");
+    assert!(after.is_empty(), "the first app's own quit clears it: {after:?}");
 }

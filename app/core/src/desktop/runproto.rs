@@ -124,13 +124,18 @@ pub struct Tick {
     pub attempt: u32,
     pub elapsed_s: u64,
     pub queue_position: Option<u32>,
+    /// An earlier app life's ticket, replayed from its record: its outcome is shown, never integrated.
+    pub replayed: bool,
     /// The ticket's worktree once it has one (the task graph's `claim --worktree`).
     pub worktree: Option<PathBuf>,
 }
 
 impl From<TicketView> for Tick {
     fn from(v: TicketView) -> Self {
-        Tick { id: v.id, state: v.state, outcome: v.outcome, reason: v.reason, commit: v.commit, attempt: v.attempt, elapsed_s: v.elapsed_s, queue_position: v.queue_position, worktree: v.worktree }
+        Tick {
+            id: v.id, state: v.state, outcome: v.outcome, reason: v.reason, commit: v.commit, attempt: v.attempt, elapsed_s: v.elapsed_s,
+            queue_position: v.queue_position, replayed: false, worktree: v.worktree,
+        }
     }
 }
 
@@ -172,15 +177,23 @@ pub struct CoreWorkers {
     pub gw: Arc<Gitw>,
 }
 
+impl CoreWorkers {
+    /// The runtime's view as the protocol sees it, marked `replayed` when it is an earlier life's ticket.
+    fn tick(&self, v: TicketView) -> Tick {
+        let replayed = self.rt.from_earlier_life(&v.id);
+        Tick { replayed, ..Tick::from(v) }
+    }
+}
+
 impl Workers for CoreWorkers {
     fn dispatch(&self, spec: TaskSpec, seat: WorkerSeat) -> Result<String, DispatchError> {
         self.rt.dispatch(spec, seat)
     }
     fn view(&self, ticket: &str) -> Option<Tick> {
-        self.rt.view(ticket).map(Tick::from)
+        self.rt.view(ticket).map(|v| self.tick(v))
     }
     fn await_any(&self, tickets: &[String], wait: Duration) -> Option<Tick> {
-        self.rt.await_any(tickets, wait).map(Tick::from)
+        self.rt.await_any(tickets, wait).map(|v| self.tick(v))
     }
     fn cancel(&self, ticket: &str) -> bool {
         self.rt.cancel(ticket)
@@ -970,7 +983,9 @@ impl RunProtocol {
         st.tasks.iter().flat_map(|t| &t.tickets).any(|(_, id, _)| self.live(id))
     }
 
-    /// The commit a task stands at for this round: its latest ticket ended `done` (in this round when it is reworked).
+    /// The commit a task stands at for this round: its latest ticket ended `done` (in this round when it is reworked)
+    /// in this app life. A replayed ticket (an earlier life's, read back from its record) is never integrable, whatever
+    /// outcome its record says: nothing of this life checked its worktree or its receipt.
     fn result(&self, st: &St, t: &TaskState) -> Option<String> {
         let (round, id, _) = t.tickets.last()?;
         let reworked = st.cur().is_some_and(|r| r.rework.contains(&t.spec.id));
@@ -978,7 +993,7 @@ impl RunProtocol {
             return None;
         }
         let v = self.0.workers.view(id)?;
-        (v.outcome == Some(Outcome::Done)).then_some(v.commit).flatten()
+        (v.outcome == Some(Outcome::Done) && !v.replayed).then_some(v.commit).flatten()
     }
 
     fn security_task(t: &PlanTask) -> bool {

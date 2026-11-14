@@ -434,7 +434,8 @@ impl WorkerRuntime {
     }
 
     /// Read back what earlier app lives recorded (`<data>/runs/*/tickets.jsonl`), before any ticket of this life. Each
-    /// ticket takes its last line. One an earlier life left queued or running (a crash) ends here `failed`/`abandoned`
+    /// ticket takes its last line; its first is written when dispatch accepts it (`queued`), so a ticket still waiting
+    /// for a seat is here too. One an earlier life left queued or running (a crash) ends here `failed`/`abandoned`
     /// with detail `app_restarted`, and that outcome is written, so the next replay reads it ended. Replayed tickets
     /// are shown and keep their ids taken (a re-dispatch is the next round), but are never started, integrated or
     /// cleaned up by this life: it holds no worktree handle for them. Their worktrees stay on disk.
@@ -660,6 +661,13 @@ impl WorkerRuntime {
     pub fn view(&self, id: &str) -> Option<TicketView> {
         let b = crate::lock(&self.0.book);
         b.tickets.get(id).map(live_view).or_else(|| b.past.get(id).cloned())
+    }
+
+    /// Is `id` an earlier life's ticket, read back from its record (`replay`) and not dispatched again in this one?
+    /// Its outcome is shown, never integrated: this life holds no worktree or receipt check for it.
+    pub fn from_earlier_life(&self, id: &str) -> bool {
+        let b = crate::lock(&self.0.book);
+        !b.tickets.contains_key(id) && b.past.contains_key(id)
     }
 
     /// The supervisor session of the ticket's running attempt, if one is running now.
@@ -1140,7 +1148,9 @@ impl WorkerRuntime {
         let _on_repo = OnRepo::new(&self.0.sessions, &sid, t.common_dir());
         // Taken before the spawn: every process of this attempt starts at or after it (the sweep's window).
         let spawned_at = procsweep::now_stamp();
-        if self.0.sup.spawn_tagged(&sid, spec, Some(tag)).is_err() {
+        let run = crate::lock(&self.0.book).tickets.get(id).map(|e| e.view.run.clone());
+        let who = crate::sessions::OwnedAs { kind: Some(crate::owned::Kind::Worker), run, ticket: Some(id.to_string()) };
+        if self.0.sup.spawn_owned(&sid, spec, Some(tag), who).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
         let tty = self.0.sup.tty(&sid).ok().flatten();
@@ -1503,6 +1513,27 @@ impl StoredTicket {
     }
 }
 
+/// A worker an earlier life left running that the start-up reconcile killed (6d2d): its ticket ends here
+/// `failed`/`abandoned` with detail `app_crashed`, in the run's own `tickets.jsonl`, before this life's replay reads it.
+/// A ticket the file has no line for, or one already ended, is left alone, and so is a history replay cannot read
+/// whole (`Replayed::incomplete`): its unended tickets may have ended past what was read (#176 review), so nothing is
+/// appended to it. Returns whether a line was written.
+pub(crate) fn record_crashed(data: &std::path::Path, run: &str, ticket: &str) -> bool {
+    let mut r = replay_run(data, run);
+    if r.incomplete {
+        return false;
+    }
+    let Some(v) = r.views.get_mut(ticket).filter(|v| v.state != State::Ended) else { return false };
+    finish_view(v, Outcome::Failed, "abandoned");
+    v.detail = Some("app_crashed".into());
+    v.summary = Some(summary(v, &Redactor::default()));
+    let line = json!({"v": 1, "event": "outcome", "ticket": v});
+    // A torn tail is ended with the torn marker first, as `replay` does, so this line does not join the fragment and
+    // the next replay tells the fragment apart from a damaged line.
+    let text = if r.torn { format!("\n{TORN_MARKER}\n{line}\n") } else { format!("{line}\n") };
+    open_record(data, run).and_then(|mut f| f.write_all(text.as_bytes())).is_ok()
+}
+
 /// What replay read back from one run's file.
 struct Replayed {
     /// The last view of each ticket.
@@ -1540,6 +1571,8 @@ fn replay_run(data: &std::path::Path, run: &str) -> Replayed {
         return out;
     }
     let mut gaps = 0;
+    // Past the budget the later lines (a ticket's outcome, or a ticket first seen there) are unread: the prefix is not
+    // the run's latest state, so the run is incomplete and none of its unended tickets is written ended.
     if raw.len() as u64 > REPLAY_MAX_FILE {
         raw.truncate(REPLAY_MAX_FILE as usize);
         gaps += 1;
