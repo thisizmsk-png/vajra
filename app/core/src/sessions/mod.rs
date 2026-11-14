@@ -497,7 +497,8 @@ impl Supervisor {
                     let _ = child.wait();
                     Err(SessionError::Ledger(e))
                 };
-                let Some(stamp) = crate::procid::start_stamp(pid).filter(|_| pid > 1) else {
+                // Read as our own unreaped child: a fast `true` may already be a zombie here (see `child_stamp`).
+                let Some(stamp) = crate::procid::child_stamp(pid).filter(|_| pid > 1) else {
                     return refuse(child, "its start time could not be read".into());
                 };
                 let o = crate::owned::Owner {

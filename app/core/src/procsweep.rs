@@ -160,7 +160,10 @@ pub fn sweep_ticket(seen: &[(u32, u64)], tmp: &Path, since: u64) -> Swept {
 /// counted killed only once it is provably gone (`owned::provably_gone`); a held pid whose stamp cannot be read survives.
 pub(crate) fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
     let mut watch = ExitWatch::new();
-    let hits: Vec<(u32, u64)> = hits.into_iter().filter(|&(p, s)| watch.add(p) && !provably_gone(&mut watch, p, s)).collect();
+    // A hit whose exit watch cannot be registered is never signalled (its exit could not be told from a reused pid),
+    // but unless it is provably gone it is not dropped either: it counts as survived, so no caller reads it as killed.
+    let (hits, unwatched): (Vec<_>, Vec<_>) = hits.into_iter().partition(|&(p, _)| watch.add(p));
+    let hits: Vec<(u32, u64)> = hits.into_iter().filter(|&(p, s)| !provably_gone(&mut watch, p, s)).collect();
     for &(p, s) in &hits {
         signal_verified(&mut watch, p, s, libc::SIGKILL);
     }
@@ -169,7 +172,8 @@ pub(crate) fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
         std::thread::sleep(Duration::from_millis(20));
     }
     let survived = left(&mut watch, &hits);
-    Swept { killed: hits.len() - survived, survived }
+    let unwatched = left(&mut watch, &unwatched);
+    Swept { killed: hits.len() - survived, survived: survived + unwatched }
 }
 
 /// At startup, before any agent: an earlier app life's worker processes, by their ticket `TMPDIR` under `work`.
