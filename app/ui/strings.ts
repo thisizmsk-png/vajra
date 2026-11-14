@@ -898,6 +898,7 @@ export const S = {
     meters: (name: string) => `${name} usage`,
     window: { "5h": "5-hour window", daily: "Daily", weekly: "Weekly", credit: "Credit" } as Record<string, string>,
     used: (pct: number) => `${pct}% used`,
+    nearLimit: "Close to the limit",
     credit: (used: number, limit: number) => `$${used.toFixed(2)} of $${limit.toFixed(0)} limit`,
     resets: (at: string) => `Resets ${at}`,
     notReported: "Usage: not reported by this account.",
@@ -962,7 +963,7 @@ export const S = {
   settings: {
     title: "Settings",
     checks: "Checks",
-    recheck: "Check again",
+    recheck: "Check agents and tools again",
     failed: "Could not run the checks.",
     lede: "Choose global defaults or override them for this project.",
     barLabel: "Actions on Settings",
