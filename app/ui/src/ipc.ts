@@ -98,7 +98,8 @@ export type TermInfo = { id: number; cwd: string; root: string; rows: number; co
 export type TermDiag = { id: number; pid: number; cwd: string; root: string; alive: boolean; in_worktree: boolean };
 export type RunDiag = { stream: string; pid: number };
 /** A shell an earlier session recorded, checked at launch by pid and start time. Only `owned` can be ended. */
-export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused"; members?: number };
+/** `unproven`: the pid is still held but can't be checked yet; the core keeps the record and never signals on it. */
+export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused" | "unproven"; members?: number };
 export type Lifecycle = { terminals: TermDiag[]; runs: RunDiag[]; found: Found[]; close_keeps: { terminals: number; runs: number }; quit_ends: { terminals: number; runs: number }; archive_leaves: number[] };
 /** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
 export type TermMsg =
