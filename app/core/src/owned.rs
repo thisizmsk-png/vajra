@@ -1083,6 +1083,72 @@ mod tests {
         crate::terminal::kill::session_members(o.pid).into_iter().map(|p| p as u32).find(|&p| p != o.pid).expect("the session has its job")
     }
 
+    /// PR 257 and PR 259 together: a leader that can't be proven and a member whose watch failed. Nothing of the session
+    /// is signalled and the record is kept, on every path: recovery while the leader's own watch fails (`NotProven`),
+    /// then once only the job's fails (`Survived`), and the start-up settle on a zombie leader (`Unproven`). Only when
+    /// every member can be watched is the session ended.
+    #[test]
+    fn given_an_unproven_leader_whose_member_watch_failed_then_it_is_kept_and_never_signalled() {
+        let (c, o) = leader();
+        let job = job_of(&o);
+        let lp = tmp("unproven-unwatched");
+        let _ = std::fs::remove_file(&lp);
+        let l = Ledger::new(lp.clone());
+        l.record(o.clone()).unwrap();
+        let mut found = vec![Found { owner: o.clone(), verdict: Verdict::Owned { members: 2 } }];
+        let untouched = |when: &str| assert!(alive(o.pid) && alive(job) && !crate::procid::is_zombie(job), "{when}: nothing was signalled");
+        REFUSE_WATCH.with(|r| r.borrow_mut().extend([o.pid, job]));
+        for attempt in 0..2 {
+            let r = recover(&o);
+            assert_eq!(r, Recovery::NotProven, "attempt {attempt}: the leader can't be watched, so it isn't proven");
+            untouched(&format!("recover attempt {attempt}"));
+            apply_recovery(&l, &mut found, &o, &r);
+            assert_eq!((l.load(), found.len()), (vec![o.clone()], 1), "attempt {attempt}: record and entry kept");
+        }
+        assert_eq!(end_session(&o), Ended::NotProven);
+        untouched("end_session");
+        // The leader is provable again but its job still can't be watched: still nothing is signalled.
+        REFUSE_WATCH.with(|r| r.borrow_mut().remove(&o.pid));
+        let r = recover(&o);
+        assert_eq!(r, Recovery::Survived { remaining: 2 });
+        untouched("recover with only the job unwatched");
+        apply_recovery(&l, &mut found, &o, &r);
+        assert_eq!(l.load(), vec![o.clone()]);
+        REFUSE_WATCH.with(|r| r.borrow_mut().clear());
+        assert_eq!(recover(&o), Recovery::Ended, "every member can be watched: the session is ended");
+        let t0 = Instant::now();
+        while alive(job) && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(job), "the job is ended with its session");
+        gone(c);
+        let _ = std::fs::remove_file(&lp);
+
+        // The settle's `Unproven` verdict: a zombie leader whose job still runs and can't be watched.
+        let (mut c2, o2) = leader();
+        let job2 = job_of(&o2);
+        REFUSE_WATCH.with(|r| r.borrow_mut().insert(job2));
+        unsafe { libc::kill(o2.pid as i32, libc::SIGKILL) };
+        let t0 = Instant::now();
+        while !crate::procid::is_zombie(o2.pid) && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let lp2 = tmp("unproven-zombie");
+        let _ = std::fs::remove_file(&lp2);
+        let l2 = Ledger::new(lp2.clone());
+        l2.record(o2.clone()).unwrap();
+        for pass in 0..2 {
+            assert_eq!(l2.settle(), vec![Found { owner: o2.clone(), verdict: Verdict::Unproven }], "settle pass {pass}");
+            assert_eq!(l2.load(), vec![o2.clone()], "settle pass {pass} kept the record");
+            assert_eq!(recover(&o2), Recovery::NotProven, "settle pass {pass}: recovery re-proves first");
+            assert!(alive(job2) && !crate::procid::is_zombie(job2), "settle pass {pass}: the job was not signalled");
+        }
+        REFUSE_WATCH.with(|r| r.borrow_mut().clear());
+        unsafe { libc::kill(job2 as i32, libc::SIGKILL) };
+        c2.wait().unwrap();
+        let _ = std::fs::remove_file(&lp2);
+    }
+
     /// Plan #248: a member whose exit watch fails to register is not left out of the session. It is listed as not proven.
     /// PR 259 review: while it may still run, nothing of the session is signalled, the leader included, so the record
     /// keeps naming a live leader. Recovery reports `Survived` every time and the record stays usable; once every member
