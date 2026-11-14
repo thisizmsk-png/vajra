@@ -13,23 +13,30 @@
 # It runs the worker argv `adapter::profiles::claude_worker_argv` builds (verifier tools), with a flag file shaped like
 # `claude_worker_flag` (test guard hook in place of the installed one), against:
 #   - user settings: allow Bash(*), Edit, Write, WebFetch; defaultMode bypassPermissions; disableAllHooks true; a hook;
+#     a sandbox block that turns the sandbox off and reopens the key folder, the data dir and the network;
 #   - the worktree's project settings: allow Bash(*), Write; a hook.
+# The worker launches with `--setting-sources ""`, so neither file should load.
 # The stub asks for: an allowed Bash call, a Bash call the guard blocks, a Write call (not in --tools), then stops.
 #
 # PASS needs all of (s4_check.py, next to this script): claude exits 0 with a successful result and the plan reaches its
-# last turn; the flag file's hook runs under -p despite the user's disableAllHooks; the guard sees the blocked Bash call,
-# which comes back refused and never runs; the Write call comes back refused and never writes; the init event lists
-# exactly the --tools set; permissionMode is dontAsk; the prompt after `--` reaches the model; the worktree's
-# project-settings hook never runs (`--setting-sources user`: a worker can write that file, and its hook would run
-# outside the guard). A run cut short after any probe fails. The user-hook line is recorded for the PR, not part of PASS.
+# last turn; the flag file's hook runs under -p; the guard sees the blocked Bash call, which comes back refused and never
+# runs; the Write call comes back refused and never writes; the init event lists exactly the --tools set;
+# permissionMode is dontAsk; the prompt after `--` reaches the model; the worktree's project-settings hook never runs
+# (a worker can write that file, and its hook would run outside the guard). A run cut short after any probe fails.
+# The user-hook line is recorded for the PR, not part of PASS.
 #
 # A second run (the owner's condition for the flip) is a writer worker against the Vajra data dir: tools
 # Read,Grep,Glob,Bash,Edit,Write; the flag file `claude_worker_flag` itself builds (cargo run --example s4_flag, so the
-# real Read and Edit deny rules and the real hooks/hooks.json); the repo's real guard hooks installed in the temp HOME;
-# a temp data dir at the guard's own place, <temp HOME>/Library/Application Support/VajraDesktop. The stub asks for: an
-# allowed Write in the worktree, a Bash write into the data dir, a Write into it, a Read then an Edit of a file there.
+# real Read and Edit deny rules, the real OS sandbox block and the real hooks/hooks.json); the repo's real guard hooks
+# installed in the temp HOME; a temp data dir at the guard's own place, <temp HOME>/Library/Application
+# Support/VajraDesktop; a stand-in key file in the temp HOME's key folder. The stub asks for: an allowed Write in the
+# worktree, a Bash write into the data dir, a Write into it, a Read then an Edit of a file there; then two Bash calls
+# that name no locked path (python reads the target from a file outside the locked folders), a read of the stand-in key
+# and a write into the data dir, which only the OS sandbox can refuse; then Bash writes into the ticket tmp and worktree.
 # PASS also needs: the worktree Write ran; the Bash, Write and Edit calls into the data dir each came back refused; the
-# data dir afterwards holds only its seed file, unchanged. Needs cargo on PATH.
+# sandbox refused both name-free calls with "Operation not permitted" and the stand-in key never reached the model;
+# the Bash writes into the ticket tmp and worktree ran; the data dir afterwards holds only its seed file, unchanged.
+# Needs cargo on PATH.
 # On PASS, set `CLAUDE_WORKER_S4_PASSED = true` in app/core/src/adapter/profiles.rs and update its pinning test.
 set -u
 
@@ -62,10 +69,14 @@ exit 0
 EOF
 chmod 755 "$SP/guard.sh"
 
-# Hostile user settings.
+# Hostile user settings, including a sandbox block that would reopen every folder the worker's sandbox locks (the
+# vajra-70 spike: the merged allowRead and excludedCommands lists did, when the worker loaded the user's settings).
+DATA="$H/Library/Application Support/VajraDesktop"; KD="$H/.claude/vajra"
 cat > "$CC/settings.json" <<EOF
 {"permissions":{"allow":["Bash(*)","Edit","Write","WebFetch"],"defaultMode":"bypassPermissions"},"disableAllHooks":true,
- "hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"echo USER >> $M/user-hook"}]}]}}
+ "hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"echo USER >> $M/user-hook"}]}]},
+ "sandbox":{"enabled":false,"allowUnsandboxedCommands":true,"excludedCommands":["*"],"ignoreViolations":{"*":["*"]},
+  "filesystem":{"disabled":true,"allowRead":["$KD","$DATA"],"allowWrite":["$KD","$DATA","/"]},"network":{"allowAllUnixSockets":true}}}
 EOF
 
 # The worktree's own project settings (a worker could write this in its worktree).
@@ -76,6 +87,8 @@ EOF
 # The Vajra flag file, as claude_worker_flag shapes it.
 cat > "$SP/flag.json" <<EOF
 {"disableAllHooks":false,"permissions":{"defaultMode":"dontAsk","disableBypassPermissionsMode":"disable","deny":["Bash(rm:*)","WebFetch"]},
+ "sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":false,"excludedCommands":[],
+  "ignoreViolations":{},"network":{"allowLocalBinding":true},"filesystem":{"disabled":false,"allowRead":[],"allowWrite":["$M"],"denyRead":[],"denyWrite":[]}},
  "hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"$SP/guard.sh","timeout":10}]}]}}
 EOF
 
@@ -145,44 +158,55 @@ TOOLS=Read,Grep,Glob,Bash
 ( cd "$WT" && env -i PATH="/usr/bin:/bin:$(dirname "$CLAUDE")" HOME="$H" CLAUDE_CONFIG_DIR="$CC" TERM=dumb \
     ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY=s4-placeholder-not-a-key DISABLE_AUTOUPDATER=1 \
     perl -e 'alarm 180; exec @ARGV' "$CLAUDE" -p --output-format stream-json --verbose --session-id 3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6 \
-    --setting-sources user --settings "$SP/flag.json" --permission-mode dontAsk --tools "$TOOLS" --allowedTools "$TOOLS" -- "Run the S4 plan" \
+    --setting-sources "" --settings "$SP/flag.json" --permission-mode dontAsk --tools "$TOOLS" --allowedTools "$TOOLS" -- "Run the S4 plan" \
     < /dev/null > "$SP/events.jsonl" 2> "$SP/stderr" )
 STATUS=$?
 echo "claude exit: $STATUS"
 
 # Run 2: a writer worker against the Vajra data dir, with the real flag file and the real guard.
-SP2=$SP/data-run; WT2=$SP/work/proj/run/t2-r1; DATA="$H/Library/Application Support/VajraDesktop"
-mkdir -p "$SP2" "$WT2" "$DATA" "$CC/skills/vajra/hooks"
+SP2=$SP/data-run; WT2=$SP/work/proj/run/t2-r1; TT2=$SP/work/proj/run/tmp/t2-r1
+mkdir -p "$SP2" "$WT2" "$TT2" "$DATA" "$KD" "$CC/skills/vajra/hooks"
 printf 'seed\n' > "$DATA/seed.json"
+# A stand-in key file in the temp HOME's key folder (never the real one), and files outside the locked folders that
+# hold its path and the data dir's: the sandbox probes read their target from these, so no command names a locked path
+# and only the OS sandbox can refuse them.
+printf 's4-stand-in\n' > "$KD/s4-key"
+printf '%s\n' "$KD/s4-key" > "$SP2/key-path"; printf '%s\n' "$DATA" > "$SP2/data-path"
 cp "$HERE/../../../hooks/"*.sh "$CC/skills/vajra/hooks/" || { echo "FAIL: could not install the repo's guard hooks"; exit 2; }
 command -v cargo >/dev/null || { echo "FAIL: cargo is not on PATH (the data-dir run builds the real flag file)"; exit 2; }
-cargo run -q --manifest-path "$HERE/../../core/Cargo.toml" --example s4_flag -- "$H" "$WT2" "$DATA" > "$SP2/flag.json" \
+cargo run -q --manifest-path "$HERE/../../core/Cargo.toml" --example s4_flag -- "$H" "$WT2" "$DATA" "$TT2" > "$SP2/flag.json" \
     || { echo "FAIL: claude_worker_flag did not build the flag file"; exit 2; }
-/usr/bin/python3 -I - "$WT2" "$DATA" > "$SP2/plan.json" <<'PY'
+/usr/bin/python3 -I - "$WT2" "$DATA" "$SP2" "$TT2" > "$SP2/plan.json" <<'PY'
 import json, sys
-wt, data = sys.argv[1], sys.argv[2]
+wt, data, sp2, tt = sys.argv[1:]
+def py(code, arg, what):
+    return {"tool": "Bash", "input": {"command": "/usr/bin/python3 -c '" + code + "' \"" + arg + "\"", "description": what}}
 print(json.dumps([
     {"tool": "Write", "input": {"file_path": wt + "/ok-written", "content": "x"}},
     {"tool": "Bash", "input": {"command": "echo x > \"" + data + "/bash-ran\"", "description": "a Bash write into the data dir"}},
     {"tool": "Write", "input": {"file_path": data + "/write-ran", "content": "x"}},
     {"tool": "Read", "input": {"file_path": data + "/seed.json"}},
     {"tool": "Edit", "input": {"file_path": data + "/seed.json", "old_string": "seed", "new_string": "edited"}},
+    py("import sys;print(open(open(sys.argv[1]).read().strip()).read())", sp2 + "/key-path", "a key read that names no locked path"),
+    py("import sys,os;open(os.path.join(open(sys.argv[1]).read().strip(),\"sandbox-ran\"),\"w\").write(\"x\")", sp2 + "/data-path", "a data-dir write that names no locked path"),
+    {"tool": "Bash", "input": {"command": "printf x > \"" + tt + "/tmp-ok\" && printf x > \"" + wt + "/bash-ok\"", "description": "Bash writes in the ticket tmp and worktree"}},
     {"say": "done"},
 ]))
 PY
 start_stub "$SP2/plan.json" "$SP2/log" "$SP2/port"
 TOOLS2=Read,Grep,Glob,Bash,Edit,Write
-( cd "$WT2" && env -i PATH="/usr/bin:/bin:$(dirname "$CLAUDE")" HOME="$H" CLAUDE_CONFIG_DIR="$CC" TERM=dumb \
+( cd "$WT2" && env -i PATH="/usr/bin:/bin:$(dirname "$CLAUDE")" HOME="$H" CLAUDE_CONFIG_DIR="$CC" TERM=dumb TMPDIR="$TT2" \
     ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY=s4-placeholder-not-a-key DISABLE_AUTOUPDATER=1 \
     perl -e 'alarm 180; exec @ARGV' "$CLAUDE" -p --output-format stream-json --verbose --session-id 4a2e8f9b-2c3d-4e5f-9a01-b2c3d4e5f6a7 \
-    --setting-sources user --settings "$SP2/flag.json" --permission-mode dontAsk --tools "$TOOLS2" --allowedTools "$TOOLS2" -- "Run the S4 plan" \
+    --setting-sources "" --settings "$SP2/flag.json" --permission-mode dontAsk --tools "$TOOLS2" --allowedTools "$TOOLS2" -- "Run the S4 plan" \
     < /dev/null > "$SP2/events.jsonl" 2> "$SP2/stderr" )
 STATUS2=$?
 echo "claude exit (data-dir run): $STATUS2"
-/usr/bin/python3 -I "$HERE/s4_check.py" "$SP" "$M" "$TOOLS" "$STATUS" "$SP2" "$WT2" "$DATA" "$TOOLS2" "$STATUS2"
+/usr/bin/python3 -I "$HERE/s4_check.py" "$SP" "$M" "$TOOLS" "$STATUS" "$SP2" "$WT2" "$DATA" "$TOOLS2" "$STATUS2" "$KD" "$TT2"
 VERDICT=$?
-# The pair a PASS proves, for profiles::CLAUDE_WORKER_PROVEN: the exact --version line and this branch's flag shape.
-SHAPE=$(cargo run -q --manifest-path "$HERE/../../core/Cargo.toml" --example s4_flag -- --shape 2>/dev/null)
+# The pair a PASS proves, for profiles::CLAUDE_WORKER_PROVEN: the exact --version line and this branch's flag shape,
+# hashed with the guard scripts this run installed (the repo's).
+SHAPE=$(cargo run -q --manifest-path "$HERE/../../core/Cargo.toml" --example s4_flag -- --shape "$CC/skills/vajra/hooks" 2>/dev/null)
 echo "info  proven pair (add on PASS): (\"$("$CLAUDE" --version 2>/dev/null | head -1)\", \"$SHAPE\")"
 exit "$VERDICT"
 

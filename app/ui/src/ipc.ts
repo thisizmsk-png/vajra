@@ -308,6 +308,12 @@ export const api = {
   workerDisk: () => call<WorkerDisk>("worker_disk"),
   /** Opens Apple's developer tools installer; the core refuses it once git is installed. */
   installDevTools: () => call<{ started: boolean }>("install_dev_tools"),
+  /** Labs (developer builds only): worker picking for one project before it ships. `available` is false in a release build. */
+  /** Every ended core run, newest first, with why each can't be resumed (null when it can). */
+  coreRuns: () =>
+    call<{ runs: { run: string; project: string | null; status: string | null; reason: string | null; resumable: boolean; why: string | null }[] }>("core_runs"),
+  labsGet: (project: string) => call<{ available: boolean; on: boolean }>("labs_get", { project }),
+  labsSet: (project: string, on: boolean) => call<{ available: boolean; on: boolean }>("labs_set", { project, on }),
   actWorkerCleanUp: (envelope: Envelope) => call<ActResult<CleanUpResult>>("act_worker_clean_up", { envelope }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
   /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read (REQUIRED: the core refuses a reject without it) as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */

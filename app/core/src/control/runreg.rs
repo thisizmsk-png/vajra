@@ -36,6 +36,9 @@ pub const TOKEN_FILE_ENV: &str = "VAJRA_RUN_TOKEN_FILE";
 pub const SOCKET_ENV: &str = "VAJRA_RUN_SOCKET";
 /// The request cap for `plan_tasks` (16.5); every other request keeps `socket::MAX_REQUEST`.
 pub const MAX_PLAN_REQUEST: usize = 256 * 1024;
+/// How long a call from a starting lead waits for its read-back to pass (`RunLead` polls it every 250 ms).
+pub const CONFIRM_WAIT: Duration = Duration::from_secs(10);
+
 /// A long wait gets `wait_s` plus this much before the client gives up.
 pub const AWAIT_SLACK: Duration = Duration::from_secs(10);
 /// Calls of one run served at once.
@@ -62,14 +65,15 @@ fn wait_prop() -> Value {
 /// The `vajra-run` tools, exactly: what `tools/list` returns.
 pub fn tools() -> Value {
     let id = json!({"type": "string", "pattern": "^t[0-9]{1,2}$"});
+    let ac = json!({"type": "string", "pattern": "^ac-[0-9]{1,2}$"});
     let short = |n: u32| json!({"type": "string", "maxLength": n});
     let criterion = json!({"type": "object", "additionalProperties": false, "required": ["id", "criterion", "check"],
-        "properties": {"id": short(32), "criterion": short(1000), "check": short(2000)}});
+        "properties": {"id": ac.clone(), "criterion": short(1000), "check": short(2000)}});
     let task = json!({"type": "object", "additionalProperties": false, "required": ["id", "title", "owner_role", "files", "brief"],
         "properties": {"id": id, "title": short(300), "owner_role": short(32),
             "files": {"type": "array", "maxItems": runproto::MAX_TASK_FILES, "items": short(300)},
             "deps": {"type": "array", "maxItems": runproto::MAX_TASK_DEPS, "items": id},
-            "criteria": {"type": "array", "maxItems": runproto::MAX_CRITERIA, "items": short(32)},
+            "criteria": {"type": "array", "maxItems": runproto::MAX_CRITERIA, "items": ac},
             "brief": short(20_000), "touches_security": {"type": "boolean"}}});
     // Byte limits: a JSON Schema length counts characters, so an ASCII string at the limit passes both.
     let pair = |a: &str, an: usize, b: &str, bn: usize| json!({"type": "object", "additionalProperties": false, "required": [a, b],
@@ -251,6 +255,9 @@ struct Entry {
     proto: RunProtocol,
     token: [u8; 32],
     lead: Option<LeadProc>,
+    /// A launched lead whose read-back has not passed yet: its calls wait (`CONFIRM_WAIT`), and none passes until
+    /// `confirm_lead`.
+    starting: Option<LeadProc>,
     /// The current lead's call slots. Each `set_lead` starts a fresh count: a dead lead's parked calls release the old
     /// one and never crowd out its successor.
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -271,6 +278,10 @@ pub struct RunRegistry {
     /// Leads no longer current (cleared, replaced or their run removed) whose process may still run: their trees stay
     /// held to vajra-run tools until the process is gone. Pruned as each one goes.
     fenced: Mutex<Vec<LeadProc>>,
+    /// The processes the app started to use the Service route: the Director-General's harness for each ask and a
+    /// classic run's harness. Only they, their descendants and the app itself pass `service_allowed`; a worker the app
+    /// spawns is never one, so neither it nor anything it starts can steer another session. Pruned as each one goes.
+    service_roots: Mutex<Vec<LeadProc>>,
     /// The peer check; `procid::descends_from` outside tests.
     descends: Box<dyn Fn(u32, LeadProc) -> bool + Send + Sync>,
 }
@@ -287,12 +298,31 @@ impl RunRegistry {
     }
 
     pub fn with_peer_check(descends: Box<dyn Fn(u32, LeadProc) -> bool + Send + Sync>) -> Self {
-        RunRegistry { runs: Mutex::new(HashMap::new()), fenced: Mutex::new(Vec::new()), descends }
+        RunRegistry { runs: Mutex::new(HashMap::new()), fenced: Mutex::new(Vec::new()), service_roots: Mutex::new(Vec::new()), descends }
+    }
+
+    /// Record `pid`, a process the app just started to use the Service route, as one of its roots. Called right after
+    /// the spawn, before the process can have made a tool call; a call that came earlier is refused, never let through.
+    /// A pid whose stamp cannot be read (it is already gone) records nothing. The app itself and its ancestors are
+    /// refused: they would admit everything.
+    pub fn allow_service(&self, pid: u32) -> bool {
+        let me = std::process::id();
+        let Some(stamp) = crate::procid::start_stamp(pid) else { return false };
+        if pid == me || crate::procid::descends_from(me, pid, stamp) {
+            return false;
+        }
+        let mut roots = crate::lock(&self.service_roots);
+        roots.retain(|r| crate::procid::same_process(r.pid, r.stamp));
+        let root = LeadProc { pid, stamp };
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+        true
     }
 
     /// Serve `run` with `proto` behind the token whose hash is `token`. No call passes until `set_lead`.
     pub fn register(&self, run: &str, proto: RunProtocol, token: [u8; 32]) {
-        crate::lock(&self.runs).insert(run.to_string(), Entry { proto, token, lead: None, calls: Default::default() });
+        crate::lock(&self.runs).insert(run.to_string(), Entry { proto, token, lead: None, starting: None, calls: Default::default() });
     }
 
     /// The lead process that started (or restarted) for `run`: the harness process itself. Calls must come from its
@@ -311,11 +341,42 @@ impl RunRegistry {
         Ok(())
     }
 
+    /// A lead that launched but is not yet confirmed confined (its read-back has not passed). It replaces the current
+    /// lead, so nothing passes until `confirm_lead`; a call from its tree waits up to `CONFIRM_WAIT` for that.
+    pub fn start_lead(&self, run: &str, lead: LeadProc) -> Result<(), LeadRefused> {
+        let me = std::process::id();
+        if lead.pid == me || crate::procid::descends_from(me, lead.pid, lead.stamp) {
+            return Err(LeadRefused::TooWide);
+        }
+        let mut runs = crate::lock(&self.runs);
+        let e = runs.get_mut(run).ok_or(LeadRefused::UnknownRun)?;
+        // The lead it replaces, confirmed or still starting, stays fenced while its process runs, as in `set_lead`.
+        for old in [e.lead.take(), e.starting.replace(lead)].into_iter().flatten().filter(|o| *o != lead) {
+            self.fence(old);
+        }
+        e.calls = Default::default();
+        Ok(())
+    }
+
+    /// The starting lead's read-back passed: from now on its calls pass. False when `lead` is no longer the one
+    /// starting (it was cleared, or a successor started).
+    pub fn confirm_lead(&self, run: &str, lead: LeadProc) -> bool {
+        match crate::lock(&self.runs).get_mut(run) {
+            Some(e) if e.starting == Some(lead) => {
+                e.starting = None;
+                e.lead = Some(lead);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Is `peer` (still the same process) in the tree of any registered lead? Such a process may call only
     /// `vajra-run` tools, and only it may send a request past `socket::MAX_REQUEST`.
     pub fn in_lead_tree(&self, peer: Option<Peer>) -> bool {
         let Some(p) = peer else { return false };
-        let mut leads: Vec<LeadProc> = crate::lock(&self.runs).values().filter_map(|e| e.lead).collect();
+        // A starting lead counts: its tree is held to vajra-run tools from the first call. So does a fenced one.
+        let mut leads: Vec<LeadProc> = crate::lock(&self.runs).values().flat_map(|e| e.lead.into_iter().chain(e.starting)).collect();
         leads.extend(crate::lock(&self.fenced).iter().copied().filter(|l| crate::procid::same_process(l.pid, l.stamp)));
         !leads.is_empty() && crate::procid::same_process(p.pid, p.stamp) && leads.into_iter().any(|l| (self.descends)(p.pid, l))
     }
@@ -324,8 +385,9 @@ impl RunRegistry {
     /// clears its successor. Returns whether it cleared.
     pub fn clear_lead(&self, run: &str, lead: LeadProc) -> bool {
         match crate::lock(&self.runs).get_mut(run) {
-            Some(e) if e.lead == Some(lead) => {
+            Some(e) if e.lead == Some(lead) || e.starting == Some(lead) => {
                 e.lead = None;
+                e.starting = None;
                 self.fence(lead);
                 true
             }
@@ -342,15 +404,22 @@ impl RunRegistry {
         }
     }
 
-    /// May `peer` use the Service route? Only by positive proof: it is still the process that connected, it descends
-    /// from this app (every Service client does: the Director-General's and a classic run's `--mcp` server are the
-    /// app's grandchildren), and it is in no lead's tree, current or fenced. A lead's descendant that outlived its
-    /// parent is reparented away from the app, so it can never prove it, on any connection.
+    /// May `peer` use the Service route? Only by positive proof, an allowlist: it is still the process that connected,
+    /// it is the app itself or descends from a recorded Service root (`allow_service`: the Director-General's and a
+    /// classic run's harness, whose `--mcp` server is its child), and it is in no lead's tree, current or fenced. Being
+    /// the app's descendant is not enough: a worker the app spawns, and anything it starts, is refused. A descendant
+    /// that outlived its root is reparented away from it, so it can never prove it, on any connection.
     pub fn service_allowed(&self, peer: Option<Peer>) -> bool {
         let Some(p) = peer else { return false };
+        if !crate::procid::same_process(p.pid, p.stamp) || self.in_lead_tree(peer) {
+            return false;
+        }
         let me = std::process::id();
-        let Some(stamp) = crate::procid::start_stamp(me) else { return false };
-        crate::procid::same_process(p.pid, p.stamp) && crate::procid::descends_from(p.pid, me, stamp) && !self.in_lead_tree(peer)
+        if p.pid == me {
+            return crate::procid::start_stamp(me) == Some(p.stamp);
+        }
+        let roots: Vec<LeadProc> = crate::lock(&self.service_roots).clone();
+        roots.into_iter().any(|r| crate::procid::descends_from(p.pid, r.pid, r.stamp))
     }
 
     /// Resume: only the new token's hash is kept.
@@ -359,15 +428,24 @@ impl RunRegistry {
     }
 
     pub fn remove(&self, run: &str) {
-        if let Some(l) = crate::lock(&self.runs).remove(run).and_then(|e| e.lead) {
-            self.fence(l);
+        if let Some(e) = crate::lock(&self.runs).remove(run) {
+            for l in [e.lead, e.starting].into_iter().flatten() {
+                self.fence(l);
+            }
         }
     }
 
     /// Gate one request and find its protocol. The registry lock is released before the call runs.
     fn admit(&self, run: &str, token: &str, peer: Option<Peer>) -> Result<(RunProtocol, CallSlot), Value> {
         use std::sync::atomic::Ordering;
-        let runs = crate::lock(&self.runs);
+        let mut runs = crate::lock(&self.runs);
+        // A lead still starting: wait (lock released) for its read-back, so its first call is not refused.
+        let until = std::time::Instant::now() + CONFIRM_WAIT;
+        while runs.get(run).is_some_and(|e| e.lead.is_none() && e.starting.is_some()) && std::time::Instant::now() < until {
+            drop(runs);
+            std::thread::sleep(Duration::from_millis(50));
+            runs = crate::lock(&self.runs);
+        }
         // An unknown run has ended (or was never this app's): a terminal answer, so the lead stops instead of retrying.
         let e = runs.get(run).ok_or_else(|| json!({"error": "run_gone", "reason": "this run has ended; stop and exit"}))?;
         if !same_hash(&sha256::digest(token.as_bytes()), &e.token) {

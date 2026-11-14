@@ -114,6 +114,25 @@ fn install_dev_tools(app: State<'_, App>) -> Res {
     app.install_dev_tools()
 }
 
+/// Every ended core run, with whether it can be resumed and why not (6d2d). Read-only; off the event thread, since it
+/// reads each run's records.
+#[tauri::command(async)]
+fn core_runs(app: State<'_, App>) -> Res {
+    app.core_runs()
+}
+
+/// Labs for one project (ADR-16 16.13): whether this build has Labs, and whether it is on. Developer builds only.
+#[tauri::command(async)]
+fn labs_get(app: State<'_, App>, project: String) -> Res {
+    app.labs_get(&project)
+}
+
+/// Turn Labs on or off for one project. A release build refuses.
+#[tauri::command(async)]
+fn labs_set(app: State<'_, App>, project: String, on: bool) -> Res {
+    app.labs_set(&project, on)
+}
+
 /// Settings: the disk the worker copies use. A walk of the copies' folder, off the event thread.
 #[tauri::command(async)]
 fn worker_disk(app: State<'_, App>) -> Res {
@@ -463,7 +482,9 @@ fn term_open(
     let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
     // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+        if own.record {
+            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
+        }
     }
     Ok(term_value(&i))
 }
@@ -508,7 +529,9 @@ fn setup_sign_in(
     let cmd = app.setup_sign_in_command(&id)?;
     let i = terms.open_sign_in(&cmd, rows, cols, term_sink(on_event)).map_err(term_err)?;
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+        if own.record {
+            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
+        }
     }
     Ok(term_value(&i))
 }
@@ -557,7 +580,9 @@ fn term_list(terms: State<'_, Terminals>) -> Res {
 
 /// Shells recorded by an earlier session of the app, reconciled once at launch, and what the human did about them.
 struct Ownership {
-    ledger: Ledger,
+    ledger: std::sync::Arc<Ledger>,
+    /// False in a second instance: it writes nothing to the ledger.
+    record: bool,
     found: std::sync::Mutex<Vec<Found>>,
     home: String,
 }
@@ -741,8 +766,9 @@ fn main() {
         std::process::exit(code);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT).
-    vajra_desktop::userpath::init(&home);
+    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT), in the
+    // background so the window does not wait for it. The first reader of the PATH waits for the answer instead.
+    vajra_desktop::userpath::start(&home);
     let app = match App::open(&data, &home) {
         Ok(a) => a,
         Err(e) => {
@@ -760,12 +786,21 @@ fn main() {
 
     // Crash reconciliation: shells an earlier session recorded are checked against the live process table now (pid and
     // start stamp, never a name). Nothing is signalled until the human asks.
-    let owned_ledger = Ledger::new(vajra_desktop::owned::ledger_path(&data));
+    // The App's ledger: one writer for shells, leads and workers alike.
+    let owned_ledger = app.owned_ledger();
+    let other_instance = app.other_instance();
     let built = tauri::Builder::default()
         // The system folder picker for the repository field (D5). The capability grants only `dialog:allow-open`.
         .plugin(tauri_plugin_dialog::init())
         .manage(app)
-        .manage(Ownership { found: std::sync::Mutex::new(owned_ledger.settle()), ledger: owned_ledger, home: home.display().to_string() })
+        // A second instance offers no shell for recovery (the first app's live terminals would look like a crash's) and
+        // records none, so it never writes the other app's ledger.
+        .manage(Ownership {
+            found: std::sync::Mutex::new(if other_instance { Vec::new() } else { owned_ledger.settle() }),
+            ledger: owned_ledger,
+            home: home.display().to_string(),
+            record: !other_instance,
+        })
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))
         .setup(move |a| {
             let handle = a.handle().clone();
@@ -912,6 +947,9 @@ fn main() {
             act_close_finished,
             worker_disk,
             install_dev_tools,
+            core_runs,
+            labs_get,
+            labs_set,
             act_worker_clean_up,
             record_orphans,
             run_log_since,
@@ -955,10 +993,12 @@ fn main() {
             }
         }
         RunEvent::Exit => {
-            // Director-General asks, then core tickets (with their descendants), then every session: `App::quit`.
+            // The Director-General's asks, then every core run's lead, then core tickets (with their descendants), then
+            // every session: `App::quit`.
             handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
-            handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover
+            // A clean quit reaped every shell, so there is nothing to recover. A second instance leaves the ledger alone.
+            handle.state::<App>().clear_ledger_on_quit();
         }
         _ => {}
     });

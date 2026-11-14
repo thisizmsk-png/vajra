@@ -274,6 +274,13 @@ pub struct App {
     pub control: Arc<Mutex<Service>>,
     /// The live runs whose leads call `vajra-run` tools over the socket (ADR-16 16.5); never behind `control`.
     pub run_leads: Arc<crate::control::runreg::RunRegistry>,
+    /// The leads of the core runs (6d2c), each watched on its own thread.
+    lead_runs: Arc<lead_start::LeadRuns>,
+    /// The ownership ledger: user shells, and every lead and worker the supervisor starts (6d2d). Shared with `main`'s
+    /// terminals, so there is one writer.
+    owned: Arc<crate::owned::Ledger>,
+    /// What the start-up reconcile did.
+    reconciled: recover::Reconciled,
     /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
     _instance: Option<(instance::Held, instance::Held)>,
     bridge: Bridge,
@@ -371,13 +378,19 @@ impl App {
         // A test build never reaches the real Keychain: its default `security` path does not exist.
         let security = Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY });
         paths::ensure_private_dir(data)?;
+        // Before anything else (6d2d): the leads and workers an earlier life's crash left running are killed, each re-proved
+        // by its recorded pid and start stamp, and their tickets and runs are written ended. Shells wait for the human.
+        let owned = Arc::new(crate::owned::Ledger::new(crate::owned::ledger_path(data)));
+        // Only the one app that holds the data folder reconciles, and only it starts agents: a second instance (a
+        // development build beside the installed app) would otherwise take the first one's live agents for a crash's.
+        // Two locks: the data folder's (its ledger) and the shared worktree folder's (every app on this account puts its
+        // workers there, whatever its data folder, and the 6c-3 sweep kills what it finds there).
+        let instance = instance::InstanceLock::take_both(data, home);
+        let sole = instance.is_some();
+        let reconciled = if sole { recover::reconcile(data, &owned) } else { recover::Reconciled { other_instance: true, ..Default::default() } };
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
-        // Only the app holding the data folder's and the account's worktree folder's locks sweeps and starts agents: a
-        // second instance (a development build beside the installed app) would take the first one's live workers for
-        // an earlier life's. Held for the app's life.
-        let instance = instance::InstanceLock::take_both(data, home);
         let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots(), instance.is_some()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
@@ -443,10 +456,22 @@ impl App {
             // Metered accounts are the ones with a stored key; the key reaches curl only through the `security` command's
             // stdout pipe. With no key stored there is nothing to meter and no outbound call.
             usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
-            sup: Arc::new(Supervisor::new(bus.clone(), log.clone())),
+            sup: {
+                let sup = Arc::new(Supervisor::new(bus.clone(), log.clone()));
+                if sole {
+                    // Every lead and worker is recorded before its spawn returns; one that can't be is refused.
+                    sup.set_ledger(owned.clone());
+                } else {
+                    sup.refuse_spawns(instance::OTHER_INSTANCE);
+                }
+                sup
+            },
+            owned,
+            reconciled,
             bus,
             control: Arc::new(Mutex::new(svc)),
             run_leads: crate::control::runreg::RunRegistry::new(),
+            lead_runs: Arc::default(),
             runs: Arc::new(Mutex::new(HashMap::new())),
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
@@ -473,6 +498,11 @@ impl App {
             issued: Mutex::new(Default::default()),
             log,
         })
+    }
+
+    /// The ownership ledger, shared with the terminals.
+    pub fn owned_ledger(&self) -> Arc<crate::owned::Ledger> {
+        self.owned.clone()
     }
 
     pub fn note(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -561,6 +591,21 @@ impl App {
             c
         };
         self.workers.runtime(&self.sup, &self.bus, on_repo, hooks, cfg)
+    }
+
+    /// Labs for `project`: `{"available": <developer build>, "on": <on for this project>}`.
+    pub fn labs_get(&self, project: &str) -> Res {
+        let labs = self.seat_env.labs();
+        Ok(json!({"available": labs::LABS_BUILD, "on": labs.on(project)}))
+    }
+
+    /// The human's Labs switch for `project`. Takes effect for the Director-General's next conversation's tool list,
+    /// and at once for the seat checks.
+    pub fn labs_set(&self, project: &str, on: bool) -> Res {
+        self.active_project(project).map_err(|e| e.to_json())?;
+        self.seat_env.labs().set(project, on).map_err(|code| fail(code, "Labs can't be changed for this project"))?;
+        self.note(if on { "labs_on" } else { "labs_off" }, &[]);
+        self.labs_get(project)
     }
 
     /// The preflight row's "Install developer tools": Apple's installer, only while git is missing (the human's click).
@@ -665,6 +710,8 @@ impl App {
             }
             v
         };
+        // Core runs (a seated proposal's, under its lead) count beside classic runs, so neither kind can start over the other.
+        let active: Vec<caps::Active> = active.into_iter().chain(self.lead_runs.active()).collect();
         let limits = *lock(&self.limits);
         caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
@@ -681,17 +728,19 @@ impl App {
         Ok(l.to_json())
     }
 
-    /// Runs whose PTY is still open.
+    /// Runs in progress: classic runs whose PTY is still open, and core runs whose lead is still watched.
     pub fn active_run_count(&self) -> usize {
-        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
+        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count() + self.lead_runs.active().len()
     }
 
-    /// The active run groups for diagnostics: stream id and the pid of the group leader.
-    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end, every core ticket ends `abandoned`
-    /// (`app_quit`) with its line written and its descendants swept, then every supervisor session is killed and
-    /// reaped. Bounded: a ticket that is not done within `QUIT_TICKETS` is left to the supervisor's kill.
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end; every core run's lead is refused new
+    /// runs, killed and never restarted (`shutdown_leads`), so no lead calls `dispatch_worker` or `integrate` while its
+    /// tickets end; every core ticket ends `abandoned` (`app_quit`) with its line written and its descendants swept;
+    /// then every supervisor session is killed and reaped. Bounded: a lead not gone within `LEAD_SHUTDOWN_WAIT`, or a
+    /// ticket not done within `QUIT_TICKETS`, is left to the supervisor's kill.
     pub fn quit(&self) {
         self.shutdown_lead();
+        self.shutdown_leads(Self::LEAD_SHUTDOWN_WAIT);
         self.workers.quit(QUIT_TICKETS);
         self.sup.shutdown();
     }
@@ -701,7 +750,16 @@ impl App {
     pub fn swept_report(&self) -> Value {
         let s = self.workers.startup_swept();
         let (killed, survived) = self.workers.runtime_swept();
-        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance()})
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance(), "crash_reconcile": self.reconciled})
+    }
+
+    /// After a clean quit: the ledger's shell records are dropped (every shell was reaped, nothing to recover). Only
+    /// the app holding the instance locks does this. A second instance's quit leaves the first app's ledger alone,
+    /// and does not rewrite it in a race with that app's records.
+    pub fn clear_ledger_on_quit(&self) {
+        if !self.other_instance() {
+            self.owned.clear();
+        }
     }
 
     /// Another app instance holds this data folder or the account's worktree folder: this one sweeps nothing and
@@ -738,6 +796,7 @@ impl App {
         Some(watcher)
     }
 
+    /// The active run groups for diagnostics: stream id and the pid of the group leader.
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
         let mut v: Vec<_> = lock(&self.runs)
             .keys()
@@ -917,6 +976,10 @@ impl App {
         if let Err(e) = spawned {
             lock(&self.control).end_session(session_id);
             return Err(e);
+        }
+        // A classic run's harness drives its campaign through its `--mcp` server, a Service client: a recorded root.
+        if let Ok(pid) = self.sup.pid(&stream) {
+            self.run_leads.allow_service(pid);
         }
         lock(&self.run_workers).insert(stream.clone(), workers);
         lock(&self.runs).insert(
@@ -2704,11 +2767,17 @@ impl Pace {
 
 mod worker_diff;
 pub mod workers;
+mod claude_canary;
 pub mod plan;
 pub mod record;
 mod record_app;
 pub mod record_ledger;
 pub mod runproto;
+pub mod charter;
+pub mod run_lead;
+mod lead_start;
+mod recover;
+pub mod labs;
 pub mod verify;
 pub mod phases;
 pub mod runlog;

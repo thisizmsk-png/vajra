@@ -217,7 +217,6 @@ fn worker_builders_refuse_bad_inputs() {
     let mut l = launch(RoleKind::Worker, false);
     l.model = None;
     assert_eq!(codex_worker_argv(&l).unwrap_err().field, "model");
-    assert!(codex_lead_argv().is_err() && claude_lead_argv().is_err());
 }
 
 fn claude(tools: &'static str) -> ClaudeWorker<'static> {
@@ -229,15 +228,16 @@ fn claude_worker_argv_snapshot() {
     let a = claude_worker_argv(&launch(RoleKind::Worker, false), &claude("Read,Grep,Glob,Edit,Write,Bash")).unwrap();
     let want: Vec<String> = [
         "/opt/bin/claude", "-p", "--output-format", "stream-json", "--verbose", "--session-id", "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6",
-        "--setting-sources", "user", "--settings", "/d/profiles/claude-worker.json", "--permission-mode", "dontAsk",
+        "--setting-sources", "", "--settings", "/d/profiles/claude-worker.json", "--permission-mode", "dontAsk",
         "--tools", "Read,Grep,Glob,Edit,Write,Bash", "--allowedTools", "Read,Grep,Glob,Edit,Write,Bash",
         "--model", "vendor/model-a", "--", "Do the task",
     ].map(String::from).into();
     assert_eq!(a, want);
     assert!(!a.iter().any(|x| x.contains("bypass") || x == "--strict-mcp-config"));
-    // Only the user's own settings load: never the worktree's project or local settings (#147 review).
+    // No settings file loads but the flag file: not the worktree's project or local settings (#147 review), and not the
+    // user's, whose merged sandbox lists would reopen the key folder and the network (vajra-70 spike).
     assert_eq!(a.iter().filter(|x| *x == "--setting-sources").count(), 1);
-    assert_eq!(a[a.iter().position(|x| x == "--setting-sources").unwrap() + 1], "user");
+    assert_eq!(a[a.iter().position(|x| x == "--setting-sources").unwrap() + 1], "");
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn the_flag_file_always_carries_the_guard_and_turns_hooks_and_bypass_back_on() {
     for p in [&home, &work, &repo, &data] {
         std::fs::create_dir_all(p).unwrap();
     }
-    let s = claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data).unwrap();
+    let s = claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &d.join("tmp")).unwrap();
     let v: Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v["disableAllHooks"], false);
     assert_eq!(v["permissions"]["disableBypassPermissionsMode"], "disable");
@@ -313,6 +313,138 @@ fn the_flag_file_always_carries_the_guard_and_turns_hooks_and_bypass_back_on() {
     assert!(write_claude_worker_flag(&data, "../x", &s).is_err(), "only a canonical session id names the file");
 }
 
+/// The OS sandbox block (vajra-70 spike): on, fail closed, no escape hatch; writes only in the ticket tmp beyond the
+/// worktree; the key folder and the data dir refused to read and write in both spellings; loopback only.
+#[test]
+fn the_flag_file_turns_the_os_sandbox_on_around_the_key_folder_and_data_dir() {
+    let d = tmpdir("sandbox");
+    let (home, work, repo, data, tmp) = (d.join("home"), d.join("work"), d.join("repo"), d.join("data"), d.join("tmp"));
+    for p in [&home, &work, &repo, &data, &tmp] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    let v: Value = serde_json::from_str(&claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).unwrap()).unwrap();
+    let sb = &v["sandbox"];
+    assert_eq!(sb["enabled"], true);
+    assert_eq!(sb["failIfUnavailable"], true, "no sandbox, no launch");
+    assert_eq!(sb["allowUnsandboxedCommands"], false, "dangerouslyDisableSandbox is ignored");
+    assert_eq!(sb["autoAllowBashIfSandboxed"], false);
+    assert_eq!(sb["excludedCommands"], json!([]));
+    assert_eq!(sb["ignoreViolations"], json!({}));
+    assert_eq!(sb["network"], json!({"allowLocalBinding": true}), "no allowedDomains: loopback only");
+    let fs = &sb["filesystem"];
+    assert_eq!(fs["disabled"], false);
+    assert_eq!(fs["allowRead"], json!([]));
+    assert_eq!(fs["allowWrite"], json!([tmp.to_str().unwrap()]));
+    let locked = crate::control::lead_settings::sandbox_locked_dirs(&home, &data).unwrap();
+    assert_eq!(fs["denyRead"], json!(locked));
+    assert_eq!(fs["denyWrite"], json!(locked));
+    for base in [home.join(".claude/vajra"), home.canonicalize().unwrap().join(".claude/vajra"), data.clone(), data.canonicalize().unwrap()] {
+        assert!(locked.contains(&base.to_str().unwrap().to_string()), "{} missing from {locked:?}", base.display());
+    }
+    assert_eq!(crate::control::lead_settings::KEY_DIR, crate::control::lead_settings::HOME_RULES[0].trim_end_matches("/**"));
+    // A ticket tmp that is relative, or inside or around a locked folder, refuses the flag.
+    for bad in [PathBuf::from("rel/tmp"), data.join("t"), home.join(".claude/vajra/t"), home.clone(), d.clone()] {
+        assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &bad).is_err(), "{}", bad.display());
+    }
+    // #212 bhishma Low: a ticket tmp that is a link into a locked folder, or passes through one, is caught by realpath.
+    std::fs::create_dir_all(data.join("inner")).unwrap();
+    std::os::unix::fs::symlink(&data, d.join("tmp-link")).unwrap();
+    std::fs::create_dir_all(d.join("via")).unwrap();
+    std::os::unix::fs::symlink(&data, d.join("via/up")).unwrap();
+    for bad in [d.join("tmp-link"), d.join("via/up/inner")] {
+        assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &bad).is_err(), "{}", bad.display());
+    }
+    assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).is_ok(), "a plain ticket tmp still works");
+}
+
+/// Sandbox B: the user's default model and named model-routing env vars carry over into the flag file; no permission,
+/// sandbox, hook, apiKeyHelper or MCP key, no key or token, and no unnamed env var ever does.
+#[test]
+fn only_the_default_model_and_named_routing_env_carry_over_from_the_users_settings() {
+    let hostile = r#"{
+        "model": "opus-plan",
+        "env": {"ANTHROPIC_BASE_URL": "https://gw.example/v1", "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2",
+                "HTTPS_PROXY": "http://proxy:3128", "ANTHROPIC_API_KEY": "sk-not-carried", "ANTHROPIC_AUTH_TOKEN": "t",
+                "ANTHROPIC_CUSTOM_HEADERS": "x-key: v", "AWS_PROFILE": "p", "CLAUDE_CODE_SANDBOX": "off", "PATH": "/evil",
+                "ANTHROPIC_MODEL": "bad\nline", "ANTHROPIC_SMALL_FAST_MODEL": 7, "NO_PROXY": "localhost",
+                "HTTP_PROXY": "http://127.0.0.1:8080", "ALL_PROXY": "socks5://127.0.0.1:1080", "https_proxy": "http://127.0.0.1:3128",
+                "http_proxy": "x", "all_proxy": "x", "no_proxy": "x"},
+        "permissions": {"allow": ["Bash(*)"], "defaultMode": "bypassPermissions"},
+        "sandbox": {"enabled": false, "filesystem": {"allowRead": ["/"]}, "excludedCommands": ["*"]},
+        "hooks": {"PreToolUse": []}, "disableAllHooks": true, "apiKeyHelper": "/bin/echo k",
+        "enabledMcpjsonServers": ["x"], "mcpServers": {"x": {}}
+    }"#;
+    let c = claude_carry_over(Some(hostile));
+    assert_eq!(c.model.as_deref(), Some("opus-plan"));
+    assert_eq!(c.env, vec![
+        ("ANTHROPIC_BASE_URL", "https://gw.example/v1".to_string()),
+        ("CLAUDE_CODE_USE_BEDROCK", "1".to_string()),
+        ("AWS_REGION", "us-west-2".to_string()),
+    ], "only named, single-line, non-blank strings; no proxy variable");
+    for k in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "AWS_PROFILE", "PATH"] {
+        assert!(!CLAUDE_CARRY_ENV.contains(&k), "{k}");
+    }
+    // #224 bhishma Low: settings env reaches the sandboxed Bash, and a loopback proxy would be a way off the machine.
+    for k in CLAUDE_CARRY_NEVER {
+        assert!(!CLAUDE_CARRY_ENV.iter().any(|c| c.eq_ignore_ascii_case(k)), "{k}");
+    }
+    assert!(CLAUDE_CARRY_ENV.iter().all(|k| !k.to_ascii_uppercase().contains("PROXY")));
+    assert_eq!(CLAUDE_CARRY_NEVER.len(), 8, "the four proxy variables in both cases");
+    assert!(CLAUDE_CARRY_ENV.iter().all(|k| !k.contains("KEY") && !k.contains("TOKEN") && !k.contains("HEADER")));
+    for t in [None, Some(""), Some("not json"), Some("[1]"), Some(r#"{"model": 3, "env": "x"}"#)] {
+        assert_eq!(claude_carry_over(t), CarryOver::default(), "{t:?}");
+    }
+    assert_eq!(claude_carry_over(Some(&format!(r#"{{"model":"{}"}}"#, "m".repeat(600)))).model, None, "too long");
+
+    // In the flag: only `model` and `env` change; the sandbox, permissions and hooks are the template's, byte for byte.
+    let d = tmpdir("carry");
+    let (home, work, repo, data, tmp) = (d.join("home"), d.join("work"), d.join("repo"), d.join("data"), d.join("tmp"));
+    for p in [&home, &work, &repo, &data, &tmp] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    let base: Value = serde_json::from_str(&claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).unwrap()).unwrap();
+    let mut with: Value = serde_json::from_str(&claude_worker_flag_with(&home, &work, std::slice::from_ref(&repo), &data, &tmp, &c).unwrap()).unwrap();
+    assert_eq!(with["model"], "opus-plan");
+    assert_eq!(with["env"], json!({"ANTHROPIC_BASE_URL": "https://gw.example/v1", "AWS_REGION": "us-west-2", "CLAUDE_CODE_USE_BEDROCK": "1"}));
+    assert!(base.get("model").is_none() && base.get("env").is_none(), "the template carries nothing");
+    let o = with.as_object_mut().unwrap();
+    o.remove("model");
+    o.remove("env");
+    assert_eq!(with, base);
+    // The proven shape hashes the template, whatever the user's settings hold.
+    let shape = claude_worker_flag_shape(&repo_hooks()).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/settings.json"), hostile).unwrap();
+    assert_eq!(read_claude_carry_over(&home), c, "read through the provider check's reader");
+    assert_eq!(claude_worker_flag_shape(&repo_hooks()).unwrap(), shape);
+}
+
+/// The carry-over reader follows no link: a settings.json that is a symlink carries nothing.
+#[test]
+fn a_linked_user_settings_file_carries_nothing() {
+    let d = tmpdir("carry-link");
+    let home = d.join("home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(d.join("elsewhere.json"), r#"{"model":"m"}"#).unwrap();
+    std::os::unix::fs::symlink(d.join("elsewhere.json"), home.join(".claude/settings.json")).unwrap();
+    assert_eq!(read_claude_carry_over(&home), CarryOver::default());
+    assert_eq!(read_claude_carry_over(&d.join("no-home")), CarryOver::default());
+}
+
+/// A Claude worker's build caches live in its ticket tmp: the sandbox leaves HOME read-only and rewrites TMPDIR.
+#[test]
+fn a_claude_worker_keeps_its_build_caches_in_the_ticket_tmp() {
+    let l = launch(RoleKind::Worker, false);
+    let env = worker_env(Engine::Claude, &l, None);
+    for (k, v) in &env {
+        assert!(crate::sessions::EXTRA_ENV_ALLOW.contains(k), "{k}");
+        assert!(Path::new(v).starts_with(l.ticket_tmp), "{k}={v:?}");
+    }
+    let names: Vec<&str> = env.iter().map(|(k, _)| *k).collect();
+    assert_eq!(names, ["TMPDIR", "GOCACHE", "GOTMPDIR", "npm_config_cache"]);
+    assert!(!worker_env(Engine::Codex, &l, None).iter().any(|(k, _)| *k == "GOCACHE"), "Codex is unchanged");
+}
+
 /// #147 gate H1: a worker that rewrites the flag file, or swaps it for a link, between the write and the spawn has the
 /// launch refused.
 #[test]
@@ -322,7 +454,7 @@ fn a_flag_file_changed_before_the_spawn_refuses_the_launch() {
     for p in [&home, &work, &repo, &data] {
         std::fs::create_dir_all(p).unwrap();
     }
-    let s = claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data).unwrap();
+    let s = claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &d.join("tmp")).unwrap();
     let f = write_claude_worker_flag(&data, "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6", &s).unwrap();
     assert_eq!(verify_claude_worker_flag(&f), Ok(()));
     let mut v: Value = serde_json::from_str(&s).unwrap();
@@ -363,7 +495,7 @@ fn no_sentinel_key_reaches_argv_env_or_files() {
         assert!(crate::sessions::EXTRA_ENV_ALLOW.contains(&k), "{k}");
         all.push(v.to_string_lossy().into_owned());
     }
-    let flag = claude_worker_flag(&home, &work, &[repo], &data).unwrap();
+    let flag = claude_worker_flag(&home, &work, &[repo], &data, &d.join("tmp")).unwrap();
     write_claude_worker_flag(&data, "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6", &flag).unwrap();
     all.push(flag);
     assert!(!all.iter().any(|x| x.contains(SENTINEL)));
@@ -386,7 +518,9 @@ fn profiles_refuse_what_is_not_proven() {
     assert!(profile(Engine::Codex, RoleKind::Worker).supported.is_ok(), "S1 and S3 passed for Codex");
     assert!(profile(Engine::Codex, RoleKind::Verifier).supported.is_ok());
     for e in [Engine::Codex, Engine::Claude] {
-        assert!(profile(e, RoleKind::Lead).supported.is_err());
+        let want = if e == Engine::Claude { Err(LEAD_UNVERIFIED) } else { Ok(()) };
+        assert_eq!(profile(e, RoleKind::Lead).supported, want, "S2 and S5 passed for Codex; the Claude lead waits for its own spike");
+        assert_eq!(profile(e, RoleKind::Lead).user, &["login"], "a lead keeps only the user's login (N3)");
         assert!(profile(e, RoleKind::DirectorGeneral).supported.is_err());
     }
     assert_eq!(RoleKind::of_role("reviewer"), Some(RoleKind::Verifier));
@@ -396,6 +530,12 @@ fn profiles_refuse_what_is_not_proven() {
     assert_eq!(disclosures(&p, false), vec![crate::desktop::seat_start::CODEX_WARNING]);
     assert_eq!(disclosures(&p, true).len(), 2);
     assert_eq!(disclosures(&profile(Engine::Claude, RoleKind::Worker), false), vec![crate::desktop::seat_start::CLAUDE_NOTE]);
+    // #212 review: a Claude worker's sandbox is loopback only, so network on never says "Internet on".
+    use crate::desktop::seat_start::{CLAUDE_NOTE, CLAUDE_NO_NETWORK_NOTE, NETWORK_NOTE};
+    for kind in [RoleKind::Worker, RoleKind::Verifier] {
+        assert_eq!(disclosures(&profile(Engine::Claude, kind), true), vec![CLAUDE_NOTE, CLAUDE_NO_NETWORK_NOTE]);
+    }
+    assert_eq!(disclosures(&p, true)[1], NETWORK_NOTE, "Codex keeps its internet note");
 }
 
 /// The `turn_context` shape codex 0.166 wrote in spike S3 (paths shortened).
@@ -517,6 +657,43 @@ fn the_claude_read_back_checks_the_mode_and_the_tool_set() {
     }
 }
 
+/// A Claude worker is guarded only when its init event shows no MCP server loaded and no `mcp__` tool; otherwise the
+/// reason names every server, from either place.
+#[test]
+fn a_claude_worker_is_guarded_only_when_no_mcp_server_loaded() {
+    let ev = |extra: Value| {
+        let mut init = json!({"type": "system", "subtype": "init", "tools": ["Read"]});
+        for (k, v) in extra.as_object().unwrap() {
+            init[k] = v.clone();
+        }
+        format!("{{\"type\":\"assistant\"}}\n{init}\n")
+    };
+    assert_eq!(claude_key_guard(&ev(json!({"mcp_servers": []}))), json!({"guarded": true}));
+    assert_eq!(claude_key_guard(&ev(json!({}))), json!({"guarded": true}));
+    let one = claude_key_guard(&ev(json!({"mcp_servers": [{"name": "files", "status": "failed"}]})));
+    assert_eq!((one["guarded"].as_bool(), one["mcp_servers"].clone()), (Some(false), json!(["files"])), "a failed server may have started");
+    assert_eq!(one["reason"], "Your MCP server files runs outside the sandbox and can read your files, including Vajra's signing key.");
+    let two = claude_key_guard(&ev(json!({"mcp_servers": [{"name": "shell"}], "tools": ["Read", "mcp__files__read", "mcp__shell__run"]})));
+    assert_eq!(two["mcp_servers"], json!(["files", "shell"]), "{two}");
+    assert!(two["reason"].as_str().unwrap().starts_with("Your MCP servers files, shell run outside"), "{two}");
+    // #215 bhishma: a format the parser can't read fails closed, as an unnamed server, never as "none loaded".
+    for odd in [json!({"mcp_servers": {"files": {}}}), json!({"mcp_servers": "files"}), json!({"mcp_servers": [{"status": "connected"}]}),
+        json!({"mcp_servers": [{"name": ""}]}), json!({"mcp_servers": [7]}), json!({"tools": "Read,mcp__x__y"}), json!({"tools": ["Read", {"name": "mcp__x__y"}]}),
+        json!({"tools": ["Read", "mcp____y"]})]
+    {
+        let g = claude_key_guard(&ev(odd.clone()));
+        assert_eq!((g["guarded"].as_bool(), g["mcp_servers"].clone()), (Some(false), json!([UNNAMED_MCP_SERVER])), "{odd}: {g}");
+    }
+    // Every init event counts, not only the first.
+    let two_inits = format!("{}{}", ev(json!({"mcp_servers": []})), ev(json!({"mcp_servers": [{"name": "late"}]})));
+    assert_eq!(claude_key_guard(&two_inits)["mcp_servers"], json!(["late"]));
+    // No init event: unknown, so not guarded.
+    assert_eq!(claude_mcp_loaded("{}\n"), None);
+    let none = claude_key_guard("{}\n");
+    assert_eq!(none["guarded"], false, "{none}");
+    assert!(none["reason"].as_str().unwrap().contains("couldn't read which MCP servers loaded"), "{none}");
+}
+
 #[test]
 fn a_read_back_mismatch_kills_the_session() {
     use crate::bus::{Bus, Config};
@@ -542,16 +719,75 @@ fn a_read_back_mismatch_kills_the_session() {
 /// `CLAUDE_WORKER_PROVEN` (the spike prints the pair). Only exact `claude --version` strings in that list pass.
 #[test]
 fn only_a_claude_build_s4_proved_with_todays_flag_shape_is_dispatched() {
-    let shape = claude_worker_flag_shape().unwrap();
+    let shape = claude_worker_flag_shape(&repo_hooks()).unwrap();
     assert_eq!(shape.len(), 64);
     assert!(CLAUDE_WORKER_PROVEN.iter().any(|(_, s)| *s == shape), "today's flag shape {shape} is not one S4 proved: rerun S4 and add its pair");
-    assert_eq!(claude_worker_flag_shape().unwrap(), shape, "the shape is the same on every call");
-    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)"), Ok(()));
-    assert_eq!(claude_worker_proven("  2.1.296 (Claude Code)\n"), Ok(()), "--version output is trimmed");
+    assert_eq!(claude_worker_flag_shape(&repo_hooks()).unwrap(), shape, "the shape is the same on every call");
+    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)", &shape), Ok(()));
+    assert_eq!(claude_worker_proven("  2.1.296 (Claude Code)\n", &shape), Ok(()), "--version output is trimmed");
     for bad in ["2.1.322 (Claude Code)", "2.1.296", "2.1.2960 (Claude Code)", "", "SHAPE_PENDING"] {
-        assert_eq!(claude_worker_proven(bad), Err(CLAUDE_UNPROVEN), "{bad:?}");
+        assert_eq!(claude_worker_proven(bad, &shape), Err(CLAUDE_UNPROVEN), "{bad:?}");
     }
+    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)", &"0".repeat(64)), Err(CLAUDE_UNPROVEN), "a proven version with another shape");
     assert_eq!(CLAUDE_UNPROVEN.reason, "claude_unproven");
+}
+
+fn repo_hooks() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hooks")
+}
+
+/// #186 codex: the flag file names the guard scripts, but S4 proved what they do, so their bytes are in the shape.
+/// One changed byte in the installed pre-tool-use.sh is a different shape; a missing or symlinked script is no shape.
+#[test]
+fn the_flag_shape_covers_the_installed_guard_scripts_bytes() {
+    let names = claude_worker_hook_scripts().unwrap();
+    assert!(names.iter().any(|n| n == "pre-tool-use.sh"), "{names:?}");
+    let d = tmpdir("guard-shape");
+    let copy = |to: &Path| {
+        std::fs::create_dir_all(to).unwrap();
+        for n in &names {
+            std::fs::copy(repo_hooks().join(n), to.join(n)).unwrap();
+        }
+    };
+    let same = d.join("same");
+    copy(&same);
+    let want = claude_worker_flag_shape(&repo_hooks()).unwrap();
+    assert_eq!(claude_worker_flag_shape(&same).unwrap(), want, "an exact install of the repo's hooks has the repo's shape");
+
+    let edited = d.join("edited");
+    copy(&edited);
+    let p = edited.join("pre-tool-use.sh");
+    let mut b = std::fs::read(&p).unwrap();
+    let i = b.len() / 2;
+    b[i] ^= 1;
+    std::fs::write(&p, b).unwrap();
+    assert_ne!(claude_worker_flag_shape(&edited).unwrap(), want, "one changed byte in the guard");
+
+    let missing = d.join("missing");
+    copy(&missing);
+    std::fs::remove_file(missing.join("pre-tool-use.sh")).unwrap();
+    assert!(claude_worker_flag_shape(&missing).is_err());
+
+    let linked = d.join("linked");
+    copy(&linked);
+    std::fs::remove_file(linked.join("pre-tool-use.sh")).unwrap();
+    std::os::unix::fs::symlink(repo_hooks().join("pre-tool-use.sh"), linked.join("pre-tool-use.sh")).unwrap();
+    assert!(claude_worker_flag_shape(&linked).is_err(), "a symlinked guard script is not hashed through");
+}
+
+/// #186 bhishma Low: the shape covers the worker argv S4 relied on, not only the flag file, so dropping or changing
+/// `--setting-sources ""`, `--permission-mode dontAsk` or the `--tools` pair needs a new S4 PASS too.
+#[test]
+fn the_flag_shape_covers_the_worker_argv_flags_s4_relied_on() {
+    let input = claude_worker_shape_input().unwrap();
+    let argv: Vec<String> = serde_json::from_str(input.rsplit_once('\n').unwrap().1).unwrap();
+    for pair in [["--setting-sources", ""], ["--permission-mode", "dontAsk"], ["--tools", "Read,Grep,Glob,Bash,Edit,Write"], ["--allowedTools", "Read,Grep,Glob,Bash,Edit,Write"], ["--output-format", "stream-json"]] {
+        assert!(argv.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]), "{pair:?} in {argv:?}");
+    }
+    assert!(argv.iter().any(|a| a == "-p") && argv.iter().any(|a| a == "--settings"), "{argv:?}");
+    let flag: serde_json::Value = serde_json::from_str(input.rsplit_once('\n').unwrap().0).unwrap();
+    assert_eq!(flag["permissions"]["defaultMode"], "dontAsk", "the flag file is the first part");
+    assert!(claude_worker_flag_shape(&repo_hooks()).is_ok());
 }
 
 #[test]
@@ -571,7 +807,12 @@ fn the_s4_owner_script_runs_the_argv_the_builder_makes() {
     for flag in ["-p", "--output-format", "stream-json", "--verbose", "--session-id", "--settings", "--permission-mode", "dontAsk", "--tools", "--allowedTools", "--setting-sources"] {
         assert!(a.iter().any(|x| x == flag) && script.contains(&format!(" {flag} ")), "{flag}");
     }
-    assert!(a.windows(2).any(|w| w[0] == "--setting-sources" && w[1] == "user") && script.contains(" --setting-sources user "));
+    assert!(a.windows(2).any(|w| w[0] == "--setting-sources" && w[1].is_empty()) && script.contains(" --setting-sources \"\" "));
+    assert!(!script.contains("--setting-sources user"), "both S4 runs use the worker's setting sources");
+    // The data-dir run proves the OS sandbox: name-free probes refused with the sandbox's EPERM.
+    assert!(S4_CHECK.contains("SANDBOX_REFUSAL = \"operation not permitted\""));
+    assert!(S4_CHECK.contains("the OS sandbox refused a key read that names no locked path"));
+    assert!(script.contains("\"$KD\" \"$TT2\""));
     // The verdict is s4_check.py's; the worktree's project-settings hook counts toward PASS (#147 review).
     assert!(script.contains("/usr/bin/python3 -I \"$HERE/s4_check.py\" \"$SP\" \"$M\" \"$TOOLS\" \"$STATUS\""));
     assert!(S4_CHECK.contains("(\"the worktree's project-settings hook never ran\", not os.path.exists(m + \"/project-hook\"))"));
@@ -599,12 +840,16 @@ enum DataRun {
     Leaked,
     /// It errored for another reason (Claude's "read it first"), so nothing proves the deny rule refused it.
     OtherError,
+    /// Every deny rule and the guard held, but no OS sandbox ran: the name-free key read returned the stand-in key and
+    /// the name-free data-dir write went through.
+    Unsandboxed,
 }
 
 /// `s4_verdict`, plus the data-dir run: a full writer run whose Bash call the guard refused and whose Write and Edit the
 /// deny rules refused, with the real refusal texts; `edit` changes how the Edit ended.
 fn s4_verdict_with(tag: &str, served: usize, status: &str, result: bool, edit: DataRun) -> (Option<i32>, String) {
     let leak = edit == DataRun::Leaked;
+    let open = edit == DataRun::Unsandboxed;
     use serde_json::json;
     let sp = tmpdir(tag);
     let m = sp.join("m");
@@ -628,28 +873,44 @@ fn s4_verdict_with(tag: &str, served: usize, status: &str, result: bool, edit: D
     }
     // The data-dir run: tu_0 (a worktree Write) succeeds; tu_1..tu_4 (Bash, Write, Read, Edit into the data dir) are
     // refused, or with `leak` the Edit (tu_4) went through and changed the seed.
-    let (d, wt, data) = (sp.join("data-run"), sp.join("wt2"), sp.join("data"));
-    for dir in [&d, &wt, &data] {
+    // tu_5 and tu_6 are the name-free key read and data-dir write (the sandbox's EPERM, or with `open` the key's text and a
+    // write); tu_7 the Bash writes into the ticket tmp and worktree.
+    let (d, wt, data, kd, tt) = (sp.join("data-run"), sp.join("wt2"), sp.join("data"), sp.join("kd"), sp.join("tt2"));
+    for dir in [&d, &wt, &data, &kd, &tt] {
         std::fs::create_dir_all(dir).unwrap();
     }
     std::fs::write(wt.join("ok-written"), "x").unwrap();
+    std::fs::write(wt.join("bash-ok"), "x").unwrap();
+    std::fs::write(tt.join("tmp-ok"), "x").unwrap();
+    std::fs::write(kd.join("s4-key"), "s4-stand-in\n").unwrap();
     std::fs::write(data.join("seed.json"), if leak { "edited\n" } else { "seed\n" }).unwrap();
+    if open {
+        std::fs::write(data.join("sandbox-ran"), "x").unwrap();
+    }
     let dev = [json!({"type": "system", "subtype": "init", "tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"], "permissionMode": "dontAsk"}), json!({"type": "result", "subtype": "success", "is_error": false})];
     std::fs::write(d.join("events.jsonl"), dev.iter().map(|e| e.to_string() + "\n").collect::<String>()).unwrap();
     let guard_text = "PreToolUse:Bash hook error: [bash \"pre-tool-use.sh\"]: Vajra guard blocked this Bash call: redirect into protected path";
     let deny_text = "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>";
     let edit_text = match edit {
-        DataRun::Refused => deny_text,
+        DataRun::Refused | DataRun::Unsandboxed => deny_text,
         DataRun::Leaked => "The file has been updated.",
         DataRun::OtherError => "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
     };
-    let texts = ["", guard_text, deny_text, deny_text, edit_text];
-    let dres: Vec<_> = (0..5).map(|i| json!({"id": format!("tu_{i}"), "is_error": i != 0 && !(leak && i == 4), "text": texts[i]})).collect();
-    let dlog: String = (0..6).map(|k| json!({"path": "/v1/messages", "tools": ["Bash"], "k": k, "results": dres[..k], "body": "Run the S4 plan"}).to_string() + "\n").collect();
+    // The texts Claude Code 2.1.296 returned in the vajra-70 spike.
+    let (key_text, data_text) = if open {
+        ("s4-stand-in", "")
+    } else {
+        ("Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nPermissionError: [Errno 1] Operation not permitted: '/h/.claude/vajra/s4-key'",
+         "PermissionError: [Errno 1] Operation not permitted: '/h/Library/Application Support/VajraDesktop/sandbox-ran'")
+    };
+    let texts = ["", guard_text, deny_text, deny_text, edit_text, key_text, data_text, ""];
+    let dres: Vec<_> = (0..8).map(|i| json!({"id": format!("tu_{i}"), "is_error": (1..=4).contains(&i) && !(leak && i == 4), "text": texts[i]})).collect();
+    let dlog: String = (0..9).map(|k| json!({"path": "/v1/messages", "tools": ["Bash"], "k": k, "results": dres[..k], "body": "Run the S4 plan"}).to_string() + "\n").collect();
     std::fs::write(d.join("log"), dlog).unwrap();
     let o = std::process::Command::new("/usr/bin/python3").arg("-I").arg("-c").arg(S4_CHECK.replace("if __name__ == \"__main__\":\n    main()", "main()"))
         .args([sp.to_str().unwrap(), m.to_str().unwrap(), "Read,Grep,Glob,Bash", status])
-        .args([d.to_str().unwrap(), wt.to_str().unwrap(), data.to_str().unwrap(), "Read,Grep,Glob,Bash,Edit,Write", "0"]).output().unwrap();
+        .args([d.to_str().unwrap(), wt.to_str().unwrap(), data.to_str().unwrap(), "Read,Grep,Glob,Bash,Edit,Write", "0"])
+        .args([kd.to_str().unwrap(), tt.to_str().unwrap()]).output().unwrap();
     (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
@@ -730,6 +991,21 @@ fn s4_passes_only_when_every_probe_ran_and_was_refused() {
     assert!(out.contains("FAIL  data-dir run: the deny rules refused an Edit in the data dir") && out.contains("S4 FAIL"), "{out}");
     assert!(out.contains("ok    data-dir run: the data dir holds only its seed file, unchanged"), "{out}");
     assert!(out.contains("ok    data-dir run: the Vajra guard refused a Bash write into the data dir"), "{out}");
+    // Key A: the guard and the deny rules held, but with no OS sandbox a command that names no locked path read the key
+    // and wrote into the data dir. That fails S4.
+    let (code, out) = s4_verdict_with("s4-unsandboxed", 4, "0", true, DataRun::Unsandboxed);
+    assert_eq!(code, Some(1), "{out}");
+    for line in [
+        "FAIL  data-dir run: the OS sandbox refused a key read that names no locked path",
+        "FAIL  data-dir run: the OS sandbox refused a data-dir write that names no locked path",
+        "FAIL  data-dir run: the stand-in key reached no tool result and is unchanged",
+        "FAIL  data-dir run: the data dir holds only its seed file, unchanged",
+        "ok    data-dir run: the Vajra guard refused a Bash write into the data dir",
+        "ok    data-dir run: Bash wrote in the ticket tmp and the worktree",
+        "S4 FAIL",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
 }
 
 /// 16.7: the harness profile decides Message, Redirect and Stop for a core worker.
@@ -807,6 +1083,9 @@ fn the_lead_read_back_passes_the_profile_and_ends_a_lead_a_sandbox_flag_beat() {
     // The marker is shown but the Vajra state dir isn't denied: the Lead ends with the check's own reason.
     let open = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(true).replace(r#""/h/.claude/vajra"},"access":"deny""#, r#""/h/.claude/vajra"},"access":"read""#));
     assert!(matches!(codex_lead_verdict(&[open], &w, m), LeadVerdict::NotApplied(why) if why.contains("/h/.claude/vajra")));
+    // #175's L1, shared: a read entry inside a Vajra dir reopens it, so the Lead ends even with every dir denied.
+    let reopened = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(true).replace(r#"{"kind":"restricted","entries":["#, r#"{"kind":"restricted","entries":[{"path":{"type":"path","path":"/h/data/runs"},"access":"read"},"#));
+    assert!(matches!(codex_lead_verdict(&[reopened], &w, m), LeadVerdict::NotApplied(why) if why.contains("/h/data/runs")));
     // The marker is shown with a wider sandbox: ended.
     let wide = lead_file(LP, r#"{"type":"danger-full-access"}"#, &s12_profile_fs(true));
     assert!(matches!(codex_lead_verdict(&[wide], &w, m), LeadVerdict::NotApplied(_)));
@@ -846,4 +1125,301 @@ fn the_lead_argv_denies_the_marker_and_has_no_sandbox_flag() {
     let mut stripped = a.clone();
     drop_sandbox_flag(&mut stripped);
     assert_eq!(stripped, a, "nothing to strip");
+}
+
+// ------------------------------------------------------------ run leads (6d2)
+
+const RUN: &str = "20261112-0930";
+const GW_HOME: &str = "/d/codex-home/gw";
+
+fn codex_lead_argv_of(l: &LeadLaunch<'_>, r: CodexRoute<'_>) -> Result<Vec<String>, InvalidInput> {
+    codex_lead_launch(l, r).map(|c| c.argv)
+}
+
+fn server() -> RunServer<'static> {
+    RunServer { exe: Path::new("/opt/Vajra/vajra-desktop"), run: RUN, token_file: Path::new("/d/runs/20261112-0930/vajra-run.token"), socket: Path::new("/d/app.sock") }
+}
+
+/// A lead's deny dirs: the state dir and the data dir `/d`, which holds the lead dir (so the profile reads it back in).
+fn lead_deny() -> &'static [PathBuf] {
+    static D: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    D.get_or_init(|| ["/h/.claude/vajra", "/d"].iter().map(PathBuf::from).collect())
+}
+
+fn lead(model: Option<&'static str>, effort: Option<&'static str>) -> LeadLaunch<'static> {
+    LeadLaunch {
+        prompt: "the charter", model, effort, lead_dir: Path::new("/d/runs/20261112-0930/lead"), project: Path::new("/p/repo"), server: server(),
+        deny: lead_deny(), profile: PROFILE,
+    }
+}
+
+/// The lead's 6k profile `-c` values, as `codex_lead_launch` writes them.
+fn lead_profile_kv() -> [String; 3] {
+    [
+        format!("permissions.{PROFILE}.filesystem={{\"/\"=\"read\",\"/h/.claude/vajra\"=\"none\",\"/d\"=\"none\",\"/d/runs/20261112-0930/lead\"=\"read\"}}"),
+        format!("permissions.{PROFILE}.network={{enabled=false}}"),
+        format!("default_permissions=\"{PROFILE}\""),
+    ]
+}
+
+/// 6k on the core lead: a fresh profile with the Vajra dirs unreadable, the lead dir alone read back in, no write
+/// entry and no network, on both routes; N3 stays (only `vajra_run`, `notify` off). A launch with no deny dirs, a
+/// guessable profile name, or a read-back entry that would reopen a denied dir is refused.
+#[test]
+fn the_codex_lead_runs_under_a_fresh_profile_with_the_vajra_dirs_denied_and_no_writes() {
+    for route in [CodexRoute::Login, CodexRoute::Gateway { home: Path::new(GW_HOME) }] {
+        let a = codex_lead_argv_of(&lead(Some("m"), None), route).unwrap();
+        let kv = pairs(&a);
+        for p in lead_profile_kv() {
+            assert_eq!(kv.iter().filter(|k| **k == p).count(), 1, "{p} in {kv:?}");
+        }
+        assert!(!kv.iter().any(|k| k.contains("\"write\"")), "a lead's profile has no write entry: {kv:?}");
+        // On 0.166 an explicit --sandbox wins over default_permissions and the deny entries never apply (2026-11-13).
+        assert!(!a.iter().any(|x| x == "--sandbox"), "no --sandbox flag, which would switch the profile off: {a:?}");
+        assert!(kv.contains(&"notify=[]") && kv.contains(&run_server_kv().as_str()), "N3 holds alongside the profile");
+    }
+    let mut l = lead(Some("m"), None);
+    l.deny = &[];
+    assert_eq!(codex_lead_launch(&l, CodexRoute::Login).unwrap_err().field, "deny");
+    let mut l = lead(Some("m"), None);
+    l.profile = "vajra";
+    assert_eq!(codex_lead_launch(&l, CodexRoute::Login).unwrap_err().field, "profile");
+    // A lead dir that is, or holds, a denied dir would reopen it.
+    for dir in ["/d", "/"] {
+        let mut l = lead(Some("m"), None);
+        l.lead_dir = Path::new(dir);
+        assert_eq!(codex_lead_launch(&l, CodexRoute::Login).unwrap_err().field, "read", "{dir}");
+    }
+}
+
+fn run_server_kv() -> String {
+    let tools = crate::control::runreg::TOOL_NAMES.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(",");
+    format!(
+        "mcp_servers={{vajra_run={{command=\"/opt/Vajra/vajra-desktop\",args=[\"--mcp-run\"],env={{VAJRA_RUN=\"{RUN}\",\
+         VAJRA_RUN_TOKEN_FILE=\"/d/runs/20261112-0930/vajra-run.token\",VAJRA_RUN_SOCKET=\"/d/app.sock\"}},\
+         default_tools_approval_mode=\"approve\",enabled_tools=[{tools}],tool_timeout_sec=130}}}}"
+    )
+}
+
+#[test]
+fn codex_login_lead_argv_snapshot() {
+    let a = codex_lead_argv_of(&lead(Some("model-a"), Some("high")), CodexRoute::Login).unwrap();
+    let want: Vec<String> = [
+        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--skip-git-repo-check",
+        "-C", "/d/runs/20261112-0930/lead", "--ignore-rules", "--ignore-user-config", "-m", "model-a",
+        "-c", "approval_policy=\"never\"", "-c", "notify=[]", "-c", "web_search=\"disabled\"",
+        "-c", "features.multi_agent=false", "-c", "features.goals=false",
+        "-c", &lead_profile_kv()[0], "-c", &lead_profile_kv()[1], "-c", &lead_profile_kv()[2],
+        "-c", "model_reasoning_effort=\"high\"", "-c", &run_server_kv(), "--", "the charter",
+    ].map(String::from).into();
+    assert_eq!(a, want);
+    // N3 on the login route holds only with the user's config ignored (spike S2): the -c table alone is merged.
+    assert_eq!(a.iter().filter(|x| *x == "--ignore-user-config").count(), 1);
+    assert!(!a.iter().any(|x| x.contains("model_provider") || x.contains("workspace-write") || x.contains("bypass")));
+}
+
+#[test]
+fn codex_gateway_lead_argv_keeps_vajras_home_and_retries_nothing() {
+    let a = codex_lead_argv_of(&lead(Some("vendor/model-a"), None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap();
+    let id = crate::providers::codex_home::PROVIDER_ID;
+    assert!(!a.iter().any(|x| x == "--ignore-user-config"), "the gateway home is Vajra's own config");
+    let kv = pairs(&a);
+    assert!(kv.contains(&format!("model_providers.{id}.request_max_retries=0").as_str()));
+    assert!(kv.contains(&format!("model_providers.{id}.stream_max_retries=0").as_str()));
+    assert!(kv.contains(&run_server_kv().as_str()));
+    assert_eq!(&a[a.len() - 2..], ["--", "the charter"]);
+    assert!(a.iter().any(|x| x == "--ignore-rules"), "no execpolicy rules on either route");
+    let gw = codex_lead_launch(&lead(Some("m"), None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap();
+    assert_eq!(gw.env, vec![("CODEX_HOME", OsString::from(GW_HOME))], "the gateway argv and its home come together");
+    assert!(codex_lead_launch(&lead(Some("m"), None), CodexRoute::Login).unwrap().env.is_empty(), "the login route keeps the user's own CODEX_HOME");
+    for bad in ["/home/u/.codex", "relative/codex-home/gw", "/d/codex-home/a\"x"] {
+        assert_eq!(codex_lead_launch(&lead(Some("m"), None), CodexRoute::Gateway { home: Path::new(bad) }).unwrap_err().field, "home", "{bad}");
+    }
+}
+
+#[test]
+fn the_lead_argv_never_holds_the_token_and_the_server_env_is_only_paths() {
+    let token = "a".repeat(64);
+    for a in [codex_lead_argv_of(&lead(Some("m"), None), CodexRoute::Login).unwrap(), codex_lead_argv_of(&lead(Some("m"), None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap()] {
+        assert!(!a.iter().any(|x| x.contains(&token) || x.contains(SENTINEL)));
+    }
+    let cfg: Value = serde_json::from_str(&claude_lead_mcp_config(&server()).unwrap()).unwrap();
+    let s = &cfg["mcpServers"]["vajra_run"];
+    assert_eq!(cfg["mcpServers"].as_object().unwrap().len(), 1, "vajra_run is the only server");
+    assert_eq!(s["command"], "/opt/Vajra/vajra-desktop");
+    assert_eq!(s["args"], json!(["--mcp-run"]));
+    assert_eq!(s["env"], json!({"VAJRA_RUN": RUN, "VAJRA_RUN_TOKEN_FILE": "/d/runs/20261112-0930/vajra-run.token", "VAJRA_RUN_SOCKET": "/d/app.sock"}));
+}
+
+#[test]
+fn lead_builders_refuse_bad_inputs() {
+    let mut l = lead(Some("m"), None);
+    assert_eq!(codex_lead_argv_of(&lead(None, None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap_err().field, "model");
+    assert!(codex_lead_argv_of(&lead(None, None), CodexRoute::Login).is_ok(), "the login route may leave the model to Codex's default");
+    assert_eq!(codex_lead_argv_of(&lead(Some("--yolo"), None), CodexRoute::Login).unwrap_err().field, "model");
+    assert_eq!(codex_lead_argv_of(&lead(Some("m"), Some("high\",x=\"")), CodexRoute::Login).unwrap_err().field, "effort");
+    l.lead_dir = Path::new("relative/lead");
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "lead_dir");
+    let mut l = lead(Some("m"), None);
+    l.server.run = "not a run";
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "run");
+    let mut l = lead(Some("m"), None);
+    l.server.token_file = Path::new("/d/x\"},y={\"");
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "token_file");
+    assert_eq!(claude_lead_mcp_config(&l.server).unwrap_err().field, "token_file");
+    let mut l = lead(Some("m"), None);
+    l.prompt = " ";
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "prompt");
+    let big = "x".repeat(MAX_LEAD_PROMPT + 1);
+    l.prompt = &big;
+    assert_eq!(codex_lead_argv_of(&l, CodexRoute::Login).unwrap_err().field, "prompt");
+    // A full 32 KiB ask in the charter, escaped as JSON, still builds: the lead prompt has its own cap.
+    let ask = "\"".repeat(32 * 1024);
+    let roles = vec!["backend".to_string()];
+    let p = crate::desktop::charter::charter(&crate::desktop::charter::Brief { ask: &ask, max_rounds: 3, project_root: "/p/repo", roles: &roles });
+    assert!(p.len() > 64 * 1024);
+    l.prompt = &p;
+    assert!(codex_lead_argv_of(&l, CodexRoute::Login).is_ok());
+    assert!(claude_lead_argv(&l, &claude_lead()).is_ok());
+    let mut l = lead(None, None);
+    l.project = Path::new("rel");
+    assert_eq!(claude_lead_argv(&l, &claude_lead()).unwrap_err().field, "project");
+    assert_eq!(claude_lead_argv(&lead(Some("m"), Some("high")), &claude_lead()).unwrap_err().field, "effort");
+    let mut c = claude_lead();
+    c.session_id = "nope";
+    assert_eq!(claude_lead_argv(&lead(None, None), &c).unwrap_err().field, "session_id");
+}
+
+fn claude_lead() -> ClaudeLead<'static> {
+    ClaudeLead {
+        claude: Path::new("/opt/bin/claude"), session_id: "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6",
+        settings: Path::new("/d/runs/20261112-0930/lead/claude-lead.json"), mcp_config: Path::new("/d/runs/20261112-0930/lead/vajra-run.json"),
+    }
+}
+
+#[test]
+fn claude_lead_argv_snapshot() {
+    let a = claude_lead_argv(&lead(Some("model-b"), None), &claude_lead()).unwrap();
+    let tools = claude_lead_tools();
+    let want: Vec<String> = [
+        "/opt/bin/claude", "-p", "--output-format", "stream-json", "--verbose", "--session-id", "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6",
+        "--setting-sources", "", "--settings", "/d/runs/20261112-0930/lead/claude-lead.json", "--permission-mode", "dontAsk",
+        "--tools", &tools, "--allowedTools", &tools,
+        "--mcp-config", "/d/runs/20261112-0930/lead/vajra-run.json", "--strict-mcp-config", "--add-dir", "/p/repo",
+        "--model", "model-b", "--", "the charter",
+    ].map(String::from).into();
+    assert_eq!(a, want);
+    assert!(!a.iter().any(|x| x.contains("bypass")));
+    assert_eq!(claude_lead_env(), vec![("MCP_TOOL_TIMEOUT", OsString::from("130000"))]);
+    let gw = codex_lead_launch(&lead(Some("m"), None), CodexRoute::Gateway { home: Path::new(GW_HOME) }).unwrap().env;
+    for (k, _) in claude_lead_env().into_iter().chain(gw) {
+        assert!(crate::sessions::EXTRA_ENV_ALLOW.contains(&k), "{k}");
+    }
+}
+
+#[test]
+fn the_claude_lead_tools_are_the_three_read_tools_and_every_vajra_run_tool() {
+    let t = claude_lead_tools();
+    let want: Vec<String> = ["Read", "Grep", "Glob"].map(String::from).into_iter()
+        .chain(crate::control::runreg::TOOL_NAMES.iter().map(|n| format!("mcp__vajra_run__{n}"))).collect();
+    assert_eq!(t, want.join(","));
+    for bad in ["Bash", "Edit", "Write", "Agent", "WebFetch", "mcp__vajra-desktop__"] {
+        assert!(!t.split(',').any(|x| x.starts_with(bad)), "{bad}");
+    }
+    assert!(std::time::Duration::from_secs(LEAD_TOOL_TIMEOUT_SEC) > crate::control::runreg::MAX_CLIENT_TIMEOUT, "the client answers before the harness gives up");
+}
+
+#[test]
+fn the_claude_lead_flag_allows_exactly_the_lead_tools_with_the_guard_and_deny_rules() {
+    let home = tmpdir("lead-home");
+    let repo = tmpdir("lead-repo");
+    let data = tmpdir("lead-data");
+    let v: Value = serde_json::from_str(&claude_lead_flag(&home, std::slice::from_ref(&repo), &data, &[]).unwrap()).unwrap();
+    let allow: Vec<&str> = v["permissions"]["allow"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    assert_eq!(allow.join(","), claude_lead_tools());
+    assert_eq!(v["permissions"]["defaultMode"], "dontAsk");
+    assert_eq!(v["permissions"]["disableBypassPermissionsMode"], "disable");
+    let deny = v["permissions"]["deny"].as_array().unwrap();
+    assert!(deny.iter().any(|r| r.as_str().unwrap().contains(data.to_str().unwrap())), "the data dir is denied");
+    assert!(v["hooks"]["PreToolUse"].is_array(), "the guard runs");
+    for d in [home, repo, data] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+fn lead_rollout(sandbox: Value, writes: &[&str]) -> String {
+    rollout(sandbox, writes, "never")
+}
+
+#[test]
+fn the_codex_lead_read_back_wants_read_only_no_network_and_the_lead_dir() {
+    let (wt, d) = (Path::new(WT), deny());
+    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[]), wt, d).is_ok());
+    let ws = json!({"type": "workspace-write", "network_access": false, "exclude_slash_tmp": true, "exclude_tmpdir_env_var": true, "writable_roots": []});
+    assert!(check_codex_lead_applied(&lead_rollout(ws, &[]), wt, d).is_err(), "workspace-write is wider than a lead's profile");
+    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only", "network_access": true}), &[]), wt, d).is_err());
+    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[WT]), wt, d).is_err(), "no write entry at all");
+    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[]), Path::new("/elsewhere"), d).is_err());
+    assert!(check_codex_lead_applied(&rollout(json!({"type": "read-only"}), &[], "on-request"), wt, d).is_err());
+    assert!(check_codex_lead_applied("{}\n", wt, d).is_err());
+}
+
+/// The `turn_context` codex 0.166 wrote on 2026-11-13 for a lead launched as `codex_lead_launch` builds it (a no-write
+/// profile, no `--sandbox`): a `read-only` sandbox and the profile's entries, `deny` for the data dir and `read` for
+/// the lead dir inside it. Run with a temp CODEX_HOME and a placeholder provider on a closed loopback port; no key.
+const OBSERVED_LEAD_TC: &str = r#"{"type":"turn_context","payload":{"cwd":"/private/tmp/v52-nowrite/data/runs/r1/lead","approval_policy":"never","sandbox_policy":{"type":"read-only"},"file_system_sandbox_policy":{"kind":"restricted","entries":[{"path":{"type":"path","path":"/"},"access":"read"},{"path":{"type":"path","path":"/private/tmp/v52-nowrite/data"},"access":"deny"},{"path":{"type":"path","path":"/private/tmp/v52-nowrite/data/runs/r1/lead"},"access":"read"}]}}}"#;
+
+/// The same launch with `--sandbox read-only` added: the flag wins and the profile is gone (only the root reads).
+const OBSERVED_FLAG_TC: &str = r#"{"type":"turn_context","payload":{"cwd":"/private/tmp/v52-nowrite/data/runs/r1/lead","approval_policy":"never","sandbox_policy":{"type":"read-only"},"permission_profile":{"type":"managed","file_system":{"type":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"}]},"network":"restricted"}}}"#;
+
+#[test]
+fn the_codex_lead_read_back_passes_what_real_codex_reports_and_refuses_a_profile_the_flag_switched_off() {
+    let lead = Path::new("/private/tmp/v52-nowrite/data/runs/r1/lead");
+    let deny = [PathBuf::from("/private/tmp/v52-nowrite/data")];
+    assert!(check_codex_lead_applied(OBSERVED_LEAD_TC, lead, &deny).is_ok());
+    assert!(check_codex_lead_applied(OBSERVED_FLAG_TC, lead, &deny).is_err(), "--sandbox switched the profile off");
+}
+
+/// 6k: a lead whose profile didn't apply never runs. A Vajra dir with no deny entry fails, an older layout with no
+/// file-system policy can't show the dirs are locked so it fails, and an empty deny list is never a pass.
+#[test]
+fn the_codex_lead_read_back_fails_unless_every_vajra_dir_shows_denied() {
+    let wt = Path::new(WT);
+    let ok = lead_rollout(json!({"type": "read-only"}), &[]);
+    let one_more = [deny().to_vec(), vec![PathBuf::from("/h/other")]].concat();
+    assert!(check_codex_lead_applied(&ok, wt, &one_more).unwrap_err().0.contains("/h/other"), "a dir with no deny entry is readable");
+    let mut v: Vec<Value> = ok.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    v[1]["payload"].as_object_mut().unwrap().remove("file_system_sandbox_policy");
+    let old = v.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+    assert!(check_codex_lead_applied(&old, wt, deny()).is_err(), "no file-system policy can't show the dirs are denied");
+    assert!(check_codex_lead_applied(&ok, wt, &[]).is_err(), "nothing to check is never a pass");
+}
+
+fn lead_init(tools: &[String], servers: &[&str], mode: &str) -> String {
+    lead_init_status(tools, servers, mode, "connected")
+}
+
+fn lead_init_status(tools: &[String], servers: &[&str], mode: &str, status: &str) -> String {
+    let servers: Vec<Value> = servers.iter().map(|s| json!({"name": s, "status": status})).collect();
+    format!("{}\n", json!({"type": "system", "subtype": "init", "permissionMode": mode, "tools": tools, "mcp_servers": servers}))
+}
+
+#[test]
+fn the_claude_lead_read_back_wants_only_the_lead_tools_and_only_vajra_run() {
+    let ok: Vec<String> = claude_lead_tools().split(',').map(String::from).collect();
+    assert!(check_claude_lead_applied(&lead_init(&ok, &["vajra_run"], "dontAsk")).is_ok());
+    let mut more = ok.clone();
+    more.push("mcp__user_mcp__probe".into());
+    assert!(check_claude_lead_applied(&lead_init(&more, &["vajra_run"], "dontAsk")).is_err(), "N3: no other server's tool");
+    let mut bash = ok.clone();
+    bash.push("Bash".into());
+    assert!(check_claude_lead_applied(&lead_init(&bash, &["vajra_run"], "dontAsk")).is_err());
+    assert!(check_claude_lead_applied(&lead_init(&ok, &["vajra_run", "user_mcp"], "dontAsk")).is_err());
+    assert!(check_claude_lead_applied(&lead_init(&ok, &[], "dontAsk")).is_err(), "the vajra_run server must be up");
+    assert!(check_claude_lead_applied(&lead_init(&ok, &["vajra_run"], "bypassPermissions")).is_err());
+    assert!(check_claude_lead_applied("").is_err());
+    assert!(check_claude_lead_applied(&lead_init_status(&ok, &["vajra_run"], "dontAsk", "failed")).is_err(), "the server must be connected");
+    let no_run: Vec<String> = ["Read", "Grep", "Glob"].map(String::from).into();
+    let e = check_claude_lead_applied(&lead_init(&no_run, &["vajra_run"], "dontAsk")).unwrap_err();
+    assert!(e.0.contains("mcp__vajra_run__plan_tasks"), "a lead without the run tools can only exit: {e:?}");
 }

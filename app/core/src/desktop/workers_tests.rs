@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::adapter::claude_selftest;
 use crate::providers::errors::{FakeClock, ProviderError};
 use crate::vajra::gitw::{GlobalBaseline, Pause, Quiesce};
 
@@ -98,6 +99,8 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path, vers
 MODE='{mode}'
 WT=$(pwd -P)
 [ "$1" = --version ] && {{ if [ -f '{log}.upgraded' ]; then echo '9.9.9 (Claude Code)'; else echo '{version}'; fi; exit 0; }}
+# Run as canary A's self-test (it talks to the loopback stub): this stand-in is no real Claude Code, so it fails.
+[ -n "$ANTHROPIC_BASE_URL" ] && {{ echo selftest >> '{log}.selftest'; exit 1; }}
 HARNESS=codex
 [ "$1" = -p ] && HARNESS=claude
 case "$1" in
@@ -219,6 +222,8 @@ struct Opts {
     redact: Redactor,
     /// What the fake harness answers to `--version`; the default is a build S4 proved.
     claude_version: &'static str,
+    /// Claude is `canary_claude` (a build only a self-test here can prove); `Some(true)` is the leaky one.
+    canary: Option<bool>,
     hooks: Hooks,
     spoil: Option<&'static str>,
     steer: Option<Steer>,
@@ -230,7 +235,7 @@ struct Opts {
 impl Default for Opts {
     fn default() -> Self {
         Opts {
-            mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_version: PROVEN_VERSION, hooks: Hooks::default(), spoil: None, gate: None, steer: None,
+            mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_version: PROVEN_VERSION, canary: None, hooks: Hooks::default(), spoil: None, gate: None, steer: None,
             poll: Duration::from_millis(20),
         }
     }
@@ -243,6 +248,7 @@ fn rig(tag: &str, o: Opts) -> Rig {
         std::fs::create_dir_all(p).unwrap();
     }
     std::fs::write(home.join(".gitconfig"), "[user]\n\tname = U\n\temail = u@e\n").unwrap();
+    install_repo_hooks(&home);
     ugit(&home, &repo, &["init", "-q", "-b", "main"]);
     let mut files = vec![("src/lib.rs", "fn a() {}\n"), ("other/x.rs", "x\n"), ("a.txt", "a\n"), (".gitignore", "target/\nnode_modules/\n")];
     files.extend(o.files.iter().copied());
@@ -278,7 +284,10 @@ fn rig(tag: &str, o: Opts) -> Rig {
         home: home.clone(),
         data: data.canonicalize().unwrap(),
         codex: bin.clone(),
-        claude: bin,
+        claude: match o.canary {
+            Some(leaky) => canary_claude(&d, leaky),
+            None => bin,
+        },
         codex_home,
         tools: WriterTools::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundled-agents")),
         account_caps: o.caps,
@@ -925,6 +934,7 @@ fn tickets_jsonl_records_dispatch_head_before_the_outcome_and_the_summary_is_red
     assert!(!s.to_string().contains("abcdef0123456789"), "the nonce never reaches the lead: {s}");
     let lines: Vec<Value> = std::fs::read_to_string(r.gw.data.join("runs/r1/tickets.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(lines.iter().map(|l| l["event"].as_str().unwrap()).collect::<Vec<_>>(), vec!["queued", "dispatch", "outcome"]);
+    assert_eq!(lines[0]["ticket"]["state"], "queued", "the first line is written when dispatch accepts the ticket");
     assert_eq!(lines[1]["ticket"]["dispatch_head"], json!(r.base));
     assert!(v.receipt.unwrap()["effective"]["model"] == "model-fake-1", "the receipt is read from the rollout");
 }
@@ -935,22 +945,80 @@ fn a_claude_worker_runs_through_its_profile_now_that_s4_passed() {
     let r = rig("claude", Opts::default());
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
-    assert_eq!(v.receipt.unwrap()["effective"]["model"], "claude-fake-1");
+    assert_eq!(v.receipt.as_ref().unwrap()["effective"]["model"], "claude-fake-1");
     assert!(v.harness_session.as_deref().is_some_and(crate::ids::valid_session_id), "its own session id, for its message queue");
     let flags: Vec<_> = std::fs::read_dir(r.gw.data.join("profiles")).unwrap().collect();
     assert!(flags.is_empty(), "the flag file is removed when the ticket ends");
+    assert_eq!(v.key_guard, Some(json!({"guarded": true})), "no MCP server loaded");
+    assert!(!v.core_worker().overlays.contains(&"not guarded"));
+}
+
+/// An MCP server runs outside the OS sandbox and can read the signing key. A Claude worker whose init event shows one
+/// loaded still runs and ends Done, but is not guarded, and the reason names the server. Its build is proven here by
+/// construction (the canary stand-in passes its self-test; only its worker run loads the server), so this test never
+/// waits on the S4 pair (#215 bhishma).
+#[test]
+fn a_claude_worker_with_a_loaded_mcp_server_runs_but_is_not_guarded() {
+    let r = canary_rig("claude-mcp", false);
+    std::fs::write(r.d.join("selftests.mcp"), "").unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1, "proven by its self-test here");
+    let g = v.key_guard.clone().unwrap();
+    assert_eq!((g["guarded"].as_bool(), g["mcp_servers"].clone()), (Some(false), json!(["files"])), "{g}");
+    assert!(g["reason"].as_str().unwrap().contains("MCP server files runs outside the sandbox"), "{g}");
+    assert!(v.core_worker().overlays.contains(&"not guarded"), "the card says so");
+    // Without the server, the same proven build's worker is guarded.
+    std::fs::remove_file(r.d.join("selftests.mcp")).unwrap();
+    let g = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(g.key_guard, Some(json!({"guarded": true})), "{g:?}");
+    assert!(!g.core_worker().overlays.iter().any(|o| o.contains("guard")), "{:?}", g.core_worker().overlays);
+    // A Codex worker has no Claude key guard: its rule lives with the Codex sandbox.
+    let c = r.done(&r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(c.key_guard, None, "{c:?}");
+    assert!(!c.core_worker().overlays.iter().any(|o| o.contains("guard")), "{:?}", c.core_worker().overlays);
+}
+
+/// #215 bhishma: a Claude ticket that started but has no key guard shows as unknown, never as guarded; one refused
+/// before it ran shows neither.
+#[test]
+fn a_started_claude_ticket_with_no_key_guard_reads_as_unknown() {
+    // Proven by construction (canary), so it doesn't wait on the S4 pair.
+    let r = canary_rig("guard-unknown", false);
+    let mut v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.attempt > 0), (Some(Outcome::Done), true), "{v:?}");
+    v.key_guard = None;
+    assert!(v.core_worker().overlays.contains(&"guard unknown"), "{:?}", v.core_worker().overlays);
+    v.attempt = 0;
+    assert!(!v.core_worker().overlays.iter().any(|o| o.contains("guard")), "not started: nothing to say");
+}
+
+/// #215 codex: attempt 1 starts with no MCP server (guarded), then a retryable error on an unchanged tree; the retries
+/// never print an init event. Their guard is their own: unknown, never attempt 1's `guarded`.
+#[test]
+fn a_retry_whose_process_never_shows_its_init_does_not_inherit_the_last_attempts_guard() {
+    // Proven by construction (canary), so it doesn't wait on the S4 pair.
+    let r = canary_rig("guard-retry", false);
+    std::fs::write(r.d.join("selftests.retry"), "").unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert!(r.d.join("selftests.retried").exists() && v.attempt > 1, "attempt 1 ran and was retried: {v:?}");
+    assert_eq!(v.key_guard, None, "{v:?}");
+    assert!(v.core_worker().overlays.contains(&"guard unknown"), "{:?}", v.core_worker().overlays);
 }
 
 /// #180 bhishma: S4 proved one Claude Code build, but users auto-update. A build no S4 run proved (with today's flag
-/// shape) is refused, as a task worker and as a check, before any worktree or flag file exists and before it runs.
+/// shape) and no self-test here proved is refused, before any worktree or flag file exists and before it runs as a
+/// worker. Here the self-test runs and the stand-in harness fails it.
 #[test]
 fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() {
     let r = rig("claude-unproven", Opts { claude_version: "9.9.9 (Claude Code)", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
-    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
     assert!(v.worktree.is_none() && !r.gw.work.join("p/r1/t1-r1").exists(), "refused before any worktree exists");
+    assert!(!r.gw.data.join("control/claude-proven.json").exists(), "nothing was added to this Mac's list");
     assert!(std::fs::read_dir(r.gw.data.join("profiles")).map_or(true, |d| d.count() == 0), "no flag file was written");
-    assert!(!r.d.join("log").exists(), "the harness never ran");
+    assert!(!r.d.join("log").exists(), "the harness never ran as a worker");
+    assert!(r.d.join("log.selftest").exists(), "it ran only as the self-test");
     // A version probe that fails is refused the same way (fail closed).
     let r = rig("claude-noversion", Opts { claude_version: "", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
@@ -962,13 +1030,210 @@ fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() 
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
 }
 
+/// A stand-in for a new Claude Code build: `--version` says 9.9.9; with ANTHROPIC_BASE_URL set (the self-test) it
+/// talks to the stub and refuses data-dir writes the way the guard and deny rules do (or, `leaky`, lets an Edit
+/// through); without it (a real worker run) it starts and edits like the shell fake. Each self-test is counted.
+fn canary_claude(dir: &Path, leaky: bool) -> PathBuf {
+    let p = dir.join("canary-claude");
+    let script = format!(
+        r#"#!/usr/bin/python3 -I
+import json, os, subprocess, sys, urllib.request
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("9.9.10 (Claude Code)" if os.path.exists("{count}.swapped") else "9.9.9 (Claude Code)"); sys.exit(0)
+tools = args[args.index("--tools") + 1].split(",")
+base = os.environ.get("ANTHROPIC_BASE_URL")
+init = {{"type": "system", "subtype": "init", "model": "claude-fake-1", "tools": tools, "permissionMode": "dontAsk"}}
+if not base and os.path.exists("{count}.mcp"):
+    # Its worker run loads a user MCP server (its self-test, which passed, didn't).
+    init["mcp_servers"] = [{{"name": "files", "status": "connected", "source": "user"}}]
+    init["tools"] = tools + ["mcp__files__read"]
+if not base and os.path.exists("{count}.retry"):
+    # A retryable error on an unchanged tree: the first worker run starts cleanly, every later one never prints init.
+    if not os.path.exists("{count}.retried"):
+        open("{count}.retried", "w").close(); print(json.dumps(init), flush=True)
+    print("unexpected status 504 Gateway Timeout", flush=True); sys.exit(1)
+print(json.dumps(init), flush=True)
+if not base:
+    open("src/lib.rs", "a").write("worker line\n"); sys.exit(0)
+open("{count}", "a").write("selftest\n")
+if os.path.exists("{count}.swap"):
+    os.rename("{count}.swap", "{count}.swapped")  # the CLI updates in place while its self-test runs
+msgs = [{{"role": "user", "content": args[-1]}}]
+while True:
+    req = urllib.request.Request(base + "/v1/messages", data=json.dumps({{"tools": [{{"name": t}} for t in tools], "messages": msgs}}).encode(), headers={{"content-type": "application/json"}})
+    evs = [json.loads(l[6:]) for l in urllib.request.urlopen(req, timeout=10).read().decode().splitlines() if l.startswith("data: ")]
+    start = next(e for e in evs if e["type"] == "content_block_start")["content_block"]
+    if start["type"] == "text":
+        print(json.dumps({{"type": "result", "subtype": "success", "is_error": False}})); sys.exit(0)
+    inp = json.loads(next(e for e in evs if e["type"] == "content_block_delta")["delta"]["partial_json"])
+    name, err, text = start["name"], False, "ok"
+    if "VajraDesktop" in (inp.get("file_path") or inp.get("command", "")):
+        if name == "Bash":
+            err, text = True, "Vajra guard blocked this Bash call"
+        elif name == "Edit" and {leaky}:
+            open(inp["file_path"], "w").write("edited\n")
+        else:
+            err, text = True, "File is in a directory that is denied by your permission settings."
+    elif name == "Write":
+        open(inp["file_path"], "w").write(inp["content"])
+    elif name == "Bash" and "python3 -c" in inp["command"]:
+        # The OS sandbox, as the command's output, then the marker its `|| echo` prints on the non-zero exit.
+        text = "PermissionError: [Errno 1] Operation not permitted: <locked>\n" + inp["command"].rsplit("echo ", 1)[1]
+    elif name == "Bash":
+        r = subprocess.run(["/bin/sh", "-c", inp["command"]], capture_output=True, text=True)
+        err, text = r.returncode != 0, r.stdout + r.stderr
+    msgs += [{{"role": "assistant", "content": [{{"type": "tool_use", "id": start["id"], "name": name, "input": inp}}]}},
+             {{"role": "user", "content": [{{"type": "tool_result", "tool_use_id": start["id"], "is_error": err, "content": text}}]}}]
+"#,
+        count = dir.join("selftests").display(),
+        leaky = if leaky { "True" } else { "False" },
+    );
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// The repo's guard hooks, installed in `home` where the app installs them, so the built-in proven pair's shape (which
+/// hashes the guard scripts' bytes) matches.
+fn install_repo_hooks(home: &Path) {
+    let hooks = profiles::claude_worker_hooks_dir(home);
+    std::fs::create_dir_all(&hooks).unwrap();
+    for e in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks")).unwrap().flatten() {
+        if e.file_type().unwrap().is_file() {
+            std::fs::copy(e.path(), hooks.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+/// A rig whose Claude is `canary_claude`.
+fn canary_rig(tag: &str, leaky: bool) -> Rig {
+    rig(tag, Opts { canary: Some(leaky), ..Opts::default() })
+}
+
+/// #186 codex: S4 proved the guard scripts' behavior, so a proven build whose installed guard differs by one byte, or
+/// is missing, is unproven, and is refused before it runs.
+#[test]
+fn a_proven_build_with_a_changed_or_missing_installed_guard_is_refused() {
+    let r = rig("claude-guard-edited", Opts::default());
+    let p = profiles::claude_worker_hooks_dir(&r.home).join("pre-tool-use.sh");
+    let mut b = std::fs::read(&p).unwrap();
+    b.push(b'\n');
+    std::fs::write(&p, b).unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    assert!(v.worktree.is_none() && !r.d.join("log").exists(), "the harness never ran: {v:?}");
+    let r = rig("claude-guard-missing", Opts::default());
+    std::fs::remove_dir_all(profiles::claude_worker_hooks_dir(&r.home)).unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    assert!(v.worktree.is_none() && !r.d.join("log").exists(), "the harness never ran: {v:?}");
+}
+
+fn selftests(r: &Rig) -> usize {
+    std::fs::read_to_string(r.d.join("selftests")).map_or(0, |t| t.lines().count())
+}
+
+/// Canary A: a build not on the built-in list passes its self-test on this Mac, so its pair is added to this Mac's
+/// list and the worker runs; the next dispatch finds the pair and does not test again.
+#[test]
+fn an_unproven_build_that_passes_its_self_test_here_runs_and_is_not_tested_again() {
+    let r = canary_rig("canary-pass", false);
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1);
+    let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
+    let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&r.home)).unwrap();
+    assert_eq!(list["pairs"], json!([{"version": "9.9.9 (Claude Code)", "shape": shape, "test": claude_selftest::VERSION}]));
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1, "a proven pair is not tested again");
+}
+
+/// Seeds this Mac's list with one pair for the rig's own build and flag shape, `test` as an older self-test wrote it
+/// (`None`: before pairs carried a test number).
+fn seed_pair(r: &Rig, test: Option<u32>) {
+    let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&r.home)).unwrap();
+    let mut pair = json!({"version": "9.9.9 (Claude Code)", "shape": shape});
+    if let Some(t) = test {
+        pair["test"] = json!(t);
+    }
+    crate::control::fsx::private_dir(&r.gw.data.join("control")).unwrap();
+    std::fs::write(r.gw.data.join("control/claude-proven.json"), json!({"pairs": [pair]}).to_string()).unwrap();
+}
+
+/// #215 codex P1: this Mac's list holds a pair an older, weaker self-test recorded (no OS sandbox probes), and the
+/// build has no OS sandbox: an Edit writes the data folder. Same version, same flag shape, so a list keyed on those
+/// alone would run it untested. The old pair isn't proof of the current test: the build is tested again and refused.
+#[test]
+fn a_pair_an_older_self_test_recorded_is_tested_again_and_a_build_with_no_sandbox_is_refused() {
+    for (tag, test) in [("canary-legacy-none", None), ("canary-legacy-1", Some(1))] {
+        let r = canary_rig(tag, true);
+        seed_pair(&r, test);
+        let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+        assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{tag} {v:?}");
+        assert!(v.worktree.is_none() && !r.d.join("log").exists(), "{tag}: the harness never ran: {v:?}");
+        assert_eq!(selftests(&r), 1, "{tag}: the old pair was self-tested, not trusted");
+    }
+}
+
+/// The same old pair for a build that does pass the current test: it is tested once more, then recorded with this
+/// test's number in place of the old entry.
+#[test]
+fn a_pair_an_older_self_test_recorded_is_replaced_once_the_current_test_passes() {
+    let r = canary_rig("canary-legacy-pass", false);
+    seed_pair(&r, Some(1));
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1);
+    let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
+    let tests: Vec<_> = list["pairs"].as_array().unwrap().iter().map(|p| p["test"].clone()).collect();
+    assert_eq!(tests, [json!(claude_selftest::VERSION)], "only the current test's pass is kept");
+}
+
+/// #195 bhishma: the CLI updates in place (9.9.9 to 9.9.10) while 9.9.9's self-test runs. The PASS can't be told
+/// apart from a PASS of the new binary, so nothing is recorded and that dispatch is refused; the next one tests
+/// 9.9.10 itself and records 9.9.10, never 9.9.9.
+#[test]
+fn a_self_test_pass_is_recorded_only_if_the_binary_still_says_the_same_version() {
+    let r = canary_rig("canary-swap", false);
+    std::fs::write(r.d.join("selftests.swap"), "").unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    assert_eq!(selftests(&r), 1);
+    assert!(!r.gw.data.join("control/claude-proven.json").exists(), "nothing recorded for a binary that changed under its test");
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 2, "the new build was tested, not refused from memory");
+    let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
+    assert_eq!(list["pairs"].as_array().unwrap().iter().map(|p| p["version"].as_str().unwrap()).collect::<Vec<_>>(), ["9.9.10 (Claude Code)"]);
+}
+
+/// Canary A: a build whose self-test fails stays refused with a clear reason, is not added to the list, and is not
+/// tested again on every dispatch (`claude_canary::RETRY_AFTER`). Codex workers still run.
+#[test]
+fn an_unproven_build_that_fails_its_self_test_stays_refused_and_codex_still_runs() {
+    let r = canary_rig("canary-fail", true);
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    assert!(v.worktree.is_none(), "refused before any worktree exists");
+    assert!(!r.gw.data.join("control/claude-proven.json").exists());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.reason.as_deref(), Some("claude_selftest_failed"), "{v:?}");
+    assert_eq!(selftests(&r), 1, "a failure is remembered, not re-tested on every dispatch");
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t3"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
 /// #186 codex: the CLI updates in place during the first attempt (proven 2.1.296, then 9.9.9). The retry, after its
-/// backoff, asks the binary again before it spawns, so the second process never launches.
+/// backoff, asks the binary again before it spawns, so the second process never launches. The new build is not on any
+/// list, and its self-test can't pass here (the stand-in harness isn't a real Claude Code).
 #[test]
 fn a_retry_asks_the_claude_binary_again_and_an_update_during_the_attempt_is_refused() {
     let r = rig("claude-reprobe", Opts { mode: "504_upgrade", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
-    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
     let starts = std::fs::read_to_string(r.d.join("log")).unwrap().lines().filter(|l| l.starts_with("start ")).count();
     assert_eq!(starts, 1, "the second attempt never launched");
     assert_eq!(r.clock.slept(), vec![errors::BACKOFF[0]], "it was a retry, after the first backoff");
@@ -1177,12 +1442,69 @@ fn a_restart_replays_every_ticket_and_a_crashed_running_one_ends_abandoned() {
     assert_eq!((d.state, d.outcome, d.commit.as_deref()), (State::Ended, Some(Outcome::Done), done.commit.as_deref()));
     let c = life2.view(&id).unwrap();
     assert_eq!((c.state, c.outcome, c.reason.as_deref(), c.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_restarted")), "{c:?}");
+    // Both are an earlier life's: the run protocol never integrates them, even the one whose record says done.
+    assert!(life2.from_earlier_life(&done.id) && life2.from_earlier_life(&id));
+    assert!(!r.rt.from_earlier_life(&id), "the life that dispatched it holds it as its own");
     assert!(wt.is_dir(), "its worktree is kept for the user to look at");
     let lines = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap();
     assert_eq!(lines.matches("app_restarted").count(), 1, "{lines}");
     let life3 = next_life(&r);
     assert_eq!(life3.view(&id).unwrap().detail.as_deref(), Some("app_restarted"));
     assert_eq!(std::fs::read_to_string(tickets_file(&r, "r1")).unwrap(), lines, "nothing more is written");
+    r.rt.quit(WAIT);
+}
+
+/// #176 review: a tickets.jsonl over the replay cap is not recovered from its prefix. Its ticket's running line comes
+/// first and its done outcome only past 16 MiB: the crash reconcile writes nothing to the file (`record_crashed`), the
+/// next life ends the ticket in memory only (`history_incomplete`, never `app_restarted`) and writes nothing, and the run
+/// takes no new dispatch. Another run still replays.
+#[test]
+fn a_tickets_file_over_the_replay_cap_is_not_recovered_from_its_prefix_and_its_run_takes_no_dispatch() {
+    let r = rig("replay-cap", Opts::default());
+    let ok = r.done(&r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
+    let path = tickets_file(&r, "r1");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let ticket = |state: &str, outcome: Value| json!({"id": "r1.t1.r1", "run": "r1", "task": "t1", "round": 1, "kind": "writer", "slot": "w1", "account": "codex", "state": state, "outcome": outcome});
+    let filler = format!("{}\n", json!({"v": 1, "event": "x", "ticket": {"pad": "x".repeat(200 << 10)}}));
+    let mut text = format!("{}\n", json!({"v": 1, "event": "dispatch", "ticket": ticket("running", Value::Null)}));
+    while text.len() <= (16 << 20) {
+        text.push_str(&filler);
+    }
+    text.push_str(&format!("{}\n", json!({"v": 1, "event": "outcome", "ticket": ticket("ended", json!("done"))})));
+    std::fs::write(&path, &text).unwrap();
+    assert!(!super::record_crashed(&r.gw.data, "r1", "r1.t1.r1"), "the reconcile writes nothing to it");
+    let life2 = next_life(&r);
+    let t1 = life2.view("r1.t1.r1").expect("shown, from the prefix");
+    assert_eq!(t1.detail.as_deref(), Some("history_incomplete"), "never written ended app_restarted: {t1:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "nothing is appended");
+    assert!(life2.replay_gaps() >= 1, "the unread file is counted");
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)));
+    assert_eq!(life2.view(&ok.id).unwrap().outcome, Some(Outcome::Done), "another run still replays");
+}
+
+/// #176 review: a ticket still waiting for a seat (account cap 1, the seat held by a hanging worker) when the app
+/// crashes has its line from dispatch, so the next life replays it ended `abandoned`/`app_restarted`, lists it and
+/// keeps its id taken, instead of losing it.
+#[test]
+fn a_ticket_still_queued_for_a_seat_at_a_crash_is_replayed_ended_and_its_id_stays_taken() {
+    let caps: BTreeMap<String, u32> = [("codex".to_string(), 1)].into();
+    let r = rig("replay-queued", Opts { mode: "hang", caps, ..Opts::default() });
+    let held = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let queued = r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap();
+    let t0 = Instant::now();
+    while r.rt.view(&held).unwrap().attempt == 0 {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.rt.view(&queued).unwrap().state, State::Queued, "the cap holds it");
+    // The crash: the first life just stops.
+    let life2 = next_life(&r);
+    let ids: Vec<String> = life2.list("r1").into_iter().map(|v| v.id).collect();
+    assert_eq!(ids, vec![held.clone(), queued.clone()]);
+    let q = life2.view(&queued).expect("the queued ticket is replayed");
+    assert_eq!((q.state, q.outcome, q.reason.as_deref(), q.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_restarted")), "{q:?}");
+    assert!(life2.from_earlier_life(&queued));
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w2", "codex")), Err(DispatchError::Exists)), "its id stays taken");
     r.rt.quit(WAIT);
 }
 

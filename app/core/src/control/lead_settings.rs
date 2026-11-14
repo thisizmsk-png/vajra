@@ -112,6 +112,24 @@ pub fn worker_edit_rules(home: &Path, data: &Path) -> Result<Vec<String>, LeadEr
     Ok(out)
 }
 
+/// The folder under `$HOME` that holds the signing key and Vajra state: `HOME_RULES`' first entry, without its `/**`.
+pub const KEY_DIR: &str = ".claude/vajra";
+
+/// The folders a Claude worker's OS sandbox refuses to read or write (`sandbox.filesystem.denyRead`/`denyWrite`): the
+/// key folder and the data dir, each in its given and realpath forms. Unlike the deny rules these hold for every
+/// process a Bash call starts, whatever it names, since Seatbelt checks the real path.
+pub fn sandbox_locked_dirs(home: &Path, data: &Path) -> Result<Vec<String>, LeadError> {
+    let mut out: Vec<String> = Vec::new();
+    for (base, what) in [(home.join(KEY_DIR), "key folder"), (data.to_path_buf(), "data dir")] {
+        for form in forms(&base, what)? {
+            if !out.contains(&form) {
+                out.push(form);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Every deny rule for this machine, deduped, in table order. A base that is not a plain absolute path is refused
 /// (`lead_guard_missing`). When a base differs from its realpath (macOS `/var` → `/private/var`, a symlinked HOME
 /// or repo) both forms are emitted: the spike did not show the twin is needed, but emitting it costs nothing.
@@ -179,7 +197,11 @@ pub fn deny_rules_for_iso(home: &Path, repos: &[std::path::PathBuf], data: &Path
 }
 
 fn render(rules: &[String], hooks: bool) -> String {
-    let allow: Vec<&str> = LEAD_TOOLS.split(',').collect();
+    render_allow(rules, hooks, LEAD_TOOLS)
+}
+
+fn render_allow(rules: &[String], hooks: bool, tools: &str) -> String {
+    let allow: Vec<&str> = tools.split(',').collect();
     let mut v = json!({
         "permissions": {
             "defaultMode": "dontAsk",
@@ -203,6 +225,12 @@ fn render(rules: &[String], hooks: bool) -> String {
     let mut s = serde_json::to_string_pretty(&v).expect("a json! value serialises");
     s.push('\n');
     s
+}
+
+/// A run lead's flag file (ADR-16 16.4, 6d2): the same deny table and guard hooks as the Director-General's, with the
+/// run lead's own tool list as the allow list.
+pub fn run_lead_settings(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf], tools: &str) -> Result<String, LeadError> {
+    Ok(render_allow(&deny_rules_for(home, repos, data, others)?, true, tools))
 }
 
 /// The Lead's settings file, as the bytes the core writes: the guard hooks and the generated deny rules.
