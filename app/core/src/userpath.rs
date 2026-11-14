@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,8 @@ pub struct State {
     pending: Mutex<bool>,
     done: Condvar,
     refresh: Refresh,
+    /// True once a refresh has stored an answer; the first resolution then no longer overwrites it.
+    refreshed: AtomicBool,
 }
 
 /// Ends the first resolution when dropped, so readers are woken even if it panicked or its thread never started.
@@ -53,11 +56,22 @@ impl Drop for Finish {
 
 impl State {
     pub const fn new() -> Self {
-        Self { current: RwLock::new(None), pending: Mutex::new(false), done: Condvar::new(), refresh: Refresh::new() }
+        Self { current: RwLock::new(None), pending: Mutex::new(false), done: Condvar::new(), refresh: Refresh::new(), refreshed: AtomicBool::new(false) }
     }
 
     fn set(&self, dirs: Vec<PathBuf>) {
-        *self.current.write().unwrap_or_else(|e| e.into_inner()) = Some(dirs);
+        let mut cur = self.current.write().unwrap_or_else(|e| e.into_inner());
+        *cur = Some(dirs);
+        self.refreshed.store(true, Ordering::SeqCst);
+    }
+
+    /// Store the first resolution's answer unless a refresh already stored a newer one (a refresh whose wait for the
+    /// first resolution timed out can finish before it). Checked under the same lock as `set`.
+    fn set_first(&self, dirs: Vec<PathBuf>) {
+        let mut cur = self.current.write().unwrap_or_else(|e| e.into_inner());
+        if !self.refreshed.load(Ordering::SeqCst) {
+            *cur = Some(dirs);
+        }
     }
 
     /// Run the first resolution on its own thread and return at once. Until it has stored its answer, `current` and
@@ -68,7 +82,7 @@ impl State {
         // If the thread cannot start, the closure is dropped, `finish` with it, and readers get the fallback.
         let _ = std::thread::Builder::new().name("userpath".into()).spawn(move || {
             let finish = finish;
-            finish.0.set(resolve());
+            finish.0.set_first(resolve());
         });
     }
 
@@ -635,6 +649,24 @@ mod tests {
         let dirs = st.current(Duration::from_secs(5)).expect("resolved");
         assert!(dirs.contains(&home.join(".local/bin")), "{dirs:?}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_first_resolution_that_finishes_after_a_timed_out_refresh_does_not_overwrite_it() {
+        let st = state();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let (old, new) = (PathBuf::from("/old/first"), PathBuf::from("/new/refreshed"));
+        let first = old.clone();
+        st.start(move || {
+            let _ = gate.recv(); // held until the refresh has stored its answer
+            vec![first]
+        });
+        // The refresh gives up waiting for the first resolution, then resolves and stores.
+        let fresh = new.clone();
+        assert!(st.refresh(Duration::from_millis(50), Instant::now(), move || vec![fresh]), "the refresh ran");
+        release.send(()).unwrap();
+        // `current` waits for the first resolution to finish; its older answer must not replace the refresh.
+        assert_eq!(st.current(Duration::from_secs(5)), Some(vec![new]));
     }
 
     #[test]
