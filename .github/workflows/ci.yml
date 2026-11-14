@@ -1,9 +1,20 @@
 name: ci
 
+# TEMPORARY (owner, 13 Nov): restore perf jobs on every PR once batch-3 is on main. (The perf jobs are in perf.yml; this
+# file keeps the test jobs on every pull request and every push to a PR branch, cancels an older run when a newer push
+# arrives on the same ref, and skips a pull request that changes only the three notes folders below. A push to main always
+# runs in full, so a docs-only change cannot leave main's manifest stale unseen.)
 on:
   push:
     branches: [main]
   pull_request:
+    # Skipped: docs/design, docs/assets and docs/reference, which no test reads. NOT skipped, because tests or shipped
+    # behaviour read them: any other markdown (agent definitions, skills, engine prompts, steering rules, SKILL.md,
+    # README), docs/commands (tests/docs/run-docs.sh), docs/architecture, docs/desktop and docs/roadmap.
+    paths-ignore:
+      - "docs/design/**"
+      - "docs/assets/**"
+      - "docs/reference/**"
 
 permissions:
   contents: read
@@ -52,6 +63,10 @@ jobs:
       - name: Profile sampler unit tests
         if: runner.os == 'macOS'
         run: python3 -m unittest discover -s app/bench/profile
+      - name: No waiting calls (main-thread commands and sync UI calls only go down)
+        run: |
+          python3 -m unittest discover -s app/bench/ci -p "test_waiting_calls.py"
+          python3 app/bench/ci/waiting_calls.py
       - name: Build the UI (tauri::generate_context! needs app/ui/dist)
         if: runner.os == 'macOS'
         working-directory: app/ui
@@ -63,6 +78,10 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: app/core
         run: cargo clippy --all-targets -- -D warnings
+      - name: The profile harness still starts a run
+        if: runner.os == 'macOS'
+        working-directory: app/core
+        run: cargo test --test profile_harness
 
   # D7 (vajra-1 decision 2026-11-12): the REAL bundled engine installer runs only here, on a fresh runner with a temp
   # HOME and no secrets: install, check the marks, roll back. Agent sessions and local tests only ever use a fake one.

@@ -350,7 +350,23 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | "Sign in to NAME" / Opens the CLI's own sign-in in a terminal tab. | sign-in button and hint | |
 | "Sign in: NAME" | terminal tab label | never saved in the tab layout |
 | Vajra engine scripts / Installed / Not installed / Run this in a terminal to install them. | engine-scripts row | detection only (ADR-16 N13) |
+| Phone not connected / Not built yet (removed) | status bar; Settings > Mobile, Notifications, Diagnostics | the button and the three empty sections are hidden until they work; the section titles and ledes stay in strings.ts for their return |
+| "run" for "campaign", "workers" for "crew" (Start a run / What should the workers do? / Runs / Past runs / Workers) | every screen | wording only; code ids, routes and file names keep the old words |
+| Claude Code / Engine self-check / Safety hooks / OS sandbox / Git / Python 3 / OpenSSL / Run workflow | check names in the pre-flight list | a check with no plain name shows as the core sent it |
+| Ready / Question (were ready / question) | Review, task list status | task statuses the list had no wording for now use the shared status words, so every status has one casing |
 | A run cannot start until the failing check below passes. / ...the failing checks below pass. | beside the disabled Start run button | shown only when the checks are what blocks a start; the button points to it for screen readers |
+| Engine id (row removed) | Crew, details of a run, task or check | Only a worker's own pane shows the engine id now, as DESIGN.md says. No wording changed. |
+| A run cannot start until the checks below finish. | beside the disabled Start run button | shown when the checks could not run at all; the button points to it for screen readers |
+| Checked at 2:03:34 AM (was 02:03:34 AM) | "Checked at" and "Tried again at" lines | the hour is no longer padded; seconds stay so two checks in one minute read differently |
+| "MODEL via PROVIDER" (was the two joined by a middle dot), for example "Default model via Claude Code", "DeepSeek V3.2 via OpenRouter" | every place a model is named with its provider: project column, Board, Review, Crew, worker header, proposal, the model pickers, Settings > Providers | DESIGN.md bans meta strings joined with middle dots; one helper writes the pair |
+| "BILLING, KEY NAME ..." (was joined by a middle dot), for example "Billing: can't tell, OPENAI_API_KEY set in the CLI config" | billing line under a proposed worker | same rule |
+| Back to NAME / Back | top of the Settings section list | the visible way out of Settings, which shows no view tabs; opens the project's Director-General view |
+| Goal, as the workers will be asked (was What the workers will be asked) / Threads / "N threads: 2 Backend, 1 Docs" | Director-General plan card | the threads line counts the proposal's workers by owner; the table below keeps model, effort and why |
+| Ping rule / "At most N pings an hour. Arrivals within M min are one ping. On for ..." / Change / Save rule / Most pings in an hour / Group arrivals within / Don't group / "M min" / Ping me for / Decisions / Questions / Blocked tasks (with one-line hints) / The rule only decides when you are pinged... / Saved. New arrivals follow this rule. / The ping rule could not be read... | top of the Inbox | the rule is global; it cannot start or approve anything |
+| Recent pings / No pings since Vajra opened. / Pinged / Not pinged | Inbox, under the rule | session only |
+| "A decision needs you in P" / "A worker has a question in P" / "A task is blocked in P" / "N things need you: ..." | ping toast and the recent-pings list | counts and project names only, never an item's text |
+| "Pinged because your rule is on for ..." / "Grouped: they arrived within M min of the first." / "Held until now: you allow N pings an hour." / "Not pinged: notifications are off." / "Not pinged: your rule is off for ..." | under every ping and every quiet arrival | why it pinged, or why not |
+| Run to start / Review in Director-General | Inbox card for a run the Director-General proposes | it starts only from the Director-General view |
 
 One-click install (ADR-17 17b). Only a source that passed its security review gets the sheet; every other row keeps the step-1 wording and has no Install button.
 

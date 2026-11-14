@@ -5,6 +5,7 @@ import { Crew } from "../src/screens/crew/Crew";
 import { parseCoreControls } from "../src/screens/crew/CoreWorkerPane";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
+import { Live, liveRun } from "./liveRun";
 
 // jsdom has no modal dialog: model showModal/close the way browsers do.
 beforeAll(() => {
@@ -36,9 +37,10 @@ const tree = node("lead", "lead", "Lead", "in_progress", [
 
 async function open(pick: string, replies: Record<string, unknown> = {}) {
   window.location.hash = "#/crew?slug=camp&id=r1";
-  const f = fakeIpc({ active_runs: { count: 0, runs: [] }, crew: tree, ...replies });
+  // A live run: the crew view re-reads it on its own cadence.
+  const f = fakeIpc({ ...liveRun(), crew: tree, ...replies });
   setTransport(f.transport);
-  render(<Crew />);
+  render(<Live><Crew /></Live>);
   const t = await screen.findByRole("tree", { name: S.crew.treeLabel });
   fireEvent.click(within(t).getByText(pick).closest("[role=treeitem]") as HTMLElement);
   return f;

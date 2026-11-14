@@ -6,6 +6,8 @@ import { S } from "../../../strings";
 import { api, onChanged } from "../../ipc";
 import type { CrewNodeDto } from "../../ipc";
 import { useRoute } from "../../router";
+import { usePoll } from "../../projects/poll";
+import { useProjects } from "../../projects/store";
 import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import { WorkerPane } from "../crew/WorkerPane";
 
@@ -53,10 +55,11 @@ export function WorkerView() {
   useEffect(load, [load]);
   useEffect(() => {
     if (!slug || !id) return;
-    const poll = setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
-    const off = onChanged(load);
-    return () => { clearInterval(poll); off(); };
+    return onChanged(load);
   }, [slug, id, load]);
+  // Polled only while this run is live and the window shows (nothing runs at rest).
+  const { liveRuns } = useProjects();
+  usePoll(load, POLL_MS, !!slug && !!id && liveRuns.includes(id));
 
   const found = root ? locate(root, worker) : null;
   if (err && !root) return <div className="v-crew__state"><Problem title={S.crew.failed} detail={err} retry={load} /></div>;

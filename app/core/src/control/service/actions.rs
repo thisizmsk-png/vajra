@@ -353,9 +353,18 @@ impl Service {
         Ok(json!({"action_id": a.id, "state": State::Refused.as_str()}))
     }
 
-    /// A `core:` ticket ended: a Lead's stop on it that still waits for the human is refused (`worker_finished`), so
-    /// the dialog never offers to stop a worker that is gone.
-    pub fn core_ticket_ended(&mut self, ticket: &str) {
+    /// A `core:` ticket ended, with its harness session id if it had one: a Lead's stop on it that still waits for the
+    /// human is refused (`worker_finished`), so the dialog never offers to stop a worker that is gone. Its control dir
+    /// is retired (see `retire_core_session`) once the settles below are done.
+    pub fn core_ticket_ended(&mut self, ticket: &str, session: Option<&str>) {
+        self.core_ticket_settle(ticket);
+        if let Some(sid) = session {
+            self.retire_core_session(sid);
+            self.prune_retired();
+        }
+    }
+
+    fn core_ticket_settle(&mut self, ticket: &str) {
         let key = format!("{CORE_PREFIX}{ticket}");
         let now = SystemTime::now();
         // The human's stop that ended it is done (a group kill has no hook ack to wait for).
