@@ -20,21 +20,27 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
   const [failed, setFailed] = useState(false);
   /** Bumped by "Look again" to run the scan once more. */
   const [scan, setScan] = useState(0);
+  /** True while a scan is running. The failure line and its button stay mounted meanwhile, so keyboard focus is not lost. */
+  const [looking, setLooking] = useState(true);
   const added = useRef(0);
 
   useEffect(() => {
     let live = true;
-    setFailed(false);
+    setLooking(true);
     api.projectDiscover().then(
       (r) => {
         if (!live) return;
+        setLooking(false);
         if (Array.isArray(r?.found)) {
+          setFailed(false);
           setFound(r.found);
           setTruncated(r.truncated === true);
         } else setFailed(true);
       },
       () => {
-        if (live) setFailed(true);
+        if (!live) return;
+        setLooking(false);
+        setFailed(true);
       },
     );
     return () => {
@@ -47,8 +53,8 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
     return (
       <span role="alert" className="v-find__failed">
         <span>{W.scanFailed}</span>
-        <button type="button" className="v-tb__add" onClick={() => setScan((n) => n + 1)}>
-          {W.scanAgain}
+        <button type="button" className="v-tb__add" disabled={looking} onClick={() => setScan((n) => n + 1)}>
+          {looking ? W.scanning : W.scanAgain}
         </button>
       </span>
     );

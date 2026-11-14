@@ -33,6 +33,25 @@ describe("FindRepos", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("keeps the alert and the button in the document while it looks again, so focus is not lost", async () => {
+    let release: () => void = () => {};
+    let n = 0;
+    setTransport(fakeIpc({
+      project_discover: () => {
+        if (n++ === 0) throw { error: "io_error", detail: "x" };
+        return new Promise((r) => { release = () => r({ found: [], truncated: false }); });
+      },
+    }).transport);
+    render(<FindRepos onAdded={() => {}} />);
+    const btn = await screen.findByRole("button", { name: W.scanAgain });
+    btn.focus();
+    fireEvent.click(btn);
+    await waitFor(() => expect(screen.getByRole("button", { name: W.scanning })).toBeTruthy());
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("button", { name: W.scanning }).hasAttribute("disabled")).toBe(true);
+    release();
+  });
+
   it("stays silent when the scan works and finds nothing", async () => {
     const f = fakeIpc({ project_discover: { found: [], truncated: false } });
     setTransport(f.transport);

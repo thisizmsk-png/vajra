@@ -91,6 +91,7 @@ export const S = {
       truncated: "More may exist; only the first ones are listed.",
       scanFailed: "Could not look for repositories on this Mac.",
       scanAgain: "Look again",
+      scanning: "Looking...",
     },
   },
   closeout: {
