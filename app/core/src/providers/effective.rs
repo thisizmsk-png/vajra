@@ -289,8 +289,14 @@ pub fn codex_rollout(events: &str, codex_home: &Path) -> Option<String> {
     Some(text)
 }
 
-/// How many session files one Lead read-back pass opens at most, newest first.
+/// How many session files one Lead read-back pass reads at most, newest first.
 const MAX_LEAD_FILES: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: how many session files this thread's Lead read-back passes have read the contents of.
+    pub(crate) static LEAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// The plain Codex Lead's read-back (bhishma MUST, S12): the plain Lead is an interactive Codex with no event stream, so
 /// its thread id is unknown. Returns the text (at most `MAX_READ` bytes each) of every session file in the newest two
@@ -319,7 +325,11 @@ pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> 
         }
     }
     days.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+    // Codex review #241: the newest `MAX_LEAD_FILES` are picked by their metadata alone, and only those are read, so one
+    // pass holds at most `MAX_LEAD_FILES * MAX_READ` bytes however many files the day folders hold. A file is opened
+    // just for its metadata here and kept open (at most `MAX_LEAD_FILES` at a time) for the read, so the file read is the
+    // one whose metadata was judged.
+    let mut picked: Vec<(std::time::SystemTime, File)> = Vec::new();
     for (_, day) in days.iter().take(2) {
         for n in entry_names(day).into_iter().filter(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
             let Ok(name) = CString::new(n) else { continue };
@@ -329,14 +339,28 @@ pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> 
             if !meta.is_file() || born < floor {
                 continue;
             }
-            let mut text = String::new();
-            if file.take(MAX_READ).read_to_string(&mut text).is_ok() {
-                found.push((born, text));
+            if picked.len() == MAX_LEAD_FILES {
+                // Full: keep the newest. The oldest is replaced only by a newer one (its file closes as it is dropped).
+                let Some((i, _)) = picked.iter().enumerate().min_by_key(|(_, p)| p.0) else { continue };
+                if born <= picked[i].0 {
+                    continue;
+                }
+                picked[i] = (born, file);
+            } else {
+                picked.push((born, file));
             }
         }
     }
-    found.sort_by_key(|f| std::cmp::Reverse(f.0));
-    found.into_iter().take(MAX_LEAD_FILES).map(|(_, t)| t).collect()
+    picked.sort_by_key(|p| std::cmp::Reverse(p.0));
+    picked
+        .into_iter()
+        .filter_map(|(_, file)| {
+            #[cfg(test)]
+            LEAD_READS.with(|c| c.set(c.get() + 1));
+            let mut text = String::new();
+            file.take(MAX_READ).read_to_string(&mut text).ok().map(|_| text)
+        })
+        .collect()
 }
 
 /// A Codex session's final answer, from its own session file: `last_agent_message` of the last `task_complete` event.

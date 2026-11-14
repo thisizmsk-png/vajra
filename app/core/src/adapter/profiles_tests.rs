@@ -1091,8 +1091,9 @@ fn the_lead_read_back_passes_the_profile_and_ends_a_lead_a_sandbox_flag_beat() {
     assert!(matches!(codex_lead_verdict(&[wide], &w, m), LeadVerdict::NotApplied(_)));
 }
 
-/// The read-back waits while the Lead's first turn hasn't run, ignores another folder's sessions, and with a
-/// marked file present ignores an unmarked one (the user's own Codex in the same folder).
+/// The read-back waits while the Lead's first turn hasn't run and ignores another folder's sessions. bhishma L1 on
+/// #241: any unmarked first turn in the project ends the Lead, even beside a marked file that passes, since a sandbox
+/// flag drops the marker and that file may be the Lead's own.
 #[test]
 fn the_lead_read_back_waits_for_the_first_turn_and_tells_its_own_file_apart() {
     let (w, m) = (lead_want(), Path::new(LM));
@@ -1102,12 +1103,15 @@ fn the_lead_read_back_waits_for_the_first_turn_and_tells_its_own_file_apart() {
     let elsewhere = lead_file("/w/other", S12_FLAG_SANDBOX, "null");
     assert_eq!(codex_lead_verdict(std::slice::from_ref(&elsewhere), &w, m), LeadVerdict::Pending, "another folder's session is never the Lead's");
     let users_own = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(false));
-    // The Lead's own file is still before its first turn: an unmarked one in the project doesn't end it yet.
-    assert_eq!(codex_lead_verdict(&[users_own.clone(), before.clone()], &w, m), LeadVerdict::Pending);
     let ours = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(true));
-    assert_eq!(codex_lead_verdict(&[users_own.clone(), ours, elsewhere], &w, m), LeadVerdict::Applied);
-    // Only unmarked files in the project, all past their first turn: the Lead can't be told apart, so it ends.
-    assert_eq!(codex_lead_verdict(&[users_own], &w, m), LeadVerdict::NotApplied(LEAD_UNMARKED.into()));
+    assert_eq!(codex_lead_verdict(&[ours.clone(), elsewhere.clone(), before.clone()], &w, m), LeadVerdict::Applied);
+    // An unmarked first turn ends the Lead in any order: beside a passing marked file, beside one before its first
+    // turn, or alone.
+    let unmarked = LeadVerdict::NotApplied(LEAD_UNMARKED.into());
+    assert_eq!(codex_lead_verdict(&[ours.clone(), users_own.clone()], &w, m), unmarked, "marked first");
+    assert_eq!(codex_lead_verdict(&[users_own.clone(), ours, elsewhere], &w, m), unmarked, "unmarked first");
+    assert_eq!(codex_lead_verdict(&[users_own.clone(), before], &w, m), unmarked);
+    assert_eq!(codex_lead_verdict(&[users_own], &w, m), unmarked);
     // A layout with no cwd in either record still counts as the project's (fail closed).
     let no_cwd = lead_file(LP, S12_FLAG_SANDBOX, "null").replace(&format!(r#""cwd":"{LP}","#), "");
     assert!(!no_cwd.contains(LP));

@@ -1285,13 +1285,14 @@ pub fn codex_lead_marker(data_real: &Path, profile: &str) -> PathBuf {
 /// sandbox flag beats a permission profile (S12), so its first turn is read back like a worker's. `rollouts` are the
 /// session files created since the launch (`effective::codex_rollouts_since`). A file whose `session_meta` names another
 /// folder is someone else's. The file whose first `turn_context` lists `marker` is the Lead's, judged by
-/// `check_codex_applied`. With no such file, one in the project whose first turn shows no marker can't be told apart
-/// from the Lead running without its profile (a sandbox flag drops every file-system entry), so the Lead ends, once no
-/// other candidate is still before its first turn. Anything else waits.
+/// `check_codex_applied` and #175's read-entry check. bhishma L1 on #241: a file in the project whose first turn shows
+/// no marker can't be told apart from the Lead running without its profile (a sandbox flag drops every file-system
+/// entry, the marker with them), so ANY such file ends the Lead, even beside a marked file that passes. A marked file
+/// that fails ends it at once. With neither, the read-back waits.
 pub fn codex_lead_verdict(rollouts: &[String], want: &CodexWant, marker: &Path) -> LeadVerdict {
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let cwd = canon(&want.cwd);
-    let (mut pending, mut unmarked) = (false, false);
+    let (mut applied, mut unmarked) = (false, false);
     for text in rollouts {
         let recs: Vec<Value> = text.lines().take(10_000).filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
         let first = |t: &str| recs.iter().find(|r| r["type"] == t);
@@ -1300,24 +1301,24 @@ pub fn codex_lead_verdict(rollouts: &[String], want: &CodexWant, marker: &Path) 
         if other(first("session_meta")) || other(first("turn_context")) {
             continue;
         }
-        let Some(tc) = first("turn_context") else {
-            pending = true;
-            continue;
-        };
+        let Some(tc) = first("turn_context") else { continue };
         let marked = tc.pointer("/payload/file_system_sandbox_policy/entries").and_then(Value::as_array).is_some_and(|es| {
             es.iter().any(|e| matches!(e["access"].as_str(), Some("none" | "deny")) && e.pointer("/path/path").and_then(Value::as_str).is_some_and(|s| Path::new(s) == marker))
         });
-        if marked {
-            // The worker check, then #175's L1 check: no read entry reopens a Vajra dir (the plain Lead reads none back).
-            return match check_codex_applied(text, want).and_then(|()| check_no_read_reopens(tc, &want.deny, &[])) {
-                Ok(()) => LeadVerdict::Applied,
-                Err(e) => LeadVerdict::NotApplied(e.0),
-            };
+        if !marked {
+            unmarked = true;
+            continue;
         }
-        unmarked = true;
+        // The worker check, then #175's L1 check: no read entry reopens a Vajra dir (the plain Lead reads none back).
+        if let Err(e) = check_codex_applied(text, want).and_then(|()| check_no_read_reopens(tc, &want.deny, &[])) {
+            return LeadVerdict::NotApplied(e.0);
+        }
+        applied = true;
     }
-    if unmarked && !pending {
+    if unmarked {
         LeadVerdict::NotApplied(LEAD_UNMARKED.into())
+    } else if applied {
+        LeadVerdict::Applied
     } else {
         LeadVerdict::Pending
     }
