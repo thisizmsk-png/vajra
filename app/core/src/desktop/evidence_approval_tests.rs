@@ -915,6 +915,80 @@ mod runner_wiring {
         assert!(seen.borrow().is_empty(), "nothing ran");
     }
 
+    /// An approved run in a fresh repository with `exclude` ignored, `tracked` committed (the approved commit is the
+    /// one with them) and `planted` files written: the check's refusal, or `None` when it runs.
+    fn planted_run(exclude: &str, tracked: &[(&str, &str)], planted: &[&str]) -> Option<String> {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        let w = g.work();
+        fs::write(g.common().join("info/exclude"), exclude).unwrap();
+        let mut commit = g.c1.clone();
+        if !tracked.is_empty() {
+            for (f, body) in tracked {
+                fs::write(w.join(f), body).unwrap();
+                git_in(&w, &["add", f]);
+            }
+            git_in(&w, &["commit", "-qm", "config"]);
+            commit = git_in(&w, &["rev-parse", "HEAD"]);
+        }
+        for f in planted {
+            let p = w.join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "x\n").unwrap();
+        }
+        let a = Ask { commit, ..super::ask() };
+        approved(&app, &a);
+        let seen = Seen::default();
+        let got = go(&app, &g, a, false, at(T0 + 2), &seen);
+        assert_eq!(got.is_ok(), seen.borrow().len() == 1, "ran exactly when it passed");
+        got.err()
+    }
+
+    fn refuses(err: Option<String>, file: &str) {
+        let err = err.unwrap_or_else(|| panic!("{file} was not refused"));
+        assert!(err.contains("ignored file a test runner would collect") && err.contains(file), "{err}");
+    }
+
+    /// bhishma M2b on 93dc4ab, row 1: pytest doesn't skip `target`; only cargo's own (with `CACHEDIR.TAG`, and no
+    /// pytest or JS config tracked) is left out.
+    #[test]
+    fn a_test_file_in_an_ignored_target_is_refused_unless_it_is_cargos_own() {
+        refuses(planted_run("target/\n", &[], &["target/test_x.py"]), "target/test_x.py");
+        assert_eq!(planted_run("target/\n", &[], &["target/CACHEDIR.TAG", "target/debug/build/x/tests/a.rs"]), None, "cargo's own target");
+        refuses(planted_run("target/\n", &[("pytest.ini", "[pytest]\n")], &["target/CACHEDIR.TAG", "target/test_x.py"]), "target/test_x.py");
+    }
+
+    /// Row 2: `go test ./...` doesn't skip `node_modules`; only dot, underscore, testdata and vendor folders.
+    #[test]
+    fn an_ignored_go_test_file_is_refused_anywhere_go_would_collect_it() {
+        refuses(planted_run("node_modules/\n", &[], &["node_modules/x/x_test.go"]), "node_modules/x/x_test.go");
+        for skipped in ["vendor/x/x_test.go", "testdata/x_test.go", "_tools/x_test.go", ".cache/x_test.go"] {
+            let dir = skipped.split('/').next().unwrap();
+            assert_eq!(planted_run(&format!("{dir}/\n"), &[], &[skipped]), None, "{skipped}: Go skips it");
+        }
+    }
+
+    /// Row 3: jest and vitest don't skip a virtualenv; one is left out only with its `pyvenv.cfg` and no JS config.
+    #[test]
+    fn a_test_file_in_an_ignored_venv_is_refused_without_its_pyvenv_cfg_or_with_a_js_runner() {
+        refuses(planted_run("venv/\n", &[], &["venv/x.test.js"]), "venv/x.test.js");
+        assert_eq!(planted_run(".venv/\n", &[], &[".venv/pyvenv.cfg", ".venv/lib/site-packages/pkg/tests/test_a.py"]), None, "a real virtualenv");
+        refuses(planted_run(".venv/\n", &[("jest.config.js", "module.exports = {}\n")], &[".venv/pyvenv.cfg", ".venv/x.test.js"]), ".venv/x.test.js");
+    }
+
+    /// Row 4: a tracked config that replaces a runner's defaults drops every skip, `node_modules` included.
+    #[test]
+    fn a_tracked_runner_config_that_replaces_the_defaults_drops_every_skip() {
+        assert_eq!(planted_run("node_modules/\n", &[], &["node_modules/pkg/test/a.test.js"]), None, "node_modules is skipped by default");
+        refuses(planted_run("node_modules/\n", &[("pytest.ini", "[pytest]\nnorecursedirs = build docs\n")], &["node_modules/pkg/test_a.py"]), "node_modules/pkg/test_a.py");
+        refuses(
+            planted_run("node_modules/\n", &[("package.json", "{\"jest\": {\"testPathIgnorePatterns\": []}}\n")], &["node_modules/pkg/a.test.js"]),
+            "node_modules/pkg/a.test.js",
+        );
+        refuses(planted_run(".venv/\n", &[("pyproject.toml", "[tool.pytest.ini_options]\nnorecursedirs = [\"x\"]\n")], &[".venv/pyvenv.cfg", ".venv/conftest.py"]), ".venv/conftest.py");
+    }
+
     /// bhishma M2 on 7c09e27: ignored files aren't in the compared tree. The check says so in the signed bundle (their
     /// listing's count and hash) and refuses an ignored file a test runner would collect.
     #[test]
