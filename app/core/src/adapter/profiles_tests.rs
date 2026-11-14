@@ -168,12 +168,34 @@ fn codex_worker_forces_every_always_setting() {
         for want in ["approval_policy=\"never\"", fs.as_str(), net.as_str(), dp.as_str()] {
             assert!(c.contains(&want), "{want} missing from {c:?}");
         }
-        // S11: `--sandbox` would switch the profile off, and the legacy keys are ignored under one.
-        assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
-        assert!(!c.iter().any(|x| x.starts_with("sandbox_workspace_write.")), "{c:?}");
+        // S12: any sandbox flag beats the profile, so none is passed in any form.
+        assert!(!a.iter().any(|x| x == "--sandbox" || x == "-s" || x.starts_with("--sandbox=")), "{a:?}");
+        assert!(!c.iter().any(|x| x.starts_with("sandbox_workspace_write.") || x.starts_with("sandbox_mode=")), "{c:?}");
         assert!(!a.iter().any(|x| x.contains("danger") || x.contains("bypass")));
         assert_eq!(a[a.len() - 2], "--");
     }
+}
+
+/// bhishma #216 L1 (S12, codex 0.166, live): `--sandbox X`, `-s X`, `-sX` and `--sandbox=X` each beat a per-launch
+/// profile, so every form is dropped, with the `sandbox_mode` and legacy `-c` keys; the prompt after `--` is kept as is.
+#[test]
+fn every_form_of_the_sandbox_flag_is_dropped_but_never_the_prompt() {
+    let mut a: Vec<String> = [
+        "/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "exec", "--json", "--sandbox", "workspace-write", "-s", "danger-full-access",
+        "-sdanger-full-access", "--sandbox=danger-full-access", "-m", "m", "-c", "sandbox_mode=\"danger-full-access\"",
+        "-c", "sandbox_workspace_write.network_access=true", "-c", "approval_policy=\"never\"", "--skip-git-repo-check", "--", "-s --sandbox x",
+    ]
+    .map(String::from)
+    .into();
+    drop_sandbox_flag(&mut a);
+    let want: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "exec", "--json", "-m", "m", "-c", "approval_policy=\"never\"", "--skip-git-repo-check", "--", "-s --sandbox x"]
+        .map(String::from)
+        .into();
+    assert_eq!(a, want);
+    // A prompt that is itself a sandbox flag, after `--`, stays.
+    let mut b: Vec<String> = ["codex", "--", "--sandbox"].map(String::from).into();
+    drop_sandbox_flag(&mut b);
+    assert_eq!(b, ["codex", "--", "--sandbox"]);
 }
 
 #[test]
@@ -1002,6 +1024,111 @@ fn controls_follow_the_harness_profile() {
     let s = steer_brief("0123456789abcdef0123456789abcdef");
     assert!(s.contains("<vajra-steer nonce=\"0123456789abcdef0123456789abcdef\""), "{s}");
     assert!(s.contains("never write the nonce"), "{s}");
+}
+
+// ------------------------------------------------ the plain Codex Lead's first-turn read-back (bhishma MUST, S12)
+
+/// The project, temp dir and marker the pinned Lead sessions below use (paths that don't exist, so none resolves).
+const LP: &str = "/w/lead/project";
+const LT: &str = "/w/lead/tmp";
+const LM: &str = "/h/data/.lead-vajra-0123456789abcdef";
+
+fn lead_want() -> CodexWant {
+    let mut deny = deny().to_vec();
+    deny.push(PathBuf::from(LM));
+    CodexWant { cwd: LP.into(), ticket_tmp: LT.into(), network: false, deny }
+}
+
+/// A Lead session file: `session_meta` with `cwd`, then (when given) one `turn_context` whose sandbox and file-system
+/// policy are as given, in the shape codex 0.166 wrote them in S12 (`codex-tui`, the interactive Codex the Lead is).
+fn lead_file(cwd: &str, sandbox: &str, fs: &str) -> String {
+    let meta = format!(r#"{{"type":"session_meta","payload":{{"id":"01a1d77d-62c1-74c3-8a27-9edd284a8505","cwd":"{cwd}","originator":"codex-tui","source":"cli","cli_version":"0.166.0"}}}}"#);
+    if sandbox.is_empty() {
+        return format!("{meta}\n");
+    }
+    format!("{meta}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"{cwd}\",\"approval_policy\":\"never\",\"sandbox_policy\":{sandbox},\"file_system_sandbox_policy\":{fs}}}}}\n")
+}
+
+/// S12's `sandbox_policy` under the profile (both with no user setting and with the user's own top-level
+/// `sandbox_mode = "danger-full-access"`: the profile won, and the two were identical).
+const S12_PROFILE_SANDBOX: &str = r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#;
+/// S12's `sandbox_policy` with `-s danger-full-access` (also `--sandbox X` and `--sandbox=X`): the flag beat the profile,
+/// the file-system policy was `null`, and the denied file was read.
+const S12_FLAG_SANDBOX: &str = r#"{"type":"danger-full-access"}"#;
+
+fn s12_profile_fs(marker: bool) -> String {
+    let mut es = vec![r#"{"path":{"type":"path","path":"/"},"access":"read"}"#.to_string()];
+    for d in DENY {
+        es.push(format!(r#"{{"path":{{"type":"path","path":"{d}"}},"access":"deny"}}"#));
+    }
+    if marker {
+        es.push(format!(r#"{{"path":{{"type":"path","path":"{LM}"}},"access":"deny"}}"#));
+    }
+    es.push(format!(r#"{{"path":{{"type":"path","path":"{LP}"}},"access":"write"}}"#));
+    es.push(format!(r#"{{"path":{{"type":"path","path":"{LT}"}},"access":"write"}}"#));
+    format!(r#"{{"kind":"restricted","entries":[{}]}}"#, es.join(","))
+}
+
+/// The pinned S12 observations, through the read-back: the profile in force (with or without the user's own
+/// `sandbox_mode`) passes; a sandbox flag that beat it ends the Lead, whether its session file is told apart by the
+/// marker or not (a flag drops every file-system entry, the marker with them).
+#[test]
+fn the_lead_read_back_passes_the_profile_and_ends_a_lead_a_sandbox_flag_beat() {
+    let (w, m) = (lead_want(), Path::new(LM));
+    let applied = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(true));
+    assert_eq!(codex_lead_verdict(std::slice::from_ref(&applied), &w, m), LeadVerdict::Applied);
+    let flag = lead_file(LP, S12_FLAG_SANDBOX, "null");
+    assert!(check_codex_applied(&flag, &w).is_err(), "the flag's turn_context fails the worker check too");
+    assert_eq!(codex_lead_verdict(&[flag], &w, m), LeadVerdict::NotApplied(LEAD_UNMARKED.into()));
+    // The marker is shown but the Vajra state dir isn't denied: the Lead ends with the check's own reason.
+    let open = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(true).replace(r#""/h/.claude/vajra"},"access":"deny""#, r#""/h/.claude/vajra"},"access":"read""#));
+    assert!(matches!(codex_lead_verdict(&[open], &w, m), LeadVerdict::NotApplied(why) if why.contains("/h/.claude/vajra")));
+    // #175's L1, shared: a read entry inside a Vajra dir reopens it, so the Lead ends even with every dir denied.
+    let reopened = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(true).replace(r#"{"kind":"restricted","entries":["#, r#"{"kind":"restricted","entries":[{"path":{"type":"path","path":"/h/data/runs"},"access":"read"},"#));
+    assert!(matches!(codex_lead_verdict(&[reopened], &w, m), LeadVerdict::NotApplied(why) if why.contains("/h/data/runs")));
+    // The marker is shown with a wider sandbox: ended.
+    let wide = lead_file(LP, r#"{"type":"danger-full-access"}"#, &s12_profile_fs(true));
+    assert!(matches!(codex_lead_verdict(&[wide], &w, m), LeadVerdict::NotApplied(_)));
+}
+
+/// The read-back waits while the Lead's first turn hasn't run and ignores another folder's sessions. bhishma L1 on
+/// #241: any unmarked first turn in the project ends the Lead, even beside a marked file that passes, since a sandbox
+/// flag drops the marker and that file may be the Lead's own.
+#[test]
+fn the_lead_read_back_waits_for_the_first_turn_and_tells_its_own_file_apart() {
+    let (w, m) = (lead_want(), Path::new(LM));
+    assert_eq!(codex_lead_verdict(&[], &w, m), LeadVerdict::Pending);
+    let before = lead_file(LP, "", "");
+    assert_eq!(codex_lead_verdict(std::slice::from_ref(&before), &w, m), LeadVerdict::Pending, "no turn yet");
+    let elsewhere = lead_file("/w/other", S12_FLAG_SANDBOX, "null");
+    assert_eq!(codex_lead_verdict(std::slice::from_ref(&elsewhere), &w, m), LeadVerdict::Pending, "another folder's session is never the Lead's");
+    let users_own = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(false));
+    let ours = lead_file(LP, S12_PROFILE_SANDBOX, &s12_profile_fs(true));
+    assert_eq!(codex_lead_verdict(&[ours.clone(), elsewhere.clone(), before.clone()], &w, m), LeadVerdict::Applied);
+    // An unmarked first turn ends the Lead in any order: beside a passing marked file, beside one before its first
+    // turn, or alone.
+    let unmarked = LeadVerdict::NotApplied(LEAD_UNMARKED.into());
+    assert_eq!(codex_lead_verdict(&[ours.clone(), users_own.clone()], &w, m), unmarked, "marked first");
+    assert_eq!(codex_lead_verdict(&[users_own.clone(), ours, elsewhere], &w, m), unmarked, "unmarked first");
+    assert_eq!(codex_lead_verdict(&[users_own.clone(), before], &w, m), unmarked);
+    assert_eq!(codex_lead_verdict(&[users_own], &w, m), unmarked);
+    // A layout with no cwd in either record still counts as the project's (fail closed).
+    let no_cwd = lead_file(LP, S12_FLAG_SANDBOX, "null").replace(&format!(r#""cwd":"{LP}","#), "");
+    assert!(!no_cwd.contains(LP));
+    assert_eq!(codex_lead_verdict(&[no_cwd], &w, m), LeadVerdict::NotApplied(LEAD_UNMARKED.into()));
+}
+
+/// The Lead's argv carries the marker as a deny entry when the caller adds it, and never a sandbox flag.
+#[test]
+fn the_lead_argv_denies_the_marker_and_has_no_sandbox_flag() {
+    let mut d = deny().to_vec();
+    d.push(codex_lead_marker(Path::new("/h/data"), PROFILE));
+    assert_eq!(d.last().unwrap(), Path::new(LM));
+    let a = codex_run_lead_argv(Path::new("/opt/tools/bin/codex"), "x", PROFILE, &d, Path::new(LP), Path::new(LT)).unwrap();
+    assert!(a.iter().any(|x| x.contains(&format!("\"{LM}\"=\"none\""))), "{a:?}");
+    let mut stripped = a.clone();
+    drop_sandbox_flag(&mut stripped);
+    assert_eq!(stripped, a, "nothing to strip");
 }
 
 // ------------------------------------------------------------ run leads (6d2)
