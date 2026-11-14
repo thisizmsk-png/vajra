@@ -312,7 +312,10 @@ impl Bridge {
     /// - `ignored`: `ls-files --others --ignored --exclude-standard --directory`, an ignored folder as one entry,
     ///   for the evidence's count and hash;
     /// - `test_like`: the ignored files a test runner's default discovery collects (`TEST_LIKE`), outside the
-    ///   dependency folders each runner skips by default (`TEST_SKIP`).
+    ///   folders every runner the repo could use skips (bhishma M2b on 93dc4ab): `node_modules`, a virtualenv with
+    ///   its `pyvenv.cfg` when no jest, vitest or mocha config is tracked, and cargo's `target` with its
+    ///   `CACHEDIR.TAG` when no pytest or JS runner config is tracked. A Go test file is refused anywhere but under the folders Go skips (`GO_SKIP`). A tracked runner
+    ///   config that replaces the defaults (`RUNNER_CONFIGS`) drops every skip.
     ///
     /// `None` as for `tree_id`, and when a listing is cut at `OUTPUT_CAP`: never a partial answer.
     pub fn worktree_snapshot(&self, repo: &Path, exclude: &[&str]) -> Option<Snapshot> {
@@ -417,16 +420,75 @@ impl Bridge {
                 return Some(Snapshot { tree, ..Snapshot::default() });
             }
             let names = |o: Output| -> Vec<String> { o.stdout_raw.split(|b| *b == 0).filter(|n| !n.is_empty()).map(|n| String::from_utf8_lossy(n).into_owned()).collect() };
+            // The runner configs as this tree has them: listed from the session's index and read from its blobs, so
+            // they are the very files the tree compare binds. More than `MAX_CONFIGS` drops every skip (fail safe).
+            let rules = (|| -> Option<SkipRules> {
+                let mut r = SkipRules::default();
+                let mut seen = 0usize;
+                for (globs, keys) in RUNNER_CONFIGS {
+                    let mut a: Vec<String> = ["ls-files", "-z", "--cached", "--"].map(String::from).to_vec();
+                    a.extend(globs.iter().map(|g| format!(":(glob){g}")));
+                    let files = names(git(&a.iter().map(String::as_str).collect::<Vec<_>>(), true)?);
+                    seen += files.len();
+                    if seen > MAX_CONFIGS {
+                        return Some(SkipRules::NONE);
+                    }
+                    for f in files {
+                        let body = git(&["cat-file", "blob", &format!(":{f}")], true)?.stdout_raw;
+                        let text = String::from_utf8_lossy(&body);
+                        let base = Path::new(&f).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                        match base {
+                            "pytest.ini" => r.py_config = true,
+                            "pyproject.toml" | "setup.cfg" | "tox.ini" => r.py_config |= text.contains("pytest"),
+                            "package.json" => r.js_config |= ["\"jest\"", "\"vitest\"", "\"mocha\""].iter().any(|k| text.contains(k)),
+                            _ => r.js_config = true,
+                        }
+                        if keys.split('|').any(|k| text.contains(k)) {
+                            r.overridden = true;
+                        }
+                    }
+                }
+                Some(r)
+            })();
             let mut list: Vec<String> = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", "."].map(String::from).to_vec();
             list.extend(excluded.iter().cloned());
             let listed = git(&list.iter().map(String::as_str).collect::<Vec<_>>(), true)?;
             let ignored_sha256 = crate::control::sha256::hex_digest(&listed.stdout_raw);
             let ignored = names(listed);
-            let mut tests: Vec<String> = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--"].map(String::from).to_vec();
-            tests.extend(TEST_LIKE.iter().map(|g| format!(":(glob){g}")));
-            tests.extend(TEST_SKIP.iter().map(|g| format!(":(exclude,glob){g}")));
-            tests.extend(excluded.iter().cloned());
-            let test_like = names(git(&tests.iter().map(String::as_str).collect::<Vec<_>>(), true)?);
+            // A config that can't be read drops every skip: refusing more is the safe side.
+            let rules = rules.unwrap_or(SkipRules::NONE);
+            // bhishma M2b on 93dc4ab: a folder is left out only where every runner the repo could use skips it.
+            // - Go (`go test ./...`) skips only dot, underscore, testdata and vendor folders: its own listing.
+            // - The others: `node_modules` (jest, vitest, pytest); a folder holding `pyvenv.cfg` (pytest's own
+            //   virtualenv test) when no jest, vitest or mocha config is tracked (they don't skip virtualenvs); and a
+            //   `target` holding cargo's `CACHEDIR.TAG` when no runner config but cargo's is tracked.
+            // - None at all when a tracked runner config replaces the runners' defaults.
+            let mut skip: Vec<String> = Vec::new();
+            if !rules.overridden {
+                skip.push(":(exclude,glob)**/node_modules/**".into());
+                for entry in ignored.iter().filter_map(|e| e.strip_suffix('/')) {
+                    let d = top_dir.join(entry);
+                    let has = |f: &str| std::fs::symlink_metadata(d.join(f)).is_ok_and(|m| m.is_file());
+                    let name = Path::new(entry).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                    let venv = has("pyvenv.cfg") && !rules.js_config;
+                    let cargo = name == "target" && has("CACHEDIR.TAG") && !rules.py_config && !rules.js_config;
+                    if venv || cargo {
+                        skip.push(format!(":(exclude,literal){entry}"));
+                    }
+                }
+            }
+            let listing = |globs: &[String], extra: &[String]| -> Option<Vec<String>> {
+                let mut a: Vec<String> = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--"].map(String::from).to_vec();
+                a.extend(globs.iter().cloned());
+                a.extend(extra.iter().cloned());
+                a.extend(excluded.iter().cloned());
+                Some(names(git(&a.iter().map(String::as_str).collect::<Vec<_>>(), true)?))
+            };
+            let others: Vec<String> = TEST_LIKE.iter().map(|g| format!(":(glob){g}")).collect();
+            let mut test_like = listing(&others, &skip)?.into_iter().filter(|p| !p.ends_with("_test.go")).collect::<Vec<_>>();
+            let go_skip: Vec<String> = GO_SKIP.iter().map(|g| format!(":(exclude,glob){g}")).collect();
+            test_like.extend(listing(&[":(glob)**/*_test.go".to_string()], &go_skip)?);
+            test_like.sort();
             Some(Snapshot { tree, ignored, ignored_sha256, test_like })
         })();
         let _ = std::fs::remove_dir_all(&dir);
@@ -488,10 +550,36 @@ pub struct Snapshot {
 pub const TEST_LIKE: [&str; 10] =
     ["**/conftest.py", "**/test_*.py", "**/*_test.py", "**/*_test.go", "**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/tests/**", "**/test/**", "**/spec/**"];
 
-/// Dependency and tool folders left out of the test-like check: the runners skip them by default (jest and pytest
-/// `node_modules`, pytest a virtualenv and dot folders like `.tox`, cargo its `target`), and installed packages ship
-/// their own tests, which would refuse almost every project.
-pub const TEST_SKIP: [&str; 6] = ["**/node_modules/**", "**/.venv/**", "**/venv/**", "**/target/**", "**/.tox/**", "**/.nox/**"];
+/// The most tracked runner config files read; past it no folder is left out of the test-like check.
+const MAX_CONFIGS: usize = 200;
+
+/// The folders `go test ./...` itself skips: names starting with a dot or an underscore, `testdata` and `vendor`.
+pub const GO_SKIP: [&str; 4] = ["**/.*/**", "**/_*/**", "**/testdata/**", "**/vendor/**"];
+
+/// What the tracked runner configs say, for `worktree_snapshot`'s test-like check (bhishma M2b on 93dc4ab).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SkipRules {
+    /// A tracked config replaces a runner's default skips (pytest `norecursedirs`; jest `testPathIgnorePatterns`,
+    /// `roots`, `testMatch` or `testRegex`; vitest `exclude`; mocha `spec`): no folder is left out.
+    pub overridden: bool,
+    /// A pytest config is tracked: pytest doesn't skip `target`.
+    pub py_config: bool,
+    /// A jest, vitest or mocha config is tracked: they skip neither `target` nor a virtualenv.
+    pub js_config: bool,
+}
+
+impl SkipRules {
+    const NONE: SkipRules = SkipRules { overridden: true, py_config: true, js_config: true };
+}
+
+/// The tracked config files each runner reads, and the keys in them that replace its default skips.
+pub const RUNNER_CONFIGS: [(&[&str], &str); 5] = [
+    (&["**/pytest.ini", "**/pyproject.toml", "**/setup.cfg", "**/tox.ini"], "norecursedirs"),
+    (&["**/jest.config.*"], "testPathIgnorePatterns|roots|testMatch|testRegex"),
+    (&["**/package.json"], "testPathIgnorePatterns|\"roots\"|testMatch|testRegex|\"spec\""),
+    (&["**/vitest.config.*", "**/vite.config.*", "**/vitest.workspace.*"], "exclude"),
+    (&["**/.mocharc*"], "spec"),
+];
 
 /// A repo config as read once by `frozen_config`: the entries `git add` gets, and the repository format.
 #[derive(Debug, Default)]
