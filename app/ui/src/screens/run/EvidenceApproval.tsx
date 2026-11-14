@@ -42,8 +42,15 @@ export function EvidenceApproval({ runId }: { runId: string }) {
     return () => { seq.current++; off(); };
   }, [load]);
 
-  // The core now holds a different list (or none pending) than the one on screen.
-  const changed = !!shown && !(isPending(latest) && latest.sha256 === shown.sha256);
+  // The core now holds a different pending list than the one on screen (PR 247 review: only then is "load the new
+  // list" something the person can do). No pending list at all closes the dialog; the Section says why.
+  const changed = !!shown && isPending(latest) && latest.sha256 !== shown.sha256;
+  useEffect(() => {
+    if (shown && latest && !isPending(latest) && !busy) {
+      setShown(null);
+      requestAnimationFrame(() => statusRef.current?.focus());
+    }
+  }, [shown, latest, busy]);
   const hidden = !!shown && shown.ask.commands.some(hidesText);
   const blockedWhy = changed ? L.changed : hidden ? L.hidden : "";
 
@@ -75,6 +82,8 @@ export function EvidenceApproval({ runId }: { runId: string }) {
         if (r.result) return done(approve ? L.approvedNote : L.declinedNote);
         const code = r.error?.error ?? r.receipt?.reason;
         if (code === "list_changed") { setAnswerErr(L.listChanged); load(); return; }
+        if (code === "expired") return done(L.state.expired);
+        if (code === "record_changed") return done(L.state.void);
         if (code === "not_pending" || code === "not_found") return done(L.notPending);
         setAnswerErr(L.notSaved(r.error?.detail ?? r.receipt?.detail ?? S.run.failed));
       },

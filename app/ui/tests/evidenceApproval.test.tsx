@@ -136,6 +136,43 @@ describe("check-command approval dialog (N20)", () => {
     expect(screen.queryByText(L.approvedNote)).toBeNull();
   });
 
+  it.each([
+    ["expired", L.state.expired],
+    ["record_changed", L.state.void],
+  ] as const)("an answer refused as %s closes the dialog and says so, never 'the commands changed' (#247)", async (code, text) => {
+    const state = { current: pending() };
+    const ipc = fakeIpc({
+      evidence_approval: () => state.current,
+      act_answer_evidence_approval: () => {
+        state.current = { run_id: RUN, state: code === "expired" ? "expired" : "void" };
+        return { receipt: { state: "failed", reason: code, detail: code }, error: { error: code, detail: code } };
+      },
+    });
+    setTransport(ipc.transport);
+    render(<EvidenceApproval runId={RUN} />);
+    const d = await openDialog();
+    fireEvent.click(within(d).getByRole("button", { name: L.approve }));
+    expect((await screen.findAllByText(text)).length).toBeGreaterThan(0);
+    act(() => ipc.emit("changed", {}));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByText(L.changed)).toBeNull();
+    expect(screen.queryByRole("button", { name: L.review })).toBeNull();
+  });
+
+  it("a list that stops being pending while open (answered elsewhere, expired) closes the dialog with the state in words", async () => {
+    const state = { current: pending() };
+    const ipc = fakeIpc({ evidence_approval: () => state.current, act_answer_evidence_approval: () => done });
+    setTransport(ipc.transport);
+    render(<EvidenceApproval runId={RUN} />);
+    await openDialog();
+    state.current = { run_id: RUN, state: "expired" };
+    act(() => ipc.emit("changed", {}));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByText(L.state.expired)).toBeTruthy();
+    expect(screen.queryByText(L.changed)).toBeNull();
+    expect(answers(ipc)).toHaveLength(0);
+  });
+
   it("a failed save says why and leaves the list pending", async () => {
     mount({ current: pending() }, { receipt: { state: "failed", reason: "audit_failed", detail: "disk full" }, error: { error: "audit_failed", detail: "disk full" } });
     const d = await openDialog();
