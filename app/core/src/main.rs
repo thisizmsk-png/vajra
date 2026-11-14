@@ -114,6 +114,18 @@ fn install_dev_tools(app: State<'_, App>) -> Res {
     app.install_dev_tools()
 }
 
+/// Labs for one project (ADR-16 16.13): whether this build has Labs, and whether it is on. Developer builds only.
+#[tauri::command(async)]
+fn labs_get(app: State<'_, App>, project: String) -> Res {
+    app.labs_get(&project)
+}
+
+/// Turn Labs on or off for one project. A release build refuses.
+#[tauri::command(async)]
+fn labs_set(app: State<'_, App>, project: String, on: bool) -> Res {
+    app.labs_set(&project, on)
+}
+
 /// Settings: the disk the worker copies use. A walk of the copies' folder, off the event thread.
 #[tauri::command(async)]
 fn worker_disk(app: State<'_, App>) -> Res {
@@ -913,6 +925,8 @@ fn main() {
             act_close_finished,
             worker_disk,
             install_dev_tools,
+            labs_get,
+            labs_set,
             act_worker_clean_up,
             record_orphans,
             run_log_since,
@@ -956,7 +970,8 @@ fn main() {
             }
         }
         RunEvent::Exit => {
-            // Director-General asks, then core tickets (with their descendants), then every session: `App::quit`.
+            // The Director-General's asks, then every core run's lead, then core tickets (with their descendants), then
+            // every session: `App::quit`.
             handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
             handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover

@@ -426,7 +426,68 @@ fn a_vajra_run_connection_serves_one_request_and_a_lead_tree_peer_gets_no_servic
     assert!(got[0].get("ok").is_some());
     // Every peer passes the (faked) ancestry check here, so this test process is "in a lead's tree".
     let svc_call = format!("{}\n", json!({"tool": "list_workers", "args": {}}));
-    assert_eq!(raw(&sock, &svc_call)[0]["error"], "run_lead_on_service");
+    // Refused and closed: two Service calls on one lead connection get one reply.
+    let got = raw(&sock, &format!("{svc_call}{svc_call}"));
+    assert_eq!(got.len(), 1, "a refused lead connection is closed: {got:?}");
+    assert_eq!(got[0]["error"], "run_lead_on_service");
+}
+
+#[test]
+fn a_lead_tree_holds_at_most_its_share_of_the_connections_and_the_apps_clients_still_get_in() {
+    use super::super::socket::{MAX_CONNECTIONS, MAX_LEAD_CONNECTIONS};
+    use std::io::{BufRead, Write};
+    let t = Tmp::new("share");
+    let reg = any_tree();
+    let (_k, lead) = lead_kid();
+    let token = registered(&reg, proto(), Some(lead));
+    let (sock, _svc) = serving(&t, Arc::new(reg));
+    // Every peer here is in a lead's tree. Each tries to hold a connection with a partial line (a lead trickling bytes).
+    // Whatever order they are accepted in, exactly the ones over the budget are turned away and the rest stay open.
+    const EXTRA: usize = 4;
+    let tries: Vec<_> = (0..MAX_LEAD_CONNECTIONS + EXTRA)
+        .map(|_| {
+            let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+            c.write_all(b"{\"vajra_run\"").unwrap();
+            c.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            c
+        })
+        .collect();
+    let (mut held, mut turned_away) = (Vec::new(), 0);
+    for c in tries {
+        let mut line = String::new();
+        let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+        match r.read_line(&mut line) {
+            Ok(n) if n > 0 => {
+                let v: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(v["reason"], "too many run lead connections", "{v}");
+                turned_away += 1;
+            }
+            _ => held.push(c),
+        }
+    }
+    assert_eq!((held.len(), turned_away), (MAX_LEAD_CONNECTIONS, EXTRA), "a lead tree holds exactly its share");
+    let ask = || {
+        let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = c.write_all(format!("{}\n", req(RUN, &token, "list_workers", json!({}))).as_bytes());
+        let mut line = String::new();
+        let _ = std::io::BufReader::new(c).read_line(&mut line);
+        serde_json::from_str::<Value>(&line).unwrap_or(Value::Null)
+    };
+    // With the budget full, one more lead connection is turned away at once.
+    let out = ask();
+    assert_eq!(out["error"], "busy", "a lead tree took more than its share: {out}");
+    assert_eq!(out["reason"], "too many run lead connections", "{out}");
+    const { assert!(MAX_LEAD_CONNECTIONS < MAX_CONNECTIONS, "the rest stay for the app's own clients") };
+    // The held ones give their slots back as they close.
+    drop(held);
+    let until = Instant::now() + Duration::from_secs(5);
+    let mut out = ask();
+    while out.get("ok").is_none() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+        out = ask();
+    }
+    assert!(out.get("ok").is_some(), "{out}");
 }
 
 #[test]
@@ -568,6 +629,29 @@ fn the_schema_text_limits_are_the_protocols_and_a_plan_at_them_is_accepted() {
     assert_eq!((decision["title"]["maxLength"].as_u64(), decision["rationale"]["maxLength"].as_u64()), (Some(MAX_DECISION_TITLE as u64), Some(MAX_RATIONALE as u64)));
 }
 
+#[test]
+fn a_starting_leads_call_waits_for_its_read_back_and_passes_only_once_confirmed() {
+    let reg = Arc::new(any_tree());
+    let token = registered(&reg, proto(), None);
+    let (_k, lead) = lead_kid();
+    reg.start_lead(RUN, lead).unwrap();
+    assert!(reg.in_lead_tree(me()), "a starting lead's tree is held to vajra-run tools from its first call");
+    let (r2, t2) = (reg.clone(), token.clone());
+    let started = std::time::Instant::now();
+    let call = std::thread::spawn(move || r2.serve(&req(RUN, &t2, "list_workers", json!({})), me()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!call.is_finished(), "nothing passes before the read-back");
+    assert!(reg.confirm_lead(RUN, lead));
+    assert_eq!(call.join().unwrap(), json!({"ok": {"workers": [], "rounds": []}}));
+    assert!(started.elapsed() < CONFIRM_WAIT);
+    // A lead cleared while starting (its read-back failed) is refused at once, and confirming it later does nothing.
+    let (_k2, next) = lead_kid();
+    reg.start_lead(RUN, next).unwrap();
+    assert!(reg.clear_lead(RUN, next));
+    assert!(!reg.confirm_lead(RUN, next));
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me())["error"], "lead_not_running");
+}
+
 /// A peer connects (a lead-tree process here: the ancestry check is faked to pass) and makes one Service call, then
 /// forks a child that keeps the socket and exits. Once the test has reaped it, the child sends a Service request on
 /// the inherited connection and writes the reply to `<dir>/reply`. The child gives up by itself after 60 s (and a read
@@ -587,8 +671,12 @@ if os.fork() == 0:
         if time.monotonic() > end:
             os._exit(1)
         time.sleep(0.02)
-    f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
-    open(os.path.join(d, "reply.tmp"), "w").write(f.readline())
+    try:
+        f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
+        line = f.readline()
+    except OSError:
+        line = ""  # the app closed the connection
+    open(os.path.join(d, "reply.tmp"), "w").write(line)
     os.rename(os.path.join(d, "reply.tmp"), os.path.join(d, "reply"))
     os._exit(0)
 os._exit(0)
@@ -618,9 +706,14 @@ fn a_connection_handed_on_by_a_lead_tree_peer_that_exited_never_reaches_the_serv
         while !t.0.join("reply").exists() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
-        let out: Value = serde_json::from_str(&std::fs::read_to_string(t.0.join("reply")).unwrap()).unwrap();
-        let want = if lead_tree { "run_lead_on_service" } else { "peer_gone" };
-        assert_eq!(out["error"], want, "lead_tree={lead_tree}: {out}");
+        let text = std::fs::read_to_string(t.0.join("reply")).unwrap();
+        if lead_tree {
+            // A refused lead connection is closed: the child reads end of file, never a Service reply.
+            assert!(text.is_empty(), "a lead connection stayed open after its refusal: {text}");
+        } else {
+            let out: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(out["error"], "peer_gone", "{out}");
+        }
     }
 }
 
@@ -803,6 +896,30 @@ fn only_recorded_service_roots_reach_the_service_and_a_workers_child_or_a_lead_a
     assert_eq!(asked["error"], "not_an_app_client", "a lead-asked worker steered another session: {asked}");
     let _ = lead.0.kill();
     let _ = lead.0.wait();
+}
+
+/// A lead spawned but not yet passed to `start_lead` (the window between `RunLead::spawn` and `set_current`): it is no
+/// recorded Service root, so a Service call it makes then is refused, and a run call gets `lead_not_running`. Neither
+/// is served. Once started, its calls wait for the read-back (`a_starting_leads_call_waits_...`).
+#[test]
+fn a_lead_calling_between_its_spawn_and_start_lead_is_never_served() {
+    let t = Tmp::new("window");
+    let reg = Arc::new(RunRegistry::default());
+    let token = registered(&reg, proto(), None);
+    let (sock, _svc) = serving(&t, reg.clone());
+    let svc = ask_from_app_child(&sock, &t.0.join("svc"), "redirect_worker", "self", None);
+    assert_eq!(svc["error"], "not_an_app_client", "an unregistered lead reached the Service: {svc}");
+    let run = reg.serve(&req(RUN, &token, "list_workers", json!({})), me());
+    assert_eq!(run["error"], "lead_not_running", "{run}");
+    // A replaced lead, starting or confirmed, stays fenced while its process runs.
+    let (_a, first) = lead_kid();
+    let (_b, second) = lead_kid();
+    reg.start_lead(RUN, first).unwrap();
+    reg.start_lead(RUN, second).unwrap();
+    let p = |l: LeadProc| Some(Peer { pid: l.pid, stamp: l.stamp });
+    assert!(reg.in_lead_tree(p(first)) && reg.in_lead_tree(p(second)));
+    reg.remove(RUN);
+    assert!(reg.in_lead_tree(p(second)), "a removed run's starting lead stays fenced");
 }
 
 #[test]

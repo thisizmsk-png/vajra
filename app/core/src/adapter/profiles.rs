@@ -1346,7 +1346,19 @@ pub fn check_codex_lead_applied(rollout: &str, lead_dir: &Path, deny: &[PathBuf]
     if tc["payload"]["sandbox_policy"]["type"] != "read-only" {
         return Err(NotApplied("the lead's sandbox is not read-only".into()));
     }
-    check_codex_applied(rollout, &CodexWant { cwd: lead_dir.to_path_buf(), ticket_tmp: lead_dir.to_path_buf(), network: false, deny: deny.to_vec() })
+    check_codex_applied(rollout, &CodexWant { cwd: lead_dir.to_path_buf(), ticket_tmp: lead_dir.to_path_buf(), network: false, deny: deny.to_vec() })?;
+    // bhishma L1 on #174: inside a denied dir, the only entry that may read is the lead dir itself (as written or as
+    // its real path). Any other read, or a read of a dir that holds a denied one, reopens what the profile shut.
+    let allowed: Vec<PathBuf> = std::iter::once(lead_dir.to_path_buf()).chain(lead_dir.canonicalize().ok()).collect();
+    let entries = tc.pointer("/payload/file_system_sandbox_policy/entries").and_then(Value::as_array).cloned().unwrap_or_default();
+    for e in entries.iter().filter(|e| e["access"] == "read") {
+        let Some(p) = e.pointer("/path/path").and_then(Value::as_str).map(Path::new) else { continue };
+        let reopens = deny.iter().any(|d| p.starts_with(d) || (d.starts_with(p) && p != Path::new("/")));
+        if reopens && !allowed.iter().any(|a| a == p) {
+            return Err(NotApplied(format!("{} is readable inside a Vajra dir", p.display())));
+        }
+    }
+    Ok(())
 }
 
 /// Check a Claude run lead's `system`/`init` event: `dontAsk`, every tool in `claude_lead_tools()` (an MCP tool of any

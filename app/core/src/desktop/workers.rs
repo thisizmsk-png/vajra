@@ -633,8 +633,7 @@ impl WorkerRuntime {
         Ok(id)
     }
 
-    /// The ticket's current view.
-    #[cfg(test)]
+    /// The git wrapper this runtime's tickets use (a core run's integrate goes through the same one).
     pub(crate) fn gitw(&self) -> &Arc<Gitw> {
         &self.0.gw
     }

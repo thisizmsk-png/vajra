@@ -39,6 +39,9 @@ use super::service::Service;
 pub const MAX_REQUEST: usize = 64 * 1024;
 /// Connections served at once.
 pub const MAX_CONNECTIONS: usize = 64;
+/// Of those, the most that run leads' trees may hold at once, so they can never crowd out the app's own clients. A
+/// lead makes one `vajra-run` call per connection, at most `runreg::MAX_RUN_CALLS` of them in flight.
+pub const MAX_LEAD_CONNECTIONS: usize = 16;
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// The most one reply may wait for the client to read it. A client that stops reading loses its connection, and its
 /// slot, instead of holding one of the `MAX_CONNECTIONS` forever.
@@ -130,6 +133,7 @@ impl Drop for Slot {
 /// Accept forever, one thread per connection, at most `MAX_CONNECTIONS` at once. Only `allowed_uid` is served.
 pub fn serve(listener: UnixListener, svc: Arc<Mutex<Service>>, runs: Arc<RunRegistry>, allowed_uid: u32) {
     let open = Arc::new(AtomicUsize::new(0));
+    let lead_open = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
         let Ok(mut conn) = conn else { continue };
         if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
@@ -139,13 +143,28 @@ pub fn serve(listener: UnixListener, svc: Arc<Mutex<Service>>, runs: Arc<RunRegi
             continue;
         }
         let slot = Slot(open.clone());
-        let (svc, runs) = (svc.clone(), runs.clone());
+        let (svc, runs, lead_open) = (svc.clone(), runs.clone(), lead_open.clone());
         // A refused thread drops the connection (and its slot) instead of panicking the accept loop.
         let _ = std::thread::Builder::new().name("vajra-socket".into()).spawn(move || {
             let _slot = slot;
-            let _ = handle(conn, &svc, &runs, allowed_uid);
+            let _ = handle(conn, &svc, &runs, allowed_uid, &lead_open);
         });
     }
+}
+
+const LEAD_BUSY: &str = "too many run lead connections";
+
+/// A lead connection holds one lead slot. False when it needs one and all `MAX_LEAD_CONNECTIONS` are taken.
+fn take_lead_slot(lead_conn: bool, slot: &mut Option<Slot>, lead_open: &Arc<AtomicUsize>) -> bool {
+    if !lead_conn || slot.is_some() {
+        return true;
+    }
+    if lead_open.fetch_add(1, Ordering::SeqCst) >= MAX_LEAD_CONNECTIONS {
+        lead_open.fetch_sub(1, Ordering::SeqCst);
+        return false;
+    }
+    *slot = Some(Slot(lead_open.clone()));
+    true
 }
 
 fn reply(w: &mut UnixStream, v: &Value) -> io::Result<()> {
@@ -182,7 +201,7 @@ fn within_cap(v: &Value, len: usize) -> bool {
     len <= MAX_REQUEST || (v.get("vajra_run").is_some() && v.get("tool").and_then(Value::as_str) == Some("plan_tasks"))
 }
 
-fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowed_uid: u32) -> io::Result<()> {
+fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowed_uid: u32, lead_open: &Arc<AtomicUsize>) -> io::Result<()> {
     // First, before any reply: every write on this connection is bounded.
     conn.set_write_timeout(Some(WRITE_TIMEOUT))?;
     match peer_uid(&conn) {
@@ -196,6 +215,12 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowe
     // Once this connection's peer was seen in a lead's tree it stays a lead connection, even if that process exits
     // and a child it handed the socket to sends the next request.
     let mut lead_conn = runs.in_lead_tree(peer);
+    // A lead connection also holds one of the lead trees' `MAX_LEAD_CONNECTIONS`, taken the first time it is seen as one:
+    // at accept, before any byte is read (so a lead trickling a partial line still counts), or at a later request.
+    let mut lead_slot: Option<Slot> = None;
+    if !take_lead_slot(lead_conn, &mut lead_slot, lead_open) {
+        return reply(&mut conn, &json!({"error": "busy", "reason": LEAD_BUSY}));
+    }
     loop {
         let req = match read_request(&mut reader, runreg::MAX_PLAN_REQUEST, || runs.in_lead_tree(peer)) {
             Ok(Some(r)) => r,
@@ -206,6 +231,9 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowe
             Err(e) => return Err(e),
         };
         lead_conn = lead_conn || runs.in_lead_tree(peer);
+        if !take_lead_slot(lead_conn, &mut lead_slot, lead_open) {
+            return reply(&mut conn, &json!({"error": "busy", "reason": LEAD_BUSY}));
+        }
         // The Service route needs the very process that connected, still alive, proved to be the app's own client.
         let peer_live = peer.is_some_and(|p| crate::procid::same_process(p.pid, p.stamp));
         let service_ok = peer_live && runs.service_allowed(peer);
@@ -213,7 +241,8 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowe
             Ok(v) if !within_cap(&v, req.len()) => json!({"error": "request_too_large"}),
             // A run lead's call: never into the Service lock, and one per connection.
             Ok(v) if v.get("vajra_run").is_some() => return reply(&mut conn, &runs.serve(&v, peer)),
-            Ok(_) if lead_conn => json!({"error": "run_lead_on_service"}),
+            // Refused and closed: a lead's tree cannot keep a connection open by repeating refused Service calls.
+            Ok(_) if lead_conn => return reply(&mut conn, &json!({"error": "run_lead_on_service"})),
             Ok(_) if !peer_live => json!({"error": "peer_gone"}),
             Ok(_) if !service_ok => json!({"error": "not_an_app_client"}),
             Ok(v) => match v.get("tool").and_then(Value::as_str) {

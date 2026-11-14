@@ -260,6 +260,8 @@ pub struct App {
     pub control: Arc<Mutex<Service>>,
     /// The live runs whose leads call `vajra-run` tools over the socket (ADR-16 16.5); never behind `control`.
     pub run_leads: Arc<crate::control::runreg::RunRegistry>,
+    /// The leads of the core runs (6d2c), each watched on its own thread.
+    lead_runs: Arc<lead_start::LeadRuns>,
     /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
     _instance: Option<(instance::Held, instance::Held)>,
     bridge: Bridge,
@@ -431,6 +433,7 @@ impl App {
             bus,
             control: Arc::new(Mutex::new(svc)),
             run_leads: crate::control::runreg::RunRegistry::new(),
+            lead_runs: Arc::default(),
             runs: Arc::new(Mutex::new(HashMap::new())),
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
@@ -546,6 +549,21 @@ impl App {
         self.workers.runtime(&self.sup, &self.bus, on_repo, hooks, cfg)
     }
 
+    /// Labs for `project`: `{"available": <developer build>, "on": <on for this project>}`.
+    pub fn labs_get(&self, project: &str) -> Res {
+        let labs = self.seat_env.labs();
+        Ok(json!({"available": labs::LABS_BUILD, "on": labs.on(project)}))
+    }
+
+    /// The human's Labs switch for `project`. Takes effect for the Director-General's next conversation's tool list,
+    /// and at once for the seat checks.
+    pub fn labs_set(&self, project: &str, on: bool) -> Res {
+        self.active_project(project).map_err(|e| e.to_json())?;
+        self.seat_env.labs().set(project, on).map_err(|code| fail(code, "Labs can't be changed for this project"))?;
+        self.note(if on { "labs_on" } else { "labs_off" }, &[]);
+        self.labs_get(project)
+    }
+
     /// The preflight row's "Install developer tools": Apple's installer, only while git is missing (the human's click).
     pub fn install_dev_tools(&self) -> Res {
         if self.workers.install_action().is_none() {
@@ -648,6 +666,8 @@ impl App {
             }
             v
         };
+        // Core runs (a seated proposal's, under its lead) count beside classic runs, so neither kind can start over the other.
+        let active: Vec<caps::Active> = active.into_iter().chain(self.lead_runs.active()).collect();
         let limits = *lock(&self.limits);
         caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
@@ -664,17 +684,18 @@ impl App {
         Ok(l.to_json())
     }
 
-    /// Runs whose PTY is still open.
+    /// Runs in progress: classic runs whose PTY is still open, and core runs whose lead is still watched.
     pub fn active_run_count(&self) -> usize {
-        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
+        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count() + self.lead_runs.active().len()
     }
 
-    /// The active run groups for diagnostics: stream id and the pid of the group leader.
-    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end, every core ticket ends `abandoned`
-    /// (`app_quit`) with its line written and its descendants swept, then every supervisor session is killed and
-    /// reaped. Bounded: a ticket that is not done within `QUIT_TICKETS` is left to the supervisor's kill.
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end; every core run's lead is refused new
+    /// runs, killed and never restarted (`shutdown_leads`); every core ticket ends `abandoned` (`app_quit`) with its line
+    /// written and its descendants swept; then every supervisor session is killed and reaped. Bounded: a lead not gone
+    /// within `LEAD_SHUTDOWN_WAIT`, or a ticket not done within `QUIT_TICKETS`, is left to the supervisor's kill.
     pub fn quit(&self) {
         self.shutdown_lead();
+        self.shutdown_leads(Self::LEAD_SHUTDOWN_WAIT);
         self.workers.quit(QUIT_TICKETS);
         self.sup.shutdown();
     }
@@ -721,6 +742,7 @@ impl App {
         Some(watcher)
     }
 
+    /// The active run groups for diagnostics: stream id and the pid of the group leader.
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
         let mut v: Vec<_> = lock(&self.runs)
             .keys()
@@ -2650,6 +2672,9 @@ mod record_app;
 pub mod record_ledger;
 pub mod runproto;
 pub mod charter;
+pub mod run_lead;
+mod lead_start;
+pub mod labs;
 pub mod verify;
 pub mod phases;
 pub mod runlog;
