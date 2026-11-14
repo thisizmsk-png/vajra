@@ -308,6 +308,19 @@ describe("Shell B frame (FG-03)", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
   });
 
+  it("picking the same folder again after the field was edited applies it again, and keeps the other fields", async () => {
+    boot("", { ...EMPTY, "plugin:dialog|open": "/Users/me/code/a" });
+    await screen.findByRole("heading", { name: S.home.start });
+    const field = () => screen.getByLabelText(S.home.repo) as HTMLInputElement;
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(field().value).toBe("/Users/me/code/a"));
+    fireEvent.change(field(), { target: { value: "/Users/me/code/b" } });
+    fireEvent.change(screen.getByLabelText(S.home.ask), { target: { value: "keep this ask" } });
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(field().value).toBe("/Users/me/code/a"));
+    expect((screen.getByLabelText(S.home.ask) as HTMLTextAreaElement).value).toBe("keep this ask");
+  });
+
   it("from inside a project, a picked folder opens the launcher with it in the Repository folder field", async () => {
     boot("", { "plugin:dialog|open": "/Users/me/code/other" });
     await screen.findByRole("navigation", { name: S.frame.projects });

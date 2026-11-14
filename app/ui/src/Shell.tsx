@@ -110,10 +110,11 @@ function Frame() {
   const [adding, setAdding] = useState(false);
   // It opens the system folder picker first. A pick fills the Repository folder field; cancelling leaves everything as it
   // was; a picker that cannot open falls back to the launcher with the cursor in the field.
+  const pickCount = useRef(0);
   const addProject = () => {
     api.chooseFolder(S.folder.title).then(
       (picked) => {
-        if (typeof picked === "string" && picked) { go("orch", { new: "1", repo: picked }, null); setAdding(true); }
+        if (typeof picked === "string" && picked) { go("orch", { new: "1", repo: picked, pick: `${Date.now()}-${++pickCount.current}` }, null); setAdding(true); }
       },
       () => { go("orch", { new: "1" }, null); setAdding(true); },
     );

@@ -78,7 +78,9 @@ export function Home() {
   const [d, setD] = useState<Draft>({ repo: route.params.repo || project?.root || "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
   // A folder picked by the title bar's Add project arrives as a route param, also when this screen is already open.
   const pickedRepo = route.params.repo;
-  useEffect(() => { if (pickedRepo) setD((x) => (x.repo === pickedRepo ? x : { ...x, repo: pickedRepo })); }, [pickedRepo]);
+  // `pick` is a fresh value for every pick, so choosing the same folder again, after the field was edited, still applies.
+  const pickId = route.params.pick;
+  useEffect(() => { if (pickedRepo) setD((x) => (x.repo === pickedRepo ? x : { ...x, repo: pickedRepo })); }, [pickedRepo, pickId]);
   // The preference scope whose defaults the form holds, or which the user has edited (PR 100 review): switching projects
   // applies the next project's defaults once its own view arrives, and an edit keeps them only within its scope.
   const scope = preferenceScope(project);
