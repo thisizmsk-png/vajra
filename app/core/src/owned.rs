@@ -332,6 +332,63 @@ pub(crate) fn running(pid: u32, stamp: u64) -> bool {
     same_process(pid, stamp) && !crate::procid::is_zombie(pid)
 }
 
+/// What can be read about a recorded process when deciding whether it is gone.
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
+    /// Its exit watch reported NOTE_EXIT (registered before its stamp was verified, so the exit is that process's).
+    exited: bool,
+    /// `kill(pid, 0)` did not fail with ESRCH: something holds the pid (live, a zombie, or another user's process).
+    exists: bool,
+    /// Its start stamp now, if it can be read.
+    stamp: Option<u64>,
+    /// Its start stamp if it is a zombie (`procid::zombie_stamp`).
+    zombie: Option<u64>,
+    /// It is our own child and `waitid(WNOWAIT)` reports it exited (not reaped here: whoever spawned it still reaps it).
+    child_exited: bool,
+}
+
+impl Seen {
+    fn read(w: &mut ExitWatch, pid: u32) -> Self {
+        // SAFETY: kill with signal 0 only checks.
+        let exists = unsafe { libc::kill(pid as i32, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        Seen { exited: w.exited(pid), exists, stamp: start_stamp(pid), zombie: crate::procid::zombie_stamp(pid), child_exited: child_exited(pid) }
+    }
+}
+
+/// Is `pid` our child that has exited? Reads without reaping (`WNOWAIT`), so the code that spawned it still owns the reap
+/// and its `Child` handle cannot later signal a reused pid.
+fn child_exited(pid: u32) -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a writable siginfo_t; WNOHANG never blocks, WNOWAIT leaves the child waitable.
+    let rc = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    // SAFETY: si_pid is set by waitid when it reports a child; zeroed (0) otherwise.
+    rc == 0 && unsafe { info.si_pid() } == pid as libc::pid_t
+}
+
+/// Fail closed: the process recorded at `stamp` is gone only when that is proven, by its exit watch, by the kernel saying
+/// the pid is free, by the pid now holding another process (a different stamp), or by it being a zombie of that very
+/// process. Anything else, a live pid whose stamp cannot be read included, still runs.
+fn gone_from(s: Seen, stamp: u64) -> bool {
+    if s.exited || !s.exists {
+        return true;
+    }
+    match s.stamp {
+        Some(now) if now != stamp => true,
+        Some(_) => s.zombie == Some(stamp),
+        None => s.zombie == Some(stamp) || s.child_exited,
+    }
+}
+
+/// Is the process recorded at (`pid`, `stamp`) provably gone? See `gone_from`.
+pub(crate) fn provably_gone(w: &mut ExitWatch, pid: u32, stamp: u64) -> bool {
+    gone_from(Seen::read(w, pid), stamp)
+}
+
+/// How many of `members` are not provably gone.
+pub(crate) fn left(w: &mut ExitWatch, members: &[(u32, u64)]) -> usize {
+    members.iter().filter(|&&(p, s)| !provably_gone(w, p, s)).count()
+}
+
 /// Reports which processes have exited, so a signal is never sent to a pid after its process is gone. A process is
 /// registered BEFORE its identity is read: if the stamp then matches, the registered pid is the right process, and its
 /// exit from then on is delivered here (an exited process that is not reaped still holds its pid). macOS only; elsewhere
@@ -431,8 +488,8 @@ fn snapshot(w: &mut ExitWatch, o: &Owner) -> Option<Vec<(u32, u64)>> {
 /// ignored SIGHUP (`nohup`, `trap '' HUP`) could no longer be found. Every signal goes to one pid, and only after that
 /// pid is checked not to have exited and to still match its stamp (`signal_verified`); there is no signal to a group or
 /// to "everything in the session". The steps: SIGHUP each member; wait up to `GRACE`; list the session again while the
-/// leader still proves itself (members that started since) and SIGKILL each member that still matches. `Ended` means none
-/// of them is still running; otherwise `Survived` says how many.
+/// leader still proves itself (members that started since) and SIGKILL each member that still matches. `Ended` means each
+/// of them is provably gone (`provably_gone`); otherwise `Survived` says how many are not.
 pub fn recover(o: &Owner) -> Recovery {
     let mut w = ExitWatch::new();
     let Some(mut members) = snapshot(&mut w, o) else { return Recovery::NotOwned };
@@ -440,7 +497,7 @@ pub fn recover(o: &Owner) -> Recovery {
         signal_verified(&mut w, p, s, libc::SIGHUP);
     }
     let t0 = Instant::now();
-    while t0.elapsed() < GRACE && members.iter().any(|&(p, s)| running(p, s)) {
+    while t0.elapsed() < GRACE && left(&mut w, &members) > 0 {
         std::thread::sleep(Duration::from_millis(25));
     }
     if let Some(now) = snapshot(&mut w, o) {
@@ -454,10 +511,12 @@ pub fn recover(o: &Owner) -> Recovery {
         signal_verified(&mut w, p, s, libc::SIGKILL);
     }
     let t1 = Instant::now();
-    while t1.elapsed() < Duration::from_secs(1) && members.iter().any(|&(p, s)| running(p, s)) {
+    while t1.elapsed() < Duration::from_secs(1) && left(&mut w, &members) > 0 {
         std::thread::sleep(Duration::from_millis(20));
     }
-    match members.iter().filter(|&&(p, s)| running(p, s)).count() {
+    // Fail closed: a member counts as ended only when it is provably gone (`gone_from`), never because its stamp went
+    // unreadable while its pid is still held.
+    match left(&mut w, &members) {
         0 => Recovery::Ended,
         remaining => Recovery::Survived { remaining },
     }
@@ -547,6 +606,47 @@ mod tests {
         let d = std::env::temp_dir().join(format!("vajra-owned-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d.join("owned.jsonl")
+    }
+
+    #[test]
+    fn given_a_held_pid_whose_stamp_cannot_be_read_when_judged_then_it_still_runs() {
+        // Today's rule (`!running`) called this gone and recover reported Ended for a process it could not prove dead.
+        let held = Seen { exists: true, ..Seen::default() };
+        assert!(!gone_from(held, 42), "an unreadable stamp on a held pid is SURVIVING, never ended");
+        let reused_zombie = Seen { exists: true, zombie: Some(7), ..Seen::default() };
+        assert!(!gone_from(reused_zombie, 42), "a zombie on a reused pid proves nothing about the recorded process");
+    }
+
+    #[test]
+    fn given_each_proof_of_exit_when_judged_then_only_those_are_gone() {
+        let s = 42;
+        let base = Seen { exists: true, ..Seen::default() };
+        assert!(gone_from(Seen { exited: true, ..base }, s), "the exit watch saw it exit");
+        assert!(gone_from(Seen { exists: false, ..base }, s), "ESRCH: the pid is free");
+        assert!(gone_from(Seen { stamp: Some(43), ..base }, s), "the pid holds another process now");
+        assert!(gone_from(Seen { zombie: Some(s), ..base }, s), "a zombie of this very process");
+        assert!(gone_from(Seen { stamp: Some(s), zombie: Some(s), ..base }, s), "a zombie whose stamp still reads (Linux)");
+        assert!(gone_from(Seen { child_exited: true, ..base }, s), "our own child, exited and waiting to be reaped");
+        assert!(!gone_from(Seen { stamp: Some(s), ..base }, s), "the same process, running");
+        assert!(!gone_from(Seen { stamp: Some(s), child_exited: true, ..base }, s), "a readable live stamp outranks a child report");
+    }
+
+    #[test]
+    fn given_a_live_child_then_a_killed_unreaped_one_when_read_then_only_the_killed_one_is_gone() {
+        let mut c = Command::new("sleep").arg("30").spawn().unwrap();
+        let (pid, stamp) = (c.id(), start_stamp(c.id()).unwrap());
+        let mut w = ExitWatch::new();
+        assert!(w.add(pid));
+        assert!(!provably_gone(&mut w, pid, stamp), "a running child is not gone");
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let t0 = Instant::now();
+        while !provably_gone(&mut w, pid, stamp) && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(alive(pid), "not reaped yet: the pid is still held");
+        assert!(provably_gone(&mut w, pid, stamp), "killed and unreaped is provably gone");
+        assert!(child_exited(pid) && child_exited(pid), "WNOWAIT reads it without reaping it");
+        c.wait().unwrap();
     }
 
     #[test]

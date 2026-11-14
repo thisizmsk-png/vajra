@@ -19,7 +19,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::owned::{ExitWatch, running, signal_verified};
+use crate::owned::{ExitWatch, left, provably_gone, signal_verified};
 use crate::procid::start_stamp;
 
 /// What one sweep did.
@@ -156,18 +156,19 @@ pub fn sweep_ticket(seen: &[(u32, u64)], tmp: &Path, since: u64) -> Swept {
     total
 }
 
-/// SIGKILL each `(pid, stamp)` that is still that process, then wait up to a second for them to go.
+/// SIGKILL each `(pid, stamp)` that is still that process, then wait up to a second for them to go. Fail closed: one is
+/// counted killed only once it is provably gone (`owned::provably_gone`); a held pid whose stamp cannot be read survives.
 pub(crate) fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
     let mut watch = ExitWatch::new();
-    let hits: Vec<(u32, u64)> = hits.into_iter().filter(|&(p, s)| watch.add(p) && running(p, s)).collect();
+    let hits: Vec<(u32, u64)> = hits.into_iter().filter(|&(p, s)| watch.add(p) && !provably_gone(&mut watch, p, s)).collect();
     for &(p, s) in &hits {
         signal_verified(&mut watch, p, s, libc::SIGKILL);
     }
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(1) && hits.iter().any(|&(p, s)| running(p, s)) {
+    while t0.elapsed() < Duration::from_secs(1) && left(&mut watch, &hits) > 0 {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let survived = hits.iter().filter(|&&(p, s)| running(p, s)).count();
+    let survived = left(&mut watch, &hits);
     Swept { killed: hits.len() - survived, survived }
 }
 
