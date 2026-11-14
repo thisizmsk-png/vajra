@@ -869,7 +869,7 @@ export const S = {
       engine_bundle_missing: "The bundled engine is missing from the app. Reinstall Vajra Desktop.",
       engine_bundle_mismatch: "The bundled engine doesn't match this build. Reinstall Vajra Desktop.",
       engine_bundle_malformed: "The bundled engine can't be read. Reinstall Vajra Desktop.",
-      engine_in_use: "A run, session or campaign is using the engine. Finish or stop it, then plan again.",
+      engine_in_use: "A run or session is using the engine. Finish or stop it, then plan again.",
       engine_needs_bash: "macOS is missing /bin/bash. Run the command above in a terminal.",
       engine_needs_jq: "The engine needs /usr/bin/jq, which macOS 15 and later include. Run the command above after installing jq.",
       engine_needs_openssl: "macOS is missing /usr/bin/openssl. Run the command above in a terminal.",
