@@ -1536,7 +1536,7 @@ fn cli_env(mut env: Vec<(&'static str, OsString)>, bin: &Path) -> Vec<(&'static 
 
 /// `claude --version` under the Lead's own environment, asked of the executable on every ask. Never cached by path: a
 /// CLI updated in place must get its own self-test, because deny-rule semantics depend on the version.
-fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Result<String, LeadError> {
+pub(super) fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Result<String, LeadError> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let bad = || LeadError::GuardMissing("claude --version failed".into());

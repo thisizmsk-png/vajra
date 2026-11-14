@@ -104,6 +104,40 @@ const CLAUDE_WORKER_USER: &[&str] = &["login", "mcp_servers", "CLAUDE.md", "them
 /// Set it back to `false` (and update the pinning test) if a Claude Code build fails S4.
 pub const CLAUDE_WORKER_S4_PASSED: bool = true;
 
+/// The Claude Code builds S4 proved, each with the worker flag shape it proved (`claude_worker_flag_shape`): the
+/// version exactly as `claude --version` prints it, and that shape's sha256. A Claude worker is dispatched only when
+/// the running build and today's shape are a pair here (#180 bhishma): S4's proof is about one build's handling of
+/// these deny rules and hooks, and users' CLIs auto-update. A new build, or any change to the rules, the hooks or the
+/// flag's fields, needs an S4 PASS on it first; `s4-claude-settings.sh` prints the pair to add. Fails closed.
+pub const CLAUDE_WORKER_PROVEN: &[(&str, &str)] = &[
+    // The owner's S4 PASS on batch-3 1f5641f4, 2026-11-12 (the extended run: the guard and the deny rules refused
+    // Bash, Write and Edit into the data dir).
+    ("2.1.296 (Claude Code)", "5badf13b1b3ce79c515613171b73fc8a8b82938cf1b2d08b1ca9837945546faa"),
+];
+
+pub const CLAUDE_UNPROVEN: Unsupported = Unsupported {
+    reason: "claude_unproven",
+    detail: "Vajra hasn't verified this Claude Code version with its worker settings yet. Use a verified version, or a Codex worker.",
+};
+
+/// The sha256 of the worker flag file built over fixed placeholder paths: the same on every machine and for every
+/// ticket, and changed by any change to the deny-rule tables, the hooks or the flag's own fields.
+pub fn claude_worker_flag_shape() -> Result<String, String> {
+    let p = |s: &str| PathBuf::from(format!("/vajra-flag-shape/{s}"));
+    let body = claude_worker_flag(&p("home"), &p("work"), &[p("repo")], &p("data"))?;
+    Ok(crate::control::sha256::hex_digest(body.as_bytes()))
+}
+
+/// Whether this `claude --version` output, with today's flag shape, is a pair S4 proved.
+pub fn claude_worker_proven(version: &str) -> Result<(), Unsupported> {
+    let shape = claude_worker_flag_shape().map_err(|_| CLAUDE_UNPROVEN)?;
+    if CLAUDE_WORKER_PROVEN.iter().any(|(v, s)| *v == version.trim() && *s == shape) {
+        Ok(())
+    } else {
+        Err(CLAUDE_UNPROVEN)
+    }
+}
+
 pub const S4_UNVERIFIED: Unsupported = Unsupported {
     reason: "s4_unverified",
     detail: "Vajra hasn't verified its Claude Code worker settings with this build yet.",

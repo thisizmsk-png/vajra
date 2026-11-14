@@ -515,6 +515,23 @@ fn a_read_back_mismatch_kills_the_session() {
 
 /// Pins today's state: the owner's S4 run on batch-3 printed PASS, so both Claude worker kinds are supported. Setting
 /// `CLAUDE_WORKER_S4_PASSED` back to false (a new Claude Code build that fails S4) must change this test with it.
+/// #180 bhishma: today's worker flag shape must be one S4 proved. Any change to the deny-rule tables, the hooks or the
+/// flag's fields changes the shape and fails this test until S4 passes on it and its pair is added to
+/// `CLAUDE_WORKER_PROVEN` (the spike prints the pair). Only exact `claude --version` strings in that list pass.
+#[test]
+fn only_a_claude_build_s4_proved_with_todays_flag_shape_is_dispatched() {
+    let shape = claude_worker_flag_shape().unwrap();
+    assert_eq!(shape.len(), 64);
+    assert!(CLAUDE_WORKER_PROVEN.iter().any(|(_, s)| *s == shape), "today's flag shape {shape} is not one S4 proved: rerun S4 and add its pair");
+    assert_eq!(claude_worker_flag_shape().unwrap(), shape, "the shape is the same on every call");
+    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)"), Ok(()));
+    assert_eq!(claude_worker_proven("  2.1.296 (Claude Code)\n"), Ok(()), "--version output is trimmed");
+    for bad in ["2.1.322 (Claude Code)", "2.1.296", "2.1.2960 (Claude Code)", "", "SHAPE_PENDING"] {
+        assert_eq!(claude_worker_proven(bad), Err(CLAUDE_UNPROVEN), "{bad:?}");
+    }
+    assert_eq!(CLAUDE_UNPROVEN.reason, "claude_unproven");
+}
+
 #[test]
 fn the_claude_worker_profile_is_supported_once_s4_passed() {
     const { assert!(CLAUDE_WORKER_S4_PASSED) };

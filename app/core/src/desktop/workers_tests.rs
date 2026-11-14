@@ -88,12 +88,16 @@ fn ugit(home: &Path, cwd: &Path, args: &[&str]) -> String {
 
 /// The fake harness. It answers as either harness: as Codex it prints `thread.started` and writes a rollout whose
 /// `turn_context` is what the profile asked for; as Claude (`-p`) it prints the `system`/`init` event. Then `mode`.
-fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path) -> PathBuf {
+/// A Claude Code build S4 proved with today's flag shape (`profiles::CLAUDE_WORKER_PROVEN`).
+const PROVEN_VERSION: &str = "2.1.296 (Claude Code)";
+
+fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path, version: &str) -> PathBuf {
     let p = dir.join(name);
     let script = format!(
         r#"#!/bin/sh
 MODE='{mode}'
 WT=$(pwd -P)
+[ "$1" = --version ] && {{ if [ -f '{log}.upgraded' ]; then echo '9.9.9 (Claude Code)'; else echo '{version}'; fi; exit 0; }}
 HARNESS=codex
 [ "$1" = -p ] && HARNESS=claude
 case "$1" in
@@ -129,6 +133,7 @@ case "$MODE" in
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
   504) echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
+  504_upgrade) touch '{log}.upgraded'; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
   hang) exec sleep 600 ;;
   rewrite_dotgit) edit; echo 'gitdir: /tmp/elsewhere' > .git ;;
   commit) edit; git -c core.hooksPath=/dev/null -c user.name=W -c user.email=w@e commit -qam worker ;;
@@ -212,7 +217,8 @@ struct Opts {
     caps: BTreeMap<String, u32>,
     files: Vec<(&'static str, &'static str)>,
     redact: Redactor,
-    claude_ok: bool,
+    /// What the fake harness answers to `--version`; the default is a build S4 proved.
+    claude_version: &'static str,
     hooks: Hooks,
     spoil: Option<&'static str>,
     steer: Option<Steer>,
@@ -224,7 +230,7 @@ struct Opts {
 impl Default for Opts {
     fn default() -> Self {
         Opts {
-            mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None, gate: None, steer: None,
+            mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_version: PROVEN_VERSION, hooks: Hooks::default(), spoil: None, gate: None, steer: None,
             poll: Duration::from_millis(20),
         }
     }
@@ -267,7 +273,7 @@ fn rig(tag: &str, o: Opts) -> Rig {
     let e2 = errors.clone();
     sup.set_error_sink(Arc::new(move |e: &ProviderError| crate::lock(&e2).push(e.clone())));
     let clock = Arc::new(FakeClock::default());
-    let bin = fake(&d, "harness", o.mode, &codex_home, &pids);
+    let bin = fake(&d, "harness", o.mode, &codex_home, &pids, o.claude_version);
     let cfg = Config {
         home: home.clone(),
         data: data.canonicalize().unwrap(),
@@ -281,7 +287,6 @@ fn rig(tag: &str, o: Opts) -> Rig {
         clock: Some(clock.clone()),
         redact: o.redact,
         steer: o.steer,
-        claude_unverified_ok: o.claude_ok,
     };
     let rt = WorkerRuntime::new(cfg, gw.clone(), sup.clone(), bus, o.hooks);
     Rig { d, home, repo: repo.canonicalize().unwrap(), base, gw, sup, rt, clock, errors }
@@ -936,6 +941,39 @@ fn a_claude_worker_runs_through_its_profile_now_that_s4_passed() {
     assert!(flags.is_empty(), "the flag file is removed when the ticket ends");
 }
 
+/// #180 bhishma: S4 proved one Claude Code build, but users auto-update. A build no S4 run proved (with today's flag
+/// shape) is refused, as a task worker and as a check, before any worktree or flag file exists and before it runs.
+#[test]
+fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() {
+    let r = rig("claude-unproven", Opts { claude_version: "9.9.9 (Claude Code)", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    assert!(v.worktree.is_none() && !r.gw.work.join("p/r1/t1-r1").exists(), "refused before any worktree exists");
+    assert!(std::fs::read_dir(r.gw.data.join("profiles")).map_or(true, |d| d.count() == 0), "no flag file was written");
+    assert!(!r.d.join("log").exists(), "the harness never ran");
+    // A version probe that fails is refused the same way (fail closed).
+    let r = rig("claude-noversion", Opts { claude_version: "", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    assert!(v.worktree.is_none(), "{v:?}");
+    // A Codex worker is not asked about Claude at all.
+    let r = rig("codex-unaffected", Opts { claude_version: "9.9.9 (Claude Code)", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+/// #186 codex: the CLI updates in place during the first attempt (proven 2.1.296, then 9.9.9). The retry, after its
+/// backoff, asks the binary again before it spawns, so the second process never launches.
+#[test]
+fn a_retry_asks_the_claude_binary_again_and_an_update_during_the_attempt_is_refused() {
+    let r = rig("claude-reprobe", Opts { mode: "504_upgrade", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    let starts = std::fs::read_to_string(r.d.join("log")).unwrap().lines().filter(|l| l.starts_with("start ")).count();
+    assert_eq!(starts, 1, "the second attempt never launched");
+    assert_eq!(r.clock.slept(), vec![errors::BACKOFF[0]], "it was a retry, after the first backoff");
+}
+
 /// A Claude task worker's steering channel is opened by its own session id before it starts, and its brief carries
 /// the nonce in the workflow's steering paragraph. A Codex worker gets none.
 #[test]
@@ -949,7 +987,7 @@ fn a_claude_task_worker_gets_its_steering_channel_by_session_id_before_it_starts
         crate::lock(&o2).push((sid.to_string(), ran));
         Some(NONCE.to_string())
     });
-    let r = rig("steer", Opts { claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let r = rig("steer", Opts { steer: Some(steer), ..Opts::default() });
     *crate::lock(&log) = r.d.join("log");
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
@@ -975,7 +1013,8 @@ fn a_spawn_that_fails_after_the_steering_channel_opened_still_retires_it() {
         Some("00112233445566778899aabbccddeeff".into())
     });
     let hooks = Hooks { on_dispatch: None, on_outcome: Some(Box::new(move |v| crate::lock(&r2).push(v.harness_session.clone()))) };
-    let r = rig("steer-spawnfail", Opts { claude_ok: true, steer: Some(steer), hooks, ..Opts::default() });
+    // The default Claude build is one S4 proved (`claude_version`), so the spawn is reached.
+    let r = rig("steer-spawnfail", Opts { steer: Some(steer), hooks, ..Opts::default() });
     r.sup.shutdown();
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("spawn_failed")), "{v:?}");
@@ -1008,7 +1047,7 @@ fn a_running_claude_check_worker_shows_message_off_with_its_true_reason() {
         o2.fetch_add(1, Ordering::SeqCst);
         Some("00112233445566778899aabbccddeeff".into())
     });
-    let r = rig("claude-check", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let r = rig("claude-check", Opts { mode: "hang", steer: Some(steer), ..Opts::default() });
     let mut s = seat("v1", "claude");
     s.role = crate::crew::roles::VERIFIER.into();
     let id = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), s, &r.base).unwrap();
@@ -1026,7 +1065,7 @@ fn a_running_claude_check_worker_shows_message_off_with_its_true_reason() {
 #[test]
 fn an_ended_ticket_offers_no_message_redirect_or_stop() {
     let steer: Steer = Arc::new(|_: &str| Some("00112233445566778899aabbccddeeff".to_string()));
-    let r = rig("ended-controls", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let r = rig("ended-controls", Opts { mode: "hang", steer: Some(steer), ..Opts::default() });
     let claude = running(&r, &r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     let codex = running(&r, &r.rt.dispatch(r.task("r2", "t1"), seat("w2", "codex")).unwrap());
     let on = |v: &TicketView, k: &str| v.core_worker().controls[k]["enabled"].as_bool().unwrap();
@@ -1050,7 +1089,7 @@ fn a_claude_task_whose_steering_channel_failed_says_so_and_a_steered_one_is_open
     let o2 = ok.clone();
     // The first open fails, the second succeeds.
     let steer: Steer = Arc::new(move |_: &str| (o2.fetch_add(1, Ordering::SeqCst) > 0).then(|| "00112233445566778899aabbccddeeff".to_string()));
-    let r = rig("claude-nochan", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let r = rig("claude-nochan", Opts { mode: "hang", steer: Some(steer), ..Opts::default() });
     let failed = running(&r, &r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!(failed.message_off(), Some(profiles::NO_STEER_CHANNEL), "{failed:?}");
     assert_eq!(failed.core_worker().controls["message"]["enabled"], false);
@@ -1061,7 +1100,7 @@ fn a_claude_task_whose_steering_channel_failed_says_so_and_a_steered_one_is_open
 
 #[test]
 fn a_claude_launch_whose_argv_is_refused_leaves_no_flag_file() {
-    let r = rig("claude-badargv", Opts { claude_ok: true, ..Opts::default() });
+    let r = rig("claude-badargv", Opts::default());
     // The model id passes dispatch but not the argv builder, which runs after the flag file is written.
     let mut s = seat("w1", "claude");
     s.model = Some("-bad".into());
@@ -1098,7 +1137,7 @@ fn next_life(r: &Rig) -> WorkerRuntime {
     let cfg = Config {
         home: s.cfg.home.clone(), data: s.cfg.data.clone(), codex: s.cfg.codex.clone(), claude: s.cfg.claude.clone(), codex_home: s.cfg.codex_home.clone(),
         tools: s.cfg.tools.clone(), account_caps: BTreeMap::new(), worker_timeout: WORKER_TIMEOUT, poll: s.cfg.poll, clock: None,
-        redact: Redactor::default(), steer: None, claude_unverified_ok: false,
+        redact: Redactor::default(), steer: None,
     };
     WorkerRuntime::new(cfg, r.gw.clone(), r.sup.clone(), s.bus.clone(), Hooks::default())
 }
@@ -1248,7 +1287,7 @@ fn a_fifo_in_the_tickets_files_place_is_refused_without_blocking() {
     let cfg = Config {
         home: s.cfg.home.clone(), data: s.cfg.data.clone(), codex: s.cfg.codex.clone(), claude: s.cfg.claude.clone(), codex_home: s.cfg.codex_home.clone(),
         tools: s.cfg.tools.clone(), account_caps: BTreeMap::new(), worker_timeout: WORKER_TIMEOUT, poll: s.cfg.poll, clock: None,
-        redact: Redactor::default(), steer: None, claude_unverified_ok: false,
+        redact: Redactor::default(), steer: None,
     };
     std::thread::spawn(move || {
         let rt = WorkerRuntime::new(cfg, gw, sup, bus, Hooks::default());
@@ -1416,7 +1455,7 @@ fn a_stop_during_a_retry_backoff_ends_the_ticket_at_once() {
         let cfg = Config {
             home: s.cfg.home.clone(), data: s.cfg.data.clone(), codex: s.cfg.codex.clone(), claude: s.cfg.claude.clone(), codex_home: s.cfg.codex_home.clone(),
             tools: s.cfg.tools.clone(), account_caps: BTreeMap::new(), worker_timeout: WORKER_TIMEOUT, poll: s.cfg.poll, clock: None,
-            redact: Redactor::default(), steer: None, claude_unverified_ok: false,
+            redact: Redactor::default(), steer: None,
         };
         WorkerRuntime::new(cfg, r.gw.clone(), r.sup.clone(), s.bus.clone(), Hooks::default())
     };
