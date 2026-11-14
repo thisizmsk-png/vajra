@@ -577,6 +577,24 @@ fn a_network_seat_resolves_and_fetches_over_https_under_deny_default() {
     assert!(!t.run(&t.profile(false), get, &[]).status.success());
 }
 
+/// bhishma L2 on 6dfca73, pinned as it is: a loopback bind works with either seat, and Seatbelt can't refuse a bind
+/// on every address (its `localhost` matches every address of the Mac). If this starts failing on the second assert,
+/// Seatbelt has narrowed `localhost`: the bind rule now keeps servers on loopback, so update the profile's comment.
+#[test]
+fn binds_work_on_loopback_and_seatbelt_cannot_keep_them_there() {
+    if !macos() || !have("python3") {
+        return eprintln!("skipped: sandbox-exec or python3");
+    }
+    let bind = |addr: &str| format!("python3 -c \"import socket; s=socket.socket(); s.bind(('{addr}', 0)); s.listen(1)\"");
+    let t = Tmp::new("bindall");
+    for network in [true, false] {
+        let p = t.fresh(network, &format!("run-{network}"));
+        p.prepare().unwrap();
+        assert!(t.run(&p, &bind("127.0.0.1"), &[]).status.success(), "loopback bind, network={network}");
+        assert!(t.run(&p, &bind("0.0.0.0"), &[]).status.success(), "Seatbelt now refuses an every-address bind (network={network}): update the profile's comment");
+    }
+}
+
 /// M1: launchd starts no job for a sandboxed caller. The job would only run `/usr/bin/true`, and is removed either way.
 #[test]
 fn launchd_starts_no_job_for_a_command() {
@@ -1083,6 +1101,114 @@ fn the_copied_index_is_only_ever_the_run_repositorys_own() {
     let start = std::time::Instant::now();
     assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), not_plain, "a FIFO index");
     assert!(start.elapsed() < Duration::from_secs(5), "a FIFO index stalled the run");
+}
+
+/// A linked worktree `work` of a fresh repo `repo` under `t`, one committed file. Returns (repo, worktree).
+fn linked_worktree(t: &Tmp) -> (PathBuf, PathBuf) {
+    let git = |dir: &Path, args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(dir).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", t.home()).output().unwrap();
+    let repo = t.0.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    assert!(git(&repo, &["init", "-q", "-b", "main"]).status.success());
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
+    assert!(git(&repo, &["add", "a.txt"]).status.success());
+    assert!(git(&repo, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "a"]).status.success());
+    let _ = fs::remove_dir_all(t.0.join("work"));
+    assert!(git(&repo, &["worktree", "add", "-q", t.0.join("work").to_str().unwrap()]).status.success());
+    (repo, t.0.join("work"))
+}
+
+/// Plan #214 L1: a filter driver set in the repository's own config (picked by a hostile `.gitattributes` in the
+/// worktree) refuses the run before any command, whether it's in the common config, the worktree's own config, or
+/// pulled in through an include. The control shows the filter is real: outside the runner, `git add` runs it.
+#[test]
+fn a_repo_configured_filter_driver_or_include_refuses_the_run() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("filterdrv");
+    let (repo, work) = linked_worktree(&t);
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    let marker = t.0.join("filter-ran");
+    let filter = t.0.join("evil-filter.sh");
+    fs::write(&filter, format!("#!/bin/sh\ntouch '{}'\nprintf constant\n", marker.display())).unwrap();
+    fs::set_permissions(&filter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    fs::write(work.join(".gitattributes"), "* filter=evil\n").unwrap();
+    fs::write(work.join("a.txt"), "changed\n").unwrap();
+    let gitc = |args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(&work).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", &home).output().unwrap();
+    let refused = RunOutcome::Failed("the repository's git config sets a filter driver or an include, which could change what the run's tree ids record".into());
+    let cmds = vec!["true".to_string()];
+    let clean_config = fs::read(common.join("config")).unwrap();
+    // In the common config. The control: outside the runner, `git add` runs it.
+    assert!(gitc(&["config", "filter.evil.clean", filter.to_str().unwrap()]).status.success());
+    assert!(gitc(&["add", "-A"]).status.success());
+    assert!(marker.exists(), "control: the filter should run outside the runner");
+    assert!(gitc(&["reset", "-q"]).status.success());
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "a common-config filter");
+    // smudge and process are refused the same way.
+    for key in ["filter.evil.smudge", "filter.evil.process"] {
+        fs::write(common.join("config"), &clean_config).unwrap();
+        assert!(gitc(&["config", key, filter.to_str().unwrap()]).status.success());
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "{key}");
+    }
+    // In the worktree's own config (config.worktree in its admin folder).
+    fs::write(common.join("config"), &clean_config).unwrap();
+    fs::write(common.join("worktrees/work/config.worktree"), format!("[filter \"evil\"]\n\tclean = {}\n", filter.display())).unwrap();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "a worktree-config filter");
+    fs::remove_file(common.join("worktrees/work/config.worktree")).unwrap();
+    // Through an include: the included file could be written by a check mid-run, so any include refuses.
+    for inc in ["[include]\n\tpath = /dev/null\n", "[includeIf \"gitdir:/\"]\n\tpath = /dev/null\n"] {
+        let mut c = clean_config.clone();
+        c.extend_from_slice(inc.as_bytes());
+        fs::write(common.join("config"), c).unwrap();
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "{inc}");
+    }
+    // A config git can't parse isn't proven clean.
+    let mut c = clean_config.clone();
+    c.extend_from_slice(b"[broken\n");
+    fs::write(common.join("config"), c).unwrap();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "an unparsable config");
+    // Back to a clean config: the same worktree, `.gitattributes` and all, runs (an attribute naming no configured
+    // driver does nothing).
+    fs::write(common.join("config"), &clean_config).unwrap();
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Ran { passed: true, .. }));
+}
+
+/// Plan #214 L1: every git in the run has fsmonitor and hooks off, whatever the repository's config says, and no
+/// command can rewrite the worktree's `.git` to point the run's git at a repo of its own. The control shows the
+/// fsmonitor hook is real: outside the runner, `git status` runs it.
+#[test]
+fn a_run_s_git_ignores_the_repos_fsmonitor_and_hooks_and_can_t_repoint_dot_git() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("fsmon");
+    let (repo, work) = linked_worktree(&t);
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    // The hook writes into the worktree, which a run may write, so a hook that ran inside would leave the marker.
+    let marker = work.join("fsmon-ran");
+    let hook = t.0.join("fsmon-hook.sh");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display())).unwrap();
+    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let gitc = |args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(&work).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", &home).output().unwrap();
+    assert!(gitc(&["config", "core.fsmonitor", hook.to_str().unwrap()]).status.success());
+    assert!(gitc(&["config", "core.hooksPath", t.0.join("hooks").to_str().unwrap()]).status.success());
+    assert!(gitc(&["status", "--porcelain"]).status.success());
+    assert!(marker.exists(), "control: the fsmonitor hook should run outside the runner");
+    fs::remove_file(&marker).unwrap();
+    let dotgit = fs::read(work.join(".git")).unwrap();
+    let cmds = vec![
+        "test \"$(git config core.fsmonitor)\" = false && test \"$(git config core.hooksPath)\" = /dev/null".to_string(),
+        "git status --porcelain >/dev/null && git add -A && test ! -e fsmon-ran".to_string(),
+        "! sh -c 'echo gitdir: /tmp > .git' 2>/dev/null".to_string(),
+    ];
+    let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
+    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "{out:?}");
+    assert!(!marker.exists(), "the fsmonitor hook ran inside a run");
+    assert_eq!(fs::read(work.join(".git")).unwrap(), dotgit, "a command rewrote the worktree's .git");
 }
 
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.
