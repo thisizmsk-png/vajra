@@ -3768,6 +3768,7 @@ name = "vajra-desktop"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "icu_properties",
  "libc",
  "objc2",
  "objc2-foundation",

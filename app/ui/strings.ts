@@ -608,6 +608,7 @@ export const S = {
       networkOn: "On: these commands can reach outside services",
       networkOff: "Off: these commands can reach only this Mac (localhost)",
       listSha: "List hash (sha256)",
+      nonAscii: "Highlighted characters are outside plain ASCII. Check each one is the letter you expect: some look like ASCII letters but aren't.",
       list: (n: number) => (n === 1 ? "1 command, run in this order" : `${n} commands, run in this order`),
       scope: "This approval covers this run and round only. It is used once and never saved as a rule. A redo, a new round or any changed command needs a new approval.",
       declineNote: "Declining ends the run as Not verified.",

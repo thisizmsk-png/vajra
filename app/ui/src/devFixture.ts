@@ -289,7 +289,7 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   evidence_approval: (a) => new URLSearchParams(location.search).has("approval")
     ? { run_id: String(a?.runId), state: "pending", sha256: "c4".repeat(32), asked_at: 1_794_000_000, hold_max_s: 86_400, ask: {
         run_id: String(a?.runId), round: 1, commit: "4e1c9a2b7d03c5e6f7a89b0c1d2e3f405162738a", seat: "verifier", account: "codex (work)",
-        commands: ["npm ci", "npm run build", "npm test -- --runInBand src/limiter", "npx playwright test e2e/rate-limit.spec.ts --reporter=line", "curl -sf http://127.0.0.1:4000/health"],
+        commands: ["npm ci", "npm run build", "npm test -- --runInBand src/limiter", "npx playwright test e2e/rate-limit.spec.ts --reporter=line", new URLSearchParams(location.search).get("approval") === "lookalike" ? "\u{0441}url -sf https://ex\u{0430}mple.com/health" : "curl -sf http://127.0.0.1:4000/health"],
         network: false,
       } }
     : { run_id: String(a?.runId), state: "none" },

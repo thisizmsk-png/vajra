@@ -4,7 +4,7 @@ import { S } from "../../../strings";
 import { api, errorText, newActionId, onChanged } from "../../ipc";
 import type { EvidenceApproval as Approval } from "../../ipc";
 import { useCurrentProject } from "../../projects/current";
-import { hidesText } from "./hidesText";
+import { asciiRuns, codePoint, hidesText } from "./hidesText";
 
 const L = S.run.approval;
 
@@ -128,9 +128,15 @@ export function EvidenceApproval({ runId }: { runId: string }) {
             </dl>
             <h3 id="v-approval-list" className="v-text v-text--label">{L.list(shown.ask.commands.length)}</h3>
             {/* Focusable so the list scrolls from the keyboard. Each command is a text node, shown whole and wrapped. */}
+            {shown.ask.commands.some((c) => /[^\x00-\x7f]/.test(c)) && <Text variant="body-sm" muted>{L.nonAscii}</Text>}
             <ol className="v-approval__list" aria-labelledby="v-approval-list" tabIndex={0}>
               {shown.ask.commands.map((c, i) => (
-                <li key={i}><code>{c}</code></li>
+                <li key={i}>
+                  <code>
+                    {/* A character outside plain ASCII is marked (a lookalike letter shows): its text stays exactly as is. */}
+                    {asciiRuns(c).map((r, k) => (r.ascii ? r.text : <mark key={k} className="v-approval__nonascii" title={codePoint(r.text)}>{r.text}</mark>))}
+                  </code>
+                </li>
               ))}
             </ol>
             <Text variant="body-sm" muted>{L.scope}</Text>
