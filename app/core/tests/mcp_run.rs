@@ -16,7 +16,7 @@ use vajra_desktop::control::runreg::{self, LeadProc, RunRegistry};
 use vajra_desktop::control::service::{Service, WorkerSeat};
 use vajra_desktop::control::{nonce, socket};
 use vajra_desktop::crew::redact::Redactor;
-use vajra_desktop::desktop::runproto::{Integration, Limits, RunConfig, RunProtocol, StubGate, SystemClock, Tick, Workers};
+use vajra_desktop::desktop::runproto::{Integrated, Integration, Limits, RunConfig, RunProtocol, StubGate, SystemClock, Tick, Workers};
 use vajra_desktop::desktop::workers::{DispatchError, KillReason, TaskSpec};
 use vajra_desktop::vajra::gitw::GitwError;
 
@@ -39,7 +39,7 @@ impl Workers for NoWorkers {
         false
     }
     fn kill_run(&self, _: &str, _: KillReason) {}
-    fn integrate(&self, _: &Integration<'_>, _: &[String]) -> Result<String, GitwError> {
+    fn integrate(&self, _: &Integration<'_>, _: &[String]) -> Result<Integrated, GitwError> {
         Err(GitwError::Invalid("no merges in this test"))
     }
     fn limit_writers(&self, _: &str, _: u32) {}

@@ -16,7 +16,7 @@ pub mod argv;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -26,6 +26,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::bus::{self, Bus};
 use crate::crew::redact::Redactor;
+use crate::providers::install::env::SetupEnv;
 use crate::logging::Logger;
 use crate::providers::errors::{self, Ident, ProviderError};
 
@@ -128,6 +129,9 @@ pub struct SpawnSpec {
     /// `CLAUDE_CONFIG_DIR`, and the per-ticket `TMPDIR`), never a key. Any other name refuses the spawn.
     pub extra_env: Vec<(&'static str, OsString)>,
 }
+
+/// The bus stream prefix reserved for one-click installs (`Supervisor::spawn_setup`).
+pub const SETUP_STREAM: &str = "setup-";
 
 /// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8), plus a Claude run lead's pinned `MCP_TOOL_TIMEOUT`
 /// (16.5, 6d2).
@@ -386,6 +390,35 @@ impl Supervisor {
         if let Some(why) = lock(&self.refuse_all).clone() {
             return Err(SessionError::Ledger(why));
         }
+        if id.starts_with(SETUP_STREAM) {
+            return Err(SessionError::InvalidId);
+        }
+        if !extra_env_ok(&spec.extra_env) {
+            return Err(SessionError::BadEnv);
+        }
+        let mut env = user_env();
+        env.extend(spec.extra_env.iter().cloned());
+        self.start(id, &spec, &env, tag, Some(who))
+    }
+
+    /// A one-click install (ADR-17, bhishma condition 8) on bus stream `setup-<id>`: exactly the Setup env profile,
+    /// never `user_env`, and the profile's proxy value and login are redacted from every line. Only `setup-` streams.
+    pub fn spawn_setup(&self, id: &str, argv: Vec<String>, cwd: &Path, env: &SetupEnv, redact: Redactor) -> Result<(), SessionError> {
+        if !id.starts_with(SETUP_STREAM) {
+            return Err(SessionError::InvalidId);
+        }
+        let mut r = crate::providers::install::env::redactor(env);
+        r.absorb(&redact);
+        let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: 24, cols: 100, redact: r, extra_env: Vec::new() };
+        // Not an agent: no ownership record and no agent mark, so its env is exactly the Setup profile and the crash
+        // reconcile never kills an install midway.
+        self.start(id, &spec, env.vars(), None, None)
+    }
+
+    /// `who`: an agent, recorded in the ownership ledger and given its mark; `None` for a one-click install.
+    fn start(
+        &self, id: &str, spec: &SpawnSpec, env: &[(&'static str, OsString)], tag: Option<ProviderTag>, who: Option<OwnedAs>,
+    ) -> Result<(), SessionError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(SessionError::ShuttingDown);
         }
@@ -398,16 +431,17 @@ impl Supervisor {
         if spec.argv.iter().any(|a| a.contains('\0')) {
             return Err(SessionError::NulInArgv);
         }
-        if !extra_env_ok(&spec.extra_env) {
-            return Err(SessionError::BadEnv);
-        }
         if !spec.cwd.is_dir() {
             return Err(SessionError::BadCwd);
         }
         if spec.rows == 0 || spec.cols == 0 {
             return Err(SessionError::InvalidSize);
         }
-        let ledger = lock(&self.owned).clone();
+        // A one-click install (`who` None) is not an agent: never recorded, never marked.
+        let (ledger, who) = match who {
+            Some(w) => (lock(&self.owned).clone(), w),
+            None => (None, OwnedAs::default()),
+        };
         // The agent's mark (`owned::Owner::mark`): only a process started here carries it, so the crash reconcile can
         // prove a record's process is ours from the process itself.
         let mark = match &ledger {
@@ -435,10 +469,7 @@ impl Supervisor {
         // would start a shell, and we never call it.
         let mut cmd = CommandBuilder::from_argv(spec.argv.iter().map(OsString::from).collect());
         cmd.env_clear();
-        for (k, v) in user_env() {
-            cmd.env(k, v);
-        }
-        for (k, v) in &spec.extra_env {
+        for (k, v) in env {
             cmd.env(k, v);
         }
         if let Some(m) = &mark {

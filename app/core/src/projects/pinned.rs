@@ -94,6 +94,26 @@ impl Pinned {
         Ok(f)
     }
 
+    /// Like `read`, and the file must have exactly one link (checked on the open file): a hard link would let a name
+    /// here reach a file kept somewhere else.
+    pub fn read_single_link(&self, name: &str, cap: u64) -> io::Result<Vec<u8>> {
+        use std::os::unix::fs::MetadataExt;
+        let f = self.openat(name, libc::O_RDONLY, 0)?;
+        let m = f.metadata()?;
+        if m.nlink() != 1 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "file has more than one link"));
+        }
+        if m.len() > cap {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
+        }
+        let mut buf = Vec::new();
+        f.take(cap + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > cap {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
+        }
+        Ok(buf)
+    }
+
     /// The whole file, which must be at most `cap` bytes.
     pub fn read(&self, name: &str, cap: u64) -> io::Result<Vec<u8>> {
         let f = self.openat(name, libc::O_RDONLY, 0)?;

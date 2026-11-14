@@ -165,7 +165,7 @@ impl App {
         Ok(rec)
     }
 
-    fn ledger_store(&self, slug: &str, bridge: &Bridge) -> Result<AppLedgerStore, String> {
+    pub(super) fn ledger_store(&self, slug: &str, bridge: &Bridge) -> Result<AppLedgerStore, String> {
         let allow = crate::vajra::allowlist::Allowlist::new(&self.claude, &self.data).map_err(|e| e.to_string())?;
         AppLedgerStore::new(&self.data, slug, allow.campaigns_dir().to_path_buf(), allow.key_path(), bridge.clone())
     }

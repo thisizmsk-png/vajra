@@ -5,7 +5,7 @@
 use super::*;
 use crate::bus::Bus;
 use crate::control::service::WorkerSeat;
-use crate::desktop::runproto::{Integration, Limits, RunConfig, StubGate, SystemClock, Tick, Workers};
+use crate::desktop::runproto::{Integrated, Integration, Limits, RunConfig, StubGate, SystemClock, Tick, Workers};
 use crate::desktop::workers::{DispatchError, KillReason, Outcome, State as TState, TaskSpec};
 use crate::vajra::gitw::GitwError;
 use std::collections::BTreeMap;
@@ -42,7 +42,7 @@ impl Workers for Held {
             t.outcome = Some(Outcome::Failed);
         }
     }
-    fn integrate(&self, _: &Integration<'_>, _: &[String]) -> Result<String, GitwError> {
+    fn integrate(&self, _: &Integration<'_>, _: &[String]) -> Result<Integrated, GitwError> {
         Err(GitwError::Invalid("no merges here"))
     }
     // These tests are about the lead's life, not the writer cap: tickets start when dispatched.
@@ -104,7 +104,61 @@ esac
     p
 }
 
+/// A fake `codex` lead: it prints `thread.started`, then writes the session file Codex 0.166 would for the profile it
+/// was given. Its file-system entries come from the `-c permissions.<name>.filesystem` value the core passed (`none`
+/// reported as `deny`, as Codex does), so the read-back judges exactly what the launch asked for. Then it sleeps.
+fn fake_codex(dir: &Path, home: &Path) -> PathBuf {
+    let p = dir.join("codex");
+    let script = format!(
+        r#"#!/usr/bin/python3 -I
+import json, os, sys, time
+fs, cwd = None, None
+a = sys.argv[1:]
+for i, x in enumerate(a):
+    if x == "-C": cwd = a[i + 1]
+    if x == "-c" and a[i + 1].startswith("permissions.") and ".filesystem=" in a[i + 1]: fs = a[i + 1].split("=", 1)[1]
+open("{dir}/launches", "a").write("codex\n")
+entries = []
+for kv in fs.strip("{{}}").split(","):
+    k, v = kv.split("=")
+    v = json.loads(v)
+    entries.append({{"path": {{"type": "path", "path": json.loads(k)}}, "access": "deny" if v == "none" else v}})
+tid = "01a1d76f-0da0-7240-8f49-4099e0c50" + str(1000 + os.getpid() % 1000)[1:]
+day = "{home}/sessions/2026/11/13"
+os.makedirs(day, exist_ok=True)
+tc = {{"type": "turn_context", "payload": {{"cwd": cwd, "approval_policy": "never", "sandbox_policy": {{"type": "read-only"}},
+      "file_system_sandbox_policy": {{"kind": "restricted", "entries": entries}}}}}}
+# `<dir>/tamper` makes the report differ from the launch: `drop_deny` loses the first denied dir, `extra_read` adds a
+# read entry inside the last denied dir.
+tamper = open("{dir}/tamper").read().strip() if os.path.exists("{dir}/tamper") else ""
+deny = [i for i, e in enumerate(entries) if e["access"] == "deny"]
+if tamper == "drop_deny":
+    del entries[deny[0]]
+if tamper == "extra_read":
+    entries.append({{"path": {{"type": "path", "path": entries[deny[-1]]["path"]["path"] + "/elsewhere"}}, "access": "read"}})
+open(day + "/rollout-2026-11-13T16-22-21-" + tid + ".jsonl", "w").write(json.dumps({{"type": "session_meta"}}) + "\n" + json.dumps(tc) + "\n")
+print(json.dumps({{"type": "thread.started", "thread_id": tid}}), flush=True)
+time.sleep(600)
+"#,
+        dir = dir.display(),
+        home = home.display()
+    );
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// A rig whose lead is the fake `codex` on the login route (`seat.account` "codex", the user's Codex home).
+fn codex_rig(tag: &str) -> Rig {
+    rig_on(tag, "hang", Duration::from_secs(10), "codex")
+}
+
 fn rig(tag: &str, mode: &str, read_back: Duration) -> Rig {
+    rig_on(tag, mode, read_back, "claude")
+}
+
+fn rig_on(tag: &str, mode: &str, read_back: Duration, account: &str) -> Rig {
     let d = std::env::temp_dir().join(format!("vajra-rl-{tag}-{}", std::process::id())).canonicalize().unwrap_or_else(|_| {
         let p = std::env::temp_dir().join(format!("vajra-rl-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
@@ -128,11 +182,14 @@ fn rig(tag: &str, mode: &str, read_back: Duration) -> Rig {
     reg.register(RUN, proto.clone(), hash);
     let bus = Arc::new(Bus::open(&d.join("spill"), crate::bus::Config::default()).unwrap());
     let sup = Arc::new(Supervisor::new(bus.clone(), None));
+    let codex_home = d.join("codex-home");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let codex = fake_codex(&d, &codex_home);
     let env = LeadEnv {
-        data: data.clone(), home, exe: PathBuf::from("/bin/echo"), socket: d.join("app.sock"), codex: PathBuf::from("/nonexistent/codex"), claude,
-        user_codex_home: d.join("codex-home"), repos: vec![repo.clone()], others: vec![], read_back_timeout: read_back,
+        data: data.clone(), home, exe: PathBuf::from("/bin/echo"), socket: d.join("app.sock"), codex, claude,
+        user_codex_home: codex_home, repos: vec![repo.clone()], others: vec![], read_back_timeout: read_back,
     };
-    let lead_seat = LeadSeat { account: "claude".into(), model: None, effort: None };
+    let lead_seat = LeadSeat { account: account.into(), model: None, effort: None };
     let lead = RunLead::new(RUN, repo.to_str().unwrap(), "fix it", 2, vec!["backend".into()], lead_seat, env, proto, reg.clone(), sup.clone(), bus).unwrap();
     Rig { d, lead, reg, held, _sup: sup }
 }
@@ -317,4 +374,50 @@ fn a_lead_launched_after_the_shutdown_began_is_killed_and_never_admitted() {
     assert!(r.lead.start().is_err(), "a launch that finds the shutdown is refused");
     assert_eq!(r.lead.shutdown(SHUTDOWN_WAIT), Shutdown::NotRunning, "and it never became the current lead");
     assert_eq!(r.reg.serve(&json!({"vajra_run": RUN, "token": token(&r), "tool": "list_workers", "args": {}}), None)["error"], "lead_not_running");
+}
+
+/// The read-back of the Codex lead now running, once its session file shows; `None` if it never does in 10 s.
+fn codex_read_back(r: &Rig) -> Option<Result<(), String>> {
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < until {
+        if let Some((sid, _)) = crate::lock(&r.lead.0.state).current.clone()
+            && let Some(got) = r.lead.read_back(&sid)
+        {
+            return Some(got);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
+/// bhishma L3 on #174: the core launches a Codex lead under a fresh profile and reads it back with the same deny list.
+/// A report that matches the launch passes; one that lost a denied dir, or gained a read inside one (L1), fails.
+#[test]
+fn a_codex_lead_is_read_back_with_the_deny_list_it_was_launched_with() {
+    for (tamper, ok) in [("", true), ("drop_deny", false), ("extra_read", false)] {
+        let r = codex_rig(&format!("cx{tamper}"));
+        std::fs::write(r.d.join("tamper"), tamper).unwrap();
+        plan(r.lead.proto());
+        r.lead.start().unwrap();
+        let got = codex_read_back(&r).expect("the fake wrote its session file");
+        assert_eq!(got.is_ok(), ok, "{tamper:?}: {got:?}");
+        if tamper == "drop_deny" {
+            assert!(got.unwrap_err().contains("readable"), "the card names the dir that wasn't denied");
+        }
+        assert!(!r.lead.0.deny.is_empty() && r.lead.0.deny.iter().any(|d| d.starts_with(r.d.join("data")) || r.d.join("data").starts_with(d)));
+    }
+}
+
+/// bhishma L2 on #174: the lead dir is read back in under the denied data dir, so a lead dir whose path leads out of
+/// the data dir is never launched.
+#[test]
+fn a_lead_dir_that_leads_out_of_the_app_data_dir_is_never_launched() {
+    let r = codex_rig("cxlink");
+    let outside = r.d.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let _ = std::fs::remove_dir_all(r.d.join("data").join("runs"));
+    std::os::unix::fs::symlink(&outside, r.d.join("data").join("runs")).unwrap();
+    plan(r.lead.proto());
+    assert!(r.lead.start().is_err(), "a lead dir reached through a link out of the data dir is refused");
+    assert!(!std::fs::read_to_string(r.d.join("launches")).unwrap_or_default().contains("codex"), "and no Codex was started");
 }

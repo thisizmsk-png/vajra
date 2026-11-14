@@ -30,6 +30,8 @@ struct FakeWorkers {
     kills: Mutex<Vec<KillReason>>,
     merges: Mutex<Vec<Vec<String>>>,
     merge_result: Mutex<Option<GitwError>>,
+    /// The paths each integration changed, by round; a round with none changed `src/a/x.rs`.
+    paths: Mutex<BTreeMap<u32, Option<Vec<String>>>>,
     fast: std::sync::atomic::AtomicBool,
     /// Every dispatch answers this error while it is set.
     dispatch_error: Mutex<Option<DispatchError>>,
@@ -134,7 +136,7 @@ impl Workers for FakeWorkers {
             self.end(&id, if reason == KillReason::Stopped { Outcome::Stopped } else { Outcome::Failed });
         }
     }
-    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
+    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<Integrated, GitwError> {
         assert_eq!(at.base, BASE);
         let hold = crate::lock(&self.integrate_hold).take();
         if let Some((entered, release)) = hold {
@@ -144,7 +146,10 @@ impl Workers for FakeWorkers {
         crate::lock(&self.merges).push(commits.to_vec());
         match crate::lock(&self.merge_result).take() {
             Some(e) => Err(e),
-            None => Ok(format!("{:f>40}", at.round)),
+            None => {
+                let paths = crate::lock(&self.paths).get(&at.round).cloned().unwrap_or_else(|| Some(vec!["src/a/x.rs".into()]));
+                Ok(Integrated { head: format!("{:f>40}", at.round), paths })
+            }
         }
     }
 }
@@ -154,6 +159,7 @@ impl Workers for FakeWorkers {
 struct FakeGate {
     verdicts: Mutex<Vec<RoundVerdict>>,
     changed: Condvar,
+    inputs: Mutex<Vec<RoundInput>>,
     /// How many times a round's checks started.
     calls: std::sync::atomic::AtomicUsize,
     /// While set, the gate says it is about to start a check ticket, then waits to be released before trying.
@@ -170,7 +176,8 @@ impl FakeGate {
 }
 
 impl RoundGate for FakeGate {
-    fn check(&self, _: &str, _: u32, _: &str, _: &[String], life: &dyn RunLife) -> RoundVerdict {
+    fn check(&self, input: &RoundInput, life: &dyn RunLife) -> RoundVerdict {
+        crate::lock(&self.inputs).push(input.clone());
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let hold = crate::lock(&self.start_hold).take();
         if let Some((about, release)) = hold {
@@ -1238,6 +1245,349 @@ fn a_clean_integration_is_named_in_later_progress() {
     let _ = r.await_round(1);
     let want = format!("run r1: no verified delivery after 1 round(s); integration vajra/r1/integration @ {:f>40} from {BASE}", 1);
     assert!(events(&rec).contains(&Event::Progress(want.clone())), "{want} in {:?}", events(&rec));
+}
+
+// ---------------------------------------------------------------- the round result (6g)
+
+fn result(passed: bool, rejected: bool) -> RoundResult {
+    RoundResult {
+        passed, rejected, failing: vec![], blocking: vec![], feedback: BTreeMap::new(), end: None,
+        checks: vec![json!({"kind": "security_review", "slot": "w9", "harness": "codex", "account": "codex", "shared_with_writer": false})],
+    }
+}
+
+#[test]
+fn the_gate_gets_the_round_with_its_criteria_tasks_flag_and_security_writers() {
+    let r = rig_with("tidy the export", vec![seat("w1", "backend", true), seat("w3", "frontend", false)], Limits::default(), false);
+    let mut p = plan1();
+    p.tasks[0].touches_security = true;
+    r.p.plan_tasks(p).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(1);
+    let i = r.gate.inputs.lock().unwrap()[0].clone();
+    assert_eq!((i.run.as_str(), i.round, i.base.as_str()), ("r1", 1, BASE));
+    assert_eq!(i.head, format!("{:f>40}", 1));
+    assert_eq!(i.criteria, criteria());
+    assert_eq!(i.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t1", "t2", "t3"]);
+    assert!(i.security);
+    assert_eq!(i.security_writers.iter().map(|s| s.slot.as_str()).collect::<Vec<_>>(), ["w1"], "the seats that ran security tasks");
+}
+
+/// The owner's M2 rule: the core flags a run whatever the lead's wording. A bland ask and plan, plus its round-1 flag.
+fn flagged_after_round_1(criteria: Vec<Criterion>, paths: Option<Vec<String>>) -> (Rig, bool) {
+    let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+    if let Some(p) = paths {
+        crate::lock(&r.w.paths).insert(1, Some(p));
+    }
+    r.p.plan_tasks(PlanInput { criteria: Some(criteria), ..plan1() }).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::from([("t3".to_string(), json!("redo"))]) });
+    r.await_round(1);
+    let flagged = r.gate.inputs.lock().unwrap()[0].security;
+    (r, flagged)
+}
+
+#[test]
+fn a_bland_criterion_whose_check_names_a_security_area_flags_the_run() {
+    let c = vec![Criterion { id: "ac-1".into(), criterion: "export has --json".into(), check: "cargo test auth::token".into() }];
+    let (r, flagged) = flagged_after_round_1(c, None);
+    assert!(flagged, "the check field counts, not only the criterion text");
+    assert!(r.p.card().security);
+    // Matched on the lead's raw text: a word only a redacted span holds still flags (bhishma L3). The stored
+    // criterion is redacted, so the flag can only come from the raw text.
+    const SPAN: &str = "token_reset_0123";
+    let r = rig_redacting("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false, Redactor::new(Some(SPAN)));
+    let c = vec![Criterion { id: "ac-1".into(), criterion: format!("export keeps {SPAN}"), check: "npm test".into() }];
+    r.p.plan_tasks(PlanInput { criteria: Some(c), ..plan1() }).unwrap();
+    assert!(!r.p.lock().criteria[0].criterion.contains(SPAN), "the stored text is redacted");
+    assert!(r.p.card().security, "flagged before redaction");
+}
+
+/// bhishma (vajra-66) M1 on #181: an invisible or control character inside a security word splits it in the raw text,
+/// but the stored, sanitised text reads the word whole. Either matching flags the run.
+#[test]
+fn an_invisible_or_control_character_inside_a_security_word_still_flags_the_run() {
+    for (criterion, check) in [("keep the to\u{200b}kens fresh", "npm test"), ("export has --json", "cargo test au\u{1}th::x"), ("rotate the pass\u{2060}word", "npm test")] {
+        let c = vec![Criterion { id: "ac-1".into(), criterion: criterion.into(), check: check.into() }];
+        let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+        r.p.plan_tasks(PlanInput { criteria: Some(c), ..plan1() }).unwrap();
+        assert!(r.p.card().security, "{criterion:?} / {check:?}");
+    }
+}
+
+/// bhishma L2 on #181: the ask has the same gap.
+#[test]
+fn an_invisible_character_inside_a_security_word_of_the_ask_flags_the_run() {
+    for ask in ["rotate the pass\u{200b}word", "fix the lo\u{7}gin page"] {
+        let r = rig_with(ask, vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+        r.p.plan_tasks(plan1()).unwrap();
+        assert!(r.p.card().security, "{ask:?}");
+    }
+}
+
+/// bhishma L1 on #181: git's output is decoded lossily, so an odd byte inside a path word arrives as U+FFFD and splits
+/// it; the word read whole still flags.
+#[test]
+fn an_odd_byte_inside_a_security_path_word_still_flags_the_run() {
+    let (_, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/to\u{fffd}ken_store.rs".into()]));
+    assert!(flagged);
+    let (_, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/se\u{200b}ssion.rs".into()]));
+    assert!(flagged);
+}
+
+#[test]
+fn a_bland_plan_whose_diff_touches_a_security_path_flags_the_run() {
+    let (r, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/auth/session.rs".into(), "docs/x.md".into()]));
+    assert!(flagged, "the integrated diff's paths flag the round's checks");
+    assert!(r.p.card().security);
+    // A diff whose paths can't be read flags the run too: it fails closed.
+    let (_, flagged) = {
+        let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+        crate::lock(&r.w.paths).insert(1, None);
+        r.p.plan_tasks(plan1()).unwrap();
+        r.round_done(&["t1", "t2", "t3"]);
+        r.p.integrate(1).unwrap();
+        r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+        r.await_round(1);
+        let f = r.gate.inputs.lock().unwrap()[0].security;
+        (r, f)
+    };
+    assert!(flagged, "unreadable diff paths");
+    // And a bland diff stays unflagged.
+    let (_, flagged) = flagged_after_round_1(criteria(), None);
+    assert!(!flagged, "the bland run is not flagged");
+}
+
+#[test]
+fn a_flag_set_in_round_1_survives_a_clean_round_2() {
+    let (r, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/auth/session.rs".into()]));
+    assert!(flagged);
+    crate::lock(&r.w.paths).insert(2, Some(vec!["docs/readme.md".into()]));
+    r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() }).unwrap();
+    r.round_done(&["t3"]);
+    r.p.integrate(2).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(2);
+    assert!(r.gate.inputs.lock().unwrap()[1].security, "a clean round 2 doesn't clear the flag");
+    assert!(r.p.card().security);
+}
+
+/// bhishma M1: a run flagged by its ask alone has no security task; the reviewer is then compared with every seat
+/// that wrote for the run, so "shares the writer's harness" is never under-reported.
+#[test]
+fn a_run_flagged_by_its_ask_alone_compares_the_reviewer_with_every_writer() {
+    let r = rig_with("fix the auth token check", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(1);
+    let i = r.gate.inputs.lock().unwrap()[0].clone();
+    assert!(i.security);
+    assert_eq!(i.security_writers.iter().map(|s| s.slot.as_str()).collect::<Vec<_>>(), ["w1", "w3"], "every writer seat");
+}
+
+#[test]
+fn a_rejected_round_ends_the_run_rejected() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Checked(result(false, true)));
+    let rt = r.await_round(1);
+    assert_eq!(rt.outcome.as_deref(), Some("rejected"));
+    assert_eq!(rt.result.unwrap()["rejected"], true);
+    assert_eq!(r.status(), Some(RunStatus::Rejected));
+}
+
+#[test]
+fn a_passed_gate_is_still_not_verified_until_the_delivery_phase() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Checked(result(true, false)));
+    let rt = r.await_round(1);
+    assert_eq!(rt.outcome.as_deref(), Some("passed"));
+    assert_eq!(rt.result.as_ref().unwrap()["passed"], true);
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert!(r.p.card().reason.unwrap().contains("the gate passed"));
+    assert_eq!(r.p.card().checks[0]["harness"], "codex", "the card names who ran each check");
+}
+
+#[test]
+fn a_failed_result_reworks_its_feedback_tasks_and_an_end_finishes_the_run() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    let mut f = result(false, false);
+    f.feedback = BTreeMap::from([("t3".to_string(), json!({"blocking_issues": ["x"]}))]);
+    r.gate.answer(RoundVerdict::Checked(f));
+    let rt = r.await_round(1);
+    assert_eq!((rt.outcome.as_deref(), rt.feedback.unwrap()["t3"]["blocking_issues"][0].as_str()), (Some("failed"), Some("x")));
+    r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() }).unwrap();
+    assert!(code(r.p.dispatch_worker("t1")).1.contains("reworks only t3"));
+    r.round_done(&["t3"]);
+    r.p.integrate(2).unwrap();
+    let mut e = result(false, false);
+    e.end = Some("the run has no verifier seat".into());
+    r.gate.answer(RoundVerdict::Checked(e));
+    r.await_round(2);
+    assert_eq!((r.status(), r.p.card().reason.as_deref()), (Some(RunStatus::NotVerified), Some("the run has no verifier seat")));
+}
+
+// ---------------------------------------------------------------- the hash-chained run log (W2)
+
+fn logged_with(limits: Limits) -> (Rig, Arc<FakeRecord>, Arc<RunLog>) {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("vajra-runproto-log-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (mut r, rec) = recorded_with(limits);
+    let log = Arc::new(RunLog::open(&dir, "r1").unwrap());
+    let placeholder = rig().p;
+    r.p = std::mem::replace(&mut r.p, placeholder).with_log(log.clone(), None);
+    (r, rec, log)
+}
+
+fn kinds(log: &RunLog) -> Vec<(LogSource, LogKind)> {
+    log.flush();
+    log.since(0, 500).0.into_iter().map(|e| (e.source, e.kind)).collect()
+}
+
+/// The record's progress as the scripts would hold it.
+fn progress_text(rec: &FakeRecord) -> String {
+    events(rec).into_iter().filter_map(|e| if let Event::Progress(t) = e { Some(format!("- 2026-11-12T09:30:00Z {t}\n")) } else { None }).collect()
+}
+
+/// W2 + 6g: a typed round result is logged by the verifier with the verdict it is applied as, in the same order
+/// round_checked applies it (an ended gate, a rejection, a pass, else a failed round).
+#[test]
+fn a_typed_round_result_logs_the_verdict_it_applies() {
+    let ended = RoundResult { end: Some("the run has no verifier seat".into()), ..result(true, true) };
+    for (x, want) in [(result(true, false), "passed"), (result(false, true), "rejected"), (result(false, false), "failed"), (ended, "ended")] {
+        let (r, _rec, log) = logged_with(Limits { rounds: 1, ..Limits::default() });
+        r.p.plan_tasks(plan1()).unwrap();
+        r.round_done(&["t1", "t3", "t2"]);
+        r.p.integrate(1).unwrap();
+        r.gate.answer(RoundVerdict::Checked(x));
+        let _ = r.await_round(1);
+        let k = kinds(&log);
+        let v = k.iter().find(|(_, k)| matches!(k, LogKind::RoundVerdict { .. })).unwrap_or_else(|| panic!("{want}: no verdict in {k:?}"));
+        assert_eq!(v, &(LogSource::Verifier, LogKind::RoundVerdict { round: 1, verdict: want.into() }), "{want}");
+    }
+}
+
+#[test]
+fn a_verified_run_logs_its_events_in_order_and_its_last_anchor_is_signed() {
+    let (r, rec, log) = logged_with(Limits::default());
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t3", "t2"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Passed);
+    let _ = r.await_round(1);
+    r.p.flush_record();
+    let k = kinds(&log);
+    let names: Vec<String> = k.iter().map(|(_, k)| serde_json::to_value(k).unwrap()["kind"].as_str().unwrap().to_string()).collect();
+    let first = |n: &str| names.iter().position(|x| x == n).unwrap_or_else(|| panic!("no {n} in {names:?}"));
+    assert_eq!(names[0], "run_started");
+    assert!(first("plan_accepted") < first("dispatched"));
+    assert!(first("dispatched") < first("ticket_ended"));
+    assert!(first("ticket_ended") < first("integrated"));
+    assert!(first("checks_started") < first("round_verdict"));
+    assert!(first("round_verdict") < first("status_set"));
+    assert_eq!(names.iter().filter(|n| *n == "dispatched").count(), 3);
+    assert_eq!(names.iter().filter(|n| *n == "ticket_ended").count(), 3);
+    let verdict = k.iter().find(|(_, k)| matches!(k, LogKind::RoundVerdict { .. })).unwrap();
+    assert_eq!(verdict, &(LogSource::Verifier, LogKind::RoundVerdict { round: 1, verdict: "passed".into() }));
+    assert_eq!(k.iter().find(|(_, k)| matches!(k, LogKind::StatusSet { .. })).unwrap().1, LogKind::StatusSet { status: "verified".into(), reason: "round 1 passed".into() });
+    // The last anchor covers everything before its `anchored` entry, and the record's end came after it was sent.
+    let entries = log.since(0, 500).0;
+    let anchors = crate::desktop::runlog::anchors("r1", &progress_text(&rec));
+    assert!(!anchors.is_empty());
+    let s = crate::desktop::runlog::signed("r1", &entries, &anchors);
+    assert!(s.verified(), "{s:?}");
+    assert_eq!(entries.last().map(|e| &e.kind), Some(&LogKind::Anchored { seq: s.signed_to, hash: entries[s.signed_to as usize - 1].hash.clone() }));
+    assert_eq!(s.unsigned_tail, 1, "only the last `anchored` entry itself is after the signed head");
+    assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(r.p.card().log.map(|c| (c.head_seq, c.broken)), Some((entries.len() as u64, None)));
+}
+
+#[test]
+fn a_verdict_after_the_run_ended_is_a_logged_noop() {
+    let (r, _rec, log) = logged_with(Limits::default());
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t3", "t2"]);
+    r.p.integrate(1).unwrap();
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    r.gate.answer(RoundVerdict::Passed);
+    let _ = r.await_round(1);
+    r.p.flush_record();
+    assert_eq!(r.status(), Some(RunStatus::Stopped), "a late pass changes nothing");
+    let k = kinds(&log);
+    assert!(k.contains(&(LogSource::Core, LogKind::Noop { what: "round 1 passed".into(), why: "the run had already ended".into() })), "{k:?}");
+    assert!(!k.iter().any(|(_, k)| matches!(k, LogKind::RoundVerdict { .. })));
+}
+
+#[test]
+fn questions_and_the_humans_answers_are_logged_with_their_source() {
+    let (r, _rec, log) = logged_with(Limits { lead_turn_budget: 2, ..Limits::default() });
+    r.p.lead_turn(10);
+    r.p.lead_turn(20);
+    r.p.keep_going();
+    let k = kinds(&log);
+    assert!(k.contains(&(LogSource::Core, LogKind::LeadTurn { turns: 2, tokens: 30 })));
+    assert!(k.contains(&(LogSource::Core, LogKind::Question { id: "turn_budget".into(), text: r#"{"turns":2}"#.into() })));
+    assert!(k.contains(&(LogSource::Human, LogKind::Answer { id: "turn_budget".into(), text: r#"{"turns":2}"#.into() })));
+}
+
+#[test]
+fn a_receipt_is_logged_before_the_runs_last_anchor() {
+    let (r, rec, log) = logged_with(Limits::default());
+    r.p.plan_tasks(plan1()).unwrap();
+    let tokens = crate::desktop::runlog::Tokens { fresh: 10, cache_write: 2, cache_read: 300, output: 40, side: 0 };
+    r.p.receipt("run", "opus", tokens, 1234, None);
+    r.p.stop();
+    r.p.flush_record();
+    let entries = log.since(0, 500).0;
+    let at = entries.iter().position(|e| matches!(e.kind, LogKind::Receipt { .. })).unwrap() as u64 + 1;
+    let s = crate::desktop::runlog::signed("r1", &entries, &crate::desktop::runlog::anchors("r1", &progress_text(&rec)));
+    assert!(s.verified() && s.signed_to >= at, "the receipt (seq {at}) is inside the signed prefix {s:?}");
+}
+
+#[test]
+fn the_protocol_redacts_log_text_before_it_is_hashed() {
+    const NONCE: &str = "abcdef0123456789abcdef0123456789";
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("vajra-runproto-redact-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut r = rig_redacting("add a --json flag", default_seats(), Limits::default(), true, Redactor::new(Some(NONCE)));
+    let log = Arc::new(RunLog::open(&dir, "r1").unwrap());
+    let placeholder = rig().p;
+    r.p = std::mem::replace(&mut r.p, placeholder).with_log(log.clone(), None);
+    r.p.receipt("run", &format!("opus {NONCE}"), crate::desktop::runlog::Tokens::default(), 0, None);
+    log.flush();
+    let on_disk = std::fs::read_to_string(dir.join(crate::desktop::runlog_store::FILE)).unwrap();
+    assert!(on_disk.contains("receipt") && !on_disk.contains(NONCE), "{on_disk}");
+    assert_eq!(crate::desktop::runlog::verify("r1", &log.entries()).broken, None);
+}
+
+#[test]
+fn a_run_whose_final_anchor_cannot_be_synced_ends_with_the_error_on_its_card() {
+    let (r, rec, log) = logged_with(Limits::default());
+    r.p.plan_tasks(plan1()).unwrap();
+    log.flush();
+    log.fail_syncs();
+    r.p.stop();
+    r.p.flush_record();
+    let card = r.p.card().log.unwrap();
+    assert!(card.io_error.is_some(), "{card:?}");
+    assert!(card.skipped_anchors >= 1);
+    assert!(crate::desktop::runlog::anchors("r1", &progress_text(&rec)).is_empty(), "the run's end sent no anchor");
+    assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 1, "the record still ends");
 }
 
 /// batch-3's `Closed`: the app is quitting, so nothing new is queued. The run is stopped (as a human Stop would), and

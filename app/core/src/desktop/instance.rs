@@ -23,26 +23,40 @@ pub const OTHER_INSTANCE_FIX: &str = "Quit the other Vajra Desktop, then restart
 /// making a new one; that also moves every live worktree or the app's data out from under the first app.
 pub struct InstanceLock;
 
+/// A held instance lock, released by `LOCK_UN` when dropped. Closing our descriptor is not enough: a flock belongs to
+/// the open file description, and a child forked by any thread while the lock is held shares that description until it
+/// execs. Left to the close, the lock would outlive this app's quit, and the next start would come up as a second
+/// instance (no sweep, no prune, no agents). `LOCK_UN` releases it for every copy at once, as the preferences lock does.
+pub struct Held(File);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: the descriptor is open for the guard's whole life; LOCK_UN never blocks.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 impl InstanceLock {
     /// The data folder's lock, or `None` when another process holds it or it can't be opened (fail closed: no sweep,
     /// no agent).
-    pub fn take(data: &Path) -> Option<File> {
+    pub fn take(data: &Path) -> Option<Held> {
         Self::take_dir(data)
     }
 
     /// The shared worktree folder's lock: one app per account sweeps and runs workers there.
-    pub fn take_work(home: &Path) -> Option<File> {
+    pub fn take_work(home: &Path) -> Option<Held> {
         let work = crate::vajra::gitw::work_root(home);
         crate::control::fsx::private_dir(&work).ok()?;
         Self::take_dir(&work)
     }
 
     /// Both locks, or none: the data folder's first.
-    pub fn take_both(data: &Path, home: &Path) -> Option<(File, File)> {
+    pub fn take_both(data: &Path, home: &Path) -> Option<(Held, Held)> {
         Self::take(data).and_then(|d| Self::take_work(home).map(|w| (d, w)))
     }
 
-    fn take_dir(path: &Path) -> Option<File> {
+    fn take_dir(path: &Path) -> Option<Held> {
         use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
         let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(path).ok()?;
@@ -50,7 +64,9 @@ impl InstanceLock {
         if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return None;
         }
-        still_named(&f, path).then_some(f)
+        // From here the guard holds it: a swapped folder releases the lock on the way out, too.
+        let held = Held(f);
+        still_named(&held.0, path).then_some(held)
     }
 }
 
@@ -84,6 +100,65 @@ mod tests {
         drop(held);
         assert!(InstanceLock::take_both(&data2, &home).is_some());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The app forks all the time (git, workers, the Lead). A child forked while the app holds both locks keeps a copy
+    /// of each folder descriptor until it execs, and a flock lives until every copy is closed. So dropping the locks
+    /// must release them itself, or a restart beside such a child comes up as a second instance (no sweep, no agents).
+    #[test]
+    fn a_child_forked_while_the_locks_are_held_does_not_keep_them_held_after_drop() {
+        use std::os::unix::process::CommandExt;
+        let d = std::env::temp_dir().join(format!("vajra-instance-fork-{}", std::process::id()));
+        let (data, home) = (d.join("data"), d.join("home"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let held = InstanceLock::take_both(&data, &home).expect("the first taker holds both");
+        // Two close-on-exec pipes (no other test's child keeps them): the child says it has forked, holding its copies
+        // of both descriptors, and then waits in its pre-exec hook until the parent has retaken the locks.
+        let pipe = || {
+            let mut fds = [0; 2];
+            // SAFETY: pipe writes two descriptors into the array; fcntl only sets their close-on-exec flag.
+            unsafe {
+                assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+                for fd in fds {
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                }
+            }
+            (fds[0], fds[1])
+        };
+        let ((ready_r, ready_w), (go_r, go_w)) = (pipe(), pipe());
+        let child = std::thread::spawn(move || {
+            let mut c = std::process::Command::new("/usr/bin/true");
+            // SAFETY: the hook calls only close, write and read, which are async-signal-safe, and reads errno.
+            unsafe {
+                c.pre_exec(move || {
+                    // Its own copies of the ends it never uses: a parent that dies before `go` leaves it at EOF.
+                    libc::close(ready_r);
+                    libc::close(go_w);
+                    libc::write(ready_w, b"x".as_ptr().cast(), 1);
+                    let mut b = 0u8;
+                    while libc::read(go_r, (&mut b as *mut u8).cast(), 1) < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {}
+                    Ok(())
+                })
+            };
+            c.status().unwrap()
+        });
+        let mut p = libc::pollfd { fd: ready_r, events: libc::POLLIN, revents: 0 };
+        // SAFETY: poll and read on our own pipe's read end.
+        assert_eq!(unsafe { libc::poll(&mut p, 1, 20_000) }, 1, "the child never forked");
+        let mut b = 0u8;
+        assert_eq!(unsafe { libc::read(ready_r, (&mut b as *mut u8).cast(), 1) }, 1);
+        // The child now holds copies of both descriptors. The app quits: its locks go.
+        drop(held);
+        let again = InstanceLock::take_both(&data, &home).is_some();
+        // SAFETY: a one-byte write to our own pipe lets the child exec, then every pipe end is closed once.
+        unsafe { libc::write(go_w, b"x".as_ptr().cast(), 1) };
+        assert!(child.join().unwrap().success());
+        for fd in [ready_r, ready_w, go_r, go_w] {
+            unsafe { libc::close(fd) };
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(again, "the next start was refused while a forked child still held a copy of the descriptors");
     }
 
     #[test]

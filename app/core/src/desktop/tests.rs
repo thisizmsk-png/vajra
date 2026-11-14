@@ -107,6 +107,11 @@ fn one_active_run_per_project() {
     let held = app.start_run(input, &cwd).unwrap_err();
     assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     assert!(held["detail"].as_str().is_some_and(|d| !d.is_empty()));
+    // bhishma #216 Low 2: a second Codex Lead is held the same way, under the launching lock and before its proof runs,
+    // so a running Lead can't write the project's `.codex` between a second Lead's proof and its launch.
+    let codex = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
+    let held = app.start_run(codex, &cwd).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     assert_eq!(app.resume_run(other, "c2", &cwd, None).unwrap_err()["reason"], "project_busy");
     // A past run's crew view never retargets the control service.
@@ -5435,6 +5440,8 @@ mod board_cards;
 
 #[path = "proof_app_tests.rs"]
 mod proof_app;
+#[path = "proof_ledger_tests.rs"]
+mod proof_ledger;
 
 /// #80 optional: a finished run's worker count is forgotten when it is reaped, not only on the next start, so a long
 /// session of runs that start and finish keeps the map bounded by the runs still going.
@@ -5511,6 +5518,23 @@ fn a_failed_worker_count_record_refuses_the_launch_before_spawn() {
     assert!(!app.sup.is_running(&format!("run-{}", SIDS[0])).unwrap_or(false));
     assert!(lock(&app.control).nonce(SIDS[0]).is_none(), "no control session left behind");
     assert!(runindex::entries(&app.data.join("runs.jsonl")).is_empty(), "no index line for a run that never started");
+}
+
+#[test]
+fn one_click_setup_offers_nothing_for_an_unverified_source_and_runs_nothing() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(code(&app.setup_plan("nope").unwrap_err()), "unknown_harness");
+    let v = app.setup_plan("codex").unwrap();
+    assert_eq!(v["manual"], "source_not_verified", "{v}");
+    assert!(v.get("plan").is_none());
+    let token = app.setup_consent("codex", &"a".repeat(64)).unwrap();
+    let token = token["token"].as_str().unwrap().to_string();
+    assert_eq!(token.len(), 32);
+    assert_eq!(code(&app.setup_consent("codex", "not-a-hash").unwrap_err()), "bad_hash");
+    assert_eq!(code(&app.setup_run("codex", &token).unwrap_err()), "source_not_verified");
+    assert!(!t.home().join(".claude/vajra/audit.log").exists() || !fs::read_to_string(t.home().join(".claude/vajra/audit.log")).unwrap().contains("setup id="), "nothing ran, nothing audited");
+    assert!(!format!("{:?}", app.consents).contains(&token));
 }
 
 // ---------------------------------------------------------------- ADR 16.6 at startup

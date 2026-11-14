@@ -59,9 +59,10 @@ impl SeatEnv {
         // One version and login probe per CLI for the whole check, not one per seat.
         let probe = Memo { inner: &system, runs: Mutex::new(HashMap::new()) };
         let keys = crate::lock(&self.keys).clone();
+        let marks = crate::providers::install::marks::Marks::at(&self.data);
         let mut out: Vec<(String, Refused)> = seats
             .iter()
-            .filter_map(|s| launch::launchable_with(self.route_for(project), &s.choice, s.kind, &agents, &probe, &keys).err().map(|r| (s.seat.clone(), r)))
+            .filter_map(|s| launch::launchable_marked(self.route_for(project), &s.choice, s.kind, &agents, &probe, &keys, &marks).err().map(|r| (s.seat.clone(), r)))
             .collect();
         if let Err(r) = launch::engine_ready(&self.home) {
             out.push(("engine".into(), r));
