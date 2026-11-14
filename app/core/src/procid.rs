@@ -79,6 +79,23 @@ struct ExternProcHead {
     p_pid: libc::pid_t,
 }
 
+// #248 L2: the mirror's layout, pinned at compile time against the libc types it is built from (64-bit macOS):
+// `p_starttime` (a 16-byte `timeval`) at 0, the two pointers at 16 and 24, `p_flag` at 32, `p_stat` at 36 and `p_pid`
+// at 40, 48 bytes in all with 8-byte alignment, and the head fits inside the record the buffer holds.
+#[cfg(target_os = "macos")]
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<libc::timeval>() == 16 && size_of::<libc::pid_t>() == 4 && size_of::<libc::c_int>() == 4 && size_of::<libc::c_char>() == 1);
+    assert!(offset_of!(ExternProcHead, p_starttime) == 0);
+    assert!(offset_of!(ExternProcHead, p_vmspace) == 16);
+    assert!(offset_of!(ExternProcHead, p_sigacts) == 24);
+    assert!(offset_of!(ExternProcHead, p_flag) == 32);
+    assert!(offset_of!(ExternProcHead, p_stat) == 36);
+    assert!(offset_of!(ExternProcHead, p_pid) == 40);
+    assert!(size_of::<ExternProcHead>() == 48 && align_of::<ExternProcHead>() == 8);
+    assert!(size_of::<ExternProcHead>() <= KINFO_PROC_SIZE && KINFO_PROC_SIZE <= size_of::<[u64; 128]>());
+};
+
 /// The head of `pid`'s kernel process record through `sysctl(KERN_PROC_PID)`, or `None` when there is no such process or
 /// the record does not have the expected size and pid (so a changed layout claims nothing). Unlike `proc_pidinfo` this
 /// also reads a zombie.

@@ -124,6 +124,7 @@ pub fn preview(r: &Report, found: &[Found], home: &str) -> String {
             Verdict::Owned { members } => format!("owned, {members} processes, can be ended"),
             Verdict::Gone => "gone".into(),
             Verdict::Reused => "pid reused by another program, left alone".into(),
+            Verdict::Unproven => "pid still held but can't be checked yet, kept for another try".into(),
         };
         t.push_str(&format!("  pid {} {} {}\n", f.owner.pid, f.owner.cwd.display(), v));
     }
