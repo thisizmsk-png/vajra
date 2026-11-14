@@ -521,6 +521,20 @@ impl Bridge {
         Some(!o.stdout_raw.is_empty())
     }
 
+    /// The submodule entries (mode 160000, gitlinks) anywhere in `tree`, read the same pinned way. `None` when git can't
+    /// answer. The tree records only a submodule's commit, so nothing inside its folder can be compared.
+    pub fn gitlinks(&self, git_dir: &Path, tree: &str) -> Option<Vec<String>> {
+        let o = self.pinned_git(git_dir, &["ls-tree", "-r", "-z", "--full-tree", tree], None)?;
+        let mut links = Vec::new();
+        for rec in o.stdout_raw.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+            let tab = rec.iter().position(|b| *b == b'\t')?;
+            if rec.starts_with(b"160000 ") {
+                links.push(String::from_utf8_lossy(&rec[tab + 1..]).into_owned());
+            }
+        }
+        Some(links)
+    }
+
     /// Git on `git_dir` alone, with replace objects off and no fsmonitor or hook; exit 0 only.
     fn pinned_git(&self, git_dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Option<Output> {
         let argv: Vec<String> = ["--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"]

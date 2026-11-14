@@ -950,6 +950,49 @@ mod runner_wiring {
         got.err()
     }
 
+    /// A commit with a submodule at `sub`, then a planted `test_evil.py` in its folder: populated (the submodule's own
+    /// repository, with a tracked file edited too) or empty, as in a fresh worktree. The run's answer, with nothing run.
+    fn submodule_run(populated: bool) -> Option<String> {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        let w = g.work();
+        let sub = w.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        git_in(&sub, &["init", "-q"]);
+        fs::write(sub.join("a.py"), "x = 1\n").unwrap();
+        git_in(&sub, &["add", "a.py"]);
+        git_in(&sub, &["commit", "-qm", "sub"]);
+        git_in(&w, &["add", "sub"]);
+        git_in(&w, &["commit", "-qm", "with a submodule"]);
+        let commit = git_in(&w, &["rev-parse", "HEAD"]);
+        assert!(git_in(&w, &["ls-tree", "HEAD", "sub"]).starts_with("160000 "), "sub is a gitlink");
+        if populated {
+            fs::write(sub.join("a.py"), "import os\n").unwrap();
+        } else {
+            fs::remove_dir_all(&sub).unwrap();
+            fs::create_dir_all(&sub).unwrap();
+        }
+        fs::write(sub.join("test_evil.py"), "def test_x(): pass\n").unwrap();
+        let a = Ask { commit, commands: vec!["pytest".into()], ..super::ask() };
+        approved(&app, &a);
+        let seen = Seen::default();
+        let got = go(&app, &g, a, false, at(T0 + 2), &seen);
+        assert!(seen.borrow().is_empty(), "nothing ran");
+        got.err()
+    }
+
+    /// Owner review on #256: the tree holds a submodule as its commit alone, and neither the tree compare nor the ignored
+    /// listing sees a file planted in its folder, which pytest and jest would collect. A commit with any submodule is
+    /// refused, populated or empty.
+    #[test]
+    fn a_commit_with_a_submodule_is_refused_whether_its_folder_is_populated_or_empty() {
+        for populated in [true, false] {
+            let err = submodule_run(populated).unwrap_or_else(|| panic!("populated {populated}: not refused"));
+            assert!(err.contains("the approved commit has a submodule (sub)"), "populated {populated}: {err}");
+        }
+    }
+
     fn refuses(err: Option<String>, file: &str) {
         let err = err.unwrap_or_else(|| panic!("{file} was not refused"));
         assert!(err.contains("ignored file a test runner would collect") && err.contains(file), "{err}");
