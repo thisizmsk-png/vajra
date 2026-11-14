@@ -325,7 +325,10 @@ fn a_record_whose_process_does_not_carry_its_mark_is_never_signalled() {
 fn a_record_that_survives_its_kill_is_tried_a_few_times_then_dropped() {
     let t = Tmp::new("tries");
     let ledger = Ledger::new(t.0.join("owned.jsonl"));
-    let o = Owner { pid: 4242, stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: MAX_TRIES - 1, mark: Some(MARK.into()) };
+    // A pid that is free: a fixed number can be held by any process on a busy runner (it read Reused on CI, #182).
+    let mut done = Command::new("/usr/bin/true").spawn().unwrap();
+    done.wait().unwrap();
+    let o = Owner { pid: done.id(), stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: MAX_TRIES - 1, mark: Some(MARK.into()) };
     ledger.record(o).unwrap();
     // Gone (no such pid with that stamp): dropped at once whatever its count.
     assert_eq!(ledger.end_agents()[0].1, Ended::Gone);
