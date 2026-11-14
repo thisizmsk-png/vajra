@@ -572,6 +572,47 @@ fn sessions_a_setup_run_gets_exactly_the_setup_env_and_its_proxy_login_is_redact
     }
 }
 
+/// #176 L1: on a supervisor that records agents (a ledger set, as in the app), a setup run still gets no agent mark and
+/// no ownership record: its env is the Setup profile alone, and the ledger stays empty. The control: an agent spawn on
+/// the same supervisor is recorded.
+#[test]
+fn sessions_a_setup_run_on_a_ledger_supervisor_gets_no_mark_and_no_record() {
+    use crate::providers::install::env::{setup_env, ALLOWED};
+    let (sup, bus, dir) = setup("setupledger");
+    let ledger = std::sync::Arc::new(crate::owned::Ledger::new(dir.join("owned.jsonl")));
+    sup.set_ledger(ledger.clone());
+    let env = setup_env(&[], |k| (k == "HOME").then(|| dir.clone().into()));
+    sup.spawn_setup("setup-codex", vec!["/usr/bin/env".into()], &dir, &env, Redactor::default()).unwrap();
+    assert!(ledger.load().is_empty(), "a setup run is never recorded, even while it runs: {:?}", ledger.load());
+    assert!(sup.wait("setup-codex", WAIT).unwrap().is_some());
+    let out = wait_lines(&bus, "setup-codex", |l| l.iter().any(|s| s.starts_with("HOME=")));
+    assert!(!out.iter().any(|l| l.starts_with(&format!("{}=", crate::owned::AGENT_MARK))), "no agent mark: {out:?}");
+    for l in out.iter().filter(|l| l.contains('=')) {
+        let name = l.split('=').next().unwrap();
+        assert!(ALLOWED.contains(&name), "{name} is outside the Setup profile");
+    }
+    assert!(ledger.load().is_empty());
+    // The control: an agent on the same supervisor is recorded while it runs.
+    sup.spawn("s-agent", spec(&["/bin/sleep", "30"], &dir)).unwrap();
+    assert_eq!(ledger.load().len(), 1, "an agent spawn is recorded");
+    sup.kill("s-agent").unwrap();
+}
+
+/// #176 L2: a second instance starts nothing, a one-click install included: `refuse_spawns` refuses `spawn_setup` with
+/// the same reason as every other spawn.
+#[test]
+fn sessions_refuse_spawns_refuses_a_setup_run_too() {
+    use crate::providers::install::env::setup_env;
+    let (sup, _bus, dir) = setup("setuprefused");
+    sup.refuse_spawns("another instance holds the data folder");
+    let env = setup_env(&[], |_| None);
+    assert_eq!(
+        sup.spawn_setup("setup-codex", vec!["/usr/bin/true".into()], &dir, &env, Redactor::default()),
+        Err(SessionError::Ledger("another instance holds the data folder".into()))
+    );
+    assert_eq!(sup.spawn("s-x", spec(&["/usr/bin/true"], &dir)), Err(SessionError::Ledger("another instance holds the data folder".into())), "the same rule as an agent");
+}
+
 #[test]
 fn sessions_setup_streams_are_only_for_setup_runs() {
     use crate::providers::install::env::setup_env;
