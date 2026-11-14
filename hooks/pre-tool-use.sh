@@ -226,8 +226,66 @@ reach_check() { # canonical dir, label -> block if a recursive read there reache
   done
   return 0
 }
+# #190 H1 (4): a campaign that Vajra Desktop's core runs is written only by the core, which runs the scripts as its own
+# children, never in an agent session. Its slug is the one a core seats file records: campaign_slug in
+# <data>/control/lead/<run>/seats.json. Matched by those recorded slugs, never by the deliver- prefix, because the CLI
+# workflow uses that prefix too. A seats file that exists but can't be read stands for both slugs its run could have.
+CORE_SLUGS=" "; CORE_ANY=0; CORE_UNKNOWN=0; CORE_PTR=0; CORE_DATA=( "$DDATA" ); CORE_LOADED=0
+SLUG_LIT='^[a-z0-9][a-z0-9-]*$'
+# The core honours VAJRA_DESKTOP_DATA (app/core/src/paths.rs), so its seats may live there too (bhishma #194 F5).
+if [ -n "${VAJRA_DESKTOP_DATA:-}" ]; then canon "$VAJRA_DESKTOP_DATA" /; CORE_DATA+=( "$CANON" ); fi
+core_slugs_load() { # reads the seats files once per hook call
+  [ "$CORE_LOADED" = 1 ] && return 0
+  CORE_LOADED=1
+  local ng=0 d f run s base lead
+  shopt -q nullglob && ng=1
+  shopt -s nullglob
+  for base in "${CORE_DATA[@]}"; do
+  lead="$base/control/lead"
+  # A lead dir (or a run dir) that exists but can't be listed: core runs may exist with slugs we can't read.
+  if [ -e "$lead" ] && { [ ! -d "$lead" ] || [ ! -r "$lead" ] || [ ! -x "$lead" ]; }; then CORE_UNKNOWN=1; continue; fi
+  for d in "$lead"/*/; do
+    d="${d%/}"; run="${d##*/}"; f="$d/seats.json"
+    if [ ! -r "$d" ] || [ ! -x "$d" ]; then CORE_ANY=1; CORE_SLUGS+="deliver-$run deliver-$run-og "; continue; fi
+    [ -e "$f" ] || [ -L "$f" ] || continue   # no seats file: not a core run (the CLI workflow writes its campaign)
+    s=""
+    if [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ]; then
+      if command -v jq >/dev/null 2>&1; then
+        s="$(jq -r '.campaign_slug | if type == "string" then . else empty end' "$f" 2>/dev/null)" || s=""
+      elif [ -x "$PYTHON3" ]; then
+        s="$("$PYTHON3" -I -c 'import json,sys
+v = json.load(open(sys.argv[1], encoding="utf-8")).get("campaign_slug")
+print(v if isinstance(v, str) else "")' "$f" 2>/dev/null)" || s=""
+      fi
+    fi
+    CORE_ANY=1
+    if [[ "$s" =~ $SLUG_LIT ]]; then
+      CORE_SLUGS+="$s "
+    else
+      CORE_SLUGS+="deliver-$run deliver-$run-og "
+    fi
+  done
+  done
+  # An active pointer that names a core slug: only the core's record repo has one (vajra-62, #190).
+  for f in "$HOME/.claude/vajra/campaigns"/.active-*; do
+    s="$(tr -d ' \r\n' < "$f" 2>/dev/null)"
+    [ -n "$s" ] && [[ "$CORE_SLUGS" == *" $s "* ]] && CORE_PTR=1
+  done
+  [ "$ng" = 1 ] || shopt -u nullglob
+  return 0
+}
+# 0 when <slug> is a core run's campaign (bhishma #194 M1). The runs can't be listed: any deliver- slug may be one.
+core_slug() {
+  core_slugs_load
+  [[ "$CORE_SLUGS" == *" $1 "* ]] && return 0
+  [ "$CORE_UNKNOWN" = 1 ] && [[ "$1" == deliver-* ]] && return 0
+  return 1
+}
+
 # Knowledge ledger (kb/) and task graphs (campaigns/<slug>/tasks.json*) change
 # only through scripts/vajra_kb.py and scripts/vajra_tasks.py; reading is fine.
+# A core run's whole campaign folder is the core's (bhishma #194 M1): campaign.json, features.json, progress.md,
+# state.sig, report.md and .lock change only in the core's own processes.
 
 PKIND=""
 # The shortcut above is valid only while no protected root was moved by a symlink under HOME.
@@ -256,6 +314,11 @@ classify_() { # canonical path -> PKIND = key|core|ancestor|""
       */*) ;;
       *.jsonl|*.log) PKIND=core; return 0 ;;
     esac
+    if [[ "$rest" == campaigns/?* ]]; then
+      local cs="${rest#campaigns/}"; cs="${cs%%/*}"
+      # classify runs with nocasematch on, so DELIVER-x (the same folder on a case-insensitive disk) matches too.
+      if [ -n "$cs" ] && core_slug "$cs"; then PKIND=core; return 0; fi
+    fi
     if [[ "$rest" == campaigns/*/checkpoints || "$rest" == campaigns/*/checkpoints/* ]]; then PKIND=core; return 0; fi
     if [[ "$rest" == campaigns/*/tasks.json* && "${rest#campaigns/*/}" != */* ]]; then PKIND=core; return 0; fi
     # vajra_tasks.py's lock directory (mkdir-based): only the script takes it.
@@ -1080,52 +1143,7 @@ NOT_SCRIPTS=" install.sh install-skills.sh generate-manifest.sh "
 # they write: their text may name protected paths. Output flags stay checked.
 DATA_SCRIPTS=" vajra_kb.py vajra_tasks.py vajra-campaign.sh "
 
-# #190 H1 (4): a campaign that Vajra Desktop's core runs is written only by the core, which runs the scripts as its own
-# children, never in an agent session. Its slug is the one a core seats file records: campaign_slug in
-# <data>/control/lead/<run>/seats.json. Matched by those recorded slugs, never by the deliver- prefix, because the CLI
-# workflow uses that prefix too. A seats file that exists but can't be read stands for both slugs its run could have.
-CORE_SLUGS=" "; CORE_ANY=0; CORE_UNKNOWN=0; CORE_PTR=0; CORE_DATA=( "$DDATA" )
-SLUG_LIT='^[a-z0-9][a-z0-9-]*$'
-# The core honours VAJRA_DESKTOP_DATA (app/core/src/paths.rs), so its seats may live there too (bhishma #194 F5).
-if [ -n "${VAJRA_DESKTOP_DATA:-}" ]; then canon "$VAJRA_DESKTOP_DATA" /; CORE_DATA+=( "$CANON" ); fi
-core_slugs_load() {
-  local ng=0 d f run s base lead
-  shopt -q nullglob && ng=1
-  shopt -s nullglob
-  for base in "${CORE_DATA[@]}"; do
-  lead="$base/control/lead"
-  # A lead dir (or a run dir) that exists but can't be listed: core runs may exist with slugs we can't read.
-  if [ -e "$lead" ] && { [ ! -d "$lead" ] || [ ! -r "$lead" ] || [ ! -x "$lead" ]; }; then CORE_UNKNOWN=1; continue; fi
-  for d in "$lead"/*/; do
-    d="${d%/}"; run="${d##*/}"; f="$d/seats.json"
-    if [ ! -r "$d" ] || [ ! -x "$d" ]; then CORE_ANY=1; CORE_SLUGS+="deliver-$run deliver-$run-og "; continue; fi
-    [ -e "$f" ] || [ -L "$f" ] || continue   # no seats file: not a core run (the CLI workflow writes its campaign)
-    s=""
-    if [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ]; then
-      if command -v jq >/dev/null 2>&1; then
-        s="$(jq -r '.campaign_slug | if type == "string" then . else empty end' "$f" 2>/dev/null)" || s=""
-      elif [ -x "$PYTHON3" ]; then
-        s="$("$PYTHON3" -I -c 'import json,sys
-v = json.load(open(sys.argv[1], encoding="utf-8")).get("campaign_slug")
-print(v if isinstance(v, str) else "")' "$f" 2>/dev/null)" || s=""
-      fi
-    fi
-    CORE_ANY=1
-    if [[ "$s" =~ $SLUG_LIT ]]; then
-      CORE_SLUGS+="$s "
-    else
-      CORE_SLUGS+="deliver-$run deliver-$run-og "
-    fi
-  done
-  done
-  # An active pointer that names a core slug: only the core's record repo has one (vajra-62, #190).
-  for f in "$HOME/.claude/vajra/campaigns"/.active-*; do
-    s="$(tr -d ' \r\n' < "$f" 2>/dev/null)"
-    [ -n "$s" ] && [[ "$CORE_SLUGS" == *" $s "* ]] && CORE_PTR=1
-  done
-  [ "$ng" = 1 ] || shopt -u nullglob
-  return 0
-}
+# The core slugs (CORE_SLUGS, core_slugs_load) are defined above classify, which also uses them (#194 M1).
 core_slug_block() { block "campaign $1 is run by Vajra Desktop: only the app writes it, so agents may read it (show, list, verify, status) but never change it"; }
 # bhishma #194 (on e512745a): every slug a core run may have, read with no fork (both forms of each run folder's name,
 # and every campaign_slug its seats file records), so a command that names one is judged even when it never spells

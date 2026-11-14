@@ -1175,6 +1175,37 @@ done
 bash_case BLOCK "a core slug as any word of a write is refused" "$CS progress 'see $C0 for context' --campaign deliver-20261112-0930"
 bash_case BLOCK "a core slug inside a longer word still counts (fail-closed)" "$CS progress 'see ${C0}x' --campaign deliver-20261112-0930"
 
+# bhishma #194 M1: a core run's whole campaign folder is the core's, not only tasks.json and checkpoints.
+CF="$VS/campaigns/$C0"; mkdir -p "$CF" "$VS/campaigns/$COG" "$VS/campaigns/deliver-20261112-0930"
+echo '{}' > "$CF/campaign.json"
+file_case BLOCK "M1: Write a core campaign.json"           Write "$CF/campaign.json"
+file_case BLOCK "M1: Edit a core features.json"            Edit "$CF/features.json"
+file_case BLOCK "M1: Write a core progress.md"             Write "$CF/progress.md"
+file_case BLOCK "M1: Write a core report.md"               Write "$CF/report.md"
+file_case BLOCK "M1: Write an -og campaign's state.sig"    Write "$VS/campaigns/$COG/state.sig"
+file_case BLOCK "M1: Write an unreadable-seats run's file" Write "$VS/campaigns/deliver-20261112-1902-og/progress.md"
+file_case BLOCK "M1: Write, upper-case slug"               Write "$VS/campaigns/DELIVER-20261112-1900/campaign.json"
+file_case BLOCK "M1: Write, tilde path"                    Write "~/.claude/vajra/campaigns/$C0/progress.md"
+bash_case BLOCK "M1: redirect into state.sig"              "echo x > ~/.claude/vajra/campaigns/$C0/state.sig"
+bash_case BLOCK "M1: append to progress.md"                "echo x >> \"$CF/progress.md\""
+bash_case BLOCK "M1: cp over report.md"                    "cp /tmp/r.md \"$CF/report.md\""
+bash_case BLOCK "M1: mv a planted campaign.json in"        "mv /tmp/c.json \"$CF/campaign.json\""
+bash_case BLOCK "M1: plant .lock with mkdir"               "mkdir \"$CF/.lock\""
+bash_case BLOCK "M1: plant .lock with touch"               "touch \"$CF/.lock\""
+bash_case BLOCK "M1: sed -i on features.json"              "sed -i '' s/false/true/ \"$CF/features.json\""
+bash_case BLOCK "M1: python writes campaign.json"          "python3 -c 'open(\"$CF/campaign.json\",\"w\").write(\"x\")'"
+bash_case BLOCK "M1: cd into the folder, then redirect"    "cd \"$CF\" && echo x > progress.md"
+bash_case BLOCK "M1: cwd is the folder"                    "echo x > progress.md" "$CF"
+bash_case BLOCK "M1: rm the folder"                        "rm -rf \"$CF\""
+file_case ALLOW "M1: Read a core campaign.json"            Read "$CF/campaign.json"
+bash_case ALLOW "M1: cat a core campaign.json"             "cat \"$CF/campaign.json\""
+file_case ALLOW "M1: a CLI campaign's progress.md is not the core's" Write "$VS/campaigns/deliver-20261112-0930/progress.md"
+file_case BLOCK "M1: a CLI campaign's tasks.json stays script-only" Write "$VS/campaigns/deliver-20261112-0930/tasks.json"
+export VAJRA_DESKTOP_DATA="$ALT"; chmod 000 "$ALT/control/lead"
+file_case BLOCK "M1: unreadable lead dir: any deliver- folder" Write "$VS/campaigns/deliver-20261112-0930/progress.md"
+file_case ALLOW "M1: unreadable lead dir: another campaign"   Write "$VS/campaigns/login-flow/progress.md"
+chmod 700 "$ALT/control/lead"; unset VAJRA_DESKTOP_DATA
+
 # --- Latency ---------------------------------------------------------------
 LAT_JSON="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit -m \"wip\" && npm test -- --watch=false 2>&1 | tail -n 20"}}')"
 RUNS=40
