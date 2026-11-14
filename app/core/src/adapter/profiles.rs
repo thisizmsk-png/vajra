@@ -176,6 +176,9 @@ pub fn claude_worker_hook_scripts() -> Result<Vec<String>, String> {
 /// codex: the flag file names the guard but S4 proved its behavior, so a changed guard needs a new proof). At dispatch
 /// `hooks` is the user's installed `~/.claude/skills/vajra/hooks`; the built-in pair is computed over the repo's
 /// `hooks/`. A missing or non-regular (symlinked) script is an error, and so the build is unproven (fail closed).
+/// Only the scripts `hooks/hooks.json` runs are hashed: a helper one of them sources or executes from elsewhere (the
+/// non-guard hooks call `vajra` skill scripts) is not in the shape, so a changed helper needs no new proof. The guard
+/// itself (`pre-tool-use.sh`) is one self-contained file and is always hashed.
 pub fn claude_worker_flag_shape(hooks: &Path) -> Result<String, String> {
     let mut input = claude_worker_shape_input()?.into_bytes();
     for name in claude_worker_hook_scripts()? {
@@ -1165,8 +1168,9 @@ fn check_fs_entries(p: &Value, allowed: &[PathBuf]) -> Result<(), NotApplied> {
 }
 
 /// Check a Claude worker's `system`/`init` event: permission mode `dontAsk`, and no built-in tool outside the role's
-/// list. The user's own MCP tools, `mcp__*`, are kept for workers under Q4, except Vajra's own namespaces: a worker has
-/// no Vajra tools (16.4), so an `mcp__vajra*` tool from a server named like Vajra's fails.
+/// list. An MCP tool, `mcp__*`, doesn't fail the read-back (Q4), except Vajra's own namespaces: a worker has no Vajra
+/// tools (16.4), so an `mcp__vajra*` tool from a server named like Vajra's fails. Any MCP server that loaded marks the
+/// worker not guarded instead (`claude_key_guard`).
 pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied> {
     let init = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "system" && e["subtype"] == "init");
     let Some(init) = init else { return Err(NotApplied("no init event".into())) };
@@ -1185,6 +1189,65 @@ pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied>
         }
     }
     Ok(())
+}
+
+/// The MCP servers a Claude worker actually loaded, from its `system`/`init` event: every server `mcp_servers` lists
+/// (whatever its status: a failed one may still have started its process) and every server an `mcp__<server>__<tool>`
+/// tool names. Sorted, deduplicated; empty when the event lists none or there is no init event. Judged from what
+/// loaded, never from the config files: under `--setting-sources ""` Claude Code 2.1.296 loads none of the user,
+/// local or project servers (vajra-51 probe, 2026-11-12), and a build that does is caught here.
+///
+/// Fails closed (#215 bhishma): every init event counts, not only the first; `None` when there is none; and a format
+/// it can't read (an `mcp_servers` or `tools` that isn't a list, an entry with no name) is `UNNAMED_MCP_SERVER`, so a
+/// server with no tools yet never reads as "none loaded".
+pub fn claude_mcp_loaded(events: &str) -> Option<Vec<String>> {
+    let inits: Vec<Value> = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).filter(|e| e["type"] == "system" && e["subtype"] == "init").collect();
+    if inits.is_empty() {
+        return None;
+    }
+    let unnamed = || UNNAMED_MCP_SERVER.to_string();
+    let mut out: Vec<String> = Vec::new();
+    for init in &inits {
+        match &init["mcp_servers"] {
+            Value::Null => {}
+            Value::Array(list) => out.extend(list.iter().map(|s| {
+                let name = s.as_str().or_else(|| s["name"].as_str()).unwrap_or("");
+                if name.is_empty() { unnamed() } else { name.to_string() }
+            })),
+            _ => out.push(unnamed()),
+        }
+        match &init["tools"] {
+            Value::Null => {}
+            Value::Array(list) => out.extend(list.iter().filter_map(|t| match t.as_str() {
+                Some(t) => t.strip_prefix("mcp__").map(|rest| rest.split("__").next().filter(|s| !s.is_empty()).map_or_else(unnamed, String::from)),
+                None => Some(unnamed()),
+            })),
+            _ => out.push(unnamed()),
+        }
+    }
+    out.sort();
+    out.dedup();
+    Some(out)
+}
+
+/// How a key guard names an MCP server the init event lists in a form Vajra can't read.
+pub const UNNAMED_MCP_SERVER: &str = "(unnamed)";
+
+/// Whether a Claude worker counts as guarded (it can't read the signing key): only when it loaded no MCP server,
+/// since an MCP server runs outside the OS sandbox. `{"guarded": true}`, or `{"guarded": false, "mcp_servers": [...],
+/// "reason": ...}` with a plain reason naming them. A worker that is not guarded still runs; the card says why.
+pub fn claude_key_guard(events: &str) -> Value {
+    let Some(names) = claude_mcp_loaded(events) else {
+        return json!({"guarded": false, "mcp_servers": [], "reason": "Vajra couldn't read which MCP servers loaded for this worker, so it can't say the worker can't read Vajra's signing key."});
+    };
+    if names.is_empty() {
+        return json!({"guarded": true});
+    }
+    let reason = match names.as_slice() {
+        [one] => format!("Your MCP server {one} runs outside the sandbox and can read your files, including Vajra's signing key."),
+        many => format!("Your MCP servers {} run outside the sandbox and can read your files, including Vajra's signing key.", many.join(", ")),
+    };
+    json!({"guarded": false, "mcp_servers": names, "reason": reason})
 }
 
 /// Check a Codex run lead's first `turn_context`: the sandbox exactly `read-only`, then `check_codex_applied` with the

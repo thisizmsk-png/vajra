@@ -211,6 +211,11 @@ pub struct TicketView {
     /// Why a running Claude worker has no steering channel (a check, or its control dir didn't open). `None` when it
     /// has one, or its harness never steers (see `message_off`).
     pub steer_off: Option<&'static str>,
+    /// A Claude worker's key guard, once its read-back passed (`profiles::claude_key_guard`): `{"guarded": true}`
+    /// only when no MCP server loaded, else not guarded with the reason naming the server. `None` before that (the
+    /// node then says "guard unknown" once the worker has started), and for Codex workers (their rule is the Codex
+    /// stack's).
+    pub key_guard: Option<Value>,
     pub commit: Option<String>,
     pub task_ref: Option<String>,
     pub files: Vec<String>,
@@ -615,7 +620,7 @@ impl WorkerRuntime {
         let view = TicketView {
             id: id.clone(), run: s.run.clone(), task: s.task.clone(), round: s.round, kind, slot: seat.slot.clone(), account: seat.account.clone(),
             state: State::Queued, queue_position: None, wait: None, attempt: 0, elapsed_s: 0, dispatch_head: None, worktree: None, deps: Vec::new(),
-            outcome: None, reason: None, detail: None, harness_session: None, steer_off: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
+            outcome: None, reason: None, detail: None, harness_session: None, steer_off: None, key_guard: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
             receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
@@ -1145,6 +1150,9 @@ impl WorkerRuntime {
             e.view.attempt = n;
             e.view.harness_session = l.session_id.clone();
             e.view.steer_off = l.steer_off;
+            // #215 codex: the guard is this process's own evidence. A retry starts unknown, never with the last
+            // attempt's `guarded`; only its own read-back (`note_key_guard`) sets it again.
+            e.view.key_guard = None;
         }
         // A kill that landed between the check above and `session` being set.
         if self.killed(id).is_some() {
@@ -1194,9 +1202,14 @@ impl WorkerRuntime {
                 break None;
             }
             if applied.is_none() {
-                applied = l.read_back(&self.attempt_events(&sid, l, &mut opening), t);
-                if let Some(Err(_)) = &applied {
-                    let _ = self.0.sup.kill(&sid);
+                let events = self.attempt_events(&sid, l, &mut opening);
+                applied = l.read_back(&events, t);
+                match &applied {
+                    Some(Err(_)) => {
+                        let _ = self.0.sup.kill(&sid);
+                    }
+                    Some(Ok(())) => self.note_key_guard(id, l, &events),
+                    None => {}
                 }
             }
         };
@@ -1223,8 +1236,12 @@ impl WorkerRuntime {
         let Some(x) = exit else { return Attempt::End(Outcome::Failed, "timed_out".into(), receipt) };
         if x.code == 0 && x.signal.is_none() {
             // A clean exit is committed only once the read-back has passed.
+            let late = applied.is_none();
             return match applied.or_else(|| l.read_back(&events, t)) {
                 Some(Ok(())) => {
+                    if late {
+                        self.note_key_guard(id, l, &events);
+                    }
                     // A check is judged by its typed result (6g): keep its final answer, read where it can't be forged.
                     if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id).filter(|e| matches!(e.job, Job::Check(..))) {
                         e.answer = l.final_answer(&events);
@@ -1313,6 +1330,16 @@ impl WorkerRuntime {
 
     fn killed(&self, id: &str) -> Option<KillReason> {
         crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.kill)
+    }
+
+    /// Records a Claude worker's key guard once its read-back passed, from what its init event says loaded.
+    fn note_key_guard(&self, id: &str, l: &Launch, events: &str) {
+        if l.engine != Engine::Claude {
+            return;
+        }
+        if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
+            e.view.key_guard = Some(profiles::claude_key_guard(events));
+        }
     }
 
     /// What one attempt's checks read: its opening lines, read from the start of the stream through the spill and
@@ -1469,7 +1496,8 @@ impl StoredTicket {
             id: self.id, run: self.run, task: self.task, round: self.round, kind, slot: self.slot, account: self.account,
             state: self.state?, queue_position: None, wait: None, attempt: self.attempt, elapsed_s: self.elapsed_s,
             dispatch_head: self.dispatch_head, worktree: self.worktree, deps: self.deps, outcome: self.outcome, reason: self.reason,
-            detail: self.detail, harness_session: self.harness_session, steer_off: None, commit: self.commit, task_ref: self.task_ref,
+            // The key guard is the live process's own read-back evidence, never replayed from a file: unknown here.
+            detail: self.detail, harness_session: self.harness_session, steer_off: None, key_guard: None, commit: self.commit, task_ref: self.task_ref,
             files: self.files, added: self.added, removed: self.removed, leftovers: self.leftovers, receipt: self.receipt,
             mismatch: self.mismatch, provider: self.provider, summary: self.summary, retention: self.retention, started: None,
         })
@@ -1600,6 +1628,15 @@ impl TicketView {
             (State::Ended, Some(Outcome::Stopped)) => (Status::Failed, Some("stopped by the human")),
             (State::Ended, _) => (Status::Failed, None),
         };
+        // An MCP server ran with it, outside the sandbox: the card says so (the reason is in `key_guard`).
+        // A Claude worker that started but has no key guard yet (or never reported one) is unknown, never shown as
+        // guarded (#215 bhishma).
+        let unguarded = match &self.key_guard {
+            Some(g) if g["guarded"] == true => None,
+            Some(_) => Some("not guarded"),
+            None if self.attempt > 0 && launch::harness_of(&self.account) == Some(Engine::Claude) => Some("guard unknown"),
+            None => None,
+        };
         let controls = match launch::harness_of(&self.account) {
             // An ended ticket offers nothing: the control service refuses it as `worker_finished` (#151 review).
             Some(e) => {
@@ -1618,7 +1655,7 @@ impl TicketView {
             round: self.round,
             check: self.kind != "writer",
             status,
-            overlays: overlay.into_iter().collect(),
+            overlays: overlay.into_iter().chain(unguarded).collect(),
             provider: self.provider.clone(),
             controls,
             diff,

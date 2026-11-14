@@ -11,8 +11,14 @@ fn main() {
         eprintln!("usage: claude_selftest <absolute claude binary> <home>");
         std::process::exit(2);
     };
+    use vajra_desktop::adapter::{claude_selftest, profiles};
+    // The shape the app would check at dispatch, over the same installed hooks.
+    let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(home)).unwrap_or_else(|e| {
+        println!("self-test FAIL: {e}");
+        std::process::exit(1);
+    });
     let start = std::time::Instant::now();
-    let r = vajra_desktop::adapter::claude_selftest::run(claude, home, vajra_desktop::adapter::claude_selftest::TIMEOUT);
+    let r = claude_selftest::run(claude, home, &shape, claude_selftest::TIMEOUT);
     let secs = start.elapsed().as_secs_f32();
     match r {
         Ok(()) => println!("self-test PASS ({secs:.1} s)"),

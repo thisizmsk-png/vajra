@@ -561,6 +561,43 @@ fn the_claude_read_back_checks_the_mode_and_the_tool_set() {
     }
 }
 
+/// A Claude worker is guarded only when its init event shows no MCP server loaded and no `mcp__` tool; otherwise the
+/// reason names every server, from either place.
+#[test]
+fn a_claude_worker_is_guarded_only_when_no_mcp_server_loaded() {
+    let ev = |extra: Value| {
+        let mut init = json!({"type": "system", "subtype": "init", "tools": ["Read"]});
+        for (k, v) in extra.as_object().unwrap() {
+            init[k] = v.clone();
+        }
+        format!("{{\"type\":\"assistant\"}}\n{init}\n")
+    };
+    assert_eq!(claude_key_guard(&ev(json!({"mcp_servers": []}))), json!({"guarded": true}));
+    assert_eq!(claude_key_guard(&ev(json!({}))), json!({"guarded": true}));
+    let one = claude_key_guard(&ev(json!({"mcp_servers": [{"name": "files", "status": "failed"}]})));
+    assert_eq!((one["guarded"].as_bool(), one["mcp_servers"].clone()), (Some(false), json!(["files"])), "a failed server may have started");
+    assert_eq!(one["reason"], "Your MCP server files runs outside the sandbox and can read your files, including Vajra's signing key.");
+    let two = claude_key_guard(&ev(json!({"mcp_servers": [{"name": "shell"}], "tools": ["Read", "mcp__files__read", "mcp__shell__run"]})));
+    assert_eq!(two["mcp_servers"], json!(["files", "shell"]), "{two}");
+    assert!(two["reason"].as_str().unwrap().starts_with("Your MCP servers files, shell run outside"), "{two}");
+    // #215 bhishma: a format the parser can't read fails closed, as an unnamed server, never as "none loaded".
+    for odd in [json!({"mcp_servers": {"files": {}}}), json!({"mcp_servers": "files"}), json!({"mcp_servers": [{"status": "connected"}]}),
+        json!({"mcp_servers": [{"name": ""}]}), json!({"mcp_servers": [7]}), json!({"tools": "Read,mcp__x__y"}), json!({"tools": ["Read", {"name": "mcp__x__y"}]}),
+        json!({"tools": ["Read", "mcp____y"]})]
+    {
+        let g = claude_key_guard(&ev(odd.clone()));
+        assert_eq!((g["guarded"].as_bool(), g["mcp_servers"].clone()), (Some(false), json!([UNNAMED_MCP_SERVER])), "{odd}: {g}");
+    }
+    // Every init event counts, not only the first.
+    let two_inits = format!("{}{}", ev(json!({"mcp_servers": []})), ev(json!({"mcp_servers": [{"name": "late"}]})));
+    assert_eq!(claude_key_guard(&two_inits)["mcp_servers"], json!(["late"]));
+    // No init event: unknown, so not guarded.
+    assert_eq!(claude_mcp_loaded("{}\n"), None);
+    let none = claude_key_guard("{}\n");
+    assert_eq!(none["guarded"], false, "{none}");
+    assert!(none["reason"].as_str().unwrap().contains("couldn't read which MCP servers loaded"), "{none}");
+}
+
 #[test]
 fn a_read_back_mismatch_kills_the_session() {
     use crate::bus::{Bus, Config};

@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::adapter::claude_selftest;
 use crate::providers::errors::{FakeClock, ProviderError};
 use crate::vajra::gitw::{GlobalBaseline, Pause, Quiesce};
 
@@ -943,10 +944,65 @@ fn a_claude_worker_runs_through_its_profile_now_that_s4_passed() {
     let r = rig("claude", Opts::default());
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
-    assert_eq!(v.receipt.unwrap()["effective"]["model"], "claude-fake-1");
+    assert_eq!(v.receipt.as_ref().unwrap()["effective"]["model"], "claude-fake-1");
     assert!(v.harness_session.as_deref().is_some_and(crate::ids::valid_session_id), "its own session id, for its message queue");
     let flags: Vec<_> = std::fs::read_dir(r.gw.data.join("profiles")).unwrap().collect();
     assert!(flags.is_empty(), "the flag file is removed when the ticket ends");
+    assert_eq!(v.key_guard, Some(json!({"guarded": true})), "no MCP server loaded");
+    assert!(!v.core_worker().overlays.contains(&"not guarded"));
+}
+
+/// An MCP server runs outside the OS sandbox and can read the signing key. A Claude worker whose init event shows one
+/// loaded still runs and ends Done, but is not guarded, and the reason names the server. Its build is proven here by
+/// construction (the canary stand-in passes its self-test; only its worker run loads the server), so this test never
+/// waits on the S4 pair (#215 bhishma).
+#[test]
+fn a_claude_worker_with_a_loaded_mcp_server_runs_but_is_not_guarded() {
+    let r = canary_rig("claude-mcp", false);
+    std::fs::write(r.d.join("selftests.mcp"), "").unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1, "proven by its self-test here");
+    let g = v.key_guard.clone().unwrap();
+    assert_eq!((g["guarded"].as_bool(), g["mcp_servers"].clone()), (Some(false), json!(["files"])), "{g}");
+    assert!(g["reason"].as_str().unwrap().contains("MCP server files runs outside the sandbox"), "{g}");
+    assert!(v.core_worker().overlays.contains(&"not guarded"), "the card says so");
+    // Without the server, the same proven build's worker is guarded.
+    std::fs::remove_file(r.d.join("selftests.mcp")).unwrap();
+    let g = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(g.key_guard, Some(json!({"guarded": true})), "{g:?}");
+    assert!(!g.core_worker().overlays.iter().any(|o| o.contains("guard")), "{:?}", g.core_worker().overlays);
+    // A Codex worker has no Claude key guard: its rule lives with the Codex sandbox.
+    let c = r.done(&r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(c.key_guard, None, "{c:?}");
+    assert!(!c.core_worker().overlays.iter().any(|o| o.contains("guard")), "{:?}", c.core_worker().overlays);
+}
+
+/// #215 bhishma: a Claude ticket that started but has no key guard shows as unknown, never as guarded; one refused
+/// before it ran shows neither.
+#[test]
+fn a_started_claude_ticket_with_no_key_guard_reads_as_unknown() {
+    // Proven by construction (canary), so it doesn't wait on the S4 pair.
+    let r = canary_rig("guard-unknown", false);
+    let mut v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.attempt > 0), (Some(Outcome::Done), true), "{v:?}");
+    v.key_guard = None;
+    assert!(v.core_worker().overlays.contains(&"guard unknown"), "{:?}", v.core_worker().overlays);
+    v.attempt = 0;
+    assert!(!v.core_worker().overlays.iter().any(|o| o.contains("guard")), "not started: nothing to say");
+}
+
+/// #215 codex: attempt 1 starts with no MCP server (guarded), then a retryable error on an unchanged tree; the retries
+/// never print an init event. Their guard is their own: unknown, never attempt 1's `guarded`.
+#[test]
+fn a_retry_whose_process_never_shows_its_init_does_not_inherit_the_last_attempts_guard() {
+    // Proven by construction (canary), so it doesn't wait on the S4 pair.
+    let r = canary_rig("guard-retry", false);
+    std::fs::write(r.d.join("selftests.retry"), "").unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert!(r.d.join("selftests.retried").exists() && v.attempt > 1, "attempt 1 ran and was retried: {v:?}");
+    assert_eq!(v.key_guard, None, "{v:?}");
+    assert!(v.core_worker().overlays.contains(&"guard unknown"), "{:?}", v.core_worker().overlays);
 }
 
 /// #180 bhishma: S4 proved one Claude Code build, but users auto-update. A build no S4 run proved (with today's flag
@@ -980,13 +1036,23 @@ fn canary_claude(dir: &Path, leaky: bool) -> PathBuf {
     let p = dir.join("canary-claude");
     let script = format!(
         r#"#!/usr/bin/python3 -I
-import json, os, sys, urllib.request
+import json, os, subprocess, sys, urllib.request
 args = sys.argv[1:]
 if args[:1] == ["--version"]:
     print("9.9.10 (Claude Code)" if os.path.exists("{count}.swapped") else "9.9.9 (Claude Code)"); sys.exit(0)
 tools = args[args.index("--tools") + 1].split(",")
-print(json.dumps({{"type": "system", "subtype": "init", "model": "claude-fake-1", "tools": tools, "permissionMode": "dontAsk"}}), flush=True)
 base = os.environ.get("ANTHROPIC_BASE_URL")
+init = {{"type": "system", "subtype": "init", "model": "claude-fake-1", "tools": tools, "permissionMode": "dontAsk"}}
+if not base and os.path.exists("{count}.mcp"):
+    # Its worker run loads a user MCP server (its self-test, which passed, didn't).
+    init["mcp_servers"] = [{{"name": "files", "status": "connected", "source": "user"}}]
+    init["tools"] = tools + ["mcp__files__read"]
+if not base and os.path.exists("{count}.retry"):
+    # A retryable error on an unchanged tree: the first worker run starts cleanly, every later one never prints init.
+    if not os.path.exists("{count}.retried"):
+        open("{count}.retried", "w").close(); print(json.dumps(init), flush=True)
+    print("unexpected status 504 Gateway Timeout", flush=True); sys.exit(1)
+print(json.dumps(init), flush=True)
 if not base:
     open("src/lib.rs", "a").write("worker line\n"); sys.exit(0)
 open("{count}", "a").write("selftest\n")
@@ -1010,6 +1076,12 @@ while True:
             err, text = True, "File is in a directory that is denied by your permission settings."
     elif name == "Write":
         open(inp["file_path"], "w").write(inp["content"])
+    elif name == "Bash" and "python3 -c" in inp["command"]:
+        # The OS sandbox, as the command's output, then the marker its `|| echo` prints on the non-zero exit.
+        text = "PermissionError: [Errno 1] Operation not permitted: <locked>\n" + inp["command"].rsplit("echo ", 1)[1]
+    elif name == "Bash":
+        r = subprocess.run(["/bin/sh", "-c", inp["command"]], capture_output=True, text=True)
+        err, text = r.returncode != 0, r.stdout + r.stderr
     msgs += [{{"role": "assistant", "content": [{{"type": "tool_use", "id": start["id"], "name": name, "input": inp}}]}},
              {{"role": "user", "content": [{{"type": "tool_result", "tool_use_id": start["id"], "is_error": err, "content": text}}]}}]
 "#,
@@ -1072,10 +1144,51 @@ fn an_unproven_build_that_passes_its_self_test_here_runs_and_is_not_tested_again
     assert_eq!(selftests(&r), 1);
     let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
     let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&r.home)).unwrap();
-    assert_eq!(list["pairs"], json!([{"version": "9.9.9 (Claude Code)", "shape": shape}]));
+    assert_eq!(list["pairs"], json!([{"version": "9.9.9 (Claude Code)", "shape": shape, "test": claude_selftest::VERSION}]));
     let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
     assert_eq!(selftests(&r), 1, "a proven pair is not tested again");
+}
+
+/// Seeds this Mac's list with one pair for the rig's own build and flag shape, `test` as an older self-test wrote it
+/// (`None`: before pairs carried a test number).
+fn seed_pair(r: &Rig, test: Option<u32>) {
+    let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&r.home)).unwrap();
+    let mut pair = json!({"version": "9.9.9 (Claude Code)", "shape": shape});
+    if let Some(t) = test {
+        pair["test"] = json!(t);
+    }
+    crate::control::fsx::private_dir(&r.gw.data.join("control")).unwrap();
+    std::fs::write(r.gw.data.join("control/claude-proven.json"), json!({"pairs": [pair]}).to_string()).unwrap();
+}
+
+/// #215 codex P1: this Mac's list holds a pair an older, weaker self-test recorded (no OS sandbox probes), and the
+/// build has no OS sandbox: an Edit writes the data folder. Same version, same flag shape, so a list keyed on those
+/// alone would run it untested. The old pair isn't proof of the current test: the build is tested again and refused.
+#[test]
+fn a_pair_an_older_self_test_recorded_is_tested_again_and_a_build_with_no_sandbox_is_refused() {
+    for (tag, test) in [("canary-legacy-none", None), ("canary-legacy-1", Some(1))] {
+        let r = canary_rig(tag, true);
+        seed_pair(&r, test);
+        let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+        assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{tag} {v:?}");
+        assert!(v.worktree.is_none() && !r.d.join("log").exists(), "{tag}: the harness never ran: {v:?}");
+        assert_eq!(selftests(&r), 1, "{tag}: the old pair was self-tested, not trusted");
+    }
+}
+
+/// The same old pair for a build that does pass the current test: it is tested once more, then recorded with this
+/// test's number in place of the old entry.
+#[test]
+fn a_pair_an_older_self_test_recorded_is_replaced_once_the_current_test_passes() {
+    let r = canary_rig("canary-legacy-pass", false);
+    seed_pair(&r, Some(1));
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 1);
+    let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
+    let tests: Vec<_> = list["pairs"].as_array().unwrap().iter().map(|p| p["test"].clone()).collect();
+    assert_eq!(tests, [json!(claude_selftest::VERSION)], "only the current test's pass is kept");
 }
 
 /// #195 bhishma: the CLI updates in place (9.9.9 to 9.9.10) while 9.9.9's self-test runs. The PASS can't be told
