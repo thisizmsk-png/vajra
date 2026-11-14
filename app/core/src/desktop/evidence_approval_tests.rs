@@ -1138,6 +1138,64 @@ mod runner_wiring {
         refuses(planted_run(".venv/\n", &[("pyproject.toml", "[tool.pytest.ini_options]\nnorecursedirs = [\"x\"]\n")], &[".venv/pyvenv.cfg", ".venv/conftest.py"]), ".venv/conftest.py");
     }
 
+    /// Codex P1 on #256: a tracked config that names its own test files makes any source file of that language
+    /// collectable, so every ignored one outside `node_modules` is refused, before the approval is used.
+    #[test]
+    fn a_config_that_names_its_own_test_files_refuses_every_ignored_source_of_its_language() {
+        let pytest_ini = ("pytest.ini", "[pytest]\npython_files = check.py\n");
+        refuses(planted_with(&["pytest"], "check.py\n", &[pytest_ini], &["check.py"]), "check.py");
+        let addopts = ("pyproject.toml", "[tool.pytest.ini_options]\naddopts = \"lib/run_me.py\"\n");
+        refuses(planted_with(&["pytest"], "lib/\n", &[addopts], &["lib/run_me.py"]), "lib/run_me.py");
+        let configs: [(&str, &str); 4] = [
+            ("jest.config.js", "module.exports = { testMatch: ['**/*.check.js'] }\n"),
+            ("package.json", "{\"jest\": {\"testRegex\": \"check\\\\.js$\"}}\n"),
+            ("vitest.config.ts", "export default { test: { include: ['**/*.check.js'] } }\n"),
+            (".mocharc.json", "{\"spec\": \"**/*.check.js\"}\n"),
+        ];
+        for cfg in configs {
+            refuses(planted_with(&["npm test"], "build/\n", &[cfg], &["build/a.check.js"]), "build/a.check.js");
+            // Installed packages stay out: a runner's own default skip, kept so ordinary projects can run.
+            assert_eq!(planted_with(&["npm test"], "node_modules/\n", &[cfg], &["node_modules/pkg/index.js"]), None, "{}", cfg.0);
+        }
+        // Without a custom pattern, an ignored source file that doesn't look like a test is left alone.
+        assert_eq!(planted_with(&["pytest"], "check.py\n", &[("pytest.ini", "[pytest]\n")], &["check.py"]), None);
+        assert_eq!(planted_with(&["npm test"], "build/\n", &[("jest.config.js", "module.exports = {}\n")], &["build/a.check.js"]), None);
+    }
+
+    /// Codex P1 on #256: the same file planted after the first check is refused at spawn, and nothing runs.
+    #[test]
+    fn a_source_file_planted_after_the_check_under_a_custom_pattern_is_refused_at_spawn() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        let w = g.work();
+        fs::write(g.common().join("info/exclude"), "check.py\n").unwrap();
+        fs::write(w.join("pytest.ini"), "[pytest]\npython_files = check.py\n").unwrap();
+        git_in(&w, &["add", "pytest.ini"]);
+        git_in(&w, &["commit", "-qm", "config"]);
+        let a = Ask { commit: git_in(&w, &["rev-parse", "HEAD"]), commands: vec!["pytest".into()], ..g.ask() };
+        approved(&app, &a);
+        let wh = g.here();
+        let base = w.join("data/walkthroughs");
+        let prof = Profile { worktree: w.clone(), tmp: w.with_file_name("run-tmp"), deny: vec![], network: false };
+        let caller: Vec<String> = vec![];
+        let run = EvidenceRun { script: &w, slug: &wh.slug, commands: &caller, base: &base, git_common: &wh.common, home: &w, state_dir: &w, tool_path: &[], limit: Duration::from_secs(60), at_spawn: None };
+        let ran = std::cell::Cell::new(false);
+        let exec = |_: &Profile, r: &EvidenceRun| {
+            fs::write(w.join("check.py"), "def test_x(): pass\n").unwrap();
+            let Some(crate::adapter::evidence_runner::AtSpawn(check)) = r.at_spawn else { panic!("no check") };
+            if let Err(why) = check() {
+                return RunOutcome::Failed(why);
+            }
+            ran.set(true);
+            RunOutcome::Ran { passed: true, sha256: "e".repeat(64) }
+        };
+        let (_, out) = app.run_approved_evidence_with(a, &prof, &run, at(T0 + 2), exec).unwrap();
+        let RunOutcome::Failed(why) = out else { panic!("ran: {out:?}") };
+        assert!(why.contains("check.py"), "{why}");
+        assert!(!ran.get(), "nothing ran");
+    }
+
     /// bhishma M2 on 7c09e27: ignored files aren't in the compared tree. The check says so in the signed bundle (their
     /// listing's count and hash) and refuses an ignored file a test runner would collect.
     #[test]

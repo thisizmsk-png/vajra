@@ -426,7 +426,7 @@ impl Bridge {
             let rules = (|| -> Option<SkipRules> {
                 let mut r = SkipRules::default();
                 let mut seen = 0usize;
-                for (globs, keys) in RUNNER_CONFIGS {
+                for (i, (globs, keys, collect)) in RUNNER_CONFIGS.iter().enumerate() {
                     let mut a: Vec<String> = ["ls-files", "-z", "--cached", "--"].map(String::from).to_vec();
                     a.extend(globs.iter().map(|g| format!(":(glob){g}")));
                     let files = names(git(&a.iter().map(String::as_str).collect::<Vec<_>>(), true)?);
@@ -438,14 +438,30 @@ impl Bridge {
                         let body = git(&["cat-file", "blob", &format!(":{f}")], true)?.stdout_raw;
                         let text = String::from_utf8_lossy(&body);
                         let base = Path::new(&f).file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                        match base {
-                            "pytest.ini" => r.py_config = true,
-                            "pyproject.toml" | "setup.cfg" | "tox.ini" => r.py_config |= text.contains("pytest"),
-                            "package.json" => r.js_config |= ["\"jest\"", "\"vitest\"", "\"mocha\""].iter().any(|k| text.contains(k)),
-                            _ => r.js_config = true,
+                        // Whether this file configures a runner at all: a pyproject.toml, setup.cfg or tox.ini only
+                        // when it mentions pytest, a package.json only when it mentions a JS runner.
+                        let runner = match base {
+                            "pyproject.toml" | "setup.cfg" | "tox.ini" => text.contains("pytest"),
+                            "package.json" => ["\"jest\"", "\"vitest\"", "\"mocha\""].iter().any(|k| text.contains(k)),
+                            _ => true,
+                        };
+                        let py = i == 0;
+                        if py {
+                            r.py_config |= runner;
+                        } else {
+                            r.js_config |= runner;
                         }
                         if keys.split('|').any(|k| text.contains(k)) {
                             r.overridden = true;
+                        }
+                        // Matched as plain text anywhere in the file, so a key in a comment counts too: refusing more
+                        // is the safe side.
+                        if collect.split('|').any(|k| text.contains(k)) {
+                            if py {
+                                r.py_custom = true;
+                            } else {
+                                r.js_custom = true;
+                            }
                         }
                     }
                 }
@@ -488,11 +504,27 @@ impl Bridge {
                 a.extend(excluded.iter().cloned());
                 Some(names(git(&a.iter().map(String::as_str).collect::<Vec<_>>(), true)?))
             };
+            // A config that names its own test files makes every source file of that language collectable (codex P1
+            // on #256): every ignored one outside `node_modules` is listed, with the folder skips above.
+            let mut custom_skip = vec![":(exclude,glob)**/node_modules/**".to_string()];
+            custom_skip.extend(skip.iter().filter(|s| !s.contains("node_modules")).cloned());
+            let mut custom: Vec<&str> = Vec::new();
+            if rules.py_custom {
+                custom.extend(PY_SOURCES);
+            }
+            if rules.js_custom {
+                custom.extend(JS_SOURCES);
+            }
             let others: Vec<String> = TEST_LIKE.iter().map(|g| format!(":(glob){g}")).collect();
             let mut test_like = listing(&others, &skip)?.into_iter().filter(|p| !p.ends_with("_test.go")).collect::<Vec<_>>();
             let go_skip: Vec<String> = GO_SKIP.iter().map(|g| format!(":(exclude,glob){g}")).collect();
             test_like.extend(listing(&[":(glob)**/*_test.go".to_string()], &go_skip)?);
+            if !custom.is_empty() {
+                let sources: Vec<String> = custom.iter().map(|g| format!(":(glob){g}")).collect();
+                test_like.extend(listing(&sources, &custom_skip)?);
+            }
             test_like.sort();
+            test_like.dedup();
             Some(Snapshot { tree, ignored, ignored_sha256, test_like })
         })();
         let _ = std::fs::remove_dir_all(&dir);
@@ -634,20 +666,33 @@ pub struct SkipRules {
     pub py_config: bool,
     /// A jest, vitest or mocha config is tracked: they skip neither `target` nor a virtualenv.
     pub js_config: bool,
+    /// A tracked pytest config names its own test files (`python_files`) or files to run (`addopts`): any Python file
+    /// could be collected, so every ignored one outside `node_modules` is test-like (codex P1 on #256).
+    pub py_custom: bool,
+    /// A tracked jest, vitest or mocha config names its own test files (`testMatch`, `testRegex`, `include`, `spec`):
+    /// every ignored JS or TS source outside `node_modules` is test-like.
+    pub js_custom: bool,
 }
 
 impl SkipRules {
-    const NONE: SkipRules = SkipRules { overridden: true, py_config: true, js_config: true };
+    const NONE: SkipRules = SkipRules { overridden: true, py_config: true, js_config: true, py_custom: true, js_custom: true };
 }
 
-/// The tracked config files each runner reads, and the keys in them that replace its default skips.
-pub const RUNNER_CONFIGS: [(&[&str], &str); 5] = [
-    (&["**/pytest.ini", "**/pyproject.toml", "**/setup.cfg", "**/tox.ini"], "norecursedirs"),
-    (&["**/jest.config.*"], "testPathIgnorePatterns|roots|testMatch|testRegex"),
-    (&["**/package.json"], "testPathIgnorePatterns|\"roots\"|testMatch|testRegex|\"spec\""),
-    (&["**/vitest.config.*", "**/vite.config.*", "**/vitest.workspace.*"], "exclude"),
-    (&["**/.mocharc*"], "spec"),
+/// The tracked config files each runner reads; the keys in them that replace its default skips; and the keys that
+/// replace or add to the names it collects (codex P1 on #256, bhishma M2 on cd9525a), or name files to run outright
+/// (pytest `addopts`).
+pub const RUNNER_CONFIGS: [(&[&str], &str, &str); 5] = [
+    (&["**/pytest.ini", "**/pyproject.toml", "**/setup.cfg", "**/tox.ini"], "norecursedirs", "python_files|addopts"),
+    (&["**/jest.config.*"], "testPathIgnorePatterns|roots|testMatch|testRegex", "testMatch|testRegex"),
+    (&["**/package.json"], "testPathIgnorePatterns|\"roots\"|testMatch|testRegex|\"spec\"", "testMatch|testRegex|\"spec\""),
+    (&["**/vitest.config.*", "**/vite.config.*", "**/vitest.workspace.*"], "exclude", "include"),
+    (&["**/.mocharc*"], "spec", "spec"),
 ];
+
+/// Every Python file: what pytest could collect once a tracked config names its own test files.
+const PY_SOURCES: [&str; 1] = ["**/*.py"];
+/// Every JS and TS source: what jest, vitest or mocha could collect once a tracked config names its own test files.
+const JS_SOURCES: [&str; 8] = ["**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"];
 
 /// A repo config as read once by `frozen_config`: the entries `git add` gets, and the repository format.
 #[derive(Debug, Default)]
