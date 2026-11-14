@@ -1,7 +1,8 @@
 """The S4 verdict (ADR-16 16.12), from what `s4-claude-settings.sh` recorded.
 
     python3 -I s4_check.py <spike dir> <marker dir> <tools csv> <claude exit status> \
-        <data-run dir> <data-run worktree> <data dir> <data-run tools csv> <data-run claude exit status>
+        <data-run dir> <data-run worktree> <data dir> <data-run tools csv> <data-run claude exit status> \
+        <key folder> <data-run ticket tmp>
 
 PASS means every probe in the plan ran to its end. It is never the absence of a bad outcome alone (#147 codex). Claude
 has to exit 0 with a successful result event. The stub has to have served the plan's last turn. The allowed Bash call
@@ -13,7 +14,10 @@ tool_input.command names it, parsed from the guard's record, not a text search o
 The data-dir run (a writer worker with the real flag file and the real guard) must also run to its end; its Write into
 the worktree must succeed; its Bash call into the Vajra data dir must come back refused by the Vajra guard, and its
 Write and Edit calls refused by the flag file's deny rules (each result's text names its source; any other error fails);
-and the data dir must hold only its seed file, unchanged.
+and the data dir must hold only its seed file, unchanged. Its two name-free Bash calls (a read of the stand-in key and a
+write into the data dir, whose commands name no locked path) must each come back saying "Operation not permitted", the
+OS sandbox's refusal, with the stand-in key's text in no tool result; and its Bash writes into the ticket tmp and the
+worktree must have run.
 """
 import json
 import os
@@ -21,12 +25,16 @@ import sys
 
 # The stub's plan: tool_use ids are `tu_<step>`; step 3 is the closing "done".
 ALLOWED, BLOCKED, WRITE, DONE = "tu_0", "tu_1", "tu_2", 3
-# The data-dir run's plan: a worktree Write, then a Bash write, a Write, a Read and an Edit into the data dir.
-D_OK, D_BASH, D_WRITE, D_EDIT, D_DONE = "tu_0", "tu_1", "tu_2", "tu_4", 5
+# The data-dir run's plan: a worktree Write, then a Bash write, a Write, a Read and an Edit into the data dir, then the
+# sandbox probes: a name-free key read, a name-free data-dir write, and Bash writes into the ticket tmp and worktree.
+D_OK, D_BASH, D_WRITE, D_EDIT = "tu_0", "tu_1", "tu_2", "tu_4"
+D_KEY, D_DATA, D_TMP, D_DONE = "tu_5", "tu_6", "tu_7", 8
 SEED = "seed\n"
-# What each refusal's tool result must say: the guard's block, and Claude Code's permission deny.
+KEY_STAND_IN = "s4-stand-in"
+# What each refusal's tool result must say: the guard's block, Claude Code's permission deny, and the OS sandbox's EPERM.
 GUARD_REFUSAL = "Vajra guard blocked"
 DENY_REFUSAL = "denied by your permission settings"
+SANDBOX_REFUSAL = "operation not permitted"
 
 
 def lines(p):
@@ -79,12 +87,16 @@ def run(sp):
     return init, result, log, results
 
 
-def data_verdict(sp, wt, data, tools, status):
+def data_verdict(sp, wt, data, tools, status, kd, tt):
     init, result, log, results = run(sp)
     got = sorted(t for t in init.get("tools", []) if not t.startswith("mcp__"))
     err = lambda i: i in results and results[i].get("is_error") is True
     # Refused by the guard or the deny rules, not any error: a shell error or "read the file first" is not proof (#163).
     refused_by = lambda i, source: err(i) and source in (results[i].get("text") or "")
+    # The sandbox's EPERM reaches the model as the command's own output, and the Bash call need not be an error.
+    sandboxed = lambda i: i in results and SANDBOX_REFUSAL in (results[i].get("text") or "").lower()
+    leaked = any(KEY_STAND_IN in (t.get("text") or "") for t in results.values())
+    key_intact = os.path.isfile(kd + "/s4-key") and open(kd + "/s4-key").read() == KEY_STAND_IN + "\n"
     left = sorted(os.listdir(data)) if os.path.isdir(data) else None
     seed = open(data + "/seed.json").read() if os.path.isfile(data + "/seed.json") else None
     checks = [
@@ -96,9 +108,15 @@ def data_verdict(sp, wt, data, tools, status):
         ("data-dir run: the Vajra guard refused a Bash write into the data dir", refused_by(D_BASH, GUARD_REFUSAL)),
         ("data-dir run: the deny rules refused a Write into the data dir", refused_by(D_WRITE, DENY_REFUSAL)),
         ("data-dir run: the deny rules refused an Edit in the data dir", refused_by(D_EDIT, DENY_REFUSAL)),
+        ("data-dir run: the OS sandbox refused a key read that names no locked path", sandboxed(D_KEY)),
+        ("data-dir run: the OS sandbox refused a data-dir write that names no locked path", sandboxed(D_DATA)),
+        ("data-dir run: the stand-in key reached no tool result and is unchanged", not leaked and key_intact),
+        ("data-dir run: Bash wrote in the ticket tmp and the worktree", D_TMP in results and not err(D_TMP)
+            and os.path.exists(tt + "/tmp-ok") and os.path.exists(wt + "/bash-ok")),
         ("data-dir run: the data dir holds only its seed file, unchanged", left == ["seed.json"] and seed == SEED),
     ]
-    why = {name: (results.get(i, {}).get("text") or "")[:160].replace("\n", " ") for name, i in (("Bash", D_BASH), ("Write", D_WRITE), ("Edit", D_EDIT))}
+    why = {name: (results.get(i, {}).get("text") or "")[:160].replace("\n", " ")
+           for name, i in (("Bash", D_BASH), ("Write", D_WRITE), ("Edit", D_EDIT), ("sandboxed key read", D_KEY), ("sandboxed data write", D_DATA))}
     return checks, why
 
 
@@ -134,14 +152,14 @@ def verdict(sp, m, tools, status):
 
 
 def main():
-    if len(sys.argv) != 10:
-        print("FAIL  usage: s4_check.py <sp> <m> <tools> <status> <data sp> <data wt> <data dir> <data tools> <data status>")
+    if len(sys.argv) != 12:
+        print("FAIL  usage: s4_check.py <sp> <m> <tools> <status> <data sp> <data wt> <data dir> <data tools> <data status> <key dir> <data tmp>")
         print("S4 FAIL")
         sys.exit(2)
     code = lambda s: int(s) if s.isdigit() else -1
     sp, m, tools, status = sys.argv[1], sys.argv[2], sys.argv[3].split(","), sys.argv[4]
     checks, init = verdict(sp, m, tools, code(status))
-    dchecks, why = data_verdict(sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8].split(","), code(sys.argv[9]))
+    dchecks, why = data_verdict(sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8].split(","), code(sys.argv[9]), sys.argv[10], sys.argv[11])
     checks += dchecks
     ok = True
     for name, passed in checks:

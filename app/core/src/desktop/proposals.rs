@@ -71,7 +71,11 @@ impl App {
 
     /// `start_proposal` with the user's overrides and start choice (ADR-16 16.3).
     pub fn start_proposal_opts(&self, id: &str, proposal_sha256: &str, opts: StartOptions) -> Res {
-        self.start_proposal_inner(id, proposal_sha256, opts, |input, cwd, taken| self.start_run_as(input, cwd, taken))
+        // A proposal with seats is a core run with its own lead (6d2c); one without starts exactly as before.
+        self.start_proposal_core(id, proposal_sha256, opts, |input, cwd, taken, project| match taken {
+            Some((_, run)) => self.start_lead_run(project, input, cwd, &run),
+            None => self.start_run_as(input, cwd, None),
+        })
     }
 
     /// `start_proposal` with the run starter given, so a test can see exactly what would start without a real CLI.
@@ -80,7 +84,13 @@ impl App {
         self.start_proposal_inner(id, proposal_sha256, StartOptions::default(), |input, cwd, _| start(input, cwd))
     }
 
+    #[cfg(test)]
     pub(super) fn start_proposal_inner(&self, id: &str, proposal_sha256: &str, opts: StartOptions, start: impl FnOnce(RunInput, &str, Option<(u64, String)>) -> Res) -> Res {
+        self.start_proposal_core(id, proposal_sha256, opts, |input, cwd, taken, _| start(input, cwd, taken))
+    }
+
+    /// `start_proposal_inner`, with the proposal's (verified) project given to the starter.
+    fn start_proposal_core(&self, id: &str, proposal_sha256: &str, opts: StartOptions, start: impl FnOnce(RunInput, &str, Option<(u64, String)>, &str) -> Res) -> Res {
         let _one = self.begin_decision(id)?;
         let p = self.open_proposal(id)?;
         let changed = || json!({"error": "proposal_changed", "detail": "this proposal is not what was shown; review it again"});
@@ -118,7 +128,7 @@ impl App {
             Some((run, now, doc, _)) => (Some((now, run)), Some(doc)),
             None => (None, None),
         };
-        match start(input, &root, taken) {
+        match start(input, &root, taken, &p.project) {
             Ok(run) => {
                 self.proposal_line(Decision::Approve, Some(&action), &p, DecisionState::Final, run["run_id"].as_str(), None)?;
                 self.note("proposal_started", &[]);

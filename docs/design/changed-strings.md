@@ -368,6 +368,19 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | "Pinged because your rule is on for ..." / "Grouped: they arrived within M min of the first." / "Held until now: you allow N pings an hour." / "Not pinged: notifications are off." / "Not pinged: your rule is off for ..." | under every ping and every quiet arrival | why it pinged, or why not |
 | Run to start / Review in Director-General | Inbox card for a run the Director-General proposes | it starts only from the Director-General view |
 
+6d2d: why an ended core run can't be resumed (the `why` codes from `core_runs`). Not shown yet: the core run card
+that shows them lands in its own PR, which runs the anti-slop gate. Proposed wording, for approval:
+
+| String | Where | Note |
+|---|---|---|
+| The project folder is gone, so this run can't continue. | run card, `cwd_missing` | |
+| The lead's agent CLI isn't installed any more. Install it, then try again. | run card, `provider_not_installed` | |
+| This provider can't lead a run yet. | run card, `lead_unverified` | the harness A lead stays off until it is spiked |
+| This run's seats can't be read, so it can't continue. | run card, `seats_unreadable` | |
+| This run's plan can't be read, so it can't continue. | run card, `plan_unreadable` | |
+| The app closed while this run was going. | run card, ended `lead_lost` with reason `app_restarted` | |
+| This run's lead couldn't start. | run card, ended `lead_lost` with reason `start_failed` | the start was recorded, then the lead never launched |
+
 One-click install (ADR-17 17b). Only a source that passed its security review gets the sheet; every other row keeps the step-1 wording and has no Install button.
 
 | String | Where | Note |

@@ -21,6 +21,10 @@ pub const DEFAULT_PROTOCOL: &str = "2025-06-18";
 /// Where tool calls go. `Ok` is the tool result, `Err` a tool error object.
 pub trait Forward {
     fn call(&mut self, tool: &str, args: &Value) -> Result<Value, Value>;
+    /// Does `tools/list` advertise `propose_run`'s seat fields?
+    fn seat_fields(&self) -> bool {
+        crate::providers::launch::CORE_ROUTE_AVAILABLE
+    }
 }
 
 /// Forwards over the app socket, one connection per call so an app restart
@@ -29,6 +33,8 @@ pub struct SocketClient {
     path: PathBuf,
     /// What this Lead was started for; sent with every call (see `Service::call_tool_for_run` / `_for_project`).
     binding: Binding,
+    /// `SEATS_ENV`: only a project-bound Director-General's client may advertise seat fields.
+    seats: bool,
 }
 
 /// The environment variable an ADR-13 per-run `mcp.json` sets for the Lead's MCP server.
@@ -36,20 +42,23 @@ pub const RUN_ENV: &str = "VAJRA_LEAD_RUN";
 /// The environment variables a Director-General's `mcp.json` sets (ADR-15 2.3): its project and conversation generation.
 pub const PROJECT_ENV: &str = "VAJRA_LEAD_PROJECT";
 pub const GEN_ENV: &str = "VAJRA_LEAD_GEN";
+/// Set to `1` by the app, in a Director-General's MCP config, when the project's proposals may carry seats (the core
+/// route, or Labs on for it). Only what `tools/list` advertises: the service checks again on every call.
+pub const SEATS_ENV: &str = "VAJRA_LEAD_SEATS";
 
 impl SocketClient {
     pub fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf(), binding: Binding::None }
+        Self { path: path.to_path_buf(), binding: Binding::None, seats: false }
     }
 
     /// A client whose calls are served only while `run` is the app's current run.
     pub fn bound(path: &Path, run: &str) -> Self {
-        Self { path: path.to_path_buf(), binding: Binding::Run(run.to_string()) }
+        Self { path: path.to_path_buf(), binding: Binding::Run(run.to_string()), seats: false }
     }
 
     /// A client whose calls see only `project`'s runs, and only while `generation` is its current conversation.
     pub fn for_project(path: &Path, project: &str, generation: u32) -> Self {
-        Self { path: path.to_path_buf(), binding: Binding::Project(project.to_string(), generation) }
+        Self { path: path.to_path_buf(), binding: Binding::Project(project.to_string(), generation), seats: false }
     }
 
     /// The client the environment asks for. A malformed or partial binding is a refusal to start, never "unbound".
@@ -61,7 +70,13 @@ impl SocketClient {
             (Some(r), None, None) if crate::ids::valid_run_id(&r) => Ok(Self::bound(path, &r)),
             (None, Some(p), Some(g)) if crate::ids::valid_project_ref(&p) => {
                 let g = g.parse::<u32>().map_err(|_| bad(GEN_ENV))?;
-                Ok(Self::for_project(path, &p, g))
+                let mut c = Self::for_project(path, &p, g);
+                c.seats = match text(SEATS_ENV)?.as_deref() {
+                    None | Some("0") => false,
+                    Some("1") => true,
+                    Some(_) => return Err(bad(SEATS_ENV)),
+                };
+                Ok(c)
             }
             _ => Err(bad("the Lead binding")),
         }
@@ -69,6 +84,9 @@ impl SocketClient {
 }
 
 impl Forward for SocketClient {
+    fn seat_fields(&self) -> bool {
+        self.seats || crate::providers::launch::CORE_ROUTE_AVAILABLE
+    }
     fn call(&mut self, tool: &str, args: &Value) -> Result<Value, Value> {
         match socket::request_bound(&self.path, &self.binding, tool, args) {
             Ok(mut v) => match v.get_mut("ok") {
@@ -90,6 +108,11 @@ fn text_prop() -> Value {
 
 /// The six tools: the five of design.md 5.2, plus ADR-15 2.4's `propose_run` (served only to a Director-General).
 pub fn tools() -> Value {
+    tools_with(crate::providers::launch::CORE_ROUTE_AVAILABLE)
+}
+
+/// The tools, with `propose_run`'s seat fields only when `seats` is on.
+pub fn tools_with(seats: bool) -> Value {
     json!([
         {"name": "list_workers",
          "description": "List the workers of the current Vajra run with their task, status and round.",
@@ -115,7 +138,7 @@ pub fn tools() -> Value {
         {"name": "propose_run",
          "description": "Propose a new Vajra run for this project. Nothing runs until the human reads the exact ask and starts it in the app.",
          "inputSchema": {"type": "object", "additionalProperties": false, "required": ["ask"],
-            "properties": propose_properties(crate::providers::launch::CORE_ROUTE_AVAILABLE)}}
+            "properties": propose_properties(seats)}}
     ])
 }
 
@@ -174,7 +197,7 @@ pub fn handle(msg: &Value, fwd: &mut impl Forward) -> Option<Value> {
             )
         }
         "ping" => ok(&id, json!({})),
-        "tools/list" => ok(&id, json!({"tools": tools()})),
+        "tools/list" => ok(&id, json!({"tools": tools_with(fwd.seat_fields())})),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(err(&id, -32602, "params.name is required"));

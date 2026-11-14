@@ -186,6 +186,35 @@ fn a_dg_cannot_send_seats_while_the_core_route_is_off() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Labs on for one project only.
+struct LabsFor(&'static str);
+impl SeatPolicy for LabsFor {
+    fn agents(&self, p: &str) -> Option<Agents> {
+        Policy { refuse: vec![] }.agents(p)
+    }
+    fn check(&self, _: &str, _: &[SeatCheck]) -> Vec<(String, Refused)> {
+        vec![]
+    }
+    fn seats_on(&self, project: &str) -> bool {
+        project == self.0
+    }
+}
+
+#[test]
+fn with_the_core_route_off_seats_follow_the_projects_labs_switch() {
+    let (mut s, dir) = service(None);
+    s.set_seats_enabled(false);
+    s.set_seat_policy(Arc::new(LabsFor("k_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")));
+    let m = invalid(&mut s, json!({"ask": "a", "workers": [w("w1", "docs")]}));
+    assert!(m.contains("unknown property"), "Labs off for this project: no workers field: {m}");
+    s.set_seat_policy(Arc::new(LabsFor(PA)));
+    propose(&mut s, json!({"ask": "tidy the README", "workers": [w("w1", "docs")]})).unwrap();
+    assert!(open(&s)[0].seats.is_some(), "Labs on for this project: seats are accepted");
+    let fields = |on: bool| crate::control::mcp::tools_with(on).as_array().unwrap().iter().find(|x| x["name"] == "propose_run").unwrap()["inputSchema"]["properties"].get("workers").is_some();
+    assert!(!fields(false) && fields(true));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // ------------------------------------------------------------------------------------------------ required seats
 
 #[test]

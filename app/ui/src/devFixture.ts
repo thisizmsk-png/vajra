@@ -285,6 +285,15 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   run_proof: (a) => proofFixture(String(a?.slug), (new URLSearchParams(location.search).get("proof") ?? "evidence_unguarded") as ProofLabel),
   export_proof_page: (a) => ({ slug: String(a?.slug), path: `~/Library/Application Support/Vajra/exports/${String(a?.slug)}-proof.html`, label: "evidence_unguarded" }),
   act_post_proof_comment: () => ({ receipt: { action_id: "a_fixture5", state: "done" }, result: { repo: "acme/web", pr: 42 } }),
+  // `?fixture&approval` shows a run waiting on its check-command approval (N20); without it the run has none.
+  evidence_approval: (a) => new URLSearchParams(location.search).has("approval")
+    ? { run_id: String(a?.runId), state: "pending", sha256: "c4".repeat(32), asked_at: 1_794_000_000, hold_max_s: 86_400, ask: {
+        run_id: String(a?.runId), round: 1, commit: "4e1c9a2b7d03c5e6f7a89b0c1d2e3f405162738a", seat: "verifier", account: "codex (work)",
+        commands: ["npm ci", "npm run build", "npm test -- --runInBand src/limiter", "npx playwright test e2e/rate-limit.spec.ts --reporter=line", "curl -sf http://127.0.0.1:4000/health"],
+        network: false,
+      } }
+    : { run_id: String(a?.runId), state: "none" },
+  act_answer_evidence_approval: () => ({ receipt: { action_id: "a_fixture6", state: "done" }, result: { state: "approved" } }),
   verify_campaign: (a) => ({ slug: String(a?.slug), ok: true, restore: null }),
   // The run's hash-chained log (W2), as `run_log_since` pages it; `run_log_verify` answers as an app restarted since.
   run_log_since: (a) => {

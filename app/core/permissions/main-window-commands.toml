@@ -105,4 +105,7 @@ permissions = [
   "allow-term-visible",
   "allow-term-ack",
   "allow-term-close",
+  "allow-core-runs",
+  "allow-labs-get",
+  "allow-labs-set",
 ]

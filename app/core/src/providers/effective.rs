@@ -289,6 +289,80 @@ pub fn codex_rollout(events: &str, codex_home: &Path) -> Option<String> {
     Some(text)
 }
 
+/// How many session files one Lead read-back pass reads at most, newest first.
+const MAX_LEAD_FILES: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: how many session files this thread's Lead read-back passes have read the contents of.
+    pub(crate) static LEAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The plain Codex Lead's read-back (bhishma MUST, S12): the plain Lead is an interactive Codex with no event stream, so
+/// its thread id is unknown. Returns the text (at most `MAX_READ` bytes each) of every session file in the newest two
+/// day folders of `codex_home/sessions` created at or after `since` (less a 2 s clock skew), newest first, at most
+/// `MAX_LEAD_FILES`. The walk holds each folder by its descriptor and refuses links, as `rollout_file` does.
+pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> Vec<String> {
+    let floor = since.checked_sub(Duration::from_secs(2)).unwrap_or(since);
+    let Ok(home) = fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(codex_home) else { return Vec::new() };
+    let Some(sessions) = sub_dir(&home, "sessions") else { return Vec::new() };
+    // Year, month, day: the newest two names at each level, so a day that crosses a month or year is still seen.
+    let newest = |dir: &File| {
+        let mut n = entry_names(dir);
+        n.sort();
+        n.into_iter().rev().take(2).collect::<Vec<_>>()
+    };
+    let mut days: Vec<(String, File)> = Vec::new();
+    for y in newest(&sessions) {
+        let Some(yd) = sub_dir(&sessions, &y) else { continue };
+        for m in newest(&yd) {
+            let Some(md) = sub_dir(&yd, &m) else { continue };
+            for d in newest(&md) {
+                if let Some(dd) = sub_dir(&md, &d) {
+                    days.push((format!("{y}/{m}/{d}"), dd));
+                }
+            }
+        }
+    }
+    days.sort_by(|a, b| b.0.cmp(&a.0));
+    // Codex review #241: the newest `MAX_LEAD_FILES` are picked by their metadata alone, and only those are read, so one
+    // pass holds at most `MAX_LEAD_FILES * MAX_READ` bytes however many files the day folders hold. A file is opened
+    // just for its metadata here and kept open (at most `MAX_LEAD_FILES` at a time) for the read, so the file read is the
+    // one whose metadata was judged.
+    let mut picked: Vec<(std::time::SystemTime, File)> = Vec::new();
+    for (_, day) in days.iter().take(2) {
+        for n in entry_names(day).into_iter().filter(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
+            let Ok(name) = CString::new(n) else { continue };
+            let Ok(file) = open_at(day, &name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0) else { continue };
+            let Ok(meta) = file.metadata() else { continue };
+            let born = meta.created().or_else(|_| meta.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            if !meta.is_file() || born < floor {
+                continue;
+            }
+            if picked.len() == MAX_LEAD_FILES {
+                // Full: keep the newest. The oldest is replaced only by a newer one (its file closes as it is dropped).
+                let Some((i, _)) = picked.iter().enumerate().min_by_key(|(_, p)| p.0) else { continue };
+                if born <= picked[i].0 {
+                    continue;
+                }
+                picked[i] = (born, file);
+            } else {
+                picked.push((born, file));
+            }
+        }
+    }
+    picked.sort_by_key(|p| std::cmp::Reverse(p.0));
+    picked
+        .into_iter()
+        .filter_map(|(_, file)| {
+            #[cfg(test)]
+            LEAD_READS.with(|c| c.set(c.get() + 1));
+            let mut text = String::new();
+            file.take(MAX_READ).read_to_string(&mut text).ok().map(|_| text)
+        })
+        .collect()
+}
+
 /// A Codex session's final answer, from its own session file: `last_agent_message` of the last `task_complete` event.
 /// The file is written by Codex in its home, outside the session's writable roots; the `--json` stream is the session's
 /// terminal, which anything the session runs can print on (#167 H1, vajra-63's residual). The last `MAX_READ` bytes

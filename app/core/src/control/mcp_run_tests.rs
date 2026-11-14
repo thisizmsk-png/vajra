@@ -178,3 +178,29 @@ fn the_run_socket_comes_only_from_its_env_and_must_be_a_socket() {
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn only_a_project_bound_client_with_the_seats_flag_advertises_seat_fields() {
+    use std::ffi::OsString;
+    let sock = Path::new("/nonexistent/app.sock");
+    let env = |seats: Option<&'static str>, project: bool| {
+        move |k: &str| -> Option<OsString> {
+            match k {
+                PROJECT_ENV if project => Some("k_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+                GEN_ENV if project => Some("1".into()),
+                RUN_ENV if !project => Some("20261112-0930".into()),
+                SEATS_ENV => seats.map(Into::into),
+                _ => None,
+            }
+        }
+    };
+    assert!(SocketClient::from_env(sock, env(Some("1"), true)).unwrap().seat_fields());
+    assert!(!SocketClient::from_env(sock, env(Some("0"), true)).unwrap().seat_fields());
+    assert!(!SocketClient::from_env(sock, env(None, true)).unwrap().seat_fields(), "Labs off: the Director-General schema has no workers field");
+    assert!(SocketClient::from_env(sock, env(Some("yes"), true)).is_err());
+    assert!(!SocketClient::from_env(sock, env(Some("1"), false)).unwrap().seat_fields(), "a run-bound client never advertises seats");
+    let mut c = SocketClient::from_env(sock, env(None, true)).unwrap();
+    let list = handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}), &mut c).unwrap();
+    let propose = list["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "propose_run").unwrap().clone();
+    assert!(propose["inputSchema"]["properties"].get("workers").is_none());
+}

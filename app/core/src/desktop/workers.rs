@@ -211,6 +211,11 @@ pub struct TicketView {
     /// Why a running Claude worker has no steering channel (a check, or its control dir didn't open). `None` when it
     /// has one, or its harness never steers (see `message_off`).
     pub steer_off: Option<&'static str>,
+    /// A Claude worker's key guard, once its read-back passed (`profiles::claude_key_guard`): `{"guarded": true}`
+    /// only when no MCP server loaded, else not guarded with the reason naming the server. `None` before that (the
+    /// node then says "guard unknown" once the worker has started), and for Codex workers (their rule is the Codex
+    /// stack's).
+    pub key_guard: Option<Value>,
     pub commit: Option<String>,
     pub task_ref: Option<String>,
     pub files: Vec<String>,
@@ -429,7 +434,8 @@ impl WorkerRuntime {
     }
 
     /// Read back what earlier app lives recorded (`<data>/runs/*/tickets.jsonl`), before any ticket of this life. Each
-    /// ticket takes its last line. One an earlier life left queued or running (a crash) ends here `failed`/`abandoned`
+    /// ticket takes its last line; its first is written when dispatch accepts it (`queued`), so a ticket still waiting
+    /// for a seat is here too. One an earlier life left queued or running (a crash) ends here `failed`/`abandoned`
     /// with detail `app_restarted`, and that outcome is written, so the next replay reads it ended. Replayed tickets
     /// are shown and keep their ids taken (a re-dispatch is the next round), but are never started, integrated or
     /// cleaned up by this life: it holds no worktree handle for them. Their worktrees stay on disk.
@@ -615,7 +621,7 @@ impl WorkerRuntime {
         let view = TicketView {
             id: id.clone(), run: s.run.clone(), task: s.task.clone(), round: s.round, kind, slot: seat.slot.clone(), account: seat.account.clone(),
             state: State::Queued, queue_position: None, wait: None, attempt: 0, elapsed_s: 0, dispatch_head: None, worktree: None, deps: Vec::new(),
-            outcome: None, reason: None, detail: None, harness_session: None, steer_off: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
+            outcome: None, reason: None, detail: None, harness_session: None, steer_off: None, key_guard: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
             receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
@@ -628,8 +634,7 @@ impl WorkerRuntime {
         Ok(id)
     }
 
-    /// The ticket's current view.
-    #[cfg(test)]
+    /// The git wrapper this runtime's tickets use (a core run's integrate goes through the same one).
     pub(crate) fn gitw(&self) -> &Arc<Gitw> {
         &self.0.gw
     }
@@ -656,6 +661,13 @@ impl WorkerRuntime {
     pub fn view(&self, id: &str) -> Option<TicketView> {
         let b = crate::lock(&self.0.book);
         b.tickets.get(id).map(live_view).or_else(|| b.past.get(id).cloned())
+    }
+
+    /// Is `id` an earlier life's ticket, read back from its record (`replay`) and not dispatched again in this one?
+    /// Its outcome is shown, never integrated: this life holds no worktree or receipt check for it.
+    pub fn from_earlier_life(&self, id: &str) -> bool {
+        let b = crate::lock(&self.0.book);
+        !b.tickets.contains_key(id) && b.past.contains_key(id)
     }
 
     /// The supervisor session of the ticket's running attempt, if one is running now.
@@ -1136,7 +1148,9 @@ impl WorkerRuntime {
         let _on_repo = OnRepo::new(&self.0.sessions, &sid, t.common_dir());
         // Taken before the spawn: every process of this attempt starts at or after it (the sweep's window).
         let spawned_at = procsweep::now_stamp();
-        if self.0.sup.spawn_tagged(&sid, spec, Some(tag)).is_err() {
+        let run = crate::lock(&self.0.book).tickets.get(id).map(|e| e.view.run.clone());
+        let who = crate::sessions::OwnedAs { kind: Some(crate::owned::Kind::Worker), run, ticket: Some(id.to_string()) };
+        if self.0.sup.spawn_owned(&sid, spec, Some(tag), who).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
         let tty = self.0.sup.tty(&sid).ok().flatten();
@@ -1145,6 +1159,9 @@ impl WorkerRuntime {
             e.view.attempt = n;
             e.view.harness_session = l.session_id.clone();
             e.view.steer_off = l.steer_off;
+            // #215 codex: the guard is this process's own evidence. A retry starts unknown, never with the last
+            // attempt's `guarded`; only its own read-back (`note_key_guard`) sets it again.
+            e.view.key_guard = None;
         }
         // A kill that landed between the check above and `session` being set.
         if self.killed(id).is_some() {
@@ -1194,9 +1211,14 @@ impl WorkerRuntime {
                 break None;
             }
             if applied.is_none() {
-                applied = l.read_back(&self.attempt_events(&sid, l, &mut opening), t);
-                if let Some(Err(_)) = &applied {
-                    let _ = self.0.sup.kill(&sid);
+                let events = self.attempt_events(&sid, l, &mut opening);
+                applied = l.read_back(&events, t);
+                match &applied {
+                    Some(Err(_)) => {
+                        let _ = self.0.sup.kill(&sid);
+                    }
+                    Some(Ok(())) => self.note_key_guard(id, l, &events),
+                    None => {}
                 }
             }
         };
@@ -1223,8 +1245,12 @@ impl WorkerRuntime {
         let Some(x) = exit else { return Attempt::End(Outcome::Failed, "timed_out".into(), receipt) };
         if x.code == 0 && x.signal.is_none() {
             // A clean exit is committed only once the read-back has passed.
+            let late = applied.is_none();
             return match applied.or_else(|| l.read_back(&events, t)) {
                 Some(Ok(())) => {
+                    if late {
+                        self.note_key_guard(id, l, &events);
+                    }
                     // A check is judged by its typed result (6g): keep its final answer, read where it can't be forged.
                     if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id).filter(|e| matches!(e.job, Job::Check(..))) {
                         e.answer = l.final_answer(&events);
@@ -1313,6 +1339,16 @@ impl WorkerRuntime {
 
     fn killed(&self, id: &str) -> Option<KillReason> {
         crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.kill)
+    }
+
+    /// Records a Claude worker's key guard once its read-back passed, from what its init event says loaded.
+    fn note_key_guard(&self, id: &str, l: &Launch, events: &str) {
+        if l.engine != Engine::Claude {
+            return;
+        }
+        if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
+            e.view.key_guard = Some(profiles::claude_key_guard(events));
+        }
     }
 
     /// What one attempt's checks read: its opening lines, read from the start of the stream through the spill and
@@ -1469,11 +1505,33 @@ impl StoredTicket {
             id: self.id, run: self.run, task: self.task, round: self.round, kind, slot: self.slot, account: self.account,
             state: self.state?, queue_position: None, wait: None, attempt: self.attempt, elapsed_s: self.elapsed_s,
             dispatch_head: self.dispatch_head, worktree: self.worktree, deps: self.deps, outcome: self.outcome, reason: self.reason,
-            detail: self.detail, harness_session: self.harness_session, steer_off: None, commit: self.commit, task_ref: self.task_ref,
+            // The key guard is the live process's own read-back evidence, never replayed from a file: unknown here.
+            detail: self.detail, harness_session: self.harness_session, steer_off: None, key_guard: None, commit: self.commit, task_ref: self.task_ref,
             files: self.files, added: self.added, removed: self.removed, leftovers: self.leftovers, receipt: self.receipt,
             mismatch: self.mismatch, provider: self.provider, summary: self.summary, retention: self.retention, started: None,
         })
     }
+}
+
+/// A worker an earlier life left running that the start-up reconcile killed (6d2d): its ticket ends here
+/// `failed`/`abandoned` with detail `app_crashed`, in the run's own `tickets.jsonl`, before this life's replay reads it.
+/// A ticket the file has no line for, or one already ended, is left alone, and so is a history replay cannot read
+/// whole (`Replayed::incomplete`): its unended tickets may have ended past what was read (#176 review), so nothing is
+/// appended to it. Returns whether a line was written.
+pub(crate) fn record_crashed(data: &std::path::Path, run: &str, ticket: &str) -> bool {
+    let mut r = replay_run(data, run);
+    if r.incomplete {
+        return false;
+    }
+    let Some(v) = r.views.get_mut(ticket).filter(|v| v.state != State::Ended) else { return false };
+    finish_view(v, Outcome::Failed, "abandoned");
+    v.detail = Some("app_crashed".into());
+    v.summary = Some(summary(v, &Redactor::default()));
+    let line = json!({"v": 1, "event": "outcome", "ticket": v});
+    // A torn tail is ended with the torn marker first, as `replay` does, so this line does not join the fragment and
+    // the next replay tells the fragment apart from a damaged line.
+    let text = if r.torn { format!("\n{TORN_MARKER}\n{line}\n") } else { format!("{line}\n") };
+    open_record(data, run).and_then(|mut f| f.write_all(text.as_bytes())).is_ok()
 }
 
 /// What replay read back from one run's file.
@@ -1513,6 +1571,8 @@ fn replay_run(data: &std::path::Path, run: &str) -> Replayed {
         return out;
     }
     let mut gaps = 0;
+    // Past the budget the later lines (a ticket's outcome, or a ticket first seen there) are unread: the prefix is not
+    // the run's latest state, so the run is incomplete and none of its unended tickets is written ended.
     if raw.len() as u64 > REPLAY_MAX_FILE {
         raw.truncate(REPLAY_MAX_FILE as usize);
         gaps += 1;
@@ -1600,6 +1660,15 @@ impl TicketView {
             (State::Ended, Some(Outcome::Stopped)) => (Status::Failed, Some("stopped by the human")),
             (State::Ended, _) => (Status::Failed, None),
         };
+        // An MCP server ran with it, outside the sandbox: the card says so (the reason is in `key_guard`).
+        // A Claude worker that started but has no key guard yet (or never reported one) is unknown, never shown as
+        // guarded (#215 bhishma).
+        let unguarded = match &self.key_guard {
+            Some(g) if g["guarded"] == true => None,
+            Some(_) => Some("not guarded"),
+            None if self.attempt > 0 && launch::harness_of(&self.account) == Some(Engine::Claude) => Some("guard unknown"),
+            None => None,
+        };
         let controls = match launch::harness_of(&self.account) {
             // An ended ticket offers nothing: the control service refuses it as `worker_finished` (#151 review).
             Some(e) => {
@@ -1618,7 +1687,7 @@ impl TicketView {
             round: self.round,
             check: self.kind != "writer",
             status,
-            overlays: overlay.into_iter().collect(),
+            overlays: overlay.into_iter().chain(unguarded).collect(),
             provider: self.provider.clone(),
             controls,
             diff,
@@ -1802,16 +1871,30 @@ impl Launch {
         Ok((engine, kind))
     }
 
-    /// #180 bhishma: the running Claude Code build, asked of the binary on every dispatch (never cached by path, as
-    /// the Lead's self-test does: a CLI updated in place is a new build), must be one S4 proved with today's flag
-    /// shape. A probe that fails, times out or prints anything else is refused (fail closed).
+    /// #180 bhishma: the running Claude Code build, asked of the binary on every dispatch and every retry (never
+    /// cached by path, as the Lead's self-test does: a CLI updated in place is a new build), must be one S4 proved with
+    /// today's flag shape, or (canary A) one this Mac's self-test proved. A version probe that fails, times out or
+    /// prints nothing is refused (`claude_unproven`); a self-test that fails is refused (`claude_selftest_failed`).
     fn claude_proven(cfg: &Config) -> Result<(), &'static str> {
         let refused = profiles::CLAUDE_UNPROVEN.reason;
         let dir = cfg.claude.parent().ok_or(refused)?;
         let path = std::env::join_paths([dir, std::path::Path::new("/usr/bin"), std::path::Path::new("/bin")]).map_err(|_| refused)?;
         let env = [("PATH", path), ("HOME", cfg.home.clone().into_os_string())];
-        let version = super::lead::claude_version(&cfg.claude, &env).map_err(|_| refused)?;
-        profiles::claude_worker_proven(&version).map_err(|u| u.reason)
+        let probe = || {
+            let v = super::lead::claude_version(&cfg.claude, &env);
+            let v = v.map_err(|e| eprintln!("vajra: could not ask Claude Code for its version ({e:?}); Claude workers stay off")).ok()?;
+            Some(v.trim().to_string()).filter(|v| !v.is_empty())
+        };
+        let version = probe().ok_or(refused)?;
+        // The installed guard's own bytes are part of the shape: a guard that differs from what S4 proved is unproven.
+        let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&cfg.home)).map_err(|e| {
+            eprintln!("vajra: the installed Vajra guard can't be checked ({e}); Claude workers stay off");
+            refused
+        })?;
+        if profiles::claude_worker_proven(&version, &shape).is_ok() {
+            return Ok(());
+        }
+        super::claude_canary::proven_here(&cfg.claude, &cfg.home, &cfg.data, &version, &shape, &probe)
     }
 
     /// `opened` is called with the worker's session id as soon as its steering channel exists, before any later step
@@ -1896,7 +1979,9 @@ impl Launch {
             Engine::Claude => {
                 let tools = cfg.tools.list(&seat.role).ok_or("harness_unsupported")?.to_string();
                 let sid = claude_sid.ok_or("spawn_failed")?;
-                let body = profiles::claude_worker_flag(&cfg.home, &t.wt, std::slice::from_ref(&t.repo), &cfg.data).map_err(|_| "profile_not_applied")?;
+                // The user's default model and model-routing env, read now so a change between launches is picked up.
+                let carry = profiles::read_claude_carry_over(&cfg.home);
+                let body = profiles::claude_worker_flag_with(&cfg.home, &t.wt, std::slice::from_ref(&t.repo), &cfg.data, &t.tmp, &carry).map_err(|_| "profile_not_applied")?;
                 let flag = profiles::write_claude_worker_flag(&cfg.data, &sid, &body).map_err(|_| "profile_not_applied")?;
                 let c = ClaudeWorker { claude: &cfg.claude, session_id: &sid, settings: &flag.path, tools: &tools };
                 l.argv = match profiles::claude_worker_argv(&wl, &c) {

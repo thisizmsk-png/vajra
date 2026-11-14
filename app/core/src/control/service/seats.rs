@@ -72,6 +72,10 @@ pub trait SeatPolicy: Send + Sync {
     fn agents(&self, project: &str) -> Option<Agents>;
     /// The H8 checks (16.2) for every seat, plus the engine check once. One entry per failing seat.
     fn check(&self, project: &str, seats: &[SeatCheck]) -> Vec<(String, Refused)>;
+    /// Can a proposal for `project` carry seats? The build's core route, or the project's Labs switch (16.13).
+    fn seats_on(&self, _project: &str) -> bool {
+        false
+    }
 }
 
 impl Seats {

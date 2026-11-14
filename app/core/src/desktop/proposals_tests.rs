@@ -55,10 +55,24 @@ fn proposed(t: &Tmp, asks: &[&str]) -> (App, String) {
     proposed_at(t, &t.repo(), asks)
 }
 
+/// A dir of fake `claude` and `codex` CLIs that answer `--version` and a signed-in status.
+fn fake_clis(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let d = root.join("fakebin");
+    fs::create_dir_all(&d).unwrap();
+    for n in ["claude", "codex"] {
+        fs::write(d.join(n), "#!/bin/sh\ncase \"$1\" in --version) echo '2.0.1 (fake)';; auth) echo '{\"loggedIn\": true}';; esac\n").unwrap();
+        fs::set_permissions(d.join(n), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    d
+}
+
 /// As `proposed`, for a project whose repo is at `repo`.
 fn proposed_at(t: &Tmp, repo: &Path, asks: &[&str]) -> (App, String) {
     let pid = super::super::test_project(&t.0.join("data"), &t.home(), repo);
-    let app = App::open(&t.0.join("data"), &t.home()).unwrap();
+    let mut app = App::open(&t.0.join("data"), &t.home()).unwrap();
+    // Provider CLIs come from a temp dir of fakes, never the machine's real PATH (CI has no claude, #182).
+    app.provider_dirs = Some(vec![fake_clis(&t.0)]);
     let root = repo.canonicalize().unwrap();
     app.orchestrator(&pid, &root).unwrap();
     {

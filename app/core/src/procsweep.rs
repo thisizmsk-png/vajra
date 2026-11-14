@@ -19,7 +19,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::owned::{ExitWatch, running, signal_verified};
+use crate::owned::{ExitWatch, left, provably_gone, signal_verified};
 use crate::procid::start_stamp;
 
 /// What one sweep did.
@@ -156,18 +156,19 @@ pub fn sweep_ticket(seen: &[(u32, u64)], tmp: &Path, since: u64) -> Swept {
     total
 }
 
-/// SIGKILL each `(pid, stamp)` that is still that process, then wait up to a second for them to go.
-fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
+/// SIGKILL each `(pid, stamp)` that is still that process, then wait up to a second for them to go. Fail closed: one is
+/// counted killed only once it is provably gone (`owned::provably_gone`); a held pid whose stamp cannot be read survives.
+pub(crate) fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
     let mut watch = ExitWatch::new();
-    let hits: Vec<(u32, u64)> = hits.into_iter().filter(|&(p, s)| watch.add(p) && running(p, s)).collect();
+    let hits: Vec<(u32, u64)> = hits.into_iter().filter(|&(p, s)| watch.add(p) && !provably_gone(&mut watch, p, s)).collect();
     for &(p, s) in &hits {
         signal_verified(&mut watch, p, s, libc::SIGKILL);
     }
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(1) && hits.iter().any(|&(p, s)| running(p, s)) {
+    while t0.elapsed() < Duration::from_secs(1) && left(&mut watch, &hits) > 0 {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let survived = hits.iter().filter(|&&(p, s)| running(p, s)).count();
+    let survived = left(&mut watch, &hits);
     Swept { killed: hits.len() - survived, survived }
 }
 
@@ -218,6 +219,11 @@ fn sweep(mark: &Mark, w: Window) -> Swept {
         }
     }
     total
+}
+
+/// Does `pid` run as this user?
+pub(crate) fn is_same_user(pid: u32) -> bool {
+    same_user(pid)
 }
 
 fn same_user(pid: u32) -> bool {
@@ -324,7 +330,7 @@ fn open_paths(pid: u32) -> Vec<PathBuf> {
 const MAX_ARGS: usize = 1 << 20;
 
 /// One variable of `pid`'s environment as it was at exec, or `None` (hidden, gone, or unset).
-fn env_var(pid: u32, name: &str) -> Option<OsString> {
+pub(crate) fn env_var(pid: u32, name: &str) -> Option<OsString> {
     use std::os::unix::ffi::OsStrExt;
     let block = env_block(pid)?;
     let key = format!("{name}=");
@@ -431,13 +437,15 @@ mod tests {
         let dev = d.join("tty");
         std::fs::write(&dev, "").unwrap();
         let f = std::fs::File::open(&dev).unwrap();
-        let mut c = Command::new("/bin/sleep").arg("600").stdin(f).spawn().unwrap();
+        // No TMPDIR, so only the terminal mark can tie it to the ticket: a platform binary's environment is hidden on
+        // a Mac with SIP on, but readable on CI runners (SIP off), where the inherited TMPDIR showed (#182 CI).
+        let mut c = Command::new("/bin/sleep").arg("600").env_remove("TMPDIR").stdin(f).spawn().unwrap();
         let t0 = Instant::now();
         while !open_paths(c.id()).iter().any(|p| p == &dev) {
             assert!(t0.elapsed() < Duration::from_secs(10), "its open file never became visible");
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(env_var(c.id(), "TMPDIR"), None, "a platform binary's environment is hidden on macOS");
+        assert_eq!(env_var(c.id(), "TMPDIR"), None, "no TMPDIR can be read for it, hidden or absent");
         let seen = holders(&dev, floor, c.id());
         assert_eq!(seen.iter().map(|h| h.0).collect::<Vec<_>>(), vec![c.id()], "the one holder, this user's, after the floor");
         // Named as anyone but itself, a process this app spawned (its parent is this test process) is never a holder:

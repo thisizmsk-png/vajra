@@ -71,7 +71,9 @@ impl Store for Empty {
 /// An app with a Director-General session, the CLIs on a temp PATH, the route on, and codex allowed next to claude.
 fn app_for(t: &Tmp, route: bool) -> (App, String) {
     let pid = crate::desktop::test_project(&t.data(), &t.0.join("home"), &t.0.join("repo"));
-    let app = App::open(&t.data(), &t.0.join("home")).unwrap();
+    let mut app = App::open(&t.data(), &t.0.join("home")).unwrap();
+    // Provider CLIs come from the same temp bin, never the machine's real PATH (CI has no claude, #182).
+    app.provider_dirs = Some(vec![t.0.join("bin")]);
     app.orchestrator(&pid, &t.0.join("repo")).unwrap();
     app.seat_env.for_test(vec![t.0.join("bin")], Keys::new(Box::new(Empty)), route);
     let patch: Patch = serde_json::from_value(json!({"agents": {"default": {"account": "claude"}, "roles": {}, "allowed": [{"account": "claude"}, {"account": "codex"}]}})).unwrap();
@@ -386,5 +388,17 @@ fn a_network_seat_says_so_on_the_card() {
     let items = app.inbox().unwrap();
     let it = items["items"].as_array().unwrap().iter().find(|i| i["kind"] == "run_proposal").unwrap();
     let w1 = it["seats_card"]["seats"].as_array().unwrap().iter().find(|s| s["seat"] == "w1").unwrap().clone();
-    assert!(w1["disclosures"].as_array().unwrap().iter().any(|d| d == NETWORK_NOTE), "{w1}");
+    // A Claude seat's sandbox allows loopback only, so its card says there's no internet, never "Internet on" (#212).
+    let d = w1["disclosures"].as_array().unwrap();
+    assert!(d.iter().any(|d| d == CLAUDE_NO_NETWORK_NOTE), "{w1}");
+    assert!(!d.iter().any(|d| d == NETWORK_NOTE), "{w1}");
+}
+
+#[test]
+fn only_a_codex_network_seat_says_internet_on() {
+    assert_eq!(network_note(Some(Engine::Codex), true), Some(NETWORK_NOTE));
+    assert_eq!(network_note(Some(Engine::Claude), true), Some(CLAUDE_NO_NETWORK_NOTE));
+    for h in [Some(Engine::Codex), Some(Engine::Claude), None] {
+        assert_eq!(network_note(h, false), None);
+    }
 }

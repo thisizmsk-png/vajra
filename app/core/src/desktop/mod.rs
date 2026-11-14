@@ -97,6 +97,20 @@ fn invalid_input(e: InvalidInput) -> Value {
     invalid(e.field, e.reason)
 }
 
+/// A plain Codex Lead waiting for its first-turn read-back: what its `turn_context` must show, the marker that names its
+/// session file, the user's Codex home it writes to, and when it launched.
+#[derive(Clone, Debug)]
+struct LeadCheck {
+    want: crate::adapter::profiles::CodexWant,
+    marker: PathBuf,
+    codex_home: PathBuf,
+    since: std::time::SystemTime,
+}
+
+/// How long a plain Codex Lead may run before its first turn is read back. It may wait on the user first (Codex asks
+/// whether to trust a new folder), so this is generous; past it, a Lead whose session file never showed is ended.
+pub const LEAD_PROOF_WAIT: Duration = Duration::from_secs(10 * 60);
+
 /// A run session started (or resumed) by this app.
 #[derive(Clone, Debug)]
 struct Run {
@@ -260,6 +274,13 @@ pub struct App {
     pub control: Arc<Mutex<Service>>,
     /// The live runs whose leads call `vajra-run` tools over the socket (ADR-16 16.5); never behind `control`.
     pub run_leads: Arc<crate::control::runreg::RunRegistry>,
+    /// The leads of the core runs (6d2c), each watched on its own thread.
+    lead_runs: Arc<lead_start::LeadRuns>,
+    /// The ownership ledger: user shells, and every lead and worker the supervisor starts (6d2d). Shared with `main`'s
+    /// terminals, so there is one writer.
+    owned: Arc<crate::owned::Ledger>,
+    /// What the start-up reconcile did.
+    reconciled: recover::Reconciled,
     /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
     _instance: Option<(instance::Held, instance::Held)>,
     bridge: Bridge,
@@ -288,6 +309,8 @@ pub struct App {
     limits: Mutex<caps::RunLimits>,
     /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
     run_workers: Mutex<HashMap<String, u32>>,
+    /// Each running plain Codex Lead whose first turn isn't read back yet, by stream (bhishma MUST, S12).
+    lead_checks: Mutex<HashMap<String, LeadCheck>>,
     /// Each core run's record, by run id: live until its protocol finalizes, so it is never listed as an orphan
     /// between tickets (6h).
     live_records: Mutex<HashMap<String, std::sync::Weak<record::CoreRecord>>>,
@@ -358,13 +381,19 @@ impl App {
         // A test build never reaches the real Keychain: its default `security` path does not exist.
         let security = Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY });
         paths::ensure_private_dir(data)?;
+        // Before anything else (6d2d): the leads and workers an earlier life's crash left running are killed, each re-proved
+        // by its recorded pid and start stamp, and their tickets and runs are written ended. Shells wait for the human.
+        let owned = Arc::new(crate::owned::Ledger::new(crate::owned::ledger_path(data)));
+        // Only the one app that holds the data folder reconciles, and only it starts agents: a second instance (a
+        // development build beside the installed app) would otherwise take the first one's live agents for a crash's.
+        // Two locks: the data folder's (its ledger) and the shared worktree folder's (every app on this account puts its
+        // workers there, whatever its data folder, and the 6c-3 sweep kills what it finds there).
+        let instance = instance::InstanceLock::take_both(data, home);
+        let sole = instance.is_some();
+        let reconciled = if sole { recover::reconcile(data, &owned) } else { recover::Reconciled { other_instance: true, ..Default::default() } };
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
-        // Only the app holding the data folder's and the account's worktree folder's locks sweeps and starts agents: a
-        // second instance (a development build beside the installed app) would take the first one's live workers for
-        // an earlier life's. Held for the app's life.
-        let instance = instance::InstanceLock::take_both(data, home);
         let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots(), instance.is_some()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
@@ -430,10 +459,22 @@ impl App {
             // Metered accounts are the ones with a stored key; the key reaches curl only through the `security` command's
             // stdout pipe. With no key stored there is nothing to meter and no outbound call.
             usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
-            sup: Arc::new(Supervisor::new(bus.clone(), log.clone())),
+            sup: {
+                let sup = Arc::new(Supervisor::new(bus.clone(), log.clone()));
+                if sole {
+                    // Every lead and worker is recorded before its spawn returns; one that can't be is refused.
+                    sup.set_ledger(owned.clone());
+                } else {
+                    sup.refuse_spawns(instance::OTHER_INSTANCE);
+                }
+                sup
+            },
+            owned,
+            reconciled,
             bus,
             control: Arc::new(Mutex::new(svc)),
             run_leads: crate::control::runreg::RunRegistry::new(),
+            lead_runs: Arc::default(),
             runs: Arc::new(Mutex::new(HashMap::new())),
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
@@ -451,6 +492,7 @@ impl App {
             launching: Mutex::new(()),
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
+            lead_checks: Mutex::new(HashMap::new()),
             live_records: Mutex::new(HashMap::new()),
             live_logs: Mutex::new(HashMap::new()),
             log_anchors: Default::default(),
@@ -460,6 +502,11 @@ impl App {
             issued: Mutex::new(Default::default()),
             log,
         })
+    }
+
+    /// The ownership ledger, shared with the terminals.
+    pub fn owned_ledger(&self) -> Arc<crate::owned::Ledger> {
+        self.owned.clone()
     }
 
     pub fn note(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -548,6 +595,21 @@ impl App {
             c
         };
         self.workers.runtime(&self.sup, &self.bus, on_repo, hooks, cfg)
+    }
+
+    /// Labs for `project`: `{"available": <developer build>, "on": <on for this project>}`.
+    pub fn labs_get(&self, project: &str) -> Res {
+        let labs = self.seat_env.labs();
+        Ok(json!({"available": labs::LABS_BUILD, "on": labs.on(project)}))
+    }
+
+    /// The human's Labs switch for `project`. Takes effect for the Director-General's next conversation's tool list,
+    /// and at once for the seat checks.
+    pub fn labs_set(&self, project: &str, on: bool) -> Res {
+        self.active_project(project).map_err(|e| e.to_json())?;
+        self.seat_env.labs().set(project, on).map_err(|code| fail(code, "Labs can't be changed for this project"))?;
+        self.note(if on { "labs_on" } else { "labs_off" }, &[]);
+        self.labs_get(project)
     }
 
     /// The preflight row's "Install developer tools": Apple's installer, only while git is missing (the human's click).
@@ -652,6 +714,8 @@ impl App {
             }
             v
         };
+        // Core runs (a seated proposal's, under its lead) count beside classic runs, so neither kind can start over the other.
+        let active: Vec<caps::Active> = active.into_iter().chain(self.lead_runs.active()).collect();
         let limits = *lock(&self.limits);
         caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
@@ -668,17 +732,19 @@ impl App {
         Ok(l.to_json())
     }
 
-    /// Runs whose PTY is still open.
+    /// Runs in progress: classic runs whose PTY is still open, and core runs whose lead is still watched.
     pub fn active_run_count(&self) -> usize {
-        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
+        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count() + self.lead_runs.active().len()
     }
 
-    /// The active run groups for diagnostics: stream id and the pid of the group leader.
-    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end, every core ticket ends `abandoned`
-    /// (`app_quit`) with its line written and its descendants swept, then every supervisor session is killed and
-    /// reaped. Bounded: a ticket that is not done within `QUIT_TICKETS` is left to the supervisor's kill.
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end; every core run's lead is refused new
+    /// runs, killed and never restarted (`shutdown_leads`), so no lead calls `dispatch_worker` or `integrate` while its
+    /// tickets end; every core ticket ends `abandoned` (`app_quit`) with its line written and its descendants swept;
+    /// then every supervisor session is killed and reaped. Bounded: a lead not gone within `LEAD_SHUTDOWN_WAIT`, or a
+    /// ticket not done within `QUIT_TICKETS`, is left to the supervisor's kill.
     pub fn quit(&self) {
         self.shutdown_lead();
+        self.shutdown_leads(Self::LEAD_SHUTDOWN_WAIT);
         self.workers.quit(QUIT_TICKETS);
         self.sup.shutdown();
     }
@@ -688,7 +754,16 @@ impl App {
     pub fn swept_report(&self) -> Value {
         let s = self.workers.startup_swept();
         let (killed, survived) = self.workers.runtime_swept();
-        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance()})
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance(), "crash_reconcile": self.reconciled})
+    }
+
+    /// After a clean quit: the ledger's shell records are dropped (every shell was reaped, nothing to recover). Only
+    /// the app holding the instance locks does this. A second instance's quit leaves the first app's ledger alone,
+    /// and does not rewrite it in a race with that app's records.
+    pub fn clear_ledger_on_quit(&self) {
+        if !self.other_instance() {
+            self.owned.clear();
+        }
     }
 
     /// Another app instance holds this data folder or the account's worktree folder: this one sweeps nothing and
@@ -725,6 +800,7 @@ impl App {
         Some(watcher)
     }
 
+    /// The active run groups for diagnostics: stream id and the pid of the group leader.
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
         let mut v: Vec<_> = lock(&self.runs)
             .keys()
@@ -739,6 +815,7 @@ impl App {
     /// queue to its workers (their messages expire). The run stays in `runs`:
     /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
+        self.check_codex_leads();
         // A launch in flight owns the session it just took; it reaps itself.
         // The guard stays bound until `reap_locked` returns, so a launch cannot install a session in between.
         let _guard = match self.launching.try_lock() {
@@ -747,6 +824,41 @@ impl App {
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
         };
         self.reap_locked();
+    }
+
+    /// bhishma MUST (S12): each running plain Codex Lead's first turn is read back like a worker's. Its own session file
+    /// (named by the launch's marker) must show the Vajra dirs denied under the profile, or the Lead is ended, with the
+    /// reason on its stream. A Lead whose first turn never shows within `LEAD_PROOF_WAIT` is ended too. Runs on every
+    /// busy tick (`LIVE_WAIT`), so a failing Lead runs at most about that long after its first turn starts.
+    pub fn check_codex_leads(&self) {
+        use crate::adapter::profiles::{LeadVerdict, codex_lead_verdict};
+        let pending: Vec<(String, LeadCheck)> = lock(&self.lead_checks).iter().map(|(s, c)| (s.clone(), c.clone())).collect();
+        for (stream, c) in pending {
+            if !self.sup.is_running(&stream).unwrap_or(false) {
+                lock(&self.lead_checks).remove(&stream);
+                continue;
+            }
+            let found = crate::providers::effective::codex_rollouts_since(&c.codex_home, c.since);
+            let verdict = match codex_lead_verdict(&found, &c.want, &c.marker) {
+                LeadVerdict::Pending if c.since.elapsed().is_ok_and(|e| e >= LEAD_PROOF_WAIT) => {
+                    LeadVerdict::NotApplied("the Lead's Codex session file never showed its first turn, so its Vajra profile can't be shown in force".into())
+                }
+                v => v,
+            };
+            match verdict {
+                LeadVerdict::Pending => {}
+                LeadVerdict::Applied => {
+                    lock(&self.lead_checks).remove(&stream);
+                    self.note("lead_profile_applied", &[]);
+                }
+                LeadVerdict::NotApplied(why) => {
+                    lock(&self.lead_checks).remove(&stream);
+                    let _ = self.sup.kill(&stream);
+                    let _ = self.bus.push(&stream, &format!("\r\nVajra ended this Codex Lead ({}): {why}\r\n", crate::adapter::profiles::PROFILE_NOT_APPLIED));
+                    self.note("lead_profile_not_applied", &[]);
+                }
+            }
+        }
     }
 
     fn reap_locked(&self) {
@@ -868,6 +980,10 @@ impl App {
         if let Err(e) = spawned {
             lock(&self.control).end_session(session_id);
             return Err(e);
+        }
+        // A classic run's harness drives its campaign through its `--mcp` server, a Service client: a recorded root.
+        if let Ok(pid) = self.sup.pid(&stream) {
+            self.run_leads.allow_service(pid);
         }
         lock(&self.run_workers).insert(stream.clone(), workers);
         lock(&self.runs).insert(
@@ -1222,20 +1338,32 @@ impl App {
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let workers = input.max_in_flight;
         let engine = self.chosen_engine(input.provider.as_deref())?;
+        let check: std::cell::RefCell<Option<LeadCheck>> = std::cell::RefCell::new(None);
         let r = self.launch_engine(engine, &session_id, &run_id, &campaign, &cwd, |n| {
             if engine == Engine::Claude {
                 argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
             } else {
+                use crate::adapter::profiles;
                 // bhishma #216 H1: a Codex Lead never runs without the Vajra dirs denied.
-                let deny = crate::adapter::profiles::vajra_deny_dirs(&self.home, &self.data);
-                let profile = crate::adapter::profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
+                let mut deny = profiles::vajra_deny_dirs(&self.home, &self.data);
+                let profile = profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
                 let real = |p: &Path| p.canonicalize().map_err(|e| fail("io_error", e));
-                let (project, tmp) = (real(&cwd)?, real(&std::env::temp_dir())?);
+                let (project, tmp, data) = (real(&cwd)?, real(&std::env::temp_dir())?, real(&self.data)?);
+                // bhishma MUST (S12): the launch's marker names its session file for the first-turn read-back.
+                let marker = profiles::codex_lead_marker(&data, &profile);
+                deny.push(marker.clone());
                 // A second Lead in this project was already held by the one-run-per-project cap, under the launching lock.
                 let codex = self.codex_for_lead()?;
-                crate::adapter::profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)
+                let a = profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)?;
+                // The pty supervisor passes no CODEX_HOME (`sessions::ENV_ALLOW`), so the Lead's Codex writes under ~/.codex.
+                let want = profiles::CodexWant { cwd: project, ticket_tmp: tmp, network: false, deny };
+                *check.borrow_mut() = Some(LeadCheck { want, marker, codex_home: self.home.join(".codex"), since: std::time::SystemTime::now() });
+                Ok(a)
             }
         }, false, workers)?;
+        if let (Some(c), Some(stream)) = (check.into_inner(), r["stream"].as_str()) {
+            lock(&self.lead_checks).insert(stream.to_string(), c);
+        }
         self.note("run_started", &[]);
         Ok(r)
     }
@@ -2720,11 +2848,17 @@ impl Pace {
 
 mod worker_diff;
 pub mod workers;
+mod claude_canary;
 pub mod plan;
 pub mod record;
 mod record_app;
 pub mod record_ledger;
 pub mod runproto;
+pub mod charter;
+pub mod run_lead;
+mod lead_start;
+mod recover;
+pub mod labs;
 pub mod verify;
 pub mod phases;
 pub mod runlog;

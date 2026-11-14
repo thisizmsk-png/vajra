@@ -3463,6 +3463,71 @@ fn two_projects_run_at_once_and_the_app_cap_holds_a_third() {
     }
 }
 
+/// #176 review: a core run recorded started whose lead then fails to launch is recorded ended at once (`lead_lost`,
+/// `start_failed`), so the next start's reconcile does not take it for a crash and call it `app_restarted`. The launch
+/// fails before any harness runs: the lead's folder is taken by a file.
+#[test]
+fn a_core_run_whose_lead_fails_to_launch_is_recorded_ended_not_left_for_the_crash_reconcile() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    let p = app.launch_project(&r[0]).unwrap().1.id;
+    let run = "20261112-0940";
+    let seats = json!({"seats": [{"seat": "lead", "account": "codex"}, {"slot": "w1", "role": "backend", "account": "codex"}]});
+    app.record_run_seats(run, &seats).unwrap();
+    let runs = t.0.join("data/runs");
+    fs::create_dir_all(runs.join(run)).unwrap();
+    fs::write(runs.join(run).join("lead"), "not a folder").unwrap();
+    let input = crate::sessions::argv::RunInput {
+        ask: "x".into(), max_rounds: 1, base: "0123456789abcdef0123456789abcdef01234567".into(), max_in_flight: 1, campaign: None, provider: None,
+    };
+    let e = app.start_lead_run(&p, input, r[0].to_str().unwrap(), run).unwrap_err();
+    assert_eq!(code(&e), "lead_failed", "{e}");
+    assert!(runs.join(run).join("core.json").is_file(), "the start was recorded first");
+    let ended: Value = serde_json::from_slice(&fs::read(runs.join(run).join("ended.json")).expect("the failed start is closed")).unwrap();
+    assert_eq!((ended["status"].as_str(), ended["reason"].as_str()), (Some("lead_lost"), Some(super::lead_start::START_FAILED)));
+    let left = super::recover::reconcile(&t.0.join("data"), &crate::owned::Ledger::new(crate::owned::ledger_path(&t.0.join("data"))));
+    assert!(left.runs.is_empty(), "the reconcile has nothing to call app_restarted: {:?}", left.runs);
+    assert_eq!(app.active_run_count(), 0, "nothing was left counted in the caps");
+}
+
+/// #175 review: a core run (a seated proposal's, under its lead) counts in the run caps beside classic runs. A second
+/// core run, or a classic run, in the same project is held, and so is a core start in a project a classic run holds.
+/// The app-wide cap counts both kinds. The hold is released when the core run ends.
+#[test]
+fn core_and_classic_runs_share_the_run_caps() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one", "two", "three"]);
+    let id = |repo: &Path| app.launch_project(repo).unwrap().1.id;
+    let (p0, p1) = (id(&r[0]), id(&r[1]));
+    let input = || crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 2, campaign: None, provider: None };
+    let held = |e: Value| (code(&e).to_string(), e["reason"].as_str().unwrap_or_default().to_string());
+    let busy = ("run_held".to_string(), "project_busy".to_string());
+
+    // A live core run in project one.
+    app.hold_core_run("20261112-0900", &p0, 2);
+    assert_eq!(app.active_run_count(), 1);
+    // core/core: a second seated start in the same project is held before anything launches.
+    assert_eq!(held(app.start_lead_run(&p0, input(), r[0].to_str().unwrap(), "20261112-0901").unwrap_err()), busy);
+    // core/classic: a classic start in that project is held too.
+    let classic = |i: usize, repo: &Path| app.launch_kind(SIDS[i], RUNS[i], &format!("c{i}"), repo, sleeper, false, true, Engine::Claude, 2);
+    assert_eq!(held(classic(0, &r[0]).unwrap_err()), busy);
+    // classic/core: a classic run in project two holds a core start there.
+    classic(1, &r[1]).unwrap();
+    assert_eq!(held(app.start_lead_run(&p1, input(), r[1].to_str().unwrap(), "20261112-0902").unwrap_err()), busy);
+    // The app cap (2 by default) counts both kinds: a third project's classic start is held.
+    let third = held(classic(2, &r[2]).unwrap_err());
+    assert_eq!(third, ("run_held".to_string(), "app_runs_full".to_string()));
+    // The core run ends: its hold is released, and project one can start again.
+    app.end_core_run("20261112-0900");
+    assert_eq!(app.active_run_count(), 1);
+    classic(0, &r[0]).unwrap();
+    for s in &SIDS[..2] {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
+}
+
 /// ADR-15 D5: the worker ceiling (8) counts every concurrent run's maxInFlight; a lone run is never held by it.
 #[test]
 fn the_worker_ceiling_holds_a_second_run_that_would_go_over() {
@@ -5597,6 +5662,85 @@ fn install_dev_tools_is_refused_while_git_is_installed() {
     assert_eq!(code(&app.install_dev_tools().unwrap_err()), "not_needed");
 }
 
+/// #175 review: a core run's Claude lead and its Claude workers are launched with the resolved claude executable, never
+/// the app's `~/.claude` folder.
+#[test]
+fn a_core_runs_claude_lead_and_workers_get_the_claude_executable_not_the_claude_folder() {
+    let t = Tmp::new();
+    fs::create_dir_all(t.home().join(".claude")).unwrap();
+    let app = t.app();
+    let want = t.fake_clis(&["claude", "codex"]).join("claude");
+    let (lead, workers) = app.core_harness_bins();
+    assert_eq!(lead, want, "the lead's argv[0]");
+    assert_eq!(workers, want, "the workers' claude");
+    assert!(lead.is_file() && !lead.ends_with(".claude"), "{}", lead.display());
+}
+
+#[test]
+fn the_lead_shutdown_with_no_leads_ends_nothing_and_after_it_no_run_lead_starts() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(app.shutdown_leads(Duration::from_millis(100)), super::lead_start::LeadShutdown::default());
+    let input = crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None, provider: None };
+    let e = app.start_lead_run("p", input, t.0.to_str().unwrap(), "20261112-0930").unwrap_err();
+    assert_eq!(e["error"], "quitting", "a quitting app refuses before it reads anything: {e}");
+}
+
+#[test]
+fn opening_the_app_after_a_crash_kills_the_earlier_lifes_recorded_lead_first() {
+    let t = Tmp::new();
+    let data = t.0.join("data");
+    fs::create_dir_all(&data).unwrap();
+    let mark = "feedfacefeedfacefeedfacefeedface";
+    let kid = super::recover::tests::marked_kid(mark);
+    let pid = kid.0.id();
+    let mut lead = kid;
+    let lead = &mut lead.0;
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None, tries: 0, mark: Some(mark.into()) };
+    crate::owned::Ledger::new(crate::owned::ledger_path(&data)).record(o).unwrap();
+    let app = t.app();
+    let gone = (0..150).any(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        lead.try_wait().unwrap().is_some()
+    });
+    if !gone {
+        let _ = lead.kill();
+    }
+    let _ = lead.wait();
+    assert!(gone, "App::open killed it before returning");
+    assert_eq!(app.swept_report()["crash_reconcile"]["killed"], 1);
+}
+
+#[test]
+fn a_second_app_on_the_same_data_folder_kills_nothing_and_starts_no_agent() {
+    use std::os::unix::process::CommandExt;
+    let t = Tmp::new();
+    let first = t.app();
+    let mut c = std::process::Command::new("/bin/sleep");
+    c.arg("60");
+    // SAFETY: setsid is async-signal-safe and has no preconditions.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut lead = c.spawn().unwrap();
+    let pid = lead.id();
+    // The first app's live lead, as its supervisor records it.
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None, tries: 0, mark: Some("feedface".into()) };
+    first.owned_ledger().record(o).unwrap();
+    let second = t.app();
+    std::thread::sleep(Duration::from_millis(300));
+    let alive = lead.try_wait().unwrap().is_none();
+    let _ = lead.kill();
+    let _ = lead.wait();
+    assert!(alive, "the first app's live lead is not the second app's crash to clean up");
+    assert_eq!(second.swept_report()["crash_reconcile"]["other_instance"], true);
+    let spec = crate::sessions::SpawnSpec { argv: vec!["/bin/true".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: vec![] };
+    assert!(matches!(second.sup.spawn("lead-x", spec), Err(crate::sessions::SessionError::Ledger(_))), "and it starts no agent");
+}
+
 /// 6c-3 pruning at app start: a stale control session dir goes; one the run index names (a run that may be resumed,
 /// whatever its harness or folder) and a Lead's recorded session stay. An index that can't be read whole prunes nothing.
 #[test]
@@ -5689,4 +5833,111 @@ fn a_second_app_prunes_no_control_dir() {
     drop(first);
     drop(t.app());
     assert!(!control.join(live).exists(), "an app holding the folder prunes it");
+}
+
+/// A plain Codex Lead started through `start_run`, on a fake codex that records its argv and stays up (so the read-back
+/// has a live Lead to end). Returns the app, its stream and the check the launch registered.
+fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut app = t.app();
+    let d = t.0.join("fakebin-codex-lead");
+    fs::create_dir_all(&d).unwrap();
+    let argv_log = t.0.join("lead-argv");
+    let body = format!(
+        "#!/bin/sh\ncase \"$1\" in --version) echo '0.166.0 (fake)';; login) echo 'Logged in';; *) printf '%s\\n' \"$@\" > '{}'; exec sleep 30;; esac\n",
+        argv_log.display()
+    );
+    fs::write(d.join("codex"), body).unwrap();
+    fs::set_permissions(d.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
+    app.provider_dirs = Some(vec![d]);
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
+    let r = app.start_run(input, &t.0.join("repo").to_string_lossy()).unwrap();
+    let stream = r["stream"].as_str().unwrap().to_string();
+    let c = lock(&app.lead_checks).get(&stream).cloned().expect("a Codex Lead registers its first-turn read-back");
+    for _ in 0..100 {
+        if argv_log.is_file() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let argv = fs::read_to_string(&argv_log).unwrap();
+    assert!(argv.contains(&format!("\"{}\"=\"none\"", c.marker.display())), "the marker is a deny entry of the launch: {argv}");
+    assert!(!argv.lines().any(|l| l == "-s" || l == "--sandbox" || l.starts_with("--sandbox=")), "{argv}");
+    assert!(c.want.deny.contains(&c.marker) && c.codex_home == t.home().join(".codex") && !c.want.network);
+    (app, stream, c)
+}
+
+/// Write a session file for the Lead's project into the temp home's Codex folder, with one `turn_context` whose
+/// file-system entries are `entries` and whose sandbox is `sandbox` (S12's shapes).
+fn lead_rollout(t: &Tmp, c: &LeadCheck, name: &str, sandbox: &str, entries: &str) {
+    let day = t.home().join(".codex/sessions/2026/11/13");
+    fs::create_dir_all(&day).unwrap();
+    let cwd = c.want.cwd.display();
+    let text = format!(
+        "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{cwd}\",\"originator\":\"codex-tui\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"{cwd}\",\"approval_policy\":\"never\",\"sandbox_policy\":{sandbox},\"file_system_sandbox_policy\":{entries}}}}}\n"
+    );
+    fs::write(day.join(format!("rollout-2026-11-13T16-38-01-{name}.jsonl")), text).unwrap();
+}
+
+/// The entries the Lead's profile shows when it is in force: `/` read, each deny dir (the marker too) denied, the
+/// project and the temp dir writable.
+fn lead_entries(c: &LeadCheck) -> String {
+    let mut es = vec![r#"{"path":{"type":"path","path":"/"},"access":"read"}"#.to_string()];
+    es.extend(c.want.deny.iter().map(|d| format!(r#"{{"path":{{"type":"path","path":"{}"}},"access":"deny"}}"#, d.display())));
+    es.extend([&c.want.cwd, &c.want.ticket_tmp].iter().map(|d| format!(r#"{{"path":{{"type":"path","path":"{}"}},"access":"write"}}"#, d.display())));
+    format!(r#"{{"kind":"restricted","entries":[{}]}}"#, es.join(","))
+}
+
+/// bhishma MUST (S12): a plain Codex Lead whose first turn ran with a sandbox flag beating its profile (S12's observed
+/// `danger-full-access`, no file-system policy) is ended, and says why on its stream.
+#[test]
+fn a_codex_lead_a_sandbox_flag_beat_is_ended_fail_closed() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    let sub = app.bus.subscribe();
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap(), "no session file yet: the Lead runs on, waiting for its first turn");
+    assert!(lock(&app.lead_checks).contains_key(&stream));
+    lead_rollout(&t, &c, "flag", r#"{"type":"danger-full-access"}"#, "null");
+    app.check_codex_leads();
+    for _ in 0..100 {
+        if !app.sup.is_running(&stream).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!app.sup.is_running(&stream).unwrap(), "the Lead is ended");
+    assert!(!lock(&app.lead_checks).contains_key(&stream));
+    let said = collect_changes(&sub, Duration::from_secs(1)).map(|p| p.to_string()).unwrap_or_default();
+    assert!(said.contains(&stream), "the reason is pushed on the Lead's own stream: {said}");
+}
+
+/// The Lead's own session file shows its profile in force (S12: the same with the user's own `sandbox_mode`): it runs
+/// on and is not looked at again. An earlier session of the user's own, made before the launch, is never a candidate.
+#[test]
+fn a_codex_lead_whose_profile_shows_runs_on() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    lead_rollout(&t, &c, "ours", r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#, &lead_entries(&c));
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap(), "the profile is in force");
+    assert!(!lock(&app.lead_checks).contains_key(&stream), "decided once");
+    app.sup.kill(&stream).unwrap();
+}
+
+/// The marker shows but a Vajra dir is readable: ended with the check's reason.
+#[test]
+fn a_codex_lead_with_a_readable_vajra_dir_is_ended() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    let open = lead_entries(&c).replacen(r#""access":"deny""#, r#""access":"read""#, 1);
+    lead_rollout(&t, &c, "open", r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#, &open);
+    app.check_codex_leads();
+    for _ in 0..100 {
+        if !app.sup.is_running(&stream).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!app.sup.is_running(&stream).unwrap(), "a readable Vajra dir ends the Lead");
 }

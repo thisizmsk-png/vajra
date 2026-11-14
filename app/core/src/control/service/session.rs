@@ -60,6 +60,12 @@ impl Service {
         self.seats_enabled = on;
     }
 
+    /// Seats for the bound Director-General's project: on for every project with the core route, else per project
+    /// through the seat policy's Labs switch.
+    pub(super) fn seats_for_bound(&self) -> bool {
+        self.seats_enabled || self.bound_project.as_ref().zip(self.seat_policy.as_ref()).is_some_and(|((p, _), pol)| pol.seats_on(p))
+    }
+
     /// The project's Director-General is now on conversation `generation`; calls from any other generation are refused.
     pub fn set_generation(&mut self, project: &str, generation: u32) -> Result<()> {
         if !crate::ids::valid_project_ref(project) {

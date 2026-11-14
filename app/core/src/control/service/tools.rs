@@ -83,7 +83,7 @@ impl Service {
             "inspect_worker" => &["worker", "lines"],
             "message_worker" | "redirect_worker" => &["worker", "text"],
             "stop_worker" => &["worker", "reason"],
-            "propose_run" if self.seats_enabled => &["ask", "base", "rounds", "lead", "workers", "max_in_flight"],
+            "propose_run" if self.seats_for_bound() => &["ask", "base", "rounds", "lead", "workers", "max_in_flight"],
             "propose_run" => &["ask", "base", "rounds"],
             _ => return Err(ControlError::UnknownTool),
         };
