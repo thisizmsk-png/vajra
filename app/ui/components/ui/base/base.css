@@ -62,6 +62,8 @@ body { margin: 0; background: var(--c-background); color: var(--c-text); font: 4
 /* Inputs are inset: darker than their surface, with the 3:1 edge that identifies them. */
 .v-field { display: flex; flex-direction: column; gap: var(--space-xs); }
 .v-field__label { font: 500 13px/16px var(--font-ui); color: var(--c-text-secondary); }
+.v-field__row { display: flex; gap: var(--space-xs); min-width: 0; }
+.v-field__row > .v-input { flex: 1; min-width: 0; }
 .v-field__hint { font: 400 12px/17px var(--font-ui); color: var(--c-text-muted); }
 .v-field__error { font: 400 12px/17px var(--font-ui); color: var(--c-danger); }
 .v-input { height: var(--row-h); padding: 0 var(--space-sm); background: var(--c-background); color: var(--c-text); border: 1px solid var(--c-border-strong); border-radius: var(--radius-md); font: 400 13px/19px var(--font-ui); transition: border-color var(--t-fast) var(--ease-out); }
