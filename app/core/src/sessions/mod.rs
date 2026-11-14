@@ -130,8 +130,9 @@ pub struct SpawnSpec {
 /// The bus stream prefix reserved for one-click installs (`Supervisor::spawn_setup`).
 pub const SETUP_STREAM: &str = "setup-";
 
-/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8).
-pub const EXTRA_ENV_ALLOW: [&str; 3] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"];
+/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8), plus a Claude run lead's pinned `MCP_TOOL_TIMEOUT`
+/// (16.5, 6d2).
+pub const EXTRA_ENV_ALLOW: [&str; 4] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "MCP_TOOL_TIMEOUT"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitInfo {

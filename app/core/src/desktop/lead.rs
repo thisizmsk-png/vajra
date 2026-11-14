@@ -1293,7 +1293,12 @@ impl App {
         // Record first, spawn second: if the ledger cannot take the line, the Lead is never started.
         ledger(AskState::Queued, Some(framed.text()), None, None)?;
         let child = match lead_run::spawn(&argv, &orch.root, &env, framed, handle) {
-            Ok(c) => c,
+            Ok(c) => {
+                // Its `--mcp` server is a Service client: the harness becomes a recorded root before it can make a tool
+                // call. One that could not be recorded has its calls refused, never admitted.
+                self.run_leads.allow_service(c.id());
+                c
+            }
             Err(e) => {
                 let _ = ledger(AskState::Failed, None, Some(e.code()), None);
                 return Err(e);
