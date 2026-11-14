@@ -5,19 +5,24 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Build the harness in this test's own profile and return `target/<profile>/examples/profile_run`. A filtered run
-/// (`cargo test --test profile_harness`) does not build examples, so the test builds it; a full run finds it fresh.
+/// Build the harness in this test's own profile and return the executable cargo reports for it. A filtered run
+/// (`cargo test --test profile_harness`) does not build examples, so the test builds it. The path comes from cargo's
+/// own build messages, not from this test binary's location: cargo 1.100 moved test binaries into a per-unit build
+/// folder, so "two folders up from this test" is no longer the profile folder.
 fn harness() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let profile_dir = exe.parent().and_then(Path::parent).unwrap();
     let mut build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    build.args(["build", "--example", "profile_run"]).current_dir(env!("CARGO_MANIFEST_DIR"));
-    if profile_dir.file_name().is_some_and(|n| n == "release") {
+    build.args(["build", "--example", "profile_run", "--message-format=json"]).current_dir(env!("CARGO_MANIFEST_DIR"));
+    if !cfg!(debug_assertions) {
         build.arg("--release");
     }
     let out = build.output().unwrap();
     assert!(out.status.success(), "the harness does not build: {}", String::from_utf8_lossy(&out.stderr));
-    profile_dir.join("examples").join("profile_run")
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "profile_run")
+        .find_map(|m| m["executable"].as_str().map(PathBuf::from))
+        .expect("cargo reports the profile_run executable")
 }
 
 #[test]
