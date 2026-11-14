@@ -44,6 +44,7 @@ fn ask() -> Ask {
         seat: "verifier".into(),
         account: "codex (work)".into(),
         commands: vec!["npm ci".into(), "npm test".into()],
+        network: false,
     }
 }
 
@@ -61,6 +62,7 @@ fn approve_then_consume_once_gives_the_consumed_state_and_an_audit_line() {
     assert_eq!(shown["ask"]["commands"], json!(["npm ci", "npm test"]), "the exact ordered list is shown");
     assert_eq!(shown["ask"]["commit"], ask().commit);
     assert_eq!(shown["ask"]["seat"], "verifier");
+    assert_eq!(shown["ask"]["network"], false, "the runner's network setting is shown with the list (PR 247)");
     app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 60)).unwrap();
     assert!(app.evidence_approval_consumed(RUN).is_none(), "approved is not consumed yet");
     assert_eq!(app.consume_evidence_approval(&ask(), at(T0 + 120)).unwrap(), sha);
@@ -113,6 +115,8 @@ fn any_changed_command_commit_round_seat_or_account_voids_it() {
         |a| a.round = 2,
         |a| a.seat = "builder".into(),
         |a| a.account = "codex (personal)".into(),
+        // Approved with the network off, run with it on (PR 247): void.
+        |a| a.network = true,
     ];
     for change in changes {
         let t = Tmp::new();

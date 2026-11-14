@@ -134,7 +134,7 @@ export type RunOverview = {
 };
 export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };
 /** N20: what the person approves for a `guarded_by_approval` run, from the core's memory (never from the file). */
-export type EvidenceAsk = { run_id: string; round: number; commit: string; seat: string; account: string; commands: string[] };
+export type EvidenceAsk = { run_id: string; round: number; commit: string; seat: string; account: string; commands: string[]; network: boolean };
 export type EvidenceApprovalState = "none" | "pending" | "approved" | "consumed" | "declined" | "expired" | "void";
 /** `ask` and `sha256` are present only when the core holds the ask; the sha is what an answer must give back. */
 export type EvidenceApproval = { run_id: string; state: EvidenceApprovalState; sha256?: string; ask?: EvidenceAsk; asked_at?: number; hold_max_s?: number };

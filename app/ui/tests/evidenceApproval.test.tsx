@@ -11,7 +11,7 @@ const L = S.run.approval;
 const RUN = "20261113-0600";
 const SHA_A = "a1".repeat(32);
 const SHA_B = "b2".repeat(32);
-const ASK = { run_id: RUN, round: 1, commit: "0123456789abcdef0123456789abcdef01234567", seat: "verifier", account: "codex (work)", commands: ["npm ci", "npm test -- --runInBand"] };
+const ASK = { run_id: RUN, round: 1, commit: "0123456789abcdef0123456789abcdef01234567", seat: "verifier", account: "codex (work)", commands: ["npm ci", "npm test -- --runInBand"], network: false };
 const pending = (sha = SHA_A, commands = ASK.commands): Approval => ({ run_id: RUN, state: "pending", sha256: sha, ask: { ...ASK, commands }, asked_at: 1, hold_max_s: 86400 });
 const done = { receipt: { state: "done" }, result: { run_id: RUN, state: "approved", sha256: SHA_A } };
 
@@ -61,6 +61,21 @@ describe("check-command approval dialog (N20)", () => {
     expect(document.activeElement?.textContent).toBe(L.notNow);
     expect(within(d).getByRole("button", { name: L.approve }).getAttribute("aria-disabled")).toBeNull();
     expect(list.tabIndex).toBe(0);
+  });
+
+  it.each([
+    [false, L.networkOff, L.networkOn],
+    [true, L.networkOn, L.networkOff],
+  ] as const)("shows the runner's network setting (network %s) beside the list (PR 247)", async (network, shownText, notText) => {
+    const a = pending();
+    a.ask = { ...ASK, network };
+    mount({ current: a });
+    const d = await openDialog();
+    const facts = d.querySelector("dl")!;
+    const dts = [...facts.querySelectorAll("dt")].map((x) => x.textContent);
+    const dds = [...facts.querySelectorAll("dd")].map((x) => x.textContent);
+    expect(dds[dts.indexOf(L.network)]).toBe(shownText);
+    expect(within(d).queryByText(notText)).toBeNull();
   });
 
   it("approve sends the sha of the list on screen, closes, and says it was approved", async () => {

@@ -56,6 +56,9 @@ pub struct Ask {
     pub account: String,
     /// Every setup, check and suite command, in order.
     pub commands: Vec<String>,
+    /// The runner's network setting for these commands (the verifier seat's, `Profile::network`): shown with the list
+    /// and bound into its sha, so an approval given with the network off can't be used by a run with it on (PR 247).
+    pub network: bool,
 }
 
 /// An ask this app made, and a person's answer to it (held in memory only).
@@ -127,7 +130,7 @@ impl Ask {
     }
 
     fn to_json(&self) -> Value {
-        json!({"run_id": self.run_id, "round": self.round, "commit": self.commit, "seat": self.seat, "account": self.account, "commands": self.commands})
+        json!({"run_id": self.run_id, "round": self.round, "commit": self.commit, "seat": self.seat, "account": self.account, "commands": self.commands, "network": self.network})
     }
 
     /// sha256 of the canonical list (compact JSON, fixed key order): what the human approved, and what the audit and

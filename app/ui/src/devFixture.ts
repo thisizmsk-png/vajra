@@ -290,6 +290,7 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     ? { run_id: String(a?.runId), state: "pending", sha256: "c4".repeat(32), asked_at: 1_794_000_000, hold_max_s: 86_400, ask: {
         run_id: String(a?.runId), round: 1, commit: "4e1c9a2b7d03c5e6f7a89b0c1d2e3f405162738a", seat: "verifier", account: "codex (work)",
         commands: ["npm ci", "npm run build", "npm test -- --runInBand src/limiter", "npx playwright test e2e/rate-limit.spec.ts --reporter=line", "curl -sf http://127.0.0.1:4000/health"],
+        network: false,
       } }
     : { run_id: String(a?.runId), state: "none" },
   act_answer_evidence_approval: () => ({ receipt: { action_id: "a_fixture6", state: "done" }, result: { state: "approved" } }),

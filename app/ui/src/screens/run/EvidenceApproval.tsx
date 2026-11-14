@@ -122,6 +122,8 @@ export function EvidenceApproval({ runId }: { runId: string }) {
               <dt>{L.commit}</dt><dd><Text as="span" variant="mono" className="v-approval__wrap">{shown.ask.commit}</Text></dd>
               <dt>{L.seat}</dt><dd>{shown.ask.seat}</dd>
               <dt>{L.account}</dt><dd>{shown.ask.account}</dd>
+              {/* The runner's own setting, bound into the list hash: what the person vouches these commands may reach. */}
+              <dt>{L.network}</dt><dd>{shown.ask.network ? L.networkOn : L.networkOff}</dd>
               <dt>{L.listSha}</dt><dd><Text as="span" variant="mono" className="v-approval__wrap">{shown.sha256}</Text></dd>
             </dl>
             <h3 id="v-approval-list" className="v-text v-text--label">{L.list(shown.ask.commands.length)}</h3>
