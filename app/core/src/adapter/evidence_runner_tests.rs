@@ -571,8 +571,20 @@ fn a_network_seat_resolves_and_fetches_over_https_under_deny_default() {
         return eprintln!("skipped: no internet here");
     }
     let t = Tmp::new("netseat");
-    let o = t.run(&t.profile(true), get, &[]);
-    assert!(o.status.success(), "a network seat couldn't fetch: {}", text(&o));
+    // curl is exec'd by the shell, so it keeps the pid the shell prints: on a failure the sandbox's own denial lines for
+    // that pid are read from the system log and shown, naming exactly what the profile refused (it failed once on a CI
+    // image and never locally). Strict either way: no skip, no retry.
+    let o = t.run(&t.profile(true), &format!("echo VAJRA_PID=$$; exec {get}"), &[]);
+    if !o.status.success() {
+        let out = text(&o);
+        let pid = out.lines().find_map(|l| l.strip_prefix("VAJRA_PID=")).unwrap_or("?").trim().to_string();
+        std::thread::sleep(std::time::Duration::from_secs(2)); // the kernel's sandbox lines reach the log a moment later
+        let log = Command::new("/usr/bin/log").args(["show", "--style", "compact", "--last", "3m", "--predicate", "eventMessage CONTAINS \"deny(\""]).output();
+        let denials: Vec<String> = log
+            .map(|l| String::from_utf8_lossy(&l.stdout).lines().filter(|l| l.contains(&format!("({pid})"))).map(str::to_string).collect())
+            .unwrap_or_default();
+        panic!("a network seat couldn't fetch: {out}\nsandbox denials for pid {pid} ({}):\n{}", denials.len(), denials.join("\n"));
+    }
     // And without one, the same fetch is refused.
     assert!(!t.run(&t.profile(false), get, &[]).status.success());
 }
