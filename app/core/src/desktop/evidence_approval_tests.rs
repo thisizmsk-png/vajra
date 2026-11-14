@@ -1116,6 +1116,33 @@ mod runner_wiring {
         assert_eq!(planted_with(&["npm test"], "build/\n", &[("jest.config.js", "module.exports = {}\n")], &["build/a.check.js"]), None);
     }
 
+    /// Codex P1 on #256: a virtualenv is skipped only while pytest can't be told to collect it. A flag that isn't
+    /// known harmless, a path into the folder, or a tracked pytest config that opts in or names it drops the skip.
+    #[test]
+    fn a_virtualenv_is_checked_when_pytest_is_told_to_collect_it() {
+        let venv = ["sandboxenv/pyvenv.cfg", "sandboxenv/test_planted.py"];
+        let ex = "sandboxenv/\n";
+        for cmd in [
+            "pytest --collect-in-virtualenv", "python -m pytest --collect-in-virtualenv tests", "pytest sandboxenv/test_planted.py",
+            "pytest ./sandboxenv/", "pytest sandboxenv/test_planted.py::test_x", "pytest -c other.ini", "pytest --rootdir=sandboxenv",
+            "pytest -p plugin", "pytest ../x", "pytest /abs/tests", "pytest 'sandbox*'",
+            // Shell quoting isn't parsed: a quoted expression of several words fails closed.
+            "pytest -m 'not slow' tests",
+        ] {
+            refuses(planted_with(&[cmd], ex, &[], &venv), "sandboxenv/test_planted.py");
+        }
+        for cfg in [
+            ("pytest.ini", "[pytest]\ntestpaths = sandboxenv\n"),
+            ("pyproject.toml", "[tool.pytest.ini_options]\naddopts = \"--collect-in-virtualenv\"\n"),
+        ] {
+            refuses(planted_with(&["pytest"], ex, &[cfg], &venv), "sandboxenv/test_planted.py");
+        }
+        // Still skipped: harmless flags, an expression, and paths elsewhere.
+        for cmd in ["pytest", "pytest -q -x --tb=short tests", "pytest -k smoke -m slow tests/unit", "python3 -m pytest -ra ./tests/"] {
+            assert_eq!(planted_with(&[cmd], ex, &[("pytest.ini", "[pytest]\ntestpaths = tests\n")], &venv), None, "{cmd}");
+        }
+    }
+
     /// Codex P1 on #256: the same file planted after the first check is refused at spawn, and nothing runs.
     #[test]
     fn a_source_file_planted_after_the_check_under_a_custom_pattern_is_refused_at_spawn() {
