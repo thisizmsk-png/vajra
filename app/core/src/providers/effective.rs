@@ -289,6 +289,56 @@ pub fn codex_rollout(events: &str, codex_home: &Path) -> Option<String> {
     Some(text)
 }
 
+/// How many session files one Lead read-back pass opens at most, newest first.
+const MAX_LEAD_FILES: usize = 16;
+
+/// The plain Codex Lead's read-back (bhishma MUST, S12): the plain Lead is an interactive Codex with no event stream, so
+/// its thread id is unknown. Returns the text (at most `MAX_READ` bytes each) of every session file in the newest two
+/// day folders of `codex_home/sessions` created at or after `since` (less a 2 s clock skew), newest first, at most
+/// `MAX_LEAD_FILES`. The walk holds each folder by its descriptor and refuses links, as `rollout_file` does.
+pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> Vec<String> {
+    let floor = since.checked_sub(Duration::from_secs(2)).unwrap_or(since);
+    let Ok(home) = fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(codex_home) else { return Vec::new() };
+    let Some(sessions) = sub_dir(&home, "sessions") else { return Vec::new() };
+    // Year, month, day: the newest two names at each level, so a day that crosses a month or year is still seen.
+    let newest = |dir: &File| {
+        let mut n = entry_names(dir);
+        n.sort();
+        n.into_iter().rev().take(2).collect::<Vec<_>>()
+    };
+    let mut days: Vec<(String, File)> = Vec::new();
+    for y in newest(&sessions) {
+        let Some(yd) = sub_dir(&sessions, &y) else { continue };
+        for m in newest(&yd) {
+            let Some(md) = sub_dir(&yd, &m) else { continue };
+            for d in newest(&md) {
+                if let Some(dd) = sub_dir(&md, &d) {
+                    days.push((format!("{y}/{m}/{d}"), dd));
+                }
+            }
+        }
+    }
+    days.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+    for (_, day) in days.iter().take(2) {
+        for n in entry_names(day).into_iter().filter(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
+            let Ok(name) = CString::new(n) else { continue };
+            let Ok(file) = open_at(day, &name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0) else { continue };
+            let Ok(meta) = file.metadata() else { continue };
+            let born = meta.created().or_else(|_| meta.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            if !meta.is_file() || born < floor {
+                continue;
+            }
+            let mut text = String::new();
+            if file.take(MAX_READ).read_to_string(&mut text).is_ok() {
+                found.push((born, text));
+            }
+        }
+    }
+    found.sort_by_key(|f| std::cmp::Reverse(f.0));
+    found.into_iter().take(MAX_LEAD_FILES).map(|(_, t)| t).collect()
+}
+
 /// A Codex session's final answer, from its own session file: `last_agent_message` of the last `task_complete` event.
 /// The file is written by Codex in its home, outside the session's writable roots; the `--json` stream is the session's
 /// terminal, which anything the session runs can print on (#167 H1, vajra-63's residual). The last `MAX_READ` bytes

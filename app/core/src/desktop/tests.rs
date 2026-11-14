@@ -5670,3 +5670,110 @@ fn a_second_app_prunes_no_control_dir() {
     drop(t.app());
     assert!(!control.join(live).exists(), "an app holding the folder prunes it");
 }
+
+/// A plain Codex Lead started through `start_run`, on a fake codex that records its argv and stays up (so the read-back
+/// has a live Lead to end). Returns the app, its stream and the check the launch registered.
+fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut app = t.app();
+    let d = t.0.join("fakebin-codex-lead");
+    fs::create_dir_all(&d).unwrap();
+    let argv_log = t.0.join("lead-argv");
+    let body = format!(
+        "#!/bin/sh\ncase \"$1\" in --version) echo '0.166.0 (fake)';; login) echo 'Logged in';; *) printf '%s\\n' \"$@\" > '{}'; exec sleep 30;; esac\n",
+        argv_log.display()
+    );
+    fs::write(d.join("codex"), body).unwrap();
+    fs::set_permissions(d.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
+    app.provider_dirs = Some(vec![d]);
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
+    let r = app.start_run(input, &t.0.join("repo").to_string_lossy()).unwrap();
+    let stream = r["stream"].as_str().unwrap().to_string();
+    let c = lock(&app.lead_checks).get(&stream).cloned().expect("a Codex Lead registers its first-turn read-back");
+    for _ in 0..100 {
+        if argv_log.is_file() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let argv = fs::read_to_string(&argv_log).unwrap();
+    assert!(argv.contains(&format!("\"{}\"=\"none\"", c.marker.display())), "the marker is a deny entry of the launch: {argv}");
+    assert!(!argv.lines().any(|l| l == "-s" || l == "--sandbox" || l.starts_with("--sandbox=")), "{argv}");
+    assert!(c.want.deny.contains(&c.marker) && c.codex_home == t.home().join(".codex") && !c.want.network);
+    (app, stream, c)
+}
+
+/// Write a session file for the Lead's project into the temp home's Codex folder, with one `turn_context` whose
+/// file-system entries are `entries` and whose sandbox is `sandbox` (S12's shapes).
+fn lead_rollout(t: &Tmp, c: &LeadCheck, name: &str, sandbox: &str, entries: &str) {
+    let day = t.home().join(".codex/sessions/2026/11/13");
+    fs::create_dir_all(&day).unwrap();
+    let cwd = c.want.cwd.display();
+    let text = format!(
+        "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{cwd}\",\"originator\":\"codex-tui\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"{cwd}\",\"approval_policy\":\"never\",\"sandbox_policy\":{sandbox},\"file_system_sandbox_policy\":{entries}}}}}\n"
+    );
+    fs::write(day.join(format!("rollout-2026-11-13T16-38-01-{name}.jsonl")), text).unwrap();
+}
+
+/// The entries the Lead's profile shows when it is in force: `/` read, each deny dir (the marker too) denied, the
+/// project and the temp dir writable.
+fn lead_entries(c: &LeadCheck) -> String {
+    let mut es = vec![r#"{"path":{"type":"path","path":"/"},"access":"read"}"#.to_string()];
+    es.extend(c.want.deny.iter().map(|d| format!(r#"{{"path":{{"type":"path","path":"{}"}},"access":"deny"}}"#, d.display())));
+    es.extend([&c.want.cwd, &c.want.ticket_tmp].iter().map(|d| format!(r#"{{"path":{{"type":"path","path":"{}"}},"access":"write"}}"#, d.display())));
+    format!(r#"{{"kind":"restricted","entries":[{}]}}"#, es.join(","))
+}
+
+/// bhishma MUST (S12): a plain Codex Lead whose first turn ran with a sandbox flag beating its profile (S12's observed
+/// `danger-full-access`, no file-system policy) is ended, and says why on its stream.
+#[test]
+fn a_codex_lead_a_sandbox_flag_beat_is_ended_fail_closed() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    let sub = app.bus.subscribe();
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap(), "no session file yet: the Lead runs on, waiting for its first turn");
+    assert!(lock(&app.lead_checks).contains_key(&stream));
+    lead_rollout(&t, &c, "flag", r#"{"type":"danger-full-access"}"#, "null");
+    app.check_codex_leads();
+    for _ in 0..100 {
+        if !app.sup.is_running(&stream).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!app.sup.is_running(&stream).unwrap(), "the Lead is ended");
+    assert!(!lock(&app.lead_checks).contains_key(&stream));
+    let said = collect_changes(&sub, Duration::from_secs(1)).map(|p| p.to_string()).unwrap_or_default();
+    assert!(said.contains(&stream), "the reason is pushed on the Lead's own stream: {said}");
+}
+
+/// The Lead's own session file shows its profile in force (S12: the same with the user's own `sandbox_mode`): it runs
+/// on and is not looked at again. An earlier session of the user's own, made before the launch, is never a candidate.
+#[test]
+fn a_codex_lead_whose_profile_shows_runs_on() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    lead_rollout(&t, &c, "ours", r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#, &lead_entries(&c));
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap(), "the profile is in force");
+    assert!(!lock(&app.lead_checks).contains_key(&stream), "decided once");
+    app.sup.kill(&stream).unwrap();
+}
+
+/// The marker shows but a Vajra dir is readable: ended with the check's reason.
+#[test]
+fn a_codex_lead_with_a_readable_vajra_dir_is_ended() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    let open = lead_entries(&c).replacen(r#""access":"deny""#, r#""access":"read""#, 1);
+    lead_rollout(&t, &c, "open", r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#, &open);
+    app.check_codex_leads();
+    for _ in 0..100 {
+        if !app.sup.is_running(&stream).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!app.sup.is_running(&stream).unwrap(), "a readable Vajra dir ends the Lead");
+}

@@ -97,6 +97,20 @@ fn invalid_input(e: InvalidInput) -> Value {
     invalid(e.field, e.reason)
 }
 
+/// A plain Codex Lead waiting for its first-turn read-back: what its `turn_context` must show, the marker that names its
+/// session file, the user's Codex home it writes to, and when it launched.
+#[derive(Clone, Debug)]
+struct LeadCheck {
+    want: crate::adapter::profiles::CodexWant,
+    marker: PathBuf,
+    codex_home: PathBuf,
+    since: std::time::SystemTime,
+}
+
+/// How long a plain Codex Lead may run before its first turn is read back. It may wait on the user first (Codex asks
+/// whether to trust a new folder), so this is generous; past it, a Lead whose session file never showed is ended.
+pub const LEAD_PROOF_WAIT: Duration = Duration::from_secs(10 * 60);
+
 /// A run session started (or resumed) by this app.
 #[derive(Clone, Debug)]
 struct Run {
@@ -288,6 +302,8 @@ pub struct App {
     limits: Mutex<caps::RunLimits>,
     /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
     run_workers: Mutex<HashMap<String, u32>>,
+    /// Each running plain Codex Lead whose first turn isn't read back yet, by stream (bhishma MUST, S12).
+    lead_checks: Mutex<HashMap<String, LeadCheck>>,
     /// Each core run's record, by run id: live until its protocol finalizes, so it is never listed as an orphan
     /// between tickets (6h).
     live_records: Mutex<HashMap<String, std::sync::Weak<record::CoreRecord>>>,
@@ -448,6 +464,7 @@ impl App {
             launching: Mutex::new(()),
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
+            lead_checks: Mutex::new(HashMap::new()),
             live_records: Mutex::new(HashMap::new()),
             live_logs: Mutex::new(HashMap::new()),
             log_anchors: Default::default(),
@@ -735,6 +752,7 @@ impl App {
     /// queue to its workers (their messages expire). The run stays in `runs`:
     /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
+        self.check_codex_leads();
         // A launch in flight owns the session it just took; it reaps itself.
         // The guard stays bound until `reap_locked` returns, so a launch cannot install a session in between.
         let _guard = match self.launching.try_lock() {
@@ -743,6 +761,41 @@ impl App {
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
         };
         self.reap_locked();
+    }
+
+    /// bhishma MUST (S12): each running plain Codex Lead's first turn is read back like a worker's. Its own session file
+    /// (named by the launch's marker) must show the Vajra dirs denied under the profile, or the Lead is ended, with the
+    /// reason on its stream. A Lead whose first turn never shows within `LEAD_PROOF_WAIT` is ended too. Runs on every
+    /// busy tick (`LIVE_WAIT`), so a failing Lead runs at most about that long after its first turn starts.
+    pub fn check_codex_leads(&self) {
+        use crate::adapter::profiles::{LeadVerdict, codex_lead_verdict};
+        let pending: Vec<(String, LeadCheck)> = lock(&self.lead_checks).iter().map(|(s, c)| (s.clone(), c.clone())).collect();
+        for (stream, c) in pending {
+            if !self.sup.is_running(&stream).unwrap_or(false) {
+                lock(&self.lead_checks).remove(&stream);
+                continue;
+            }
+            let found = crate::providers::effective::codex_rollouts_since(&c.codex_home, c.since);
+            let verdict = match codex_lead_verdict(&found, &c.want, &c.marker) {
+                LeadVerdict::Pending if c.since.elapsed().is_ok_and(|e| e >= LEAD_PROOF_WAIT) => {
+                    LeadVerdict::NotApplied("the Lead's Codex session file never showed its first turn, so its Vajra profile can't be shown in force".into())
+                }
+                v => v,
+            };
+            match verdict {
+                LeadVerdict::Pending => {}
+                LeadVerdict::Applied => {
+                    lock(&self.lead_checks).remove(&stream);
+                    self.note("lead_profile_applied", &[]);
+                }
+                LeadVerdict::NotApplied(why) => {
+                    lock(&self.lead_checks).remove(&stream);
+                    let _ = self.sup.kill(&stream);
+                    let _ = self.bus.push(&stream, &format!("\r\nVajra ended this Codex Lead ({}): {why}\r\n", crate::adapter::profiles::PROFILE_NOT_APPLIED));
+                    self.note("lead_profile_not_applied", &[]);
+                }
+            }
+        }
     }
 
     fn reap_locked(&self) {
@@ -1141,20 +1194,32 @@ impl App {
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let workers = input.max_in_flight;
         let engine = self.chosen_engine(input.provider.as_deref())?;
+        let check: std::cell::RefCell<Option<LeadCheck>> = std::cell::RefCell::new(None);
         let r = self.launch_engine(engine, &session_id, &run_id, &campaign, &cwd, |n| {
             if engine == Engine::Claude {
                 argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
             } else {
+                use crate::adapter::profiles;
                 // bhishma #216 H1: a Codex Lead never runs without the Vajra dirs denied.
-                let deny = crate::adapter::profiles::vajra_deny_dirs(&self.home, &self.data);
-                let profile = crate::adapter::profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
+                let mut deny = profiles::vajra_deny_dirs(&self.home, &self.data);
+                let profile = profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
                 let real = |p: &Path| p.canonicalize().map_err(|e| fail("io_error", e));
-                let (project, tmp) = (real(&cwd)?, real(&std::env::temp_dir())?);
+                let (project, tmp, data) = (real(&cwd)?, real(&std::env::temp_dir())?, real(&self.data)?);
+                // bhishma MUST (S12): the launch's marker names its session file for the first-turn read-back.
+                let marker = profiles::codex_lead_marker(&data, &profile);
+                deny.push(marker.clone());
                 // A second Lead in this project was already held by the one-run-per-project cap, under the launching lock.
                 let codex = self.codex_for_lead()?;
-                crate::adapter::profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)
+                let a = profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)?;
+                // The pty supervisor passes no CODEX_HOME (`sessions::ENV_ALLOW`), so the Lead's Codex writes under ~/.codex.
+                let want = profiles::CodexWant { cwd: project, ticket_tmp: tmp, network: false, deny };
+                *check.borrow_mut() = Some(LeadCheck { want, marker, codex_home: self.home.join(".codex"), since: std::time::SystemTime::now() });
+                Ok(a)
             }
         }, false, workers)?;
+        if let (Some(c), Some(stream)) = (check.into_inner(), r["stream"].as_str()) {
+            lock(&self.lead_checks).insert(stream.to_string(), c);
+        }
         self.note("run_started", &[]);
         Ok(r)
     }
