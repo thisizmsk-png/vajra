@@ -51,7 +51,8 @@ export function EvidenceApproval({ runId }: { runId: string }) {
       requestAnimationFrame(() => statusRef.current?.focus());
     }
   }, [shown, latest, busy]);
-  const hidden = !!shown && shown.ask.commands.some(hidesText);
+  // The same fields the core checks: every command, the seat and the account (all shown in the dialog).
+  const hidden = !!shown && [...shown.ask.commands, shown.ask.seat, shown.ask.account].some(hidesText);
   const blockedWhy = changed ? L.changed : hidden ? L.hidden : "";
 
   const open = () => {

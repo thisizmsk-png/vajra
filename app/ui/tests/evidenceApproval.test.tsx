@@ -190,6 +190,16 @@ describe("check-command approval dialog (N20)", () => {
     await waitFor(() => expect(answers(ipc)[0]?.args).toMatchObject({ approve: false }));
   });
 
+  it.each(["seat", "account"] as const)("a hidden character in the %s blocks Approve too, as the core does", async (field) => {
+    const a = pending();
+    a.ask = { ...ASK, [field]: "verifier‮evil" };
+    const ipc = mount({ current: a });
+    const d = await openDialog();
+    expect(within(d).getByText(L.hidden)).toBeTruthy();
+    fireEvent.click(within(d).getByRole("button", { name: L.approve }));
+    expect(answers(ipc)).toHaveLength(0);
+  });
+
   it.each([
     ["expired", L.state.expired],
     ["void", L.state.void],
