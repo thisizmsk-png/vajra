@@ -22,6 +22,13 @@ impl Service {
         a.session_id = r.session_id.to_string();
         a.reason = r.reason.map(str::to_string);
         let mut extra = json!({"lead_session_id": r.lead_session_id});
+        if let Some((project, generation)) = r.project {
+            extra["project_id"] = json!(project);
+            extra["generation"] = json!(generation);
+        }
+        if let Some(tokens) = r.tokens {
+            extra["tokens"] = tokens.clone();
+        }
         if let Some(t) = r.text {
             extra["text"] = json!(t);
             extra["text_sha256"] = json!(sha256::hex_digest(t.as_bytes()));

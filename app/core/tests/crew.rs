@@ -108,6 +108,7 @@ mod crew {
             prompt_first_line: None,
             branch: None,
             status,
+            provider: None,
         }
     }
 
@@ -328,6 +329,38 @@ mod crew {
         assert_eq!(title_case("deploy_plan"), "Deploy Plan");
     }
 
+    // ---- provider (launch receipt) ----
+
+    #[test]
+    fn a_transcript_reports_its_model_and_a_crew_node_carries_the_provider() {
+        use vajra_desktop::providers::effective::ProviderTag;
+        let h = Home::new();
+        let p = h.project().join("model.jsonl");
+        let rec = json!({"type": "assistant", "message": {"model": "claude-model-x", "role": "assistant", "content": [{"type": "text", "text": "ok"}]}});
+        fs::write(&p, format!("{rec}\n")).unwrap();
+        let mut tr = Transcript::new(Tailer::new(h.allow(), p), Redactor::new(None));
+        assert_eq!(tr.model(), None, "nothing read yet");
+        tr.poll().unwrap();
+        assert_eq!(tr.model(), Some("claude-model-x"));
+
+        let mut w = worker("a1", "bhima", "task.t1.r1", Status::InProgress);
+        w.provider = Some(ProviderTag::new("claude", "claude-model-x", "subscription", None));
+        let tasks = json!({"tasks": [{"id": "t1", "owner_agent": "bhima", "status": "in_progress"}]});
+        let workers = vec![w, worker("a2", "bhima", "task.t1.r2", Status::InProgress)];
+        let signals = Signals::default();
+        let root = tree::build(&CrewInput { run_id: RUN, lead: None, run_status: Status::InProgress, tasks: Some(&tasks), workers: &workers, core: &[], signals: &signals });
+        fn nodes<'a>(n: &'a Node, out: &mut Vec<&'a Node>) {
+            out.push(n);
+            n.children.iter().for_each(|c| nodes(c, out));
+        }
+        let mut all = Vec::new();
+        nodes(&root, &mut all);
+        let with = all.iter().find(|n| n.id == "agent:a1").expect("worker node");
+        assert_eq!(with.provider.as_ref().map(|p| (p.account.as_str(), p.model.as_str(), p.billing.as_str())), Some(("claude", "claude-model-x", "subscription")));
+        assert_eq!(with.provider.as_ref().map(|p| (p.label.as_str(), p.family.as_str())), Some(("Claude Code", "claude")));
+        assert_eq!(all.iter().find(|n| n.id == "agent:a2").unwrap().provider, None, "not reported: no tag, never a guess");
+    }
+
     // ---- tree ----
 
     #[test]
@@ -336,7 +369,7 @@ mod crew {
         let workers = vec![worker("a1", "bhima", "task.t1.r1", Status::InProgress)];
         let signals = Signals::default();
         let root = tree::build(&CrewInput {
-            run_id: RUN, lead: None, run_status: Status::InProgress, tasks: Some(&tasks), workers: &workers, signals: &signals,
+            run_id: RUN, lead: None, run_status: Status::InProgress, tasks: Some(&tasks), workers: &workers, core: &[], signals: &signals,
         });
         let all = format!("{root:?}");
         assert_eq!(all.matches("kind: Task").count(), 1, "one task node, not a status-less duplicate: {all}");
@@ -366,7 +399,7 @@ mod crew {
             lead: Some(Status::InProgress),
             run_status: Status::InProgress,
             tasks: Some(&tasks),
-            workers: &workers,
+            workers: &workers, core: &[],
             signals: &signals,
         });
         assert_eq!(root.kind, NodeKind::Lead);
@@ -427,7 +460,7 @@ mod crew {
             lead: None,
             run_status: Status::Unknown,
             tasks: Some(&tasks),
-            workers: &workers,
+            workers: &workers, core: &[],
             signals: &Signals::default(),
         });
         assert_eq!(root.status, Status::Unknown, "no Lead session is 'unknown', never idle");
@@ -451,7 +484,7 @@ mod crew {
             lead: None,
             run_status: Status::InProgress,
             tasks: Some(&tasks),
-            workers: &workers,
+            workers: &workers, core: &[],
             signals: &Signals::default(),
         });
         let t1 = find(&root, "Backend · t1").unwrap();
@@ -471,7 +504,7 @@ mod crew {
             lead: None,
             run_status: Status::Unknown,
             tasks: Some(&tasks),
-            workers: &workers,
+            workers: &workers, core: &[],
             signals: &Signals::default(),
         });
         assert_eq!(find(&root, "Backend · t1").unwrap().status, Status::Unknown);
@@ -485,7 +518,7 @@ mod crew {
             lead: None,
             run_status: Status::Unknown,
             tasks: None,
-            workers: &[],
+            workers: &[], core: &[],
             signals: &Signals::default(),
         });
         assert_eq!(none.children[0].status, Status::Unknown);
@@ -506,7 +539,7 @@ mod crew {
             lead: None,
             run_status: Status::InProgress,
             tasks: Some(&tasks),
-            workers: &workers,
+            workers: &workers, core: &[],
             signals: &signals,
         });
         let r1 = find(&root, "round 1").unwrap();
@@ -521,18 +554,18 @@ mod crew {
         let signals = Signals::default();
 
         h.write_tasks(&[("t1", "bhima", "claimed"), ("t2", "nakula", "ready")]);
-        let a = tree::snapshot(&mut reader, SLUG, RUN, None, Status::InProgress, &workers, &signals);
+        let a = tree::snapshot(&mut reader, SLUG, RUN, None, Status::InProgress, &workers, &[], &signals);
         assert_eq!(find(&a, "Backend · t1").unwrap().status, Status::Claimed);
         assert_eq!(find(&a, "Frontend · t2").unwrap().status, Status::Ready);
 
         h.write_tasks(&[("t1", "bhima", "done"), ("t2", "nakula", "blocked")]);
-        let b = tree::snapshot(&mut reader, SLUG, RUN, None, Status::InProgress, &workers, &signals);
+        let b = tree::snapshot(&mut reader, SLUG, RUN, None, Status::InProgress, &workers, &[], &signals);
         assert_eq!(find(&b, "Backend · t1").unwrap().status, Status::Done);
         assert_eq!(find(&b, "Frontend · t2").unwrap().status, Status::Blocked);
         assert_eq!(find(&b, "Frontend · t2").unwrap().status.as_str(), "blocked");
 
         fs::write(h.tasks_path(), b"{ half written").unwrap();
-        let c = tree::snapshot(&mut reader, SLUG, RUN, None, Status::InProgress, &workers, &signals);
+        let c = tree::snapshot(&mut reader, SLUG, RUN, None, Status::InProgress, &workers, &[], &signals);
         assert_eq!(find(&c, "Backend · t1").unwrap().status, Status::Done, "keeps last good snapshot");
     }
 
@@ -551,7 +584,7 @@ mod crew {
             lead: None,
             run_status: Status::InProgress,
             tasks: None,
-            workers: &workers,
+            workers: &workers, core: &[],
             signals: &Signals::default(),
         });
         let steps = find(&root, "Run steps").unwrap();

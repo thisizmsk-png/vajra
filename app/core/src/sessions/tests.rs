@@ -30,6 +30,7 @@ fn spec(argv: &[&str], cwd: &std::path::Path) -> SpawnSpec {
         rows: 24,
         cols: 80,
         redact: Redactor::default(),
+        extra_env: Vec::new(),
     }
 }
 
@@ -278,6 +279,7 @@ fn sessions_build_run_argv_spawns_as_argv() {
         base: "ea73cb05d639b945e21c667e17103e56404861a8".into(),
         max_in_flight: 2,
         campaign: None,
+        provider: None,
     };
     let mut a = argv::build_run_argv(&input, "0123456789abcdef0123456789abcdef").unwrap();
     a[0] = "echo".into();
@@ -386,4 +388,195 @@ fn take_over_changes_are_serialised_with_delivery() {
     let turn = ApprovedPlanTurn::new("20261106-0911", 0, "push").unwrap();
     assert_eq!(sup.submit_fixed_turn("s-cat", &turn), Err(SessionError::TakeOverActive));
     sup.kill("s-cat").unwrap();
+}
+
+/// A gateway launch through the real spawn path with a fake `codex`: the child sees `ENV_ALLOW` plus `CODEX_HOME` and
+/// nothing else, with no key, and its stdin is not the terminal.
+#[test]
+fn sessions_gateway_launch_env_is_allowlist_plus_codex_home_and_stdin_is_null() {
+    use std::os::unix::fs::PermissionsExt;
+    let (sup, bus, dir) = setup("gw");
+    let fake = dir.join("codex");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nif [ -t 0 ]; then echo STDIN=tty; else echo STDIN=notty; fi\nif read x; then echo READ=data; else echo READ=eof; fi\necho ARGC=$#\nexec /usr/bin/env\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = dir.join("home-for-codex");
+    let mut argv = crate::sessions::argv::build_gateway_argv("do it", "deepseek/deepseek-v4-flash", Some("low")).unwrap();
+    assert_eq!(argv[4], "codex");
+    argv[4] = fake.display().to_string();
+    let mut s = spec(&["true"], &dir);
+    s.argv = argv;
+    s.extra_env = vec![("CODEX_HOME", home.clone().into())];
+    sup.spawn("s-gw", s).unwrap();
+    sup.wait("s-gw", WAIT).unwrap().expect("exited");
+    let l = wait_lines(&bus, "s-gw", |l| l.iter().any(|x| x.starts_with("TERM=")));
+    assert!(l.contains(&"STDIN=notty".to_string()) && l.contains(&"READ=eof".to_string()), "{l:?}");
+    let names: Vec<&str> = l.iter().filter_map(|x| x.split_once('=').map(|kv| kv.0)).filter(|k| !matches!(*k, "STDIN" | "READ" | "ARGC")).collect();
+    // The shell that wraps the fake adds its own bookkeeping variables; nothing else may appear.
+    for k in &names {
+        assert!(ENV_ALLOW.contains(k) || *k == "CODEX_HOME" || ["PWD", "OLDPWD", "SHLVL", "_"].contains(k), "unexpected env var {k}");
+    }
+    assert!(l.contains(&format!("CODEX_HOME={}", home.display())), "{l:?}");
+    for k in crate::adapter::CODEX_KEYS.iter().chain(crate::adapter::CLAUDE_KEYS.iter()) {
+        assert!(!names.contains(k), "{k} leaked");
+    }
+}
+
+#[test]
+fn sessions_extra_env_outside_the_allowlist_refuses_the_spawn() {
+    let (sup, _bus, dir) = setup("badenv");
+    for env in [
+        vec![("OPENAI_API_KEY", OsString::from("sentinel-not-a-key"))],
+        vec![("CODEX_HOME", OsString::from("/a")), ("CODEX_HOME", OsString::from("/b"))],
+        vec![("TMPDIR", OsString::new())],
+        // The Setup profile's proxy and CA variables never reach an agent (ADR-17, bhishma condition 8).
+        vec![("HTTPS_PROXY", OsString::from("http://proxy.example:3128"))],
+        vec![("NODE_EXTRA_CA_CERTS", OsString::from("/etc/ca.pem"))],
+    ] {
+        let mut s = spec(&["/usr/bin/env"], &dir);
+        s.extra_env = env;
+        assert_eq!(sup.spawn("s-badenv", s), Err(SessionError::BadEnv));
+    }
+    let mut s = spec(&["/usr/bin/env"], &dir);
+    s.extra_env = vec![("TMPDIR", dir.clone().into()), ("CLAUDE_CONFIG_DIR", dir.join("cfg").into())];
+    sup.spawn("s-okenv", s).unwrap();
+}
+
+#[test]
+fn sessions_without_a_codex_home_never_set_one() {
+    let (sup, bus, dir) = setup("nohome");
+    sup.spawn("s-nh", spec(&["/usr/bin/env"], &dir)).unwrap();
+    sup.wait("s-nh", WAIT).unwrap().expect("exited");
+    let l = wait_lines(&bus, "s-nh", |l| l.iter().any(|x| x.starts_with("TERM=")));
+    assert!(!l.iter().any(|x| x.starts_with("CODEX_HOME=")));
+}
+
+fn error_sink() -> (ErrorSink, Arc<Mutex<Vec<ProviderError>>>) {
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let g = got.clone();
+    (Arc::new(move |e: &ProviderError| lock(&g).push(e.clone())), got)
+}
+
+fn tag() -> ProviderTag {
+    ProviderTag { slot: "w1".into(), session_id: "s_fixture".into(), account: "gateway-fixture".into(), attempt: 1, core_reports: false }
+}
+
+fn wait_events(got: &Arc<Mutex<Vec<ProviderError>>>, n: usize) -> Vec<ProviderError> {
+    let start = Instant::now();
+    while lock(got).len() < n && start.elapsed() < WAIT {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    lock(got).clone()
+}
+
+#[test]
+fn a_worker_that_dies_with_no_error_is_reported_as_unexplained() {
+    let (sup, _bus, dir) = setup("unexplained");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    sup.spawn_tagged("s-dead", spec(&["sh", "-c", "echo crashed hard; exit 3"], &dir), Some(tag())).unwrap();
+    let ev = wait_events(&got, 1);
+    assert_eq!(ev.len(), 1);
+    assert_eq!((ev[0].kind, ev[0].action, ev[0].account.as_str()), (errors::Kind::UnexplainedExit, errors::Action::AskingUser, "gateway-fixture"));
+    assert!(ev[0].message.contains("exit code 3") && ev[0].message.contains("crashed hard"), "{}", ev[0].message);
+}
+
+#[test]
+fn a_typed_error_in_the_last_lines_beats_unexplained() {
+    let (sup, _bus, dir) = setup("typed");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    sup.spawn_tagged("s-401", spec(&["sh", "-c", "echo 'unexpected status 401 Unauthorized'; exit 1"], &dir), Some(tag())).unwrap();
+    let ev = wait_events(&got, 1);
+    assert_eq!((ev[0].kind, ev[0].http_status), (errors::Kind::Auth, Some(401)));
+}
+
+#[test]
+fn a_clean_exit_an_untagged_worker_and_our_own_kill_report_nothing() {
+    let (sup, _bus, dir) = setup("quiet");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    sup.spawn_tagged("s-ok", spec(&["sh", "-c", "exit 0"], &dir), Some(tag())).unwrap();
+    sup.spawn("s-untagged", spec(&["sh", "-c", "exit 4"], &dir)).unwrap();
+    sup.spawn_tagged("s-killed", spec(&["sleep", "30"], &dir), Some(tag())).unwrap();
+    sup.kill("s-killed").unwrap();
+    for id in ["s-ok", "s-untagged", "s-killed"] {
+        assert!(sup.wait(id, WAIT).unwrap().is_some());
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(lock(&got).is_empty(), "{:?}", lock(&got));
+}
+
+#[test]
+fn a_serialized_codex_error_event_is_decoded_classified_and_redacted_on_exit() {
+    let (sup, _bus, dir) = setup("codex-event");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    let event = serde_json::json!({
+        "type": "turn.failed",
+        "error": {"message": "unexpected status 401 Unauthorized: {\"error\":{\"code\":401,\"user_id\":\"user_SENTINEL0000TESTONLY\"}} cf-ray: 0000deadbeef0000-XXX"}
+    });
+    let script = dir.join("emit.sh");
+    std::fs::write(&script, format!("#!/bin/sh\ncat <<'EOF'\n{event}\nEOF\nexit 1\n")).unwrap();
+    sup.spawn_tagged("s-codex", spec(&["sh", script.to_str().unwrap()], &dir), Some(tag())).unwrap();
+    let ev = wait_events(&got, 1);
+    assert_eq!((ev[0].kind, ev[0].http_status), (errors::Kind::Auth, Some(401)));
+    let wire = ev[0].to_json().to_string();
+    assert!(!wire.contains("SENTINEL0000") && !wire.contains("0000deadbeef"), "{wire}");
+    // The raw escaped line (no decoding) is redacted too.
+    let raw = event.to_string();
+    assert!(!crate::crew::redact::redact_provider_text(&raw).contains("SENTINEL0000"));
+}
+
+/// 6c: a retry's exit is reported with its own attempt (not always 1), the policy decides on that attempt, and the
+/// session keeps its last lines for the core's retry rule.
+#[test]
+fn a_retry_reports_its_own_attempt_and_keeps_its_last_lines() {
+    let (sup, _bus, dir) = setup("attempt");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    let t = |n| ProviderTag { attempt: n, ..tag() };
+    sup.spawn_tagged("s-a2", spec(&["sh", "-c", "echo 'unexpected status 504'; exit 1"], &dir), Some(t(2))).unwrap();
+    let ev = wait_events(&got, 1);
+    assert_eq!((ev[0].attempt, ev[0].action), (2, errors::Action::Retrying), "the second failure still retries (2 min)");
+    assert!(sup.wait("s-a2", WAIT).unwrap().is_some());
+    assert!(sup.last_lines("s-a2").unwrap().iter().any(|l| l.contains("504")));
+    sup.spawn_tagged("s-a3", spec(&["sh", "-c", "echo 'unexpected status 504'; exit 1"], &dir), Some(t(3))).unwrap();
+    let ev = wait_events(&got, 2);
+    assert_eq!((ev[1].attempt, ev[1].action), (3, errors::Action::AskingUser), "the third asks the user");
+}
+
+#[test]
+fn sessions_a_setup_run_gets_exactly_the_setup_env_and_its_proxy_login_is_redacted() {
+    use crate::providers::install::env::{setup_env, ALLOWED};
+    let (sup, bus, dir) = setup("setup");
+    let proxy = "http://alice:hunter2pass@proxy.example:3128";
+    let env = setup_env(&[], |k| match k {
+        "HTTPS_PROXY" => Some(proxy.into()),
+        "HOME" => Some(dir.clone().into()),
+        "OPENAI_API_KEY" => Some("sentinel-not-a-key".into()),
+        _ => None,
+    });
+    sup.spawn_setup("setup-codex", vec!["/usr/bin/env".into()], &dir, &env, Redactor::default()).unwrap();
+    assert!(sup.wait("setup-codex", WAIT).unwrap().is_some());
+    let out = wait_lines(&bus, "setup-codex", |l| l.iter().any(|s| s.starts_with("HTTPS_PROXY=")));
+    let all = out.join("\n");
+    assert!(!all.contains("hunter2pass") && !all.contains("alice"), "{all}");
+    assert!(!all.contains("sentinel-not-a-key"), "{all}");
+    for l in out.iter().filter(|l| l.contains('=')) {
+        let name = l.split('=').next().unwrap();
+        assert!(ALLOWED.contains(&name), "{name} is outside the Setup profile");
+    }
+}
+
+#[test]
+fn sessions_setup_streams_are_only_for_setup_runs() {
+    use crate::providers::install::env::setup_env;
+    let (sup, _bus, dir) = setup("setupid");
+    let env = setup_env(&[], |_| None);
+    assert_eq!(sup.spawn_setup("s-codex", vec!["/usr/bin/true".into()], &dir, &env, Redactor::default()), Err(SessionError::InvalidId));
+    assert_eq!(sup.spawn("setup-codex", spec(&["/usr/bin/true"], &dir)), Err(SessionError::InvalidId), "an agent can't take a setup stream");
 }

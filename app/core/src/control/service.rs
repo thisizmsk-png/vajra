@@ -17,11 +17,23 @@
 // module's private items. This file keeps the `Service` struct, `open`, `rebuild` and the shared helpers.
 mod actions; // list, inspect, message, redirect, stop, confirm, cancel, resume
 mod asks; // the Lead-ask and plan-decision records
+mod proposals; // ADR-15 2.4: run proposals from a Director-General, started or dismissed by a human
+mod seats; // proposal seats: the lead and worker picks of a proposal, their hash and their launch checks
 mod session; // start, resume and end a session; the nonce, redactor and worker list
 mod tools; // the Lead's tool surface (socket calls and their dispatch)
 mod types; // actors, errors, the action model, the ask and decision records, the limits
 mod watcher; // the ack watcher and the thread that ticks it
+pub use proposals::{DEFAULT_PROPOSAL_BASE, DEFAULT_PROPOSAL_ROUNDS, MAX_OPEN_PROPOSALS, Proposal, ProposalDecision, proposal_sha, valid_proposal_item};
+pub use seats::{DEFAULT_MAX_IN_FLIGHT, LeadSeat, MAX_WORKERS, SeatCheck, SeatPolicy, Seats, WorkerSeat, proposal_sha_v2, security_warning};
 pub use types::*;
+
+/// What `core_ticket` found.
+struct CoreRef {
+    core: Arc<dyn CoreWorkers>,
+    session: String,
+    run: String,
+    round: u32,
+}
 pub use watcher::{Watcher, spawn_watcher};
 
 use std::collections::HashMap;
@@ -43,22 +55,60 @@ use crate::crew::redact::Redactor;
 use crate::crew::tree::{Status, Worker};
 use crate::logging::Logger;
 
+/// One run session the service steers. Several can be live at once (ADR-15 2.6): each keeps its own nonce, its own
+/// queue and stop dirs and its own workers, so nothing addressed to one session can reach another.
 struct Session {
     id: String,
     run_id: String,
     dir: SessionDir,
     nonce: String,
+    workers: Vec<WorkerInfo>,
+    /// The project the run belongs to (ADR-15 2.3), set by the app at launch. Its Director-General sees this session.
+    project: Option<String>,
 }
+
+/// See `Service::set_project_gate`.
+pub type ProjectGate = Box<dyn Fn(&str) -> std::result::Result<(), ControlError> + Send>;
 
 pub struct Service {
     control_root: PathBuf,
     audit_log: PathBuf,
     ledger: Ledger,
     logger: Option<Logger>,
-    session: Option<Session>,
-    workers: Vec<WorkerInfo>,
+    /// Live run sessions by session id.
+    sessions: HashMap<String, Session>,
+    /// While a Lead tool call runs: the sessions it is bound to (one run, or every run of one project). `None` for human
+    /// calls, which see every session.
+    scope: Option<Vec<String>>,
+    /// The current conversation generation of each project's Director-General. A tool call with another one is refused.
+    generations: HashMap<String, u32>,
+    /// Asked on every Director-General call, before anything else: does the project still exist, and is it active?
+    /// The app installs it with its project store; with none installed, nothing is gated (the service's own tests).
+    project_gate: Option<ProjectGate>,
+    /// Role defaults and the launch checks for proposal seats (ADR-16). `None`: no seat default exists and none is checked.
+    seat_policy: Option<Arc<dyn SeatPolicy>>,
+    /// `core:<ticket>` workers (6c): `None` until the app hands over its runtime.
+    core: Option<Arc<dyn CoreWorkers>>,
+    /// The Claude core workers' own control dirs this app opened (by their session id), with their nonces: a message is
+    /// published only into one of these, where the control hook looks for that session.
+    core_dirs: HashMap<String, String>,
+    /// Whether `propose_run` takes `lead`, `workers` and `max_in_flight`. Off until the core route ships (6d).
+    seats_enabled: bool,
+    /// While a Director-General's tool call runs: its (project, generation). Only such a call may propose a run.
+    bound_project: Option<(String, u32)>,
     /// Actions not yet in a final state, by id.
     pending: HashMap<String, Action>,
+    /// A human's stop of a `core:` worker, by ticket, from the kill until the ticket ends (`core_ticket_ended` settles
+    /// it). Kept out of `pending`: a group kill leaves no stop file or hook ack for the watcher to wait on.
+    /// Every accepted stop is kept: a second one before the ticket ends (a double click, or a Lead's confirmed after
+    /// the human's) is its own action with its own receipt, and all of them settle together (#151 review).
+    core_stops: HashMap<String, Vec<Action>>,
+    /// Core workers' steering nonces after their ticket ended, newest last, at most `RETIRED_NONCES`: the redactor still
+    /// carries them, because their output may still be shown.
+    retired_nonces: std::collections::VecDeque<String>,
+    /// Control dirs no longer used (an ended core worker's, or a stale one found at start) that are removed once no
+    /// pending action is settled through them (`prune_retired`, every tick).
+    retired_dirs: std::collections::BTreeSet<String>,
     /// Latest stop action state per worker key, for `list_workers`.
     last_stop: HashMap<String, (String, State)>,
     seq: u64,
@@ -72,6 +122,13 @@ impl Service {
     /// audit.log, passed explicitly. Pending actions are rebuilt from the
     /// ledger so acks that land while the app is down are still recorded.
     pub fn open(data_dir: &Path, audit_log: PathBuf, logger: Option<Logger>) -> io::Result<Self> {
+        Self::open_with(data_dir, audit_log, logger, true)
+    }
+
+    /// `open`, settling the previous life's leftover `core:` stops only when `settle`: the app holds the instance locks
+    /// (6c-3). A second app on the same data folder must not settle them, since they are the first, running app's live
+    /// actions; it rebuilds the same pending state read-only.
+    pub fn open_with(data_dir: &Path, audit_log: PathBuf, logger: Option<Logger>, settle: bool) -> io::Result<Self> {
         let control_root = data_dir.join("control");
         fsx::private_dir(data_dir)?;
         fsx::private_dir(&control_root)?;
@@ -83,15 +140,28 @@ impl Service {
             audit_log,
             ledger,
             logger,
-            session: None,
-            workers: Vec::new(),
+            sessions: HashMap::new(),
+            scope: None,
+            generations: HashMap::new(),
+            project_gate: None,
+            seat_policy: None,
+            core: None,
+            core_dirs: HashMap::new(),
+            seats_enabled: crate::providers::launch::CORE_ROUTE_AVAILABLE,
+            bound_project: None,
             pending: HashMap::new(),
+            core_stops: HashMap::new(),
+            retired_nonces: Default::default(),
+            retired_dirs: Default::default(),
             last_stop: HashMap::new(),
             seq: 0,
             last_recorded: None,
             ttl: DEFAULT_TTL,
         };
         svc.rebuild(&records);
+        if settle {
+            svc.settle_core_after_restart(SystemTime::now());
+        }
         Ok(svc)
     }
 
@@ -145,6 +215,90 @@ impl Service {
         self.seq = records.iter().filter(|r| Kind::parse(str_field(r, "kind")).is_some_and(Kind::queued_text)).count() as u64;
     }
 
+    /// The previous app's `core:` workers did not outlive it, and their tickets are gone with its runtime. A stop it
+    /// recorded but never saw end is settled now, as unknown (this app can't tell how it ended); a Lead's stop still
+    /// waiting for the human is refused. Neither is left for the watcher, which would wait for a stop file.
+    fn settle_core_after_restart(&mut self, now: SystemTime) {
+        let left: Vec<Action> = self.pending.values().filter(|a| a.kind == Kind::Stop && a.worker.starts_with(CORE_PREFIX)).cloned().collect();
+        for a in left {
+            let (state, reason) = if a.state == State::AwaitingHumanConfirm { (State::Refused, "worker_finished") } else { (State::DeliveryUnknown, "app_restarted") };
+            if self.record(&a, state, json!({"reason": reason}), now).is_ok() {
+                self.pending.remove(&a.id);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ pruning
+
+    /// A core worker's ticket ended: its steering channel closes (no new message is accepted for it), its nonce moves to
+    /// the bounded retired set the redactor still carries, and its dir is retired for removal.
+    pub(super) fn retire_core_session(&mut self, sid: &str) {
+        let Some(n) = self.core_dirs.remove(sid) else { return };
+        self.retired_nonces.push_back(n);
+        while self.retired_nonces.len() > RETIRED_NONCES {
+            self.retired_nonces.pop_front();
+        }
+        self.retired_dirs.insert(sid.to_string());
+    }
+
+    /// At start, before any agent: every `<control>/<sid>` dir that is not live (a run session or a core worker's),
+    /// not in `keep` (every session an index line names, so a run that may be resumed keeps its dir), is retired, and
+    /// removed now unless a pending action still settles through it. Only names that are session ids (a uuid) and real
+    /// directories are considered: the ledger, `lead/`, `projects/` and anything planted are left alone. Returns how
+    /// many were removed.
+    pub fn prune_control_dirs(&mut self, keep: &std::collections::HashSet<String>) -> usize {
+        let Ok(rd) = fs::read_dir(&self.control_root) else { return 0 };
+        for e in rd.flatten() {
+            let Ok(name) = e.file_name().into_string() else { continue };
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink());
+            if crate::ids::valid_session_id(&name)
+                && is_dir
+                && !keep.contains(&name)
+                && !self.sessions.contains_key(&name)
+                && !self.core_dirs.contains_key(&name)
+            {
+                self.retired_dirs.insert(name);
+            }
+        }
+        self.prune_retired()
+    }
+
+    /// Remove each retired dir that no pending action, live session or core worker uses. `remove_dir_all` does not
+    /// follow links (it opens each level by descriptor, no-follow), and the dir itself is re-checked to be a real dir
+    /// right before. A dir that can't be removed stays retired and is tried again next tick.
+    pub(super) fn prune_retired(&mut self) -> usize {
+        let used: std::collections::HashSet<&str> = self.pending.values().map(|a| a.session_id.as_str()).collect();
+        let ready: Vec<String> = self
+            .retired_dirs
+            .iter()
+            .filter(|s| !used.contains(s.as_str()) && !self.sessions.contains_key(*s) && !self.core_dirs.contains_key(*s))
+            .cloned()
+            .collect();
+        let mut removed = 0;
+        for sid in ready {
+            let p = self.control_root.join(&sid);
+            // (done with it, removed by this call)
+            let (done, did) = match fs::symlink_metadata(&p) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => (true, false),
+                Ok(m) if m.is_dir() => {
+                    let ok = fs::remove_dir_all(&p).is_ok();
+                    (ok, ok)
+                }
+                // A link or a file where a session dir was: not ours to touch, and never followed.
+                Ok(_) => (true, false),
+                Err(_) => (false, false),
+            };
+            if done {
+                self.retired_dirs.remove(&sid);
+            }
+            removed += usize::from(did);
+        }
+        if removed > 0 {
+            self.log("control_dirs_pruned", &[("count", removed as u64)]);
+        }
+        removed
+    }
+
     // ------------------------------------------------------------ helpers
 
     fn log(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -157,21 +311,71 @@ impl Service {
         self.redactor().clean(text)
     }
 
-    fn session(&self) -> Result<&Session> {
-        self.session.as_ref().ok_or(ControlError::ControlDisabled)
+    fn session(&self, sid: &str) -> Result<&Session> {
+        self.sessions.get(sid).ok_or(ControlError::ControlDisabled)
     }
 
-    fn resolve(&self, arg: &str) -> Result<&WorkerInfo> {
+    /// The sessions the current call may see: the bound session for a Lead call, every session for a human one.
+    fn in_scope(&self) -> impl Iterator<Item = &Session> {
+        self.sessions.values().filter(|s| self.scope.as_ref().is_none_or(|b| b.contains(&s.id)))
+    }
+
+    /// A worker's generation (its attempt number) for the action receipt guard. Read only: no ledger line. A name
+    /// that is ambiguous across sessions has no generation (the caller must use the agent id).
+    pub fn worker_generation(&self, arg: &str) -> Option<u64> {
+        if let Some(t) = arg.strip_prefix(CORE_PREFIX) {
+            return self.core_ticket(t).ok().map(|c| u64::from(c.round));
+        }
+        self.resolve(arg).ok().map(|(_, w)| u64::from(w.round.unwrap_or(0)))
+    }
+
+    /// The one worker of a campaign's run(s) on task `task` (the bare id in `tasks.json`; the workflow namespaces worker
+    /// task ids as `<run_id>.<task>`). Matches only those exact ids, so a worker of another campaign with the same task
+    /// name is never found. `Ok(None)`: no such worker. `Err`: more than one live worker matches. Read only.
+    pub fn task_worker(&self, runs: &[String], task: &str) -> std::result::Result<Option<String>, ControlError> {
+        let hit: Vec<&WorkerInfo> = self
+            .in_scope()
+            .flat_map(|s| s.workers.iter())
+            .filter(|w| {
+                w.task_id.as_deref().is_some_and(|t| {
+                    // The workflow writes tasks.json ids already namespaced (`<run>.t1`), and so are worker task ids: an
+                    // exact match whose run is one of the campaign's. A bare id (`t1`) matches the remainder after `<run>.`.
+                    runs.iter().any(|r| t.strip_prefix(r.as_str()).and_then(|x| x.strip_prefix('.')).is_some_and(|rest| t == task || rest == task))
+                })
+            })
+            .collect();
+        let live: Vec<&&WorkerInfo> = hit.iter().filter(|w| !w.finished()).collect();
+        match (hit.as_slice(), live.as_slice()) {
+            ([], _) => Ok(None),
+            (_, [w]) => Ok(Some(w.key().to_string())),
+            (_, []) => Ok(hit.last().map(|w| w.key().to_string())),
+            _ => Err(ControlError::WorkerAmbiguous),
+        }
+    }
+
+    /// The workers as `list_workers` shows them (every session in scope), without recording a list action (for
+    /// `project_state`).
+    pub fn workers_view(&self) -> Vec<Value> {
+        self.in_scope()
+            .flat_map(|s| s.workers.iter().map(move |w| (s.id.as_str(), w)))
+            .map(|(sid, w)| self.worker_json(sid, w))
+            .collect()
+    }
+
+    /// The one worker `arg` names among the sessions in scope, with its session id. A name that matches live workers
+    /// in two sessions (each run has a `t1`) is ambiguous: the caller must use the agent id.
+    fn resolve(&self, arg: &str) -> Result<(String, WorkerInfo)> {
         if arg.is_empty() || arg.chars().count() > MAX_WORKER {
             return Err(ControlError::InvalidArgs("worker".into()));
         }
         let key = arg.strip_prefix("agent:").unwrap_or(arg);
-        let exact: Vec<&WorkerInfo> = self.workers.iter().filter(|w| !key.is_empty() && w.key() == key).collect();
+        let all: Vec<(&str, &WorkerInfo)> = self.in_scope().flat_map(|s| s.workers.iter().map(move |w| (s.id.as_str(), w))).collect();
+        let exact: Vec<(&str, &WorkerInfo)> = all.iter().copied().filter(|(_, w)| !key.is_empty() && w.key() == key).collect();
         let found = if exact.is_empty() {
             let suffix = format!(".{arg}");
-            self.workers
-                .iter()
-                .filter(|w| {
+            all.iter()
+                .copied()
+                .filter(|(_, w)| {
                     w.task_id.as_deref().is_some_and(|t| t == arg || t.ends_with(&suffix))
                         || w.worker.engine_id == arg
                         || ui_name(&w.worker.engine_id).eq_ignore_ascii_case(arg)
@@ -180,21 +384,64 @@ impl Service {
         } else {
             exact
         };
-        match found.as_slice() {
-            [] => Err(ControlError::WorkerNotFound),
-            [w] => Ok(w),
+        let one = match found.as_slice() {
+            [] => return Err(ControlError::WorkerNotFound),
+            [w] => *w,
             many => {
-                let live: Vec<&&WorkerInfo> = many.iter().filter(|w| !w.finished()).collect();
+                let live: Vec<&(&str, &WorkerInfo)> = many.iter().filter(|(_, w)| !w.finished()).collect();
                 match live.as_slice() {
-                    [w] => Ok(w),
-                    _ => Err(ControlError::WorkerAmbiguous),
+                    [w] => **w,
+                    _ => return Err(ControlError::WorkerAmbiguous),
                 }
             }
+        };
+        Ok((one.0.to_string(), one.1.clone()))
+    }
+
+    /// The session an action without a worker is about: the bound one, or the only one.
+    /// A `core:<ticket>` ref: the runtime holding it, and the in-scope session of the ticket's run. A Lead bound to
+    /// another run, or a ticket of a run with no control session, finds nothing.
+    fn core_ticket(&self, ticket: &str) -> Result<CoreRef> {
+        let core = self.core.clone().ok_or(ControlError::WorkerNotFound)?;
+        let (run, round) = core.live(ticket)?;
+        let session = self.in_scope().find(|s| s.run_id == run).map(|s| s.id.clone()).ok_or(ControlError::WorkerNotFound)?;
+        Ok(CoreRef { core, session, run, round })
+    }
+
+    /// The app's worker runtime, for `core:<ticket>` workers.
+    pub fn set_core_workers(&mut self, core: Arc<dyn CoreWorkers>) {
+        self.core = Some(core);
+    }
+
+    /// Before a Claude core worker starts: its own control dir `<control>/<session_id>` (0700, as a run's) and its
+    /// steering nonce, which its brief carries and its output redacts. The hook delivers there by session id (16.7).
+    pub fn open_core_session(&mut self, session_id: &str) -> Result<String> {
+        if !queue::valid_session_id(session_id) {
+            return Err(ControlError::InvalidArgs("session_id".into()));
+        }
+        let dir = SessionDir::create(&self.control_root, session_id)?;
+        let n = nonce::rotate(&dir.root)?;
+        dir.sweep_temp();
+        self.seq = self.seq.max(dir.max_seq());
+        self.core_dirs.insert(session_id.to_string(), n.clone());
+        Ok(n)
+    }
+
+    fn default_session(&self) -> Option<&Session> {
+        let mut it = self.in_scope();
+        match (it.next(), it.next()) {
+            (Some(s), None) => Some(s),
+            _ => None,
         }
     }
 
-    fn new_action(&self, kind: Kind, actor: Actor, w: Option<&WorkerInfo>, now: SystemTime) -> Result<Action> {
-        let (sid, rid) = self.session.as_ref().map_or((String::new(), String::new()), |s| (s.id.clone(), s.run_id.clone()));
+    fn new_action(&self, kind: Kind, actor: Actor, w: Option<(&str, &WorkerInfo)>, now: SystemTime) -> Result<Action> {
+        let s = match w {
+            Some((sid, _)) => self.sessions.get(sid),
+            None => self.default_session(),
+        };
+        let (sid, rid) = s.map_or((String::new(), String::new()), |s| (s.id.clone(), s.run_id.clone()));
+        let w = w.map(|(_, w)| w);
         Ok(Action {
             id: new_action_id(now)?,
             kind,
@@ -263,3 +510,7 @@ impl Service {
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "service_sessions_tests.rs"]
+mod sessions_tests;

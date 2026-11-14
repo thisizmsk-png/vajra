@@ -26,6 +26,22 @@ printf '%s' "$out" | grep -q "not signed"; check "worktree copy says it did not 
 VAJRA_OPERATOR_SIGN=1 bash "$WT/scripts/generate-manifest.sh" < /dev/null >/dev/null 2>&1
 [ ! -e "$VS/manifest.sig" ]; check "operator flag does not let a worktree copy sign" $?
 
+# D7 O1 (owner 2026-11-12): the README media in docs/assets is left out, and every other shipped file is still listed.
+# A copy of every file the repository tracks, outside app/, as a stub with the same name.
+FULL="$T/full"; mkdir -p "$FULL/scripts"; cp "$REPO/scripts/generate-manifest.sh" "$FULL/scripts/"
+git -C "$REPO" ls-files | grep -v '^app/' | while IFS= read -r f; do
+  [ "$f" = scripts/generate-manifest.sh ] && continue
+  mkdir -p "$FULL/$(dirname "$f")"; [ -e "$FULL/$f" ] || echo stub > "$FULL/$f"
+done
+bash "$FULL/scripts/generate-manifest.sh" < /dev/null >/dev/null 2>&1
+check "the full copy writes a manifest" $?
+[ -z "$(jq -r '.files | keys[] | select(startswith("docs/assets/"))' "$FULL/manifest.json")" ]; check "docs/assets media is not in the manifest" $?
+missing="$(git -C "$REPO" ls-files | grep -v -e '^app/' -e '^docs/assets/' -e '^manifest.json$' | while IFS= read -r f; do jq -e --arg f "$f" '.files[$f]' "$FULL/manifest.json" >/dev/null || echo "$f"; done)"
+[ -z "$missing" ]; check "every other tracked file is still listed (missing: $(echo $missing | head -c 200))" $?
+for f in scripts/vajra-campaign.sh scripts/vajra-verify-work.sh scripts/vajra_tasks.py scripts/vajra_kb.py scripts/vajra-doctor.sh scripts/install.sh workflows/vajra-deliver.js hooks/pre-tool-use.sh hooks/session-start.sh SKILL.md package.json; do
+  jq -e --arg f "$f" '.files[$f]' "$FULL/manifest.json" >/dev/null; check "engine file $f is listed" $?
+done
+
 bash "$SKILL/scripts/generate-manifest.sh" < /dev/null >/dev/null 2>&1
 [ ! -e "$VS/manifest.sig" ]; check "installed copy without a TTY or the flag does not sign" $?
 

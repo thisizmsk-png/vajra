@@ -36,6 +36,18 @@ pub fn run_id_at(unix_secs: u64) -> String {
     format!("{y:04}{m:02}{d:02}-{:02}{:02}", rem / 3600, rem % 3600 / 60)
 }
 
+/// A project id the control plane accepts: a store id (`p_` and a ULID, FG-01), or a stand-in from before the store
+/// (`valid_standin_ref`), which only resolves through its mapping to a store project (FG-02c).
+pub fn valid_project_ref(p: &str) -> bool {
+    valid_standin_ref(p) || crate::projects::contract::valid_project_id(p)
+}
+
+/// The stand-in project id FG-02a/b used before the store: `k_` and 32 lowercase hex chars, a digest of the project key
+/// (`desktop::caps::project_key`). Never `p_…`, so it cannot be mistaken for a store id.
+pub fn valid_standin_ref(p: &str) -> bool {
+    p.len() == 34 && p.starts_with("k_") && p.bytes().skip(2).all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -49,6 +61,17 @@ mod tests {
         assert!(valid_session_id("1b4e28ba-2fa1-41d2-883f-0016d3cca427"));
         for bad in ["", "--last", "../x", "sess-1234abcd", "1b4e28ba-2fa1-41d2-883f-0016d3cca42Z", "1b4e28ba2fa141d2883f0016d3cca427"] {
             assert!(!valid_session_id(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn project_refs_are_store_ids_or_k_and_32_lowercase_hex() {
+        assert!(valid_project_ref(&format!("k_{}", "0a".repeat(16))));
+        assert!(valid_standin_ref(&format!("k_{}", "0a".repeat(16))));
+        let p = crate::projects::contract::make_id("p", 1, [0; 10]);
+        assert!(valid_project_ref(&p) && !valid_standin_ref(&p), "{p}");
+        for bad in ["", "k_", "p_0123456789abcdef0123456789abcdef", "k_0123456789ABCDEF0123456789abcdef", "k_../../0123456789abcdef0123456789", "k_0123456789abcdef0123456789abcdef0"] {
+            assert!(!valid_project_ref(bad), "{bad}");
         }
     }
 

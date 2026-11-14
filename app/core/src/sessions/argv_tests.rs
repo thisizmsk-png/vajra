@@ -13,6 +13,7 @@ fn input() -> RunInput {
         base: SHA.into(),
         max_in_flight: 4,
         campaign: None,
+        provider: None,
     }
 }
 
@@ -275,7 +276,8 @@ fn lead_argv_is_fixed_template() {
         assert_eq!(
             after(&argv, "--tools"),
             "Read,Grep,Glob,mcp__vajra-desktop__list_workers,mcp__vajra-desktop__inspect_worker,\
-             mcp__vajra-desktop__message_worker,mcp__vajra-desktop__redirect_worker,mcp__vajra-desktop__stop_worker"
+             mcp__vajra-desktop__message_worker,mcp__vajra-desktop__redirect_worker,mcp__vajra-desktop__stop_worker,\
+             mcp__vajra-desktop__propose_run"
         );
         assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
         assert_eq!(after(&argv, "--setting-sources"), "");
@@ -319,4 +321,91 @@ fn lead_agents_json_is_one_valid_agent() {
     let a = &v["vajra-lead"];
     assert!(a["description"].is_string() && a["prompt"].as_str().unwrap().len() > 100);
     assert_eq!(v.as_object().unwrap().len(), 1);
+}
+
+/// The bench rig's "lead" arm (app/bench/ade/anatomy_arms.json) measures the Director-General's first request. It must be
+/// the production launch minus only what needs the app's own files: the settings file, the MCP config, and the six MCP
+/// tools. So its prompt, agent, permission mode and built-in tool list are pinned to `build_lead_argv`, and a change to
+/// `LEAD_AGENTS` fails here until the arms file follows.
+#[test]
+fn the_bench_rigs_lead_arm_is_the_production_launch_minus_the_apps_own_files() {
+    let arms: serde_json::Value = serde_json::from_str(include_str!("../../../bench/ade/anatomy_arms.json")).unwrap();
+    let arm: Vec<String> = arms["lead"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect();
+    let prod = lead(false);
+    for flag in ["--setting-sources", "--permission-mode", "--agents", "--agent"] {
+        assert_eq!(after(&arm, flag), after(&prod, flag), "{flag}");
+    }
+    assert!(arm.iter().any(|a| a == "--strict-mcp-config"));
+    let builtin: Vec<&str> = LEAD_TOOLS.split(',').filter(|t| !t.starts_with("mcp__")).collect();
+    assert_eq!(after(&arm, "--tools"), builtin.join(","));
+    // Nothing else sneaks in: these flags, and no more.
+    let flags: std::collections::BTreeSet<&str> = arm.iter().filter(|a| a.starts_with("--")).map(String::as_str).collect();
+    assert_eq!(
+        flags.into_iter().collect::<Vec<_>>(),
+        ["--agent", "--agents", "--permission-mode", "--setting-sources", "--strict-mcp-config", "--tools"]
+    );
+}
+
+const KEY: &str = "SENTINEL-sk-or-v1-0123456789";
+
+fn gateway(effort: Option<&str>) -> Vec<String> {
+    build_gateway_argv("add a toggle", "deepseek/deepseek-v4-flash", effort).unwrap()
+}
+
+#[test]
+fn gateway_argv_snapshot() {
+    let a = gateway(Some("high"));
+    assert_eq!(a[..4], ["/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh"]);
+    assert_eq!(
+        a[4..],
+        [
+            "codex", "exec", "--json", "--sandbox", "workspace-write", "-m", "deepseek/deepseek-v4-flash",
+            "-c", "model_reasoning_effort=\"high\"",
+            "-c", "model_providers.vajra-openrouter.request_max_retries=0",
+            "-c", "model_providers.vajra-openrouter.stream_max_retries=0",
+            "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+            "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+            "--", "add a toggle",
+        ]
+    );
+}
+
+#[test]
+fn gateway_argv_without_effort_has_no_effort_override_but_keeps_retry_and_sandbox() {
+    let a = gateway(None);
+    assert!(!a.iter().any(|x| x.contains("model_reasoning_effort")));
+    for want in ["request_max_retries=0", "stream_max_retries=0", "exclude_slash_tmp=true", "exclude_tmpdir_env_var=true"] {
+        assert!(a.iter().any(|x| x.ends_with(want)), "{want}");
+    }
+}
+
+#[test]
+fn gateway_argv_holds_no_key_and_keeps_the_ask_after_the_separator() {
+    // The ask is the one free-text element and it is last, after `--`, so a flag-shaped ask stays a prompt.
+    let a = build_gateway_argv("--dangerously-bypass-approvals-and-sandbox", "m", None).unwrap();
+    assert_eq!(a[a.len() - 2..], ["--", "--dangerously-bypass-approvals-and-sandbox"]);
+    assert!(!a.iter().any(|x| x.contains(KEY) || x.contains("API_KEY") || x.contains("Bearer")));}
+
+#[test]
+fn gateway_argv_refuses_bad_inputs() {
+    let f = |ask: &str, m: &str, e: Option<&str>| build_gateway_argv(ask, m, e).unwrap_err().field;
+    assert_eq!(f("", "m", None), "ask");
+    assert_eq!(f("a\0b", "m", None), "ask");
+    assert_eq!(f("x", "", None), "model");
+    assert_eq!(f("x", "-m", None), "model");
+    assert_eq!(f("x", "a b", None), "model");
+    assert_eq!(f("x", "a;b", None), "model");
+    assert_eq!(f("x", "m", Some("high\"\nx=1")), "effort");
+    assert_eq!(f("x", "m", Some("max")), "effort");
+}
+
+#[test]
+fn only_a_codex_gateway_or_key_account_gets_the_gateway_argv() {
+    use crate::adapter::{gateway_run_argv, Account, Engine, Route};
+    let acct = |engine, route| Account { id: "openrouter".into(), engine, route };
+    for ok in [Route::Gateway, Route::ApiKey] {
+        assert!(gateway_run_argv(&acct(Engine::Codex, ok), "x", "m", None).is_ok());
+    }
+    assert!(gateway_run_argv(&Account::login(Engine::Codex), "x", "m", None).is_err());
+    assert!(gateway_run_argv(&acct(Engine::Claude, Route::Gateway), "x", "m", None).is_err());
 }

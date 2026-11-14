@@ -10,6 +10,7 @@ use serde_json::Value;
 use super::names::{title_case, ui_name};
 use super::record::{JournalEntry, Meta};
 use super::tailer::Transcript;
+use crate::providers::effective::ProviderTag;
 use crate::vajra::state::Reader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,12 +79,18 @@ pub struct Node {
     pub engine_id: Option<String>,
     pub status: Status,
     pub overlays: Vec<&'static str>,
+    /// What the worker ran on, once it reported it (`None` while not reported).
+    pub provider: Option<ProviderTag>,
+    /// A core worker's Message, Redirect and Stop, as its harness profile allows them (16.7).
+    pub controls: Option<Value>,
+    /// A core worker's change count against its `dispatch_head`.
+    pub diff: Option<Value>,
     pub children: Vec<Node>,
 }
 
 impl Node {
     fn group(id: String, kind: NodeKind, title: String) -> Self {
-        Self { id, kind, title, engine_id: None, status: Status::Unknown, overlays: Vec::new(), children: Vec::new() }
+        Self { id, kind, title, engine_id: None, status: Status::Unknown, overlays: Vec::new(), provider: None, controls: None, diff: None, children: Vec::new() }
     }
 }
 
@@ -97,6 +104,8 @@ pub struct Worker {
     pub prompt_first_line: Option<String>,
     pub branch: Option<String>,
     pub status: Status,
+    /// From the transcript's own model field; `None` until the worker reports one.
+    pub provider: Option<ProviderTag>,
 }
 
 /// Overlay signals keyed by agent id.
@@ -107,6 +116,39 @@ pub struct Signals {
     pub activity: HashSet<String>,
 }
 
+/// A worker the core runs itself (ADR-16 16.7): one ticket of the worker runtime.
+#[derive(Clone, Debug)]
+pub struct CoreWorker {
+    pub ticket: String,
+    /// The run-local task id (`t1`), or the check kind for a check ticket.
+    pub task: String,
+    pub round: u32,
+    /// A verify, review or evidence ticket: placed under its round's verification group.
+    pub check: bool,
+    pub status: Status,
+    pub overlays: Vec<&'static str>,
+    pub provider: Option<ProviderTag>,
+    pub controls: Value,
+    pub diff: Option<Value>,
+}
+
+impl CoreWorker {
+    fn node(&self, title: String, kind: NodeKind) -> Node {
+        Node {
+            id: format!("core:{}", self.ticket),
+            kind,
+            title,
+            engine_id: None,
+            status: self.status,
+            overlays: self.overlays.clone(),
+            provider: self.provider.clone(),
+            controls: Some(self.controls.clone()),
+            diff: self.diff.clone(),
+            children: Vec::new(),
+        }
+    }
+}
+
 pub struct CrewInput<'a> {
     pub run_id: &'a str,
     /// Lead chat session status, `None` when it is not open.
@@ -114,6 +156,8 @@ pub struct CrewInput<'a> {
     pub run_status: Status,
     pub tasks: Option<&'a Value>,
     pub workers: &'a [Worker],
+    /// The core's own workers (6c), placed by their ticket.
+    pub core: &'a [CoreWorker],
     pub signals: &'a Signals,
 }
 
@@ -131,6 +175,7 @@ pub fn worker_from(agent_id: &str, meta: &Meta, journal: Option<&JournalEntry>, 
             Some(_) => Status::InProgress,
             None => Status::Unknown,
         },
+        provider: tr.and_then(|t| t.model()).map(|model| ProviderTag::new("claude", model, "unknown", None)),
     }
 }
 
@@ -195,6 +240,9 @@ fn worker_node(w: &Worker, title: String, kind: NodeKind, signals: &Signals) -> 
         engine_id: Some(w.engine_id.clone()),
         status: w.status,
         overlays,
+        provider: w.provider.clone(),
+        controls: None,
+        diff: None,
         children: Vec::new(),
     }
 }
@@ -268,6 +316,28 @@ pub fn build(input: &CrewInput) -> Node {
         }
     }
 
+    for c in input.core {
+        if c.check {
+            let i = match verify.iter().position(|(n, _)| *n == c.round) {
+                Some(i) => i,
+                None => {
+                    verify.push((c.round, Node::group(format!("verification:r{}", c.round), NodeKind::Verification, format!("Verification r{}", c.round))));
+                    verify.len() - 1
+                }
+            };
+            verify[i].1.children.push(c.node(title_case(&c.task.replace('-', " ")), NodeKind::Worker));
+            continue;
+        }
+        let i = match tasks.iter().position(|(n, _)| n.id == format!("task:{}", c.task)) {
+            Some(i) => i,
+            None => {
+                tasks.push((Node::group(format!("task:{}", c.task), NodeKind::Task, format!("Task {}", c.task)), Vec::new()));
+                tasks.len() - 1
+            }
+        };
+        tasks[i].1.push((c.round, c.node(format!("round {}", c.round), NodeKind::Round)));
+    }
+
     let mut run = Node::group(format!("run:{}", input.run_id), NodeKind::Run, format!("Run {}", input.run_id));
     run.status = input.run_status;
     for (mut n, mut rounds) in tasks {
@@ -295,6 +365,7 @@ pub fn build(input: &CrewInput) -> Node {
 
 /// Re-read `tasks.json` (last good snapshot on a parse error) and rebuild.
 /// The UI polls this at 2 Hz, so a tasks.json change shows within 2 s.
+#[allow(clippy::too_many_arguments)]
 pub fn snapshot(
     reader: &mut Reader,
     slug: &str,
@@ -302,8 +373,13 @@ pub fn snapshot(
     lead: Option<Status>,
     run_status: Status,
     workers: &[Worker],
+    core: &[CoreWorker],
     signals: &Signals,
 ) -> Node {
     let snap = reader.tasks(slug);
-    build(&CrewInput { run_id, lead, run_status, tasks: snap.value.as_ref(), workers, signals })
+    build(&CrewInput { run_id, lead, run_status, tasks: snap.value.as_ref(), workers, core, signals })
 }
+
+#[cfg(test)]
+#[path = "tree_tests.rs"]
+mod tests;

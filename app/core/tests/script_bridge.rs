@@ -70,7 +70,7 @@ fn argv_for_each_fixed_request() {
     assert_eq!(g.stdout, "[--no-pager]\n[-c]\n[core.fsmonitor=]\n[rev-parse]\n[--]\n[a b]\n");
     // diff never runs a repo-configured external diff or textconv driver.
     let g = b.run(&Request::Git { cwd: tmp(), args: vec!["diff".into(), "main".into(), "--".into()] }).unwrap();
-    assert_eq!(g.stdout, "[--no-pager]\n[-c]\n[core.fsmonitor=]\n[diff]\n[--no-ext-diff]\n[--no-textconv]\n[main]\n[--]\n");
+    assert_eq!(g.stdout, "[--no-pager]\n[-c]\n[core.fsmonitor=]\n[diff]\n[--no-ext-diff]\n[--no-textconv]\n[--ignore-submodules=all]\n[main]\n[--]\n");
 }
 
 #[test]

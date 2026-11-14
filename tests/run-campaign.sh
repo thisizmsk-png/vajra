@@ -100,6 +100,29 @@ C resume login-flow --from-checkpoint 1 >/dev/null; check "earlier valid checkpo
 C show --json | jq -e '.signature_valid == true and (.features | length) == 2' >/dev/null; check "show --json" $?
 C list | grep -q '^\* login-flow'; check "list marks active campaign" $?
 
+# --- the outside-guard label (N17, 6k): an -og slug or a goal that starts with the marker ---
+OGL="evidence ran outside the guard"
+C list | grep '^\* login-flow' | grep -qF "$OGL"; [ $? -ne 0 ]; check "list: an unmarked campaign has no label" $?
+C show | grep -qF "$OGL"; [ $? -ne 0 ]; check "show: an unmarked campaign has no label" $?
+C show --json | jq -e '.evidence_outside_guard == false' >/dev/null; check "show --json: unmarked is false" $?
+C create deliver-r1-og --goal "Users can log in" --feature "ac-1|x" >/dev/null 2>&1
+C create deliver-r2 --goal "[evidence ran outside the Vajra guard] Users can log in" --feature "ac-1|x" >/dev/null 2>&1
+C create deliver-r3 --goal "Users can log in [evidence ran outside the Vajra guard]" --feature "ac-1|x" >/dev/null 2>&1
+C resume login-flow >/dev/null 2>&1
+C list | grep ' deliver-r1-og ' | grep -qF "$OGL"; check "list: an -og slug carries the label" $?
+C list | grep ' deliver-r2 ' | grep -qF "$OGL"; check "list: a marked goal carries the label (list prints no goal)" $?
+C list | grep ' deliver-r3 ' | grep -qF "$OGL"; [ $? -ne 0 ]; check "list: the marker counts only at the start of the goal" $?
+S1="$(C show deliver-r1-og)"; printf '%s\n' "$S1" | grep -q "^label: $OGL\. A pass here is never plain Verified\.$"; check "show: an -og slug prints the label" $?
+S2="$(C show deliver-r2)"; printf '%s\n' "$S2" | grep -q "^label: $OGL"; check "show: a marked goal prints the label" $?
+C show deliver-r1-og --json | jq -e '.evidence_outside_guard == true' >/dev/null; check "show --json: -og slug is true" $?
+C show deliver-r2 --json | jq -e '.evidence_outside_guard == true' >/dev/null; check "show --json: marked goal is true" $?
+C show deliver-r3 --json | jq -e '.evidence_outside_guard == false' >/dev/null; check "show --json: a marker later in the goal is false" $?
+cp "$CD/deliver-r3/campaign.json" "$WORK/r3.json"; printf 'not json' > "$CD/deliver-r3/campaign.json"
+C list | grep ' deliver-r3 ' | grep -qF "$OGL"; check "list: an unreadable goal shows the label (when unsure)" $?
+cp "$WORK/r3.json" "$CD/deliver-r3/campaign.json"
+for s in deliver-r1-og deliver-r2 deliver-r3; do C close "$s" --status abandoned >/dev/null 2>&1; done
+C resume login-flow >/dev/null 2>&1
+
 # --- close ---
 C close >/dev/null; check "close" $?
 [ "$(jq -r .status "$D/campaign.json")" = "done" ]; check "status done" $?
@@ -303,6 +326,196 @@ for vd_case in "0:$VSIG" "3:$(printf '%064d' 0)" "2:"; do
   [ -z "$(ls -A "$VT")" ]; check "verify-digest: no vajra-digest.* temp file left after exit $want" $?
 done
 [ ! -s "$WORK/vd-err-0" ]; check "verify-digest: a valid check writes nothing to stderr (no unbound variable from the trap)" $?
+
+# --- the active pointer is per repo: two concurrent runs in different repos never see each other's campaign ---
+if command -v git >/dev/null 2>&1; then
+  RA="$WORK/repo-a"; RB="$WORK/repo-b"; NR="$WORK/no-repo"
+  for r in "$RA" "$RB"; do
+    mkdir -p "$r"; git -C "$r" init -q; git -C "$r" config user.email t@t; git -C "$r" config user.name t
+    git -C "$r" commit -q --allow-empty -m init
+  done
+  mkdir -p "$NR"
+  in_a() { ( cd "$RA" && C "$@" ); }; in_b() { ( cd "$RB" && C "$@" ); }; in_nr() { ( cd "$NR" && C "$@" ); }
+  in_a create run-a --feature "x|in repo a" >/dev/null 2>&1; check "repo A: create" $?
+  in_a active --brief | grep -q "^run-a: "; check "repo A: its banner names run-a" $?
+  [ -z "$(in_b active --brief)" ]; check "repo B: no banner before it has a campaign" $?
+  in_b pass x >/dev/null 2>&1; [ $? -ne 0 ]; check "repo B: a slug-less command does not reach repo A's campaign" $?
+  [ "$(jq -r '.features[0].passes' "$CD/run-a/features.json")" = false ]; check "repo A's campaign untouched by repo B" $?
+  in_b create run-b --feature "y|in repo b" >/dev/null 2>&1; check "repo B: create" $?
+  in_a active --brief | grep -q "^run-a: "; check "repo A: still run-a after repo B created run-b" $?
+  in_b active --brief | grep -q "^run-b: "; check "repo B: banner names run-b" $?
+  in_b pass y >/dev/null 2>&1; check "repo B: slug-less pass goes to run-b" $?
+  [ "$(jq -r '.features[0].passes' "$CD/run-b/features.json")" = true ] && [ "$(jq -r '.features[0].passes' "$CD/run-a/features.json")" = false ]
+  check "repo B: pass changed run-b only" $?
+  [ "$(in_a active)" = run-a ] && [ "$(in_b active)" = run-b ]; check "active names each repo's own campaign" $?
+  # A linked worktree is the same repo: it shares the pointer.
+  git -C "$RA" worktree add -q "$WORK/repo-a-wt" 2>/dev/null
+  ( cd "$WORK/repo-a-wt" && C active --brief ) | grep -q "^run-a: "; check "a worktree of repo A sees run-a" $?
+  [ -z "$(in_nr active --brief)" ]; check "outside any repo: no banner from either repo" $?
+  in_a close >/dev/null 2>&1; check "repo A: slug-less close closes run-a" $?
+  [ -z "$(in_a active --brief)" ] && in_b active --brief | grep -q "^run-b: "; check "closing repo A's campaign leaves repo B's banner" $?
+  in_b resume run-a >/dev/null 2>&1; [ $? -ne 0 ]; check "a closed campaign cannot be resumed" $?
+  # The key is the knowledge ledger's project id: sha256 of the absolute git common dir, first 16 hex.
+  cd_b="$(git -C "$RB" rev-parse --path-format=absolute --git-common-dir)"
+  kb="$(printf '%s' "$cd_b" | openssl dgst -sha256 -r | cut -c1-16)"
+  [ "$(tr -d ' \r\n' < "$CD/.active-$kb")" = run-b ]; check "repo B's pointer is .active-<project id>" $?
+  # A pre-upgrade global pointer is never read: it could name another repo's campaign.
+  printf 'run-b\n' > "$CD/.active"
+  [ -z "$(in_a active --brief)" ] && [ -z "$(in_nr active --brief)" ]; check "the old global .active is ignored" $?
+  rm -f "$CD/.active"
+
+  # #84 review: Git before 2.31 does not know --path-format; it echoes the option as its own line and still exits 0.
+  # A fake old git (it prints the option, then runs the real git without it) and a copy of the script that calls it:
+  # two repo roots must still get two pointers. (A copy, not a PATH entry: the key holder may pin its own PATH.)
+  REAL_GIT="$(command -v git)"; OLDGIT="$WORK/old-git"
+  cat > "$OLDGIT" <<OG
+#!/bin/sh
+for a in "\$@"; do [ "\$a" = "--path-format=absolute" ] && echo "--path-format=absolute"; done
+n=\$#; i=0
+while [ \$i -lt \$n ]; do a="\$1"; shift; i=\$((i+1)); [ "\$a" = "--path-format=absolute" ] || set -- "\$@" "\$a"; done
+exec "$REAL_GIT" "\$@"
+OG
+  chmod 755 "$OLDGIT"
+  og_out="$(cd "$RA" && "$OLDGIT" rev-parse --path-format=absolute --git-common-dir)"; og_rc=$?
+  [ "$og_rc" -eq 0 ] && [ "${og_out%%
+*}" = "--path-format=absolute" ]
+  check "fake old git echoes --path-format and exits 0, like git before 2.31" $?
+  OLD_SCRIPT="$WORK/old-git-campaign.sh"
+  sed "s#git -c core.fsmonitor= rev-parse#\"$OLDGIT\" -c core.fsmonitor= rev-parse#g" "$SCRIPT" > "$OLD_SCRIPT"
+  [ "$(grep -c "$OLDGIT" "$OLD_SCRIPT")" = 2 ]; check "the copy calls the fake old git for both lookups" $?
+  RC="$WORK/repo-c"; RD="$WORK/repo-d"
+  for r in "$RC" "$RD"; do mkdir -p "$r"; git -C "$r" init -q; done
+  OC() { "$BASH_BIN" "$OLD_SCRIPT" "$@"; }
+  ( cd "$RC" && OC create run-c --feature "c|in repo c" ) >/dev/null 2>&1; check "old git: create in repo C" $?
+  [ -z "$(cd "$RD" && OC active --brief)" ]; check "old git: repo D (at its root) does not see repo C's campaign" $?
+  ( cd "$RD" && OC pass c ) >/dev/null 2>&1; [ $? -ne 0 ]; check "old git: a slug-less pass in repo D cannot reach repo C" $?
+  ( cd "$RC" && OC active --brief ) | grep -q "^run-c: "; check "old git: repo C still sees run-c" $?
+  ( cd "$RC/" && mkdir -p sub && cd sub && OC active --brief ) | grep -q "^run-c: "; check "old git: a subfolder of repo C shares its pointer" $?
+  [ ! -e "$CD/.active-global" ] || [ "$(tr -d ' \r\n' < "$CD/.active-global")" != run-c ]; check "old git: repo C's pointer is not the global one" $?
+  ( cd "$RC" && OC close ) >/dev/null 2>&1
+fi
+
+# --- lock owner and unlock --if-stale (6h-e) ---
+C create lk --feature "f1|one" >/dev/null 2>&1; check "lock: create a campaign" $?
+LD="$CD/lk"
+[ ! -e "$LD/.lock" ]; check "lock: a normal create leaves no lock" $?
+C pass f1 --campaign lk >/dev/null 2>&1; check "lock: a normal pass succeeds" $?
+[ ! -e "$LD/.lock" ]; check "lock: a normal pass leaves no lock and no owner file" $?
+
+# A copy that holds the lock for a while, so a test can SIGKILL it with the lock held.
+HOLD_SCRIPT="$WORK/hold-campaign.sh"
+awk '{print} /^  jq -n --argjson pid/ {print "  sleep 30"}' "$SCRIPT" > "$HOLD_SCRIPT"
+grep -q '^  sleep 30' "$HOLD_SCRIPT"; check "lock: the hold copy was built" $?
+# hold_lock: start a holder in its own process group; sets HP (the script's pid) once the owner file is written.
+hold_lock() {
+  set -m; "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+  local i=0; while [ ! -f "$LD/.lock/owner.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+}
+kill_holder() { kill -9 -- "-$HP" 2>/dev/null; wait "$HP" 2>/dev/null; }
+
+hold_lock
+[ -f "$LD/.lock/owner.json" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "lock: owner.json records the holder's pid" $?
+[ -n "$(jq -r .start "$LD/.lock/owner.json")" ]; check "lock: owner.json records a start time" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner with the same start time is kept" $?
+kill_holder
+[ -d "$LD/.lock" ] && [ -f "$LD/.lock/owner.json" ]; check "lock: SIGKILL leaves the lock and its owner file" $?
+C unlock lk --if-stale >/dev/null 2>&1; check "lock: unlock --if-stale on a killed owner succeeds" $?
+[ ! -e "$LD/.lock" ]; check "lock: --if-stale removed the owner file and the lock" $?
+C pass f1 --campaign lk >/dev/null 2>&1; check "lock: the campaign is usable again" $?
+
+# a reused pid: the pid is alive (this shell) but the recorded start time is not its start time
+mkdir "$LD/.lock"; jq -n --argjson pid "$$" '{pid: $pid, start: "Mon Jan  1 00:00:00 1990"}' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "lock: a reused pid (different start time) is treated as dead" $?
+# the same pid with the matching start time is live
+mkdir "$LD/.lock"; SELF_START="$(TZ=UTC LC_ALL=C ps -o lstart= -p $$ | tr -s ' ' | sed 's/^ //; s/ $//')"
+jq -n --argjson pid "$$" --arg s "$SELF_START" '{pid: $pid, start: $s}' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live pid with its real start time is kept" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"
+# a live owner is kept whatever time zone the writer and the unlocker run in
+set -m; TZ=Asia/Kolkata "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+i=0; while [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" != "$HP" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+TZ=America/Los_Angeles C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner is kept when the unlocker runs in another time zone" $?
+TZ=Pacific/Auckland C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner is kept in a third time zone" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
+# no owner file: never removed
+mkdir "$LD/.lock"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a lock with no owner file is kept" $?
+printf 'not json' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: an unreadable owner file keeps the lock" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"
+C unlock lk >/dev/null 2>&1; [ $? -ne 0 ]; check "lock: unlock without --if-stale is refused" $?
+C unlock "../x" --if-stale >/dev/null 2>&1; [ $? -ne 0 ]; check "lock: unlock refuses an invalid slug" $?
+C unlock lk --if-stale >/dev/null 2>&1; check "lock: unlock with no lock held is a no-op success" $?
+
+# interleave: unlocker A deletes a dead owner's lock and pauses (still inside reclamation); a writer then takes the
+# lock; unlocker B, which saw the same dead owner, must not delete the writer's lock.
+SLOW_UNLOCK="$WORK/slow-unlock.sh"
+awk '{print} /^  release_lock \|\| true/ {print "  sleep 3"}' "$SCRIPT" > "$SLOW_UNLOCK"
+grep -q '^  sleep 3' "$SLOW_UNLOCK"; check "race: the slow-unlock copy was built" $?
+mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "Mon Jan  1 00:00:00 1990"}' > "$LD/.lock/owner.json"
+"$BASH_BIN" "$SLOW_UNLOCK" unlock lk --if-stale >/dev/null 2>&1 & UA=$!
+i=0; while [ -e "$LD/.lock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+[ ! -e "$LD/.lock" ]; check "race: unlocker A removed the dead owner's lock" $?
+hold_lock
+[ -f "$LD/.lock/owner.json" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "race: a writer took the released lock" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ]; check "race: unlocker B refuses (the lock is a live writer's)" $?
+wait "$UA" 2>/dev/null
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "race: the writer's lock and owner record are intact" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
+# handoff: unlocker U reads writer A's record and pauses; A finishes; writer B wants the lock; U resumes. U must not
+# delete B's lock (A's release waits for U, so the lock generation U checked stays put until U is done).
+SHORT_A="$WORK/short-a.sh"; PAUSE_U="$WORK/pause-u.sh"
+awk '{print} /^  jq -n --argjson pid/ {print "  sleep 1"}' "$SCRIPT" > "$SHORT_A"
+awk '{print} /^  pid="\$\(jq -r/ {print "  sleep 3"}' "$SCRIPT" > "$PAUSE_U"
+grep -q '^  sleep 1' "$SHORT_A" && grep -q '^  sleep 3' "$PAUSE_U"; check "handoff: the test copies were built" $?
+"$BASH_BIN" "$SHORT_A" pass f1 --campaign lk >/dev/null 2>&1 & AP=$!
+i=0; while [ ! -f "$LD/.lock/owner.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+"$BASH_BIN" "$PAUSE_U" unlock lk --if-stale >/dev/null 2>&1 & UP=$!
+sleep 0.5
+set -m; "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+wait "$UP"; URC=$?
+wait "$AP" 2>/dev/null
+i=0; while [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" != "$HP" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+[ "$URC" -ne 0 ]; check "handoff: the unlocker refused (it never saw A as gone)" $?
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "handoff: writer B holds an intact lock" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
+[ ! -e "$LD/.lock" ]; check "handoff: nothing is left behind" $?
+# a reclaim-flock holder killed with SIGKILL must not strand the campaign: the next unlock recovers on its own
+PYH="$WORK/flock-holder.py"
+cat > "$PYH" <<'PYEOF'
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1] + "/.lock.reclaim", os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").write("held")
+time.sleep(60)
+PYEOF
+mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "x"}' > "$LD/.lock/owner.json"
+rm -f "$WORK/held"
+set -m; /usr/bin/python3 -I "$PYH" "$LD" "$WORK/held" >/dev/null 2>&1 & FH=$!; set +m
+i=0; while [ ! -f "$WORK/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+[ -f "$WORK/held" ]; check "mutex: a flock holder is running" $?
+kill -9 -- "-$FH" 2>/dev/null; wait "$FH" 2>/dev/null
+[ -e "$LD/.lock.reclaim" ]; check "mutex: the killed holder left its flock file behind" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "mutex: unlock recovers after the holder was SIGKILLed, no manual cleanup" $?
+C pass f1 --campaign lk >/dev/null 2>&1 && [ ! -e "$LD/.lock" ]; check "mutex: a later writer still releases its lock normally" $?
+
+# a killed writer's release helper survives it (only the shell is killed) and must not delete a later writer's lock
+rm -f "$WORK/held"
+set -m; /usr/bin/python3 -I "$PYH" "$LD" "$WORK/held" >/dev/null 2>&1 & FH=$!; set +m
+i=0; while [ ! -f "$WORK/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+"$BASH_BIN" "$SHORT_A" pass f1 --campaign lk >/dev/null 2>&1 & AP=$!
+i=0; while [ -z "$(pgrep -P "$AP" 2>/dev/null | head -1)" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
+# A's owner record is written and it sleeps; wait for its release helper (a child python) to be waiting on the flock
+i=0; while [ -z "$(pgrep -P "$AP" -f 'import fcntl' 2>/dev/null | head -1)" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
+[ -n "$(pgrep -P "$AP" -f 'import fcntl' 2>/dev/null | head -1)" ]; check "release helper: A's helper is waiting on the flock" $?
+kill -9 "$AP" 2>/dev/null; wait "$AP" 2>/dev/null
+# U removes dead A's lock and writer B takes it, all while A's helper still waits
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"; mkdir "$LD/.lock"
+jq -n '{pid: 424242, start: "B start"}' > "$LD/.lock/owner.json"
+kill -9 -- "-$FH" 2>/dev/null; wait "$FH" 2>/dev/null
+sleep 1.5
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" = "424242" ]; check "release helper: the surviving helper leaves writer B's lock alone" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock" 2>/dev/null
 
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"

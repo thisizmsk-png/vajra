@@ -7,8 +7,25 @@ const ASK: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const RUN: &str = "20261106-0911";
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
-fn header(ask: &str, run: &str) -> String {
-    format!("[Vajra Desktop: question from the human, ask {ask}, run {run}. Answer with the read and control tools only.]\n")
+/// The header no longer carries ids, so the arguments are ignored; they stay so the call sites read as before.
+fn header(_ask: &str, _run: &str) -> String {
+    "[Vajra Desktop: question from the human. Answer with the read and control tools only.]\n".to_string()
+}
+
+#[test]
+fn the_header_is_one_fixed_line_that_never_starts_with_a_slash_and_carries_no_ids() {
+    assert!(HEADER.starts_with('['), "never a slash: the stdin body must not run as a CLI command");
+    assert!(HEADER.ends_with('\n') && HEADER.matches('\n').count() == 1);
+    assert!(HEADER.starts_with("[Vajra Desktop: question from the human"), "strip_header's prefix");
+    // The same bytes for every ask and run, so turn 2 adds the same (small) line and the prefix is stable.
+    let a = frame(ASK, RUN, "one", &no_red()).unwrap();
+    let b = frame("01ARZ3NDEKTSV4RRFFQ69G5FAW", "20261107-0000", "two", &no_red()).unwrap();
+    assert_eq!(a.header(), b.header());
+    assert!(!a.header().contains(ASK) && !a.header().contains(RUN));
+    // Even text that starts with a slash is framed behind it.
+    let s = frame(ASK, RUN, "/vajra do something", &no_red()).unwrap();
+    assert_eq!(s.as_bytes()[0], b'[');
+    assert_eq!(s.text(), "/vajra do something");
 }
 
 fn no_red() -> Redactor {
@@ -338,4 +355,27 @@ fn deny_rules_not_injectable() {
         }
         assert!(!std::fs::read_to_string(&f).unwrap().contains(&needle), "{} builds a Read rule outside the generator", f.display());
     }
+}
+
+/// ADR-15 D8: every other project's folder is denied as a whole, in both spellings, on top of the usual rules.
+#[test]
+fn other_project_folders_are_denied_as_a_whole() {
+    let t = tmp("others");
+    let (home, repo, data, other) = (t.join("home"), t.join("repo"), t.join("data"), t.join("other"));
+    for d in [&home, &repo, &data, &other] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let base = ls::deny_rules(&home, &repo, &data).unwrap();
+    let with = ls::deny_rules_with(&home, &repo, &data, std::slice::from_ref(&other)).unwrap();
+    assert!(base.iter().all(|r| with.contains(r)), "the usual rules stay");
+    let real = std::fs::canonicalize(&other).unwrap();
+    assert!(with.contains(&format!("Read(/{}/**)", real.display())), "{with:#?}");
+    assert!(with.contains(&format!("Read(/{}/**)", other.display())), "the given spelling too");
+    assert_eq!(ls::deny_rules_with(&home, &repo, &data, &[]).unwrap(), base);
+    let s: serde_json::Value = serde_json::from_str(&ls::settings_with(&home, &repo, &data, std::slice::from_ref(&other)).unwrap()).unwrap();
+    assert!(s["permissions"]["deny"].as_array().unwrap().iter().any(|r| r.as_str() == Some(&format!("Read(/{}/**)", real.display()))));
+    // A folder a rule cannot express fails closed instead of being skipped.
+    let odd = t.join("odd[1]");
+    std::fs::create_dir_all(&odd).unwrap();
+    assert_eq!(ls::deny_rules_with(&home, &repo, &data, &[odd]).unwrap_err().code(), "lead_guard_missing");
 }

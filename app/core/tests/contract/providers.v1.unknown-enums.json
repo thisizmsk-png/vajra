@@ -1,0 +1,16 @@
+{
+  "schema": "vajra.providers/1",
+  "extra": "ignored",
+  "providers": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "installed": true,
+      "path": "/usr/local/bin/claude",
+      "tested": "maybe",
+      "capabilities": {"pty_attach": true, "transcript": true, "inspect": true, "message": true, "redirect": true, "stop": "pause", "resume": true, "vajra_workflow": true, "future_flag": true},
+      "login": {"route": "Uses your Claude Code login", "state": "expired", "checked_by": "cli_status"},
+      "billing": {"source": "login"}
+    }
+  ]
+}

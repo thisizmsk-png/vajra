@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { api, errorText, isIpcError, onChanged, setTransport } from "../src/ipc";
+import { api, errorText, isIpcError, onChanged, onInboxNew, setTransport } from "../src/ipc";
 import { fakeIpc } from "./fakeIpc";
 
 afterEach(() => setTransport());
@@ -16,16 +16,83 @@ describe("typed ipc", () => {
     ]);
   });
 
-  it("maps the three Lead commands to snake_case commands with camelCase args", async () => {
-    const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false } });
+  it("maps provider_list and passes a provider to resume only when one is given", async () => {
+    const f = fakeIpc({ provider_list: { schema: "vajra.providers/1", providers: [] }, resume_run: {} });
+    setTransport(f.transport);
+    await api.providerList();
+    await api.resumeRun("s", "c", "/w");
+    await api.resumeRun("s", "c", "/w", "codex");
+    expect(f.calls).toEqual([
+      { cmd: "provider_list", args: undefined },
+      { cmd: "resume_run", args: { sessionId: "s", campaign: "c", cwd: "/w" } },
+      { cmd: "resume_run", args: { sessionId: "s", campaign: "c", cwd: "/w", provider: "codex" } },
+    ]);
+  });
+
+  it("maps the project commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ app_info: {}, project_list: { projects: [], skipped: 0 }, project_add: {}, project_rename: {}, project_archive: {}, project_sessions: { sessions: [], skipped: 0, unsupported: false, truncated: false } });
+    setTransport(f.transport);
+    await api.appInfo();
+    await api.projectList();
+    await api.projectAdd("/Users/me/src/a");
+    await api.projectAdd("/Users/me/src/a/b", true);
+    await api.projectRename("p_1", "New", 2);
+    await api.projectArchive("p_1");
+    await api.projectSessions("p_1");
+    expect(f.calls).toEqual([
+      { cmd: "app_info", args: undefined },
+      { cmd: "project_list", args: { includeArchived: false } },
+      { cmd: "project_add", args: { path: "/Users/me/src/a", confirmNested: false } },
+      { cmd: "project_add", args: { path: "/Users/me/src/a/b", confirmNested: true } },
+      { cmd: "project_rename", args: { id: "p_1", name: "New", expectRev: 2 } },
+      { cmd: "project_archive", args: { id: "p_1", expectRev: undefined } },
+      { cmd: "project_sessions", args: { id: "p_1" } },
+    ]);
+  });
+
+  it("maps the migration commands", async () => {
+    const f = fakeIpc({ project_migration_suggest: { done: false, groups: [], unsorted: [], terminal: [] }, project_migration_confirm: {} });
+    setTransport(f.transport);
+    await api.projectMigrationSuggest();
+    await api.projectMigrationConfirm(["/Users/me/src/a"]);
+    expect(f.calls).toEqual([
+      { cmd: "project_migration_suggest", args: undefined },
+      { cmd: "project_migration_confirm", args: { roots: ["/Users/me/src/a"] } },
+    ]);
+  });
+
+  it("maps the Director-General commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false, name: "Director-General" }, new_conversation: { project_id: "k_0", generation: 2, stream: "orchestrator-k_0-g2" } });
     setTransport(f.transport);
     await api.askLead("20261106-0911", "what is bhima doing?");
     await api.cancelAsk("01ARZ3NDEKTSV4RRFFQ69G5FAV");
     await api.leadStatus("20261106-0911");
+    expect((await api.newConversation("20261106-0911")).generation).toBe(2);
     expect(f.calls).toEqual([
       { cmd: "ask_lead", args: { runId: "20261106-0911", text: "what is bhima doing?" } },
       { cmd: "cancel_ask", args: { askId: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } },
       { cmd: "lead_status", args: { runId: "20261106-0911" } },
+      { cmd: "new_conversation", args: { runId: "20261106-0911" } },
+    ]);
+  });
+
+  it("maps the receipt-wrapped Director-General actions to their commands (FG-02c)", async () => {
+    const f = fakeIpc({ lead_status: { available: true, busy: false, name: "Director-General" }, act_ask_lead: { receipt: null }, act_new_conversation: { receipt: null }, act_cancel_ask: { receipt: null }, act_start_proposal: { receipt: null }, act_dismiss_proposal: { receipt: null } });
+    setTransport(f.transport);
+    const envelope = { action_id: "act-1234abcd", project_id: "p_1", expect_generation: 2 };
+    await api.leadStatusForProject("p_1");
+    await api.actAskLead(envelope, "20261106-0911", "hi");
+    await api.actNewConversation(envelope, "20261106-0911");
+    await api.actCancelAsk(envelope, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    await api.actStartProposal(envelope, "proposal:a1", "ab".repeat(32));
+    await api.actDismissProposal(envelope, "proposal:a2");
+    expect(f.calls).toEqual([
+      { cmd: "lead_status", args: { projectId: "p_1" } },
+      { cmd: "act_ask_lead", args: { envelope, runId: "20261106-0911", text: "hi" } },
+      { cmd: "act_new_conversation", args: { envelope, runId: "20261106-0911" } },
+      { cmd: "act_cancel_ask", args: { envelope, askId: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } },
+      { cmd: "act_start_proposal", args: { envelope, id: "proposal:a1", proposalSha256: "ab".repeat(32) } },
+      { cmd: "act_dismiss_proposal", args: { envelope, id: "proposal:a2" } },
     ]);
   });
 
@@ -40,6 +107,39 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps the proposal commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ start_proposal: { action_id: "a1", state: "started", run: {} }, dismiss_proposal: { action_id: "a2", state: "dismissed" } });
+    setTransport(f.transport);
+    await api.startProposal("proposal:a1", "ab".repeat(32));
+    await api.dismissProposal("proposal:a2");
+    expect(f.calls).toEqual([
+      { cmd: "start_proposal", args: { id: "proposal:a1", proposalSha256: "ab".repeat(32) } },
+      { cmd: "dismiss_proposal", args: { id: "proposal:a2" } },
+    ]);
+  });
+
+  it("maps the receipt-wrapped inbox actions and the arrival event (FG-07)", async () => {
+    const f = fakeIpc({ act_reject_plan: { receipt: null }, act_answer_question: { receipt: null } });
+    setTransport(f.transport);
+    const envelope = { action_id: "act-0001-aaaa", project_id: "p_1", expect_generation: null };
+    const sha = "123456789abcdef1" + "0".repeat(48); // the 16-hex prefix is above 2^53: it must travel as the string
+    await api.actRejectPlan(envelope, "plan:r.0", "no", sha);
+    await api.actAnswerQuestion(envelope, "task:c1.t1", "use the key id");
+    expect(f.calls).toEqual([
+      { cmd: "act_reject_plan", args: { envelope, id: "plan:r.0", reason: "no", planSha256: sha } },
+      { cmd: "act_answer_question", args: { envelope, id: "task:c1.t1", text: "use the key id" } },
+    ]);
+    // Through JSON the hash is unchanged (a number would have rounded 0x123456789abcdef1).
+    expect(JSON.parse(JSON.stringify(f.calls[0].args)).planSha256).toBe(sha);
+    expect(Number.isSafeInteger(Number.parseInt("123456789abcdef1", 16))).toBe(false); // as a number it would have been rounded
+    const got: unknown[] = [];
+    const off = onInboxNew((p) => got.push(p));
+    f.emit("inbox_new", { project_id: "p_1", kind: "plan", count: 2 });
+    off();
+    f.emit("inbox_new", { project_id: "p_1", kind: "plan", count: 3 });
+    expect(got).toEqual([{ project_id: "p_1", kind: "plan", count: 2 }]);
+  });
+
   it("maps inbox to the inbox command", async () => {
     const f = fakeIpc({ inbox: { count: 0, items: [] } });
     setTransport(f.transport);
@@ -47,10 +147,31 @@ describe("typed ipc", () => {
     expect(f.calls).toEqual([{ cmd: "inbox", args: undefined }]);
   });
 
+  it("says what is wrong with the projects folder and what to do", () => {
+    const detail = "The app's projects folder is a symbolic link, which the app never follows (it could point the app's records somewhere else), so projects are unavailable until it is fixed.";
+    const fix = 'Move /d/projects aside (for example: mv "/d/projects" "/d/projects.old"), then restart the app. A new projects folder is made at that path.';
+    expect(errorText({ error: "projects_unavailable", detail, fix, path: "/d/projects" })).toBe(`${detail} ${fix}`);
+    expect(errorText({ error: "projects_unavailable", detail })).toBe(detail);
+  });
+
   it("shows the sandbox message as one friendly line", () => {
-    const msg = "Ask the Lead needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
+    const msg = "Asking the Director-General needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
     expect(errorText({ error: "lead_guard_missing", detail: msg })).toBe(msg);
+    const full = "Two Director-General turns are running, the most the app runs at once. Ask again when one finishes.";
+    expect(errorText({ error: "turns_full", detail: full })).toBe(full);
     expect(errorText({ error: "lead_busy" })).toBe("lead_busy");
+  });
+
+  it("says the project-store refusals in plain words (FG-02c)", () => {
+    const texts: Record<string, string> = {
+      not_a_project: "This folder is not a project. Add it as a project first.",
+      project_archived: "This project is archived. Restore it to use it again.",
+      project_missing: "This project is no longer in the app's project list.",
+    };
+    for (const [error, detail] of Object.entries(texts)) {
+      expect(errorText({ error, detail, action: "add_project", path: "/Users/me/src/a" })).toBe(detail);
+    }
+    expect(errorText({ error: "not_a_project" })).toBe("not_a_project");
   });
 
   it("rejects with the core's {error, detail} and errorText reads it", async () => {

@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: { port: 1420, strictPort: true },
-  build: { outDir: "dist", emptyOutDir: true, modulePreload: { polyfill: false } },
-  test: { environment: "jsdom", include: ["tests/**/*.test.{ts,tsx}"], css: false },
+  // assetsInlineLimit 0: the app's CSP (default-src 'self') blocks data: images, so a small asset must ship as a same-origin file, never as a data: URI.
+  build: { outDir: "dist", emptyOutDir: true, modulePreload: { polyfill: false }, assetsInlineLimit: 0 },
+  test: { environment: "jsdom", include: ["tests/**/*.test.{ts,tsx}"], setupFiles: ["tests/setup.ts"], css: false },
 });

@@ -5,7 +5,7 @@ import { Crew } from "../src/screens/crew/Crew";
 import { History } from "../src/screens/history/History";
 import { Settings } from "../src/screens/settings/Settings";
 import { REGISTRY } from "../src/screens/registry";
-import { problemDetail } from "../src/screens/states";
+import { clock, problemDetail } from "../src/screens/states";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
 
@@ -61,7 +61,7 @@ describe("History states", () => {
     render(<History />);
     expect(await screen.findByText(S.history.emptyHint)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: S.states.goHome }));
-    expect(window.location.hash).toBe("#/home");
+    expect(window.location.hash).toBe("#/orch");
   });
 
   it("shows loading rows until the campaigns arrive", async () => {
@@ -75,9 +75,16 @@ describe("History states", () => {
 });
 
 describe("Check again", () => {
+  it("writes the time without a padded hour, and with seconds so two checks in one minute read differently", () => {
+    const a = clock(new Date(2026, 10, 12, 2, 3, 34));
+    expect(a).toContain("2:03:34");
+    expect(a.startsWith("0")).toBe(false);
+    expect(clock(new Date(2026, 10, 12, 2, 3, 35))).not.toBe(a);
+  });
+
   it("says when the check finished, so a re-check that finds nothing new is not a dead click", async () => {
     let calls = 0;
-    setTransport(fakeIpc({ preflight: () => { calls++; return { start_enabled: true, rows: [] }; } }).transport);
+    setTransport(fakeIpc({ preflight: () => { calls++; return { start_enabled: true, rows: [] }; }, provider_list: { schema: "vajra.providers/1", providers: [] }, setup_list: { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } } }).transport);
     render(<Settings />);
     await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Checked at /));
     fireEvent.click(screen.getAllByRole("button", { name: S.settings.recheck })[0]);
@@ -86,21 +93,29 @@ describe("Check again", () => {
   });
 });
 
-describe("Screens not built yet", () => {
-  it("the Run view right after a start opens on that run's evidence", async () => {
+describe("Settings way back", () => {
+  it("offers a link out, since Settings shows no view tabs and selects no project tab", async () => {
+    window.location.hash = "#/settings";
+    setTransport(fakeIpc({ preflight: { start_enabled: true, rows: [] }, provider_list: { schema: "vajra.providers/1", providers: [] }, setup_list: { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } } }).transport);
+    render(<Settings />);
+    const back = await screen.findByRole("link", { name: S.settings.back });
+    expect(back.getAttribute("href")).toBe("#/orch");
+    expect(back.closest("nav")).toBeNull();
+  });
+});
+
+describe("Review view", () => {
+  it("right after a start opens on that run's evidence", async () => {
     window.location.hash = "#/run?slug=camp&id=r1";
     const f = fakeIpc({ evidence_list: { slug: "camp", stale: false, rows: [] } });
     setTransport(f.transport);
-    const Run = REGISTRY.run;
+    const Run = REGISTRY.review;
     render(<Run />);
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "evidence_list" && c.args?.slug === "camp")).toBe(true));
     expect(await screen.findByText(S.run.none)).toBeTruthy();
   });
 
-  it("without a run, it says so and offers Home", () => {
-    const Inbox = REGISTRY.inbox;
-    render(<Inbox />);
-    expect(screen.getByText(S.shell.notBuilt)).toBeTruthy();
-    expect(screen.getByRole("button", { name: S.states.goHome })).toBeTruthy();
+  it("every view the router knows has a component: no placeholder screens are left", () => {
+    for (const v of ["orch", "board", "review", "worker", "crew", "history", "settings"] as const) expect(typeof REGISTRY[v]).toBe("function");
   });
 });

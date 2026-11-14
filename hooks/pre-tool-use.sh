@@ -23,6 +23,7 @@
 # empty arrays are expanded with ${a[@]+"${a[@]}"} because of set -u.
 
 set -u
+set -o pipefail
 unset CDPATH
 # NFR-SEC-2: a hook runs outside the guard, and the programs it starts can read the HMAC key file. A same-uid worker
 # can write user dirs (for example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs
@@ -32,15 +33,66 @@ PYTHON3="/usr/bin/python3"
 # Path comparisons are case-insensitive (nocasematch is switched on only inside
 # classify/inside/icase, so `case` on flags like -c vs -C stays exact).
 
+# Fail closed on any unexpected error (item 4). The EXIT trap blocks every exit without a decision, and the ERR trap
+# blocks a failing top-level command. Neither sees an error that does not end the script: a bad substitution or an
+# unbound variable inside `$(...)` only ends that subshell and leaves an empty value, and a `[` test that errors reads
+# as false, so the check is skipped and the call would be allowed. Every such error is printed by bash on stderr, so
+# the hook's own stderr goes to a private file, its messages go to fd 3 (the real stderr), and `allow` refuses to
+# allow when that file holds anything. errtrace is not used: the helpers answer with their return code.
+# bhishma #218 M: the file is opened twice (fd 2 to write, fd 4 to read) and deleted by name at once, so a process the
+# agent left running can't find it to truncate it; only fd 4 is ever read. A signal or timeout kill blocks too (L).
+exec 3>&2
 DECIDED=0
+GERR=""
+GERR_OPEN=0
+GERR_SEEN=0
+GERR_BUF=""
+# Everything bash wrote to the captured stderr so far, up to 4096 characters, read once through fd 4 (built-ins
+# only, so it can run inside a trap). GERR_LINE: its first non-blank line, printable, at most 300 characters.
+gerr_read() {
+  if [ "$GERR_OPEN" = 1 ] && [ "$GERR_SEEN" = 0 ]; then
+    GERR_SEEN=1
+    IFS= read -r -d '' -n 4096 GERR_BUF <&4 || true
+  fi
+  local l
+  GERR_LINE=""
+  while IFS= read -r l; do
+    l="${l//[^[:print:]]/}"
+    [ -n "${l// /}" ] && { GERR_LINE="${l:0:300}"; break; }
+  done <<<"$GERR_BUF"
+  return 0
+}
+internal_error() { # what -> the one fail-closed message, on the real stderr
+  gerr_read
+  echo "Vajra guard: internal error ($1${GERR_LINE:+: $GERR_LINE}); blocking the tool call (fail-closed)." >&3
+}
 on_exit() {
   local rc=$?
   if [ "$DECIDED" != 1 ]; then
-    echo "Vajra guard: internal error (rc=${rc}); blocking the tool call (fail-closed)." >&2
+    internal_error "exit ${rc} without a decision"
     exit 2
   fi
 }
 trap on_exit EXIT
+on_err() {
+  local rc=$?
+  internal_error "line ${1:-?} failed with ${rc}"
+  DECIDED=1
+  exit 2
+}
+trap 'on_err $LINENO' ERR
+# Killed by a signal or a timeout: never an exit Claude Code would let through.
+for sig in TERM HUP INT PIPE; do
+  trap "internal_error 'stopped by SIG$sig'; DECIDED=1; exit 2" "$sig"
+done
+if ! GERR="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/vajra-guard-err.XXXXXX" 2>/dev/null)" || [ -z "$GERR" ]; then
+  echo "Vajra guard: it could not create its private error file in the temp folder (${TMPDIR:-/tmp} is not writable), so every tool call is blocked (fail-closed). Make the temp folder writable and retry." >&3
+  DECIDED=1
+  exit 2
+fi
+exec 2>"$GERR" 4<"$GERR"
+GERR_OPEN=1
+/bin/rm -f "$GERR"
 
 VS="${HOME}/.claude/vajra"
 AUDIT_LOG="${VS}/audit.log"
@@ -53,12 +105,16 @@ audit() { # verdict tool reason
 
 block() {
   audit BLOCK "${TOOL:-unknown}" "$1"
-  echo "Vajra guard blocked this ${TOOL:-tool} call: $1" >&2
+  echo "Vajra guard blocked this ${TOOL:-tool} call: $1" >&3
   DECIDED=1
   exit 2
 }
 
 allow() {
+  gerr_read
+  if [ "$GERR_OPEN" != 1 ] || [ -n "$GERR_BUF" ]; then
+    block "an internal error occurred while checking it, so it is not allowed (fail-closed): ${GERR_LINE:-unknown error}"
+  fi
   audit ALLOW "${TOOL:-unknown}" ""
   DECIDED=1
   exit 0
@@ -67,7 +123,9 @@ allow() {
 TOOL=""
 NOJQ="jq was not found in /usr/bin, /bin, /usr/sbin or /sbin and /usr/bin/python3 could not parse the payload, so every tool call is blocked (fail-closed). Vajra's hooks use only those root-owned system dirs: a jq in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq; otherwise xcode-select --install provides /usr/bin/python3, which the guard then uses. Retry after."
 
-PAYLOAD="$(cat)"
+# A failed read (no `cat` in the pinned dirs) falls through to the parse step's own, more specific block; `allow`
+# refuses anyway, because the failure is on the captured stderr.
+PAYLOAD="$(cat)" || PAYLOAD=""
 CWD_IN="" CMD="" P1="" P2="" P3="" PAT="" AID=""
 if command -v jq >/dev/null 2>&1; then
 PARSED="$(jq -r '
@@ -114,6 +172,29 @@ canon() { # path base -> CANON (absolute, physical, .. collapsed)
   case "$p" in
     "~") p="$HOME" ;;
     "~/"*) p="$HOME/${p#??}" ;;
+    "~+"|"~+/"*) p="${base%/}${p#??}" ;;  # ~+ is the cwd
+    # ~- (OLDPWD), a dir-stack entry (~N, ~+N, ~-N, once the command uses pushd) and ~name for an
+    # existing account expand to a directory this script cannot know: fail closed, as Glob does. Any
+    # other ~word stays literal in bash (~2s in a sentence), so it is a plain relative name (#148 review).
+    "~"?*)
+      local tn="${p#\~}" tnd
+      tn="${tn%%/*}"; tnd="${tn#[+-]}"
+      if [ "$tn" = - ]; then block "a ~- path cannot be resolved; write the path in full: $p"; fi
+      case "$tnd" in
+        ""|*[!0-9]*) ;;
+        *[!0]*) [[ "$CMD" == *pushd* ]] && block "a ~N dir-stack path cannot be resolved; write the path in full: $p" ;;
+        # ~0 and ~+0 are always the cwd. ~-0 is the bottom stack entry: the cwd only while the stack has one
+        # entry, so once the command uses pushd it is refused like any other stack entry (#148 review).
+        *)
+          case "$tn" in -*) [[ "$CMD" == *pushd* ]] && block "a ~-N dir-stack path cannot be resolved; write the path in full: $p" ;; esac
+          p="${base%/}${p#"~$tn"}" ;;
+      esac
+      case "$tn" in
+        [A-Za-z_]*) case "$tn" in *[!A-Za-z0-9._-]*) ;; *)
+          /usr/bin/id -u "$tn" >/dev/null 2>&1 && block "a ~name path cannot be resolved; write the path in full: $p" ;;
+        esac ;;
+      esac
+      ;;
   esac
   case "$p" in /*) ;; *) p="${base%/}/$p" ;; esac
   while :; do
@@ -175,6 +256,15 @@ ROOTS=(
 canon "$HOME/Library/Application Support/VajraDesktop/control" /; DCTL="$CANON"
 canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; DCTL2="$CANON"
 ROOTS+=( "$DCTL" "$DCTL2" )
+# ADR-16 (design.md 16.6/16.8): the whole Vajra Desktop app data dir <data>
+# ("$HOME/Library/Application Support/VajraDesktop") is core-only state (seats.json,
+# run records, profiles, ticket dirs, the git baseline, the control queue): agents
+# never write anywhere under it. Reads stay allowed (the control dir keeps its own
+# worker read block below). The worktree root <work> (VajraWorktrees, a sibling,
+# never a prefix match) stays writable.
+canon "$HOME/Library/Application Support/VajraDesktop" /; DDATA="$CANON"
+canon "$HOME/Library/Application__SP__Support/VajraDesktop" /; DDATA2="$CANON"
+ROOTS+=( "$DDATA" "$DDATA2" )
 # Read-protected for workers (payload carries agent_id): the control dir holds the
 # steering nonce, and transcripts hold each worker's brief (which carries it). The
 # main session and the Lead chat session have no agent_id and keep reading.
@@ -194,14 +284,72 @@ reach_check() { # canonical dir, label -> block if a recursive read there reache
   done
   return 0
 }
+# #190 H1 (4): a campaign that Vajra Desktop's core runs is written only by the core, which runs the scripts as its own
+# children, never in an agent session. Its slug is the one a core seats file records: campaign_slug in
+# <data>/control/lead/<run>/seats.json. Matched by those recorded slugs, never by the deliver- prefix, because the CLI
+# workflow uses that prefix too. A seats file that exists but can't be read stands for both slugs its run could have.
+CORE_SLUGS=" "; CORE_ANY=0; CORE_UNKNOWN=0; CORE_PTR=0; CORE_DATA=( "$DDATA" ); CORE_LOADED=0
+SLUG_LIT='^[a-z0-9][a-z0-9-]*$'
+# The core honours VAJRA_DESKTOP_DATA (app/core/src/paths.rs), so its seats may live there too (bhishma #194 F5).
+if [ -n "${VAJRA_DESKTOP_DATA:-}" ]; then canon "$VAJRA_DESKTOP_DATA" /; CORE_DATA+=( "$CANON" ); fi
+core_slugs_load() { # reads the seats files once per hook call
+  [ "$CORE_LOADED" = 1 ] && return 0
+  CORE_LOADED=1
+  local ng=0 d f run s base lead
+  shopt -q nullglob && ng=1
+  shopt -s nullglob
+  for base in "${CORE_DATA[@]}"; do
+  lead="$base/control/lead"
+  # A lead dir (or a run dir) that exists but can't be listed: core runs may exist with slugs we can't read.
+  if [ -e "$lead" ] && { [ ! -d "$lead" ] || [ ! -r "$lead" ] || [ ! -x "$lead" ]; }; then CORE_UNKNOWN=1; continue; fi
+  for d in "$lead"/*/; do
+    d="${d%/}"; run="${d##*/}"; f="$d/seats.json"
+    if [ ! -r "$d" ] || [ ! -x "$d" ]; then CORE_ANY=1; CORE_SLUGS+="deliver-$run deliver-$run-og "; continue; fi
+    [ -e "$f" ] || [ -L "$f" ] || continue   # no seats file: not a core run (the CLI workflow writes its campaign)
+    s=""
+    if [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ]; then
+      if command -v jq >/dev/null 2>&1; then
+        s="$(jq -r '.campaign_slug | if type == "string" then . else empty end' "$f" 2>/dev/null)" || s=""
+      elif [ -x "$PYTHON3" ]; then
+        s="$("$PYTHON3" -I -c 'import json,sys
+v = json.load(open(sys.argv[1], encoding="utf-8")).get("campaign_slug")
+print(v if isinstance(v, str) else "")' "$f" 2>/dev/null)" || s=""
+      fi
+    fi
+    CORE_ANY=1
+    if [[ "$s" =~ $SLUG_LIT ]]; then
+      CORE_SLUGS+="$s "
+    else
+      CORE_SLUGS+="deliver-$run deliver-$run-og "
+    fi
+  done
+  done
+  # An active pointer that names a core slug: only the core's record repo has one (vajra-62, #190).
+  for f in "$HOME/.claude/vajra/campaigns"/.active-*; do
+    s="$(tr -d ' \r\n' < "$f" 2>/dev/null)"
+    [ -n "$s" ] && [[ "$CORE_SLUGS" == *" $s "* ]] && CORE_PTR=1
+  done
+  [ "$ng" = 1 ] || shopt -u nullglob
+  return 0
+}
+# 0 when <slug> is a core run's campaign (bhishma #194 M1). The runs can't be listed: any deliver- slug may be one.
+core_slug() {
+  core_slugs_load
+  [[ "$CORE_SLUGS" == *" $1 "* ]] && return 0
+  [ "$CORE_UNKNOWN" = 1 ] && [[ "$1" == deliver-* ]] && return 0
+  return 1
+}
+
 # Knowledge ledger (kb/) and task graphs (campaigns/<slug>/tasks.json*) change
 # only through scripts/vajra_kb.py and scripts/vajra_tasks.py; reading is fine.
+# A core run's whole campaign folder is the core's (bhishma #194 M1): campaign.json, features.json, progress.md,
+# state.sig, report.md and .lock change only in the core's own processes.
 
 PKIND=""
 # The shortcut above is valid only while no protected root was moved by a symlink under HOME.
 CLASSIFY_FAST=""
 if [ "$CL" = "$CHOME/.claude" ] && [ "$VS_C" = "$CL/vajra" ] && [ "$SKILL" = "$CL/skills/vajra" ] \
-   && [[ "$DCTL" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
+   && [[ "$DCTL" == "$CHOME/Library/"* ]] && [[ "$DDATA" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
 classify() { local was=0; shopt -q nocasematch && was=1; shopt -s nocasematch; classify_ "$1"; [ "$was" = 1 ] || shopt -u nocasematch; return 0; }
 classify_() { # canonical path -> PKIND = key|core|ancestor|""
   local p="$1" r rest
@@ -224,6 +372,11 @@ classify_() { # canonical path -> PKIND = key|core|ancestor|""
       */*) ;;
       *.jsonl|*.log) PKIND=core; return 0 ;;
     esac
+    if [[ "$rest" == campaigns/?* ]]; then
+      local cs="${rest#campaigns/}"; cs="${cs%%/*}"
+      # classify runs with nocasematch on, so DELIVER-x (the same folder on a case-insensitive disk) matches too.
+      if [ -n "$cs" ] && core_slug "$cs"; then PKIND=core; return 0; fi
+    fi
     if [[ "$rest" == campaigns/*/checkpoints || "$rest" == campaigns/*/checkpoints/* ]]; then PKIND=core; return 0; fi
     if [[ "$rest" == campaigns/*/tasks.json* && "${rest#campaigns/*/}" != */* ]]; then PKIND=core; return 0; fi
     # vajra_tasks.py's lock directory (mkdir-based): only the script takes it.
@@ -258,6 +411,102 @@ key_anc() { [ "$1" = / ] || inside "$KEY" "$1"; }
 
 same_dir() { # path dir -> 0 if they are the same directory (case-insensitive)
   inside "$1" "$2" && inside "$2" "$1"
+}
+# ADR-16 (#148 review N1-N3): one rule for every word the analysis cannot resolve to
+# one path. A word is ambiguous when it holds a glob or brace character (* ? [ {), an
+# unresolved expansion ($, backticks) or a non-ASCII byte (APFS folds U+212A KELVIN
+# SIGN to k and U+017F LONG S to s, and is normalization-insensitive). Its literal
+# directory is the text before the first such character, up to the last "/" (none:
+# the cwd). If that directory is HOME or above it, or is or holds a protected path
+# (classify: core or ancestor), the word could resolve into <data> or another
+# protected root, so a write through it is refused. Mode "uni" checks only non-ASCII
+# (the file tools never expand globs or variables).
+AMB_D="" AMB_R=0
+amb_reach() { # canonical dir -> 0 if an ambiguous name there could reach a protected path
+  [ "$1" = "$AMB_D" ] && return $AMB_R
+  AMB_D="$1"; AMB_R=1
+  # "/" holds everything (inside would compare against "//*").
+  if [ "$1" = / ] || inside "$CHOME" "$1"; then AMB_R=0; else classify "$1"; [ -n "$PKIND" ] && AMB_R=0; fi
+  return $AMB_R
+}
+amb_check() { # word base mode(all|uni|cd|read) -> block if ambiguous and it could reach a protected path
+  # cd: mark the cwd unknown instead of blocking; read: return 0 (reach) / 1, never block (pipe taint, #148 F3).
+  local w="$1" lit l2 d rest
+  if [ "$3" = uni ]; then
+    case "$w" in *[![:ascii:]]*) ;; *) return 1 ;; esac
+    lit="${w%%[![:ascii:]]*}"
+  else
+    case "$w" in *[\*\?\[\{\$\`]*|*[![:ascii:]]*) ;; *) return 1 ;; esac
+    case "$w" in
+      */*|"~"*) lit="${w%%[\*\?\[\{\$\`]*}"; l2="${w%%[![:ascii:]]*}"; [ "${#l2}" -lt "${#lit}" ] && lit="$l2" ;;
+      *) lit="" ;; # no "/": the literal dir is the cwd (the common case in a long interpreter string; amb_reach caches it)
+    esac
+  fi
+  case "$lit" in
+    */*) d="${lit%/*}"; [ -n "$d" ] || d=/ ;;
+    "~"*) d="$lit" ;;
+    *) d="" ;;
+  esac
+  # #148 F1: what follows the first ambiguous character can climb out of the literal dir: a ".." after it, a second
+  # ambiguous segment, or (when this command assigns a value that could climb or point near a protected root,
+  # AMB_DYN) any expansion. The literal dir then bounds nothing, so the word is judged from "/".
+  rest="${w:${#lit}}"
+  case "$rest" in
+    *..*) d=/ ;;
+    */*[\*\?\[\{\$\`]*) [ "$3" = uni ] || d=/ ;;
+    *[\$\`]*) [ "$3" != uni ] && [ "$AMB_DYN" = 1 ] && d=/ ;;
+  esac
+  if [ -z "$d" ]; then d="$2"; elif [ "$d" != / ]; then canon "$d" "$2"; d="$CANON"; fi
+  amb_reach "$d" || return 1
+  case "$3" in
+    cd) CWD_UNK=1; return 0 ;;
+    read) return 0 ;;
+  esac
+  block "a glob, brace, variable or non-ASCII name under $d could resolve into a protected Vajra path (such as the Vajra Desktop app data dir); write the full path literally"
+}
+# Set once per command by amb_dyn_scan: 1 if it assigns a variable a value that could climb (..), is computed ($(...),
+# backticks) or whose literal dir could reach a protected path, or fills one by for/select/read/mapfile/printf -v.
+AMB_DYN=0
+# 1 after a cd/pushd whose target is ambiguous near a protected path: the real cwd is unknown, so a later relative
+# write target, or any non-reader, in the same command is refused (#148 F1/F5).
+CWD_UNK=0
+amb_val_dyn() { # value -> AMB_DYN=1 if it could climb, is computed, or its literal dir could reach a protected path
+  local v="$1" lit d
+  case "$v" in *..*|*'$('*|*\`*) AMB_DYN=1; return 0 ;; esac
+  case "$v" in /*|"~"*) ;; *) return 0 ;; esac
+  lit="${v%%[\*\?\[\{\$\`]*}"
+  case "$lit" in */*) d="${lit%/*}"; [ -n "$d" ] || d=/ ;; *) d="$lit" ;; esac
+  canon "$d" "$CWD"
+  amb_reach "$CANON" && AMB_DYN=1
+  return 0
+}
+amb_dyn_scan() { # tokens...
+  # read/mapfile/readarray/getopts count only as a segment's command word, and -v only as an option of
+  # printf/declare/typeset/local/read (#148 review: grep -v or cp -v is not an assignment).
+  local t f=0 first=1 cw=""
+  AMB_DYN=0
+  for t in "$@"; do
+    case "$t" in ";"|PIPE) f=0; first=1; cw=""; continue ;; esac
+    if [ "$first" = 1 ]; then
+      case "$t" in
+        do|then|else|elif|if|while|until|"!"|"{"|time) continue ;; # keywords: the command word comes next
+        ?*=*) amb_val_dyn "${t#*=}"; [ "$AMB_DYN" = 1 ] && return 0; continue ;; # VAR=value prefix
+      esac
+      first=0; cw="${t##*/}"
+      case "$cw" in
+        read|mapfile|readarray|getopts) AMB_DYN=1; return 0 ;;
+        for|select) f=1 ;;
+      esac
+      continue
+    fi
+    if [ "$f" = 1 ]; then [ "$t" = in ] && f=2; continue; fi
+    if [ "$f" = 2 ]; then amb_val_dyn "$t"; [ "$AMB_DYN" = 1 ] && return 0; continue; fi
+    case "$t" in
+      -v|-v?*) case "$cw" in printf|declare|typeset|local|read) AMB_DYN=1; return 0 ;; esac ;;
+      ?*=*) amb_val_dyn "${t#*=}"; [ "$AMB_DYN" = 1 ] && return 0 ;;
+    esac
+  done
+  return 0
 }
 # A Glob pattern can reach the state directory's file names (the HMAC key, the audit log) however it is written. Every
 # pattern goes through ONE normalizer, and a pattern whose meaning cannot be decided is denied:
@@ -463,6 +712,7 @@ case "$TOOL" in
   Write|Edit|MultiEdit|NotebookEdit)
     for f in "$P1" "$P2" "$P3"; do
       [ -n "$f" ] || continue
+      amb_check "$f" "$CWD" uni || true  # it blocks itself; 1 only means "not ambiguous"
       canon "$f" "$CWD"
       classify "$CANON"
       case "$PKIND" in
@@ -732,10 +982,10 @@ END {
   exit 0
 }
 '
-SCAN="$CMD"
+SCAN="$CMD"; RAW_FALLBACK=0
 case "$CMD" in
   *"<<"*|*"'"*|*'"'*)
-    if PRE_OUT="$(printf '%s' "$CMD" | LC_ALL=C awk "$PRE_AWK" 2>/dev/null)"; then SCAN="$PRE_OUT"; fi
+    if PRE_OUT="$(printf '%s' "$CMD" | LC_ALL=C awk "$PRE_AWK" 2>/dev/null)"; then SCAN="$PRE_OUT"; else RAW_FALLBACK=1; fi
     ;;
 esac
 
@@ -770,6 +1020,7 @@ END {
   T = " " N " "
   gsub(/\$\(/, " ; ", T); gsub(/`/, " ; ", T)
   gsub(/\(/, " ; ", T); gsub(/\)/, " ; ", T); gsub(/,/, " ", T)
+  gsub(/>\|/, " > ", T)
   gsub(/>&/, " __DUP__ ", T); gsub(/&>/, " > ", T)
   gsub(/&/, " ; ", T); gsub(/;/, " ; ", T); gsub(/\|/, " PIPE ", T)
   gsub(/>/, " > ", T); gsub(/</, " < ", T)
@@ -814,6 +1065,13 @@ re_escape() { # ERE-escape -> RE_OUT
 re_escape "$HOME"; HOME_RE="$RE_OUT"
 
 # --- Whole-command signatures --------------------------------------------
+# "Application Support" is spelled plainly when the raw command has the two words joined by a space, or by a
+# backslash-escaped space (the form tab completion writes). Either way N holds a real space, and the second pass
+# joins it and judges the real path. (The old pattern was a space followed by anything, so it also accepted text
+# between the words; that is kept, and the path analysis still runs on every form.)
+appsup_plain() {
+  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* || "$CMD" == *[Aa]pplication\\\ [Ss]upport* ]]
+}
 shopt -s nocasematch
 [[ "$N" == *".hmac-key"* ]] && block "the Vajra HMAC key is never a command target"
 # Checked on the raw command too: even a heredoc body may not set it.
@@ -822,7 +1080,38 @@ shopt -s nocasematch
 [[ "$N" == *VAJRA_OPERATOR_SIGN* || "$CMD" == *VAJRA_OPERATOR_SIGN* ]] && block "VAJRA_OPERATOR_SIGN is for the operator re-signing the manifest, not the agent"
 if [[ "$CMD" == *vajradesktop/control* ]]; then
   [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
-  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
+  appsup_plain || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
+fi
+# ADR-16: the same for the app data dir <data> and every path below it, so a
+# spelling the path analysis cannot resolve never hides a write there. A command
+# names <data> path-wise when, in the raw text or with quotes and backslashes
+# removed (Vajra''Desktop, "Vajra"Desktop, Vajra\Desktop), it has /VajraDesktop at
+# a word end, VajraDesktop/ or VajraDesktop\. Such a command:
+#   * must spell "Application Support" plainly (not ${IFS}, $'\040', ...);
+#   * may use no shell expansion but $HOME/${HOME}: a variable, $(...), backticks,
+#     $'...' or ${...} could hold or build the path (D=<data>; rm -rf "$D").
+# A command with an "Application ... Support/Vajra..." path (other than VajraWorktrees,
+# the writable <work>) gets the expansion rule too, so Vajra$V is refused as well.
+# bash 3.2 pattern substitution is quadratic (a 4 KB command took ~600 ms): tr strips linearly.
+DRAW="$CMD"
+case "$CMD" in *[\"\'\\]*) DRAW="$(printf '%s' "$CMD" | LC_ALL=C tr -d "\"'\\\\")" ;; esac
+DNAMED=0 DAPP=0
+for v in "$CMD" "$DRAW"; do
+  # Every form below holds "vajradesktop" or "support/vajra"; skip the costlier patterns otherwise.
+  [[ "$v" == *vajradesktop* || "$v" == *support/vajra* ]] || continue
+  case "$v" in
+    */vajradesktop|*/vajradesktop[!a-z0-9_.-]*|*vajradesktop/*|*vajradesktop\\*) DNAMED=1 ;;
+  esac
+  case "$v" in *application*support/vajra|*application*support/vajra[!w]*) DAPP=1 ;; esac
+done
+if [ "$DNAMED" = 1 ]; then
+  appsup_plain || block "the Vajra Desktop app data dir is named by an unusual spelling; write the path plainly"
+fi
+if [ "$DNAMED" = 1 ] || [ "$DAPP" = 1 ]; then
+  DX="${CMD//'${HOME}'/}"
+  [[ "$DX" == *'$HOME'[A-Za-z0-9_]* ]] && block "a command that names the Vajra Desktop app data dir may not use shell variables; write the path literally (\$HOME is fine)"
+  DX="${DX//'$HOME'/}"
+  [[ "$DX" == *'$'* || "$DX" == *'`'* ]] && block "a command that names the Vajra Desktop app data dir may not use shell variables or substitutions; write the path literally (\$HOME is fine)"
 fi
 shopt -u nocasematch
 
@@ -887,6 +1176,7 @@ if [ "$BIGNORM" = 0 ]; then
 T=" $N "
 T="${T//'$('/ ; }"; T="${T//\`/ ; }"
 T="${T//(/ ; }"; T="${T//)/ ; }"; T="${T//,/ }"
+T="${T//>|/ > }"  # >| (noclobber override) is a plain redirect, never a pipe
 T="${T//>&/ __DUP__ }"; T="${T//&>/ > }"
 T="${T//&/ ; }"; T="${T//;/ ; }"; T="${T//|/ PIPE }"
 T="${T//>/ > }"; T="${T//</ < }"
@@ -910,6 +1200,328 @@ NOT_SCRIPTS=" install.sh install-skills.sh generate-manifest.sh "
 # Vajra scripts whose arguments are data (titles, bodies, queries), not paths
 # they write: their text may name protected paths. Output flags stay checked.
 DATA_SCRIPTS=" vajra_kb.py vajra_tasks.py vajra-campaign.sh "
+
+# The core slugs (CORE_SLUGS, core_slugs_load) are defined above classify, which also uses them (#194 M1).
+core_slug_block() { block "campaign $1 is run by Vajra Desktop: only the app writes it, so agents may read it (show, list, verify, status) but never change it"; }
+# bhishma #194 (on e512745a): every slug a core run may have, read with no fork (both forms of each run folder's name,
+# and every campaign_slug its seats file records), so a command that names one is judged even when it never spells
+# either script's name (a renamed copy, a name built by a glob or by code). A superset of CORE_SLUGS: it only triggers.
+CORE_QUICK=" "
+core_slugs_quick() {
+  local ng=0 base d f txt re='"campaign_slug"[[:space:]]*:[[:space:]]*"([a-z0-9][a-z0-9-]*)"'
+  shopt -q nullglob && ng=1
+  shopt -s nullglob
+  for base in "${CORE_DATA[@]}"; do
+    [ -d "$base/control/lead" ] || continue
+    for d in "$base/control/lead"/*/; do
+      d="${d%/}"; CORE_QUICK+="deliver-${d##*/} deliver-${d##*/}-og "
+      f="$d/seats.json"; txt=""
+      if [ -f "$f" ] && [ -r "$f" ]; then IFS= read -r -d '' txt < "$f" || :; fi
+      while [[ "$txt" =~ $re ]]; do CORE_QUICK+="${BASH_REMATCH[1]} "; txt="${txt#*"${BASH_REMATCH[0]}"}"; done
+    done
+  done
+  [ "$ng" = 1 ] || shopt -u nullglob
+  return 0
+}
+# 0 when the command has a shell expansion outside single quotes: $ (but $PWD and $HOME), a backtick, or (unquoted)
+# a brace or glob character. Single-quoted text is literal, which is how the CLI workflow quotes every value.
+# With $1 = strict (#194 H2: a nested shell or eval runs its quoted body as code), single quotes protect nothing.
+core_expands() {
+  printf '%s' "$SCAN" | LC_ALL=C awk -v strict="${1:-}" '
+  function okvar(s, i) { return substr(s, i + 1, 7) ~ /^(PWD|HOME)([^A-Za-z0-9_]|$)/ || substr(s, i + 1, 7) ~ /^\{(PWD|HOME)\}/ }
+  BEGIN { RS = "\001"; sq = sprintf("%c", 39) }
+  {
+    s = $0; n = length(s); q = 0
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (strict != "" && (c == sq || c == "\"")) continue
+      if (q == 1) { if (c == sq) q = 0; continue }
+      if (c == "\\") { i++; continue }
+      if (c == "`") exit 0
+      if (c == "$") { if (okvar(s, i)) continue; exit 0 }
+      if (q == 2) { if (c == "\"") q = 0; continue }
+      if (c == sq) { q = 1; continue }
+      if (c == "\"") { q = 2; continue }
+      if (index("{}*?[]", c)) exit 0
+    }
+    exit 1
+  }'
+}
+# The guard's word split for core_campaign_guard: every separator becomes " ; " and every redirect its own word.
+core_words() {
+  local X="${1//&>/ > }"; X="${X//>&/ > }"
+  X="${X//;/ ; }"; X="${X//|/ ; }"; X="${X//&/ ; }"; X="${X//(/ ; }"; X="${X//)/ ; }"
+  # bhishma #194: an opening backtick leaves a `$` word, as `$(` does (its `(` is the separator), so both forms of a
+  # substitution are judged the same; a closing one is only a separator.
+  while [[ "$X" == *\`* ]]; do X="${X/\`/ \$ ; }"; [[ "$X" == *\`* ]] && X="${X/\`/ ; }"; done
+  X="${X//>/ > }"; X="${X//</ < }"
+  printf '%s' "$X"
+}
+# The separator character each `;` word of core_words came from, in order (bhishma #194: a pipe into an interpreter
+# feeds it arguments the command doesn't show). Every separator character makes exactly one `;` word.
+core_seps() {
+  local S="${1//&>/ > }" c m out=""
+  S="${S//>&/ > }"
+  for ((m = 0; m < ${#S}; m++)); do
+    c="${S:m:1}"
+    case "$c" in ";"|"|"|"&"|"("|")"|"\`") out="$out$c" ;; esac
+  done
+  printf '%s' "$out"
+}
+# 0 when word $1 expands: a $ (but $PWD and $HOME), a backtick, or a brace or glob character, unless every place it
+# appears in the raw command is inside quotes, where a glob stays literal (and a quoted $ is one argument; the
+# operand rule judges that). Uses SCAN, which keeps the quotes.
+core_word_expands() {
+  local w="$1" v
+  v="${w//\$\{PWD\}/}"; v="${v//\$\{HOME\}/}"; v="${v//\$PWD/}"; v="${v//\$HOME/}"
+  case "$v" in *[\$\`\{\}\*\?\[\]]*) ;; *) return 1 ;; esac
+  [ "${2:-}" = raw ] && return 0                         # the operand: quoted or not, its name isn't the text's
+  core_all_quoted "$w" && return 1
+  return 0
+}
+# 0 when every occurrence of $1 in SCAN is a whole double- or single-quoted word ("$f", 'test_*').
+core_all_quoted() {
+  local w="$1" s="$SCAN" r all q1 q2 n1 n2
+  [ -n "$w" ] || return 1
+  r="${s//"$w"/}"; all=$(( (${#s} - ${#r}) / ${#w} ))
+  q1="\"$w\""; q2="'$w'"
+  r="${s//"$q1"/}"; n1=$(( (${#s} - ${#r}) / ${#q1} ))
+  r="${s//"$q2"/}"; n2=$(( (${#s} - ${#r}) / ${#q2} ))
+  [ "$all" -gt 0 ] && [ $((n1 + n2)) -eq "$all" ]
+}
+# bhishma #194 M1: 0 when the interpreter operand at word $1 (W/WO index) expands and could reach a core campaign.
+# Known over-block (bhishma #194 Low, accepted): an operand built by a substitution, such as node $(npm bin)/x.js, is
+# refused quoted or not while a core campaign runs, because its name is whatever the substitution prints.
+core_hidden_operand() {
+  local k="$1" to="${WO[$1]}" m s n
+  core_word_expands "$to" raw || return 1
+  # bhishma #194 (on 15fe1ff, H3): arguments fed by xargs, parallel or find -exec before the interpreter, a stdin
+  # redirect after it, or a pipe into its segment never show in the command text. The interpreter is word $i.
+  for ((m = i - 1; m >= 0; m--)); do
+    [ "${W[$m]}" = ";" ] && break
+    case "${W[$m]##*/}" in xargs|gxargs|parallel|-exec|-execdir|-ok|-okdir) return 0 ;; esac
+  done
+  if [ "$m" -ge 0 ]; then
+    n=0; for ((s = 0; s <= m; s++)); do [ "${W[$s]}" = ";" ] && n=$((n + 1)); done
+    [ "${SEPS:$((n - 1)):1}" = "|" ] && return 0
+  fi
+  for ((m = k + 1; m < nw; m++)); do
+    [ "${W[$m]}" = ";" ] && break
+    [ "${W[$m]}" = "<" ] && return 0
+  done
+  core_all_quoted "$to" || return 0                       # unquoted: it may split into a script and its arguments
+  for ((m = k + 1; m < nw; m++)); do
+    [ "${W[$m]}" = ";" ] && break
+    core_word_expands "${WO[$m]}" && return 0             # an argument the command text doesn't show
+  done
+  [[ "$lc" == *campaign* || "$lc" == *deliver-* ]] && return 0
+  local NS; NS="$(printf '%s' "$lc" | tr -c 'a-z0-9-' '-' | tr -s '-')"
+  for s in $CORE_SLUGS; do [[ "$NS" == *"$s"* ]] && return 0; done
+  core_ptr_reach && return 0
+  return 1
+}
+# 0 when a command with no slug may run where the app's own campaign is the active one: the core's active pointer
+# exists, and the cwd is in the app data dir or the command changes directory or git repository.
+core_ptr_reach() {
+  [ "$CORE_PTR" = 1 ] || return 1
+  local d inapp=0 NS
+  canon "${CWD_IN:-/}" /
+  for d in "${CORE_DATA[@]}"; do inside "$CANON" "$d" && inapp=1; done
+  NS="$(printf '%s' "$lc" | tr -c 'a-z0-9-' '-' | tr -s '-')"
+  [ "$inapp" = 1 ] || [[ "$NS" == *vajradesktop* || "$NS" == *git-dir* || "$NS" == *git-common-dir* || "$NS" == *git-work-tree* ]] \
+    || [[ " $X " == *" cd "* || " $X " == *" pushd "* || " $X " == *" -c "* || " $X " == *" --chdir"* ]]
+}
+# #194 (bhishma F1-F4, claude thread): one check over the whole command, before it is split into segments.
+# Either script is found by file name wherever its copy lives, nested shells and xargs included. A use counts as a
+# read only when the word after it (redirects skipped) is a literal read subcommand; anything else is a write.
+# While a core run exists, a write is refused when the pre-pass could not model the command, when it has a shell
+# expansion, or when a core slug appears anywhere in it (also as vajra-campaign.sh create would sanitize it).
+core_campaign_guard() {
+  local X lc hit=0 was=0
+  # Fork-free first test (most calls stop here); any case, as APFS is case-insensitive.
+  shopt -q nocasematch && was=1
+  shopt -s nocasematch
+  # Wide on purpose (#194 H1): a name built by a glob or variable may not spell the script out.
+  [[ "$N" == *vajra* || "$N" == *campaign* || "$N" == *task* || "$N" == *scripts* || "$N" == *.claude* ]] && hit=1
+  # H1-b, by position: an interpreter whose script operand expands, whatever its letters.
+  # Any later word of the same segment that expands (bhishma #194 M3: an option value such as -X dev comes first).
+  local RE_IOP='(^|[ ;|&(])(python[0-9.]*|perl|ruby|node|bash|sh|zsh|dash|ksh)( +[^ ;|&]+)* +[^ ;|&]*[][$*?{}]'
+  [[ "$N" =~ $RE_IOP ]] && hit=1
+  # bhishma #194 (on e512745a): the slug is a trigger too, so a renamed copy, a globbed name or a name built by code
+  # that closes a core campaign is judged. deliver- covers the core's own names (and a run folder that can't be read);
+  # any other slug a seats file records (a resumed campaign) is matched as vajra-campaign.sh create would sanitize it.
+  [[ "$N" == *deliver* ]] && hit=1
+  if [ "$hit" = 0 ]; then
+    core_slugs_quick
+    if [ "$CORE_QUICK" != " " ]; then
+      local q="${N//[^a-zA-Z0-9-]/-}" qs
+      while [[ "$q" == *--* ]]; do q="${q//--/-}"; done
+      for qs in $CORE_QUICK; do [[ "$q" == *"$qs"* ]] && { hit=1; break; }; done
+    fi
+  fi
+  [ "$was" = 1 ] || shopt -u nocasematch
+  [ "$hit" = 1 ] || return 0
+  lc="$(printf '%s' "$N" | tr '[:upper:]' '[:lower:]')"
+  core_slugs_load
+  [ "$CORE_ANY" = 1 ] || [ "$CORE_UNKNOWN" = 1 ] || return 0
+  X="$(core_words "$lc")"
+  # The same words in their own case (bhishma #194 M3): options are matched as typed (python -X and -W take a value,
+  # bash -O does, -E is a python flag but perl code). Lowercasing changes no spacing, so the indexes line up.
+  local XO; XO="$(core_words "$N")"
+  local W=() WO=() i j nw t to sub write=0 cwrite=0 name nested=0 feeder=0 lit
+  local why="a write through vajra-campaign.sh or vajra_tasks.py while Vajra Desktop runs a campaign"
+  local SEPS; SEPS="$(core_seps "$lc")"
+  set -f; W=( $X ); WO=( $XO ); set +f
+  nw=${#W[@]}
+  [ "${#WO[@]}" = "$nw" ] || block "$why: the guard could not read this command's words"
+  local nsemi=0; for ((i = 0; i < nw; i++)); do [ "${W[$i]}" = ";" ] && nsemi=$((nsemi + 1)); done
+  [ "$nsemi" = "${#SEPS}" ] || block "$why: the guard could not read this command's separators"
+  for ((i = 0; i < nw; i++)); do
+    name="${W[$i]##*/}"
+    # H1: a command word that may expand to either script's name is refused before any write is looked for. Only in
+    # command position (#194 LOW: a for-list of test files isn't run by its name; an interpreter operand is H1-b's).
+    # The first word is in command position (bhishma #194 M2: index -1 is an error in bash 3.2, the last word in 4.3+).
+    local prev=";"
+    [ "$i" -gt 0 ] && prev="${W[$((i - 1))]}"
+    case "$prev" in ";"|exec|command|env|nohup|time|nice|sudo|then|do|else) ;; *) prev="" ;; esac
+    # bhishma #194: a `$( )` or backtick substitution in command position builds a name the command doesn't show.
+    [ -n "$prev" ] && [ "${W[$i]}" = "\$" ] \
+      && block "while Vajra Desktop runs a campaign, a command name may not come from a \$( ) or backtick substitution: write the command literally"
+    [ -n "$prev" ] && case "$name" in
+      *[\$\{\}\*\?\[\]]*)
+        lit="${name//[\$\{\}\*\?\[\]]/}"
+        # As a pattern it matches a script's name; or its fixed letters hint at one and it looks like a script path or
+        # file name (a slash, or ending in py or sh, as $'..' leaves .py once its escape is dropped).
+        if [[ vajra-campaign.sh == $name || vajra_tasks.py == $name ]] \
+           || { [[ "$lit" == *vajra* || "$lit" == *campaign* || "$lit" == *task* || "${W[$i]}" == *scripts/* || "${W[$i]}" == *.claude/* ]] \
+                && [[ "${W[$i]}" == */* || "$lit" == *py || "$lit" == *sh ]]; }; then
+          block "while Vajra Desktop runs a campaign, name vajra-campaign.sh and vajra_tasks.py literally (no globs, variables or \$'...'): ${W[$i]}"
+        fi ;;
+    esac
+    # H1-b: an interpreter's script operand (the first word after its options) is judged by position, whatever its
+    # letters (cd scripts; python3 $v). bhishma #194 M1: an operand that expands is refused only when it could reach a
+    # core campaign: it isn't quoted (it may split into more arguments), a later argument expands, the command names a
+    # core slug, deliver- or campaign, or the app's active pointer is in reach. A quoted one is one argument, and with
+    # every later argument literal the script's arguments are what the command shows. $PWD and $HOME are literal.
+    case "$name" in
+      sh|bash|zsh|dash|ksh|python|python2|python3|python3.[0-9]|python3.[0-9][0-9]|perl|ruby|node)
+        local ik=py; case "$name" in sh|bash|zsh|dash|ksh) ik=sh ;; perl) ik=pl ;; ruby) ik=rb ;; node) ik=js ;; esac
+        for ((j = i + 1; j < nw; j++)); do
+          t="${W[$j]}"; to="${WO[$j]}"
+          case "$t" in ">"|"<") j=$((j + 1)); continue ;; ";") break ;; esac
+          # Inline code, a module or stdin: no script operand (H2-b judges a shell's body). Long options are flags.
+          case "$ik:$to" in
+            sh:--rcfile|sh:--init-file) j=$((j + 1)); continue ;;
+            sh:--*) continue ;;
+            sh:-*c*|sh:-*s*) break ;;
+            sh:-o|sh:+o|sh:-O|sh:+O) j=$((j + 1)); continue ;;
+            sh:-*|sh:+*) continue ;;
+            py:-c|py:-m|py:-*c|py:-*m) break ;;
+            py:-W|py:-X|py:--check-hash-based-pycs) j=$((j + 1)); continue ;;
+            pl:-e|pl:-E|pl:-*e|pl:-*E) break ;;
+            rb:-e|rb:-*e) break ;;
+            rb:-I|rb:-r) j=$((j + 1)); continue ;;
+            js:-e|js:-p|js:--eval|js:--print|js:-*e|js:-*p) break ;;
+            js:-r|js:--require) j=$((j + 1)); continue ;;
+            *:-*) continue ;;
+          esac
+          core_hidden_operand "$j" && block "while Vajra Desktop runs a campaign, an interpreter's script that a variable or glob names must be quoted (\"\$f\"), with literal arguments, and the command may not name a campaign: $to"
+          break
+        done ;;
+    esac
+    # H2: a nested shell or eval runs its quoted body as code. H2-b: -c, -s or a stdin redirect anywhere among the
+    # shell's options, and the dot builtin and trap, are the same. H3: xargs, parallel and find -exec add arguments
+    # the command text never shows.
+    case "$name" in
+      sh|bash|zsh|dash|ksh)
+        for ((j = i + 1; j < nw; j++)); do
+          t="${WO[$j]}"
+          case "$t" in
+            --rcfile|--init-file) j=$((j + 1)) ;;   # long options are flags (bhishma #194 M3: --norc isn't -c)
+            --*) ;;
+            -*c*|-*s*|"<") nested=1; break ;;
+            -o|+o|-O|+O) j=$((j + 1)) ;;
+            -*|+*) ;;
+            ";") nested=1; break ;;               # a shell with no script reads its commands from stdin
+            *) break ;;
+          esac
+        done
+        [ "$j" -ge "$nw" ] && nested=1 ;;           # a bare shell reads its commands from stdin
+      eval|source|.|trap) nested=1 ;;
+      xargs|parallel) feeder=1 ;;
+      -exec|-execdir|-ok|-okdir) feeder=1 ;;
+    esac
+    [ "$name" = vajra-campaign.sh ] || [ "$name" = vajra_tasks.py ] || continue
+    sub=""
+    for ((j = i + 1; j < nw; j++)); do
+      t="${W[$j]}"
+      case "$t" in
+        ">"|"<") j=$((j + 1)); while [ "$j" -lt "$nw" ] && { [ "${W[$j]}" = ">" ] || [ "${W[$j]}" = "<" ]; }; do j=$((j + 1)); done; continue ;;
+        [0-9]|[0-9][0-9]) case "${W[$((j + 1))]:-}" in ">"|"<") continue ;; esac ;;
+      esac
+      sub="$t"; break
+    done
+    if [ "$name" = vajra-campaign.sh ]; then
+      case "$sub" in list|show|active|verify|verify-digest) continue ;; esac
+      cwrite=1
+    else
+      case "$sub" in validate|ready|status|list|waves|graph|check-evidence) continue ;; esac
+    fi
+    write=1
+  done
+  local NS s
+  NS="$(printf '%s' "$lc" | tr -c 'a-z0-9-' '-' | tr -s '-')"
+  # bhishma #194 (on e512745a): a command that names a core slug may only read it. Every command in it must be a plain
+  # reader, a git read, or vajra-campaign.sh or vajra_tasks.py by its own name (run directly or as an interpreter's
+  # first operand), whose subcommand the loop above judges. Anything else (a renamed copy, a globbed or built name, an
+  # interpreter running code, a nested shell, xargs or find) could run a copy that writes it.
+  local named=""
+  for s in $CORE_SLUGS; do [[ "$NS" == *"$s"* ]] && { named="$s"; break; }; done
+  [ -z "$named" ] && [ "$CORE_UNKNOWN" = 1 ] && [[ "$NS" == *deliver-* ]] && named="a deliver- campaign"
+  if [ -n "$named" ]; then
+    local rwhy="while Vajra Desktop runs campaign $named, a command that names it may only read it: run vajra-campaign.sh or vajra_tasks.py by their own names with a read subcommand (show, list, verify, status), or a plain reader such as cat, grep or ls"
+    [ "$RAW_FALLBACK" = 0 ] || block "$rwhy (and with plain quoting the guard can read)"
+    local cmdpos=1 cw ok
+    for ((i = 0; i < nw; i++)); do
+      t="${W[$i]}"
+      [ "$t" = "\$" ] && block "$rwhy (no \$( ) or backtick substitutions)"
+      if [ "$t" = ";" ]; then cmdpos=1; continue; fi
+      [ "$cmdpos" = 1 ] || continue
+      case "$t" in
+        ">"|"<") i=$((i + 1)); continue ;;
+        [0-9]|[0-9][0-9]) case "${W[$((i + 1))]:-}" in ">"|"<") continue ;; esac ;;
+        if|then|do|else|elif|while|until|"!"|"{"|"}"|"("|")"|fi|done|exec|command|nohup|time|nice|sudo|env) continue ;;
+        -*) [ "$i" -gt 0 ] && case "${W[$((i - 1))]}" in env|nice|sudo|time|command) continue ;; esac ;;
+        [a-z_]*=*) [[ "${t%%=*}" =~ ^[a-z_][a-z0-9_]*$ ]] && continue ;;
+      esac
+      cmdpos=0; cw="${t##*/}"; ok=0
+      case "$cw" in
+        vajra-campaign.sh|vajra_tasks.py) ok=1 ;;
+        git) case " status log diff show rev-parse ls-files ls-tree cat-file blame describe shortlog " in *" ${W[$((i + 1))]:-} "*) ok=1 ;; esac ;;
+        sh|bash|zsh|dash|ksh|python|python2|python3|python3.[0-9]|python3.[0-9][0-9])
+          case "${W[$((i + 1))]:-}" in */vajra-campaign.sh|vajra-campaign.sh|*/vajra_tasks.py|vajra_tasks.py) ok=1 ;; esac ;;
+        *) [[ "$READERS" == *" $cw "* ]] && ok=1 ;;
+      esac
+      [ "$ok" = 1 ] || block "$rwhy: ${t}"
+    done
+  fi
+  [ "$write" = 1 ] || return 0
+  [ "$RAW_FALLBACK" = 0 ] || block "$why must use plain quoting the guard can read (no \$( ), backticks, \$'...' or unclosed quotes)"
+  [ "$feeder" = 0 ] || block "$why must name its arguments in the command itself, not through xargs, parallel or find -exec"
+  if [ "$nested" = 1 ]; then
+    core_expands strict && block "$why inside bash -c, sh -c or eval must have no variables (only \$PWD and \$HOME), substitutions, braces or globs, even in quotes"
+  fi
+  core_expands && block "$why must name everything literally: no variables (only \$PWD and \$HOME), substitutions, braces or globs outside single quotes"
+  for s in $CORE_SLUGS; do [[ "$NS" == *"$s"* ]] && core_slug_block "$s"; done
+  [ "$CORE_UNKNOWN" = 1 ] && [[ "$NS" == *deliver-* ]] && block "$why can't name a deliver- campaign: the app's run folders can't be read, so any of them may be the app's"
+  # No slug named: vajra-campaign.sh writes the active campaign of the cwd's repository. Only the core's record repo,
+  # inside the app data dir, has a pointer that names a core slug: refuse a campaign write that may run there.
+  if [ "$cwrite" = 1 ] && core_ptr_reach; then
+    block "$why may not change directory or git repository: the app's own campaign is the active one there"
+  fi
+  return 0
+}
+core_campaign_guard
 GIT_READ=" status log diff show rev-parse ls-files ls-tree cat-file blame grep describe shortlog reflog remote branch tag config "
 SYSROOTS=" /etc /usr /var /bin /sbin /lib /boot /dev /sys /opt /root /home /System /Library /Applications /private /private/etc /private/var /Users /Volumes /usr/local /usr/bin /usr/lib "
 
@@ -1095,11 +1707,11 @@ copy_layout() {
 # env -C/--chdir moves the cwd for one command only (Sol r4485195331): run the
 # segment with that cwd, then restore it unless the segment was a cd/pushd.
 eval_segment() {
-  local saved="$SEGCWD"
+  local saved="$SEGCWD" saved_unk="$CWD_UNK"
   SEG_CD=0
   eval_segment_body
   local rc=$?
-  [ "$SEG_CD" = 1 ] || SEGCWD="$saved"
+  [ "$SEG_CD" = 1 ] || { SEGCWD="$saved"; CWD_UNK="$saved_unk"; }
   return $rc
 }
 
@@ -1119,10 +1731,10 @@ eval_segment_body() { # uses SEG array
         while [ "$i" -lt "$n" ]; do
           case "${SEG[$i]}" in
             -C|--chdir)
-              [ $((i + 1)) -lt "$n" ] && { canon "${SEG[$((i + 1))]}" "$SEGCWD"; SEGCWD="$CANON"; }
+              [ $((i + 1)) -lt "$n" ] && { amb_check "${SEG[$((i + 1))]}" "$SEGCWD" all; canon "${SEG[$((i + 1))]}" "$SEGCWD"; SEGCWD="$CANON"; }
               i=$((i + 2)) ;;
-            --chdir=*) canon "${SEG[$i]#--chdir=}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
-            -C?*) canon "${SEG[$i]#-C}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            --chdir=*) amb_check "${SEG[$i]#--chdir=}" "$SEGCWD" all; canon "${SEG[$i]#--chdir=}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            -C?*) amb_check "${SEG[$i]#-C}" "$SEGCWD" all; canon "${SEG[$i]#-C}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
             -u|-P|--unset) i=$((i + 2)) ;;
             -S|--split-string) i=$((i + 1)); break ;;
             --) i=$((i + 1)); break ;;
@@ -1143,6 +1755,14 @@ eval_segment_body() { # uses SEG array
   # cd / pushd: move the effective cwd for later segments.
   if [ "$wb" = cd ] || [ "$wb" = pushd ]; then
     SEG_CD=1
+    # A cd target the analysis cannot resolve to one dir near a protected path leaves the real cwd unknown
+    # (CWD_UNK): later relative writes and non-readers are refused, reads still run (#148 F1/F5).
+    local cdt="" cdunk=$CWD_UNK
+    for ((c = wi + 1; c < n; c++)); do case "${SEG[$c]}" in -P|-L|-e|-@|--) ;; *) cdt="${SEG[$c]}"; break ;; esac; done
+    CWD_UNK=0
+    for ((c = wi + 1; c < n; c++)); do amb_check "${SEG[$c]}" "$SEGCWD" cd; done
+    # From an unknown cwd only an absolute or ~ target (or none: HOME) is known again.
+    if [ "$CWD_UNK" = 0 ] && [ "$cdunk" = 1 ]; then case "$cdt" in /*|"~"|"~/"*|"") ;; *) CWD_UNK=1 ;; esac; fi
     if [ $((wi + 1)) -lt "$n" ] && [ "${SEG[$((wi + 1))]}" != "-" ]; then
       canon "${SEG[$((wi + 1))]}" "$SEGCWD"; SEGCWD="$CANON"
     else
@@ -1462,7 +2082,7 @@ eval_segment_body() { # uses SEG array
   if [ "$SEGCWD" != "$FAST_CWD" ]; then
     FAST_CWD="$SEGCWD"; FAST_OK=1; FAST_LINKS=0
     local e
-    for e in "$CL" "$DCTL" "$DCTL2"; do
+    for e in "$CL" "$DCTL" "$DCTL2" "$DDATA" "$DDATA2"; do
       if inside "$SEGCWD" "$e" || inside "$e" "$SEGCWD"; then FAST_OK=0; fi
     done
     shopt -s nullglob dotglob
@@ -1471,8 +2091,9 @@ eval_segment_body() { # uses SEG array
   fi
   fastcwd=$FAST_OK
   CP_OK=0; CP_SRC=" "
-  local copier=0
+  local copier=0 asg=0
   case "$wb" in cp|gcp|ditto|rsync|install|ginstall) copier=1; copy_layout ;; esac
+  case "$wb" in export|declare|local|readonly|typeset) asg=1 ;; esac
   local parts=()
   for ((c = 0; c < n; c++)); do  # from 0: VAR=value prefixes count too
     tok="${SEG[$c]}"
@@ -1496,6 +2117,19 @@ eval_segment_body() { # uses SEG array
       *) parts=( "$tok" ) ;;
     esac
     for part in ${parts[@]+"${parts[@]}"}; do
+      # A redirect target, or an argument of a command that may write, must not be ambiguous near a protected root.
+      # A source operand of an understood copy (CP_OK) is a read: the copy-out rule below judges it.
+      # An export/declare/local/readonly/typeset value is not a path the command writes (#148 F5).
+      if [ "$redirect" = 1 ] || { [ "$reader" = 0 ] && [ "$dataarg" = 0 ] && [ "$c" -gt "$wi" ] \
+           && ! { [ "$CP_OK" = 1 ] && [[ "$CP_SRC" == *" $c "* ]]; } && ! { [ "$asg" = 1 ] && [[ "$tok" == *=* ]]; }; }; then
+        amb_check "$part" "$SEGCWD" all
+        if [ "$CWD_UNK" = 1 ]; then
+          case "$part" in /*|"~"|"~/"*) ;; *) block "the cwd is unknown after a cd to a glob or variable near a protected Vajra path; cd to the literal path first" ;; esac
+        fi
+      elif [ "$c" -gt "$wi" ]; then
+        # #148 F3: a reader's ambiguous word near a protected path taints the pipe, as a literal protected path does.
+        amb_check "$part" "$SEGCWD" read && hit=1
+      fi
       if [ "$fastcwd" = 1 ]; then
         case "$part" in
           ""|.|..|*/*|*"~"*|.*[\*\?\[]*) ;;
@@ -1515,8 +2149,11 @@ eval_segment_body() { # uses SEG array
             [ "$dataarg" = 1 ] && continue
             hit=1
             # A copier may read a protected source (not an ancestor of one)
-            # into a destination outside every protected area.
-            if [ "$CP_OK" = 1 ] && [ "$PKIND" = core ] && [ "$part" = "$tok" ] && [[ "$CP_SRC" == *" $c "* ]]; then continue; fi
+            # into a destination outside every protected area. A source that holds
+            # the control dir (the <data> root, an ancestor before ADR-16) never is.
+            if [ "$CP_OK" = 1 ] && [ "$PKIND" = core ] && [ "$part" = "$tok" ] && [[ "$CP_SRC" == *" $c "* ]] \
+               && ! { inside "$DCTL" "$cc" && ! same_dir "$DCTL" "$cc"; } \
+               && ! { inside "$DCTL2" "$cc" && ! same_dir "$DCTL2" "$cc"; }; then continue; fi
             [ "$copier" = 1 ] && [ "$reader" = 0 ] && block "only read-only commands may touch protected path $cc (a copy may read protected files only into a destination outside every protected area; never into one, never via links)"
             [ "$reader" = 1 ] || block "only read-only commands may touch protected path $cc"
             ;;
@@ -1529,6 +2166,8 @@ eval_segment_body() { # uses SEG array
   if [ "$PIPE_TAINT" = 1 ] && [ "$reader" = 0 ]; then
     block "protected path piped into a non-reader (${wb})"
   fi
+  # #148 F1/F5: after an ambiguous cd near a protected path only readers may run.
+  [ "$reader" = 0 ] && [ "$CWD_UNK" = 1 ] && block "the cwd is unknown after a cd to a glob or variable near a protected Vajra path; only read-only commands may follow it"
   if [ "$reader" = 0 ] && [ "$script" = 0 ]; then
     classify "$SEGCWD"
     [ "$PKIND" = core ] && block "only read-only commands may run inside protected directory $SEGCWD"
@@ -1541,7 +2180,7 @@ eval_segment_body() { # uses SEG array
 }
 
 run_pass() { # judge every segment of TOKS from the starting cwd
-  SEGCWD="$CWD"
+  SEGCWD="$CWD" CWD_UNK=0
   FAST_CWD="" FAST_OK=0 FAST_LINKS=0
   PIPE_IN=0 PIPE_TAINT=0 PIPE_KTAINT=0 SEG_HIT=0 SEG_KANC=0
   SEG=()
@@ -1562,14 +2201,22 @@ run_pass() { # judge every segment of TOKS from the starting cwd
     esac
   done
 }
+APPSUP_PAT='[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn] [Ss][Uu][Pp][Pp][Oo][Rr][Tt]'
+T2="${T//$APPSUP_PAT/Application__SP__Support}"
+# AMB_DYN (new in #148) reads assignment values from the joined view when the command names "Application
+# Support": the split view cuts a <work> path at the space and would see ~/Library as its literal dir.
+if [ "$T2" != "$T" ]; then
+  set -f; DTOKS=( $T2 ); set +f
+  amb_dyn_scan ${DTOKS[@]+"${DTOKS[@]}"}
+else
+  amb_dyn_scan ${TOKS[@]+"${TOKS[@]}"}
+fi
 run_pass
 
 # Second pass, additive only: the pass above has already run unchanged. If the
 # command names "Application Support" (any case), rerun the same segment loop
 # with that phrase joined into one token, so a path with that space (the Vajra
 # Desktop control dir) is judged as one path. It can only add blocks.
-APPSUP_PAT='[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn] [Ss][Uu][Pp][Pp][Oo][Rr][Tt]'
-T2="${T//$APPSUP_PAT/Application__SP__Support}"
 if [ "$T2" != "$T" ]; then
   set -f
   TOKS=( $T2 )

@@ -1,35 +1,7 @@
-/* Graphite shell (DESIGN.md "Layout"): 240 px sidebar on the surface, the screen on the background. */
-.v-shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; position: relative; }
-.v-shell__nav { display: flex; flex-direction: column; gap: 2px; padding: 10px var(--space-sm) var(--space-sm); border-right: 1px solid var(--c-border); background: var(--c-surface); min-height: 0; }
-.v-shell__brand { display: flex; align-items: center; gap: var(--space-sm); height: var(--ctl-lg); padding: 0 var(--space-sm); margin-bottom: var(--space-sm); font: 600 14px/16px var(--font-ui); color: var(--c-text); user-select: none; }
-/* The mark: an ink tile with a lozenge cut from it, drawn in CSS so the idle window decodes no image. */
-.v-shell__mark { position: relative; flex: none; width: 18px; height: 18px; border-radius: 5px; background: var(--c-action); }
-.v-shell__mark::after { content: ""; position: absolute; inset: 5px; background: var(--c-surface); transform: rotate(45deg) scale(0.8); border-radius: 1px; }
-/* Overlay title bar: the brand row is the window's drag handle and clears the traffic lights. */
-.v-shell--overlay .v-shell__nav { padding-top: 0; }
-.v-shell--overlay .v-shell__brand { height: var(--titlebar-h); margin: 0 calc(-1 * var(--space-sm)) var(--space-sm); padding-left: 80px; }
-.v-shell--overlay .v-shell__brand > * { pointer-events: none; }
-/* Settings sits at the foot of the sidebar, apart from the places you work in. */
-.v-shell__link:last-of-type { margin-top: auto; }
-.v-shell__link { display: flex; align-items: center; gap: 10px; height: var(--row-h); padding: 0 var(--space-sm); border-radius: var(--radius-md); color: var(--c-text-secondary); text-decoration: none; font: 500 13px/16px var(--font-ui); transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
-.v-shell__label { flex: 1; min-width: 0; text-align: left; }
+/* Screens inside shell B's main area (the frame itself is shell/frame.css). */
 /* Skip link: the first Tab stop, out of sight until it has focus. */
 .v-skip { position: absolute; left: var(--space-sm); top: var(--space-sm); z-index: 10; padding: var(--space-xs) var(--space-sm); border-radius: var(--radius-md); background: var(--c-primary); color: var(--c-text-on-primary); font: 500 13px/16px var(--font-ui); text-decoration: none; transform: translateY(-200%); }
 .v-skip:focus-visible { transform: none; outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
-.v-shell__link .v-icon { color: var(--c-text-muted); transition: color var(--t-fast) var(--ease-out); }
-.v-shell__link:hover .v-icon, .v-shell__link[aria-current="page"] .v-icon { color: var(--c-text); }
-/* The palette for the mouse: reads as a field, so it is inset like one. */
-.v-shell__search { display: flex; align-items: center; gap: 10px; height: var(--row-h); margin-bottom: var(--space-md); padding: 0 6px 0 var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-background); color: var(--c-text-muted); font: 400 13px/16px var(--font-ui); cursor: default; transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
-.v-shell__search:hover { border-color: var(--c-border-strong); color: var(--c-text-secondary); }
-.v-shell__search:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
-/* Key hints are out of layout until asked for (hover, or focus in the nav), so the idle window draws no hint glyphs (idle memory). */
-.v-shell__link .v-kbd-group { display: none; }
-.v-shell__search .v-kbd-group { display: none; }
-.v-shell__search:hover .v-kbd-group, .v-shell__search:focus-visible .v-kbd-group { display: inline-flex; }
-.v-shell__link:hover .v-kbd-group, .v-shell__link:focus-visible .v-kbd-group, .v-shell__nav:focus-within .v-kbd-group { display: inline-flex; }
-.v-shell__link:hover { background: var(--c-accent); color: var(--c-text); }
-.v-shell__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
-.v-shell__link:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 .v-shell__main:focus { outline: none; }
 .v-shell__main { min-width: 0; min-height: 0; padding: var(--space-xl); overflow: auto; background: var(--c-background); }
 /* A screen that owns its layout (header, panes, action bar) fills the main area edge to edge. */
@@ -59,6 +31,7 @@
 .v-launch__foot { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-md); padding: var(--space-md) var(--space-lg) var(--space-md); }
 .v-launch__adv summary { height: var(--row-h); display: flex; align-items: center; color: var(--c-text-secondary); font: 500 12px/16px var(--font-ui); cursor: default; }
 .v-launch__adv .v-field { margin-top: var(--space-xs); max-width: 240px; }
+.v-launch__why { margin: 0 0 0 auto; align-self: center; text-align: right; font-size: 12px; color: var(--c-text-muted); }
 .v-launch__fail { padding: 0 var(--space-lg) var(--space-md); color: var(--c-danger); }
 
 .v-home__checks { margin: 10px 2px 0; }
@@ -72,14 +45,52 @@
 /* The fix hint uses the UI face on Home so the idle window loads no second typeface (idle memory); Settings keeps mono. */
 .v-home__fix { font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
 .v-settings .v-home__fix { font-family: var(--font-mono); }
+.v-home__action { display: inline-flex; align-items: center; gap: var(--space-sm); font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
 /* Start run shows its key while you are in the form, which is where the key works. */
 .v-launch .v-button--primary .v-kbd-group { display: none; }
 .v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
+/* The page title stands clear of the first section heading; flush, the two read as one two-line title. */
+h1.v-run__name { margin-bottom: var(--space-lg); }
 .v-run__row { display: flex; align-items: center; gap: var(--space-md); height: 100%; border-bottom: 1px solid var(--c-border); }
 .v-run__row > span { flex: 1; }
+.v-run__row > .v-badge { flex: none; }
+/* The task list is a table in all but name: fixed tracks, so wave, task, who, status and "waits for" line up down the list. */
+.v-run__task { display: grid; grid-template-columns: 64px minmax(0, 3fr) minmax(0, 3fr) 96px minmax(0, 2fr) auto; column-gap: var(--space-md); }
+/* A list row is as wide as its content by default; a task row is as wide as the list, or each row would size its own tracks. */
+.v-vrow:has(> .v-run__task) { width: 100%; }
+.v-run__task > * { min-width: 0; }
+.v-run__task > .v-badge { justify-self: start; }
+.v-run__title, .v-run__who, .v-run__deps { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-run__who .v-wp__ran, .v-run__who .v-wp__err { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v-run__cmd { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); margin-bottom: var(--space-sm); }
 .v-run__cmd pre { margin: 0; max-width: 100%; max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/16px var(--font-mono); color: var(--c-text-secondary); }
+/* Proof (6i): the label first, then the record and the export, all left-aligned on one column. */
+.v-proof { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-sm); }
+.v-proof__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); }
+.v-proof__why { display: flex; flex-direction: column; gap: var(--space-xs); padding-left: var(--space-md); border-left: 2px solid var(--c-border-strong); }
+.v-proof__record { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: var(--space-md); row-gap: var(--space-xs); margin: 0; font: 12px/16px var(--font-ui); }
+.v-proof__record dt { color: var(--c-text-secondary); }
+.v-proof__record dd { margin: 0; min-width: 0; }
+.v-proof__hash { overflow-wrap: anywhere; }
+.v-proof__acts, .v-proof__post { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-sm); }
+.v-proof__post .v-field { min-width: min(100%, 360px); }
+/* Check-command approval (N20): the exact list, numbered, wrapped whole; nothing is cut or summarised. */
+.v-approval__line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); }
+.v-approval__status:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-dialog.v-approval { width: min(640px, calc(100vw - 32px)); max-width: none; max-height: calc(100vh - 32px); overflow-y: auto; }
+.v-approval > * + * { margin-top: var(--space-md); }
+.v-approval__facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: var(--space-md); row-gap: var(--space-xs); margin-bottom: 0; font: 12px/16px var(--font-ui); }
+.v-approval__facts dt { color: var(--c-text-secondary); }
+.v-approval__facts dd { margin: 0; min-width: 0; }
+.v-approval__wrap { overflow-wrap: anywhere; }
+.v-approval > h3 { margin-bottom: 0; }
+.v-approval > h3 + .v-approval__list { margin-top: var(--space-xs); }
+.v-approval__list { margin-bottom: 0; padding: var(--space-sm) var(--space-sm) var(--space-sm) calc(var(--space-lg) + var(--space-sm)); max-height: 16rem; overflow: auto; background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-md); font: 12px/18px var(--font-mono); }
+.v-approval__list:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-approval__list li { padding: 2px 0; color: var(--c-text-secondary); }
+.v-approval__list li::marker { color: var(--c-text-muted); }
+.v-approval__list code { font: inherit; color: var(--c-text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .v-home__report { margin: 0; padding: var(--space-md); max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/16px var(--font-mono); color: var(--c-text-secondary); border: 1px solid var(--c-border); }
 .v-home__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .v-home__list li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); border-bottom: 1px solid var(--c-border); }
@@ -108,6 +119,10 @@
 .v-crew__err { padding: var(--space-sm) var(--space-lg); border-bottom: 1px solid var(--c-border); }
 .v-crew__body { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px minmax(0, 1fr) 280px; }
 .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 320px minmax(0, 1fr); }
+/* A worker's own tab is the same pane and Details as Crew, without the tree: Details sits beside the stream, not under it. */
+/* It fills the screen's height (the screen is a flex column inside an overflow-hidden main), and its single row is capped
+   at that height, so the stream and Details scroll inside their panes instead of running off the window. */
+.v-worker { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 280px; grid-template-rows: minmax(0, 1fr); }
 .v-crew__tree { min-height: 0; overflow: auto; padding: 6px var(--space-sm); border-right: 1px solid var(--c-border); }
 .v-crew__pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }
 .v-crew__pane--facts { padding: var(--space-xl); gap: var(--space-lg); max-width: 760px; }
@@ -119,12 +134,19 @@
 /* One bar, one segment per status, in the status colours (currentColor from the v-status class). */
 .v-crew__meter { display: flex; gap: 2px; height: 6px; margin: var(--space-md) var(--space-lg) var(--space-xs); border-radius: var(--radius-pill); overflow: hidden; }
 .v-crew__meter > span { flex-basis: 0; background: currentColor; }
-.v-crew__panehead { display: flex; align-items: center; gap: 10px; padding: var(--space-md) var(--space-lg) 0; min-width: 0; }
+.v-crew__panehead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: var(--space-md) var(--space-lg) 0; min-width: 0; }
 .v-crew__task { min-width: 0; color: var(--c-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .v-crew__pane .v-tablist { padding: 6px var(--space-md) 0; }
 .v-crew__pane .v-tabpanel { padding: var(--space-md) var(--space-lg); }
 .v-crew__aside { min-height: 0; overflow: auto; padding: var(--space-md) 14px; border-left: 1px solid var(--c-border); background: var(--c-background); }
 .v-crew__aside .v-section__head { margin-bottom: var(--space-sm); }
+/* A core worker's pane (16.7): its changed files, and Message, Redirect and Stop with the harness's reason when off. */
+.v-crew__pane > .v-crew__changes { margin: 0; padding: var(--space-md) var(--space-lg); }
+.v-crew__files { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: var(--text-body-sm, 13px); }
+.v-crew__files code { overflow-wrap: anywhere; }
+.v-crew__controls { display: grid; gap: var(--space-sm); }
+.v-crew__controlrow { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
+.v-crew__reason { margin: 0; color: var(--c-text-muted); font-size: var(--text-body-sm, 13px); }
 .v-crew__facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px var(--space-md); margin: 0; font-size: 12px; line-height: 17px; }
 .v-crew__facts dt { color: var(--c-text-muted); }
 .v-crew__facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--c-text-secondary); }
@@ -157,6 +179,13 @@
 .v-history__meter > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--c-text-secondary); }
 /* With the report open, Status and Updated give their room to the campaign (the report names its status). */
 .v-history__body--open .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
+/* With a report open the list has about 560 px at 1280. The run name gets what is left, so the count loses its
+   meter and its column shrinks to the count. 64 px holds the sortable "Passing" header and a three-digit count beside
+   16 px of cell padding. Integrity (168) and Actions (140) keep their full widths: they hold "Integrity check failed"
+   and the Report and Verify buttons. */
+.v-history__body--open .v-history__main { padding-inline: var(--space-lg); }
+.v-history__body--open .v-history__meter { display: none; }
+.v-history__body--open .v-table th:nth-child(3) { width: 64px; }
 .v-history__main { padding: var(--space-xl); display: flex; flex-direction: column; gap: var(--space-xl); }
 .v-history__muted { color: var(--c-text-secondary); font-size: 12px; }
 .v-history__acts { display: inline-flex; gap: var(--space-xs); }
@@ -183,30 +212,33 @@
 .v-problem { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); padding: var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); max-width: 560px; }
 .v-problem__detail { overflow-wrap: anywhere; }
 .v-problem .v-button { margin-top: var(--space-xs); }
+/* The "tried at" line is a live region, so it exists before the first retry. Until it has words it is out of the
+   panel's flex flow, so it takes no room and no gap whatever the gap is. It stays rendered, so it is still announced. */
+.v-problem .v-checked:empty { position: absolute; min-height: 0; margin: 0; }
 .v-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); max-width: 480px; }
 .v-empty__act { display: flex; gap: var(--space-sm); margin-top: var(--space-sm); }
 .v-loading { display: flex; flex-direction: column; gap: 10px; padding: var(--space-xs) 0; }
 .v-loading .v-skeleton { height: 12px; max-width: 420px; }
 .v-loading .v-skeleton:nth-child(2n) { max-width: 300px; }
+/* Loading rows wait 100 ms before they show, so a load that finishes sooner (a view's first open) never flashes them. */
+.v-loading { visibility: hidden; animation: v-loading-show 0s linear 100ms forwards; }
+@keyframes v-loading-show { to { visibility: visible; } }
 .v-crew__state { padding: 48px var(--space-xl); }
 .v-crew__tree--loading { border: 0; padding: 0; max-width: 320px; }
 
-/* Under 1200 px (UX.md section 3): the sidebar folds to 56 px icons, each keeping its name for screen readers and
-   as a tooltip; Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */
+/* Under 1200 px (UX.md section 3): Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */
 @media (max-width: 1199px) {
-  .v-shell { grid-template-columns: 56px 1fr; }
-  .v-shell__nav { padding: 10px var(--space-sm); align-items: stretch; }
-  .v-shell__brand { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  /* Folded, the traffic lights overhang the 56 px rail: the rail keeps a title-bar-high gap, and screen heads clear the lights. */
-  .v-shell--overlay .v-shell__nav { padding-top: var(--titlebar-h); }
-  .v-shell--overlay :is(.v-screen__head, .v-crew__head) { padding-left: 32px; }
-  .v-shell__nav .v-shell__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .v-shell .v-shell__nav :is(.v-shell__link, .v-shell__search) .v-kbd-group { display: none; }
-  .v-shell__link, .v-shell__search { justify-content: center; padding: 0; gap: 0; }
-  .v-shell__search { margin-top: var(--space-xs); border-color: transparent; background: transparent; }
-  .v-shell__search:hover { background: var(--c-accent); }
-  .v-crew__body { grid-template-columns: 240px minmax(0, 1fr) 220px; }
-  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 240px minmax(0, 1fr); }
+  /* 260 leaves the middle its 480 px minimum at 960 with the details column open. Every row keeps its chevron slot,
+     shrunk to 16 px, which is the indent step, so a leaf's icon stays in the same column as its siblings' and under
+     its parent's label. Dropping the slot only on leaf rows would pull a leaf left of its own parent. A longer
+     status still clips, and the tree gives it a tooltip. */
+  .v-crew__body { grid-template-columns: 260px minmax(0, 1fr) 220px; }
+  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 260px minmax(0, 1fr); }
+  .v-crew__tree .v-tree__twisty { min-width: 16px; }
+  .v-worker { grid-template-columns: minmax(0, 1fr) 220px; }
+  /* The narrow Details column: each label sits over its value, so a path and its Copy button get the whole width. */
+  .v-crew__aside .v-crew__facts { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .v-crew__aside .v-crew__facts dd { margin-bottom: var(--space-sm); }
   .v-crew__head { padding: 0 var(--space-md); }
   .v-history .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
   .v-history__body--open { grid-template-columns: minmax(0, 1fr); }
