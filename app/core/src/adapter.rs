@@ -10,6 +10,7 @@
 use std::ffi::OsString;
 
 pub mod profiles;
+pub mod evidence_runner;
 
 use crate::sessions::argv::{self, InvalidInput, RunInput};
 
