@@ -281,11 +281,30 @@ await scenario('protected actions from the plan come back as pending, not perfor
   assert.deepEqual(r.result.pending_approval, [{ action: 'pull_request', why: 'team reviews in PRs' }])
   assert.ok(!labels(r).includes('deploy_plan'))
 })
-await scenario('campaign failures are reported as risks, never fatal', async () => {
-  const r = await go(ARGS, { preflight: { ...base.preflight, campaign_ok: false, campaign_output: 'jq is required' }, campaign: { ok: false, outputs: ['locked'] } })
+await scenario('campaign updates after the start are reported as risks, never fatal', async () => {
+  const r = await go(ARGS, { campaign: { ok: false, outputs: ['locked'] } })
   assert.equal(r.result.status, 'done')
-  assert.match(r.result.report, /campaign record failed at start: jq is required/)
   assert.match(r.result.report, /campaign update "campaign.deliver" failed: locked/)
+})
+// bhishma #217 M1: a fresh run whose campaign create fails (a folder planted before the run, under its predictable id)
+// stops at preflight with a plain reason. Nothing after it runs: no plan, no task, no campaign write, no report.
+await scenario('a fresh run whose campaign create fails stops before any write', async () => {
+  for (const out of ['campaign already exists: deliver-' + RUN, 'jq is required']) {
+    const r = await go(ARGS, { preflight: { ...base.preflight, campaign_ok: false, campaign_output: out } })
+    assert.equal(r.result.status, 'error', out)
+    assert.equal(r.result.node, 'preflight')
+    assert.match(r.result.error, new RegExp(`campaign deliver-${RUN} could not be created, so this run stopped before writing anything`))
+    assert.ok(r.result.error.includes(out), 'the script\'s own reason is kept')
+    const after = labels(r).slice(labels(r).indexOf('preflight') + 1)
+    assert.deepEqual(after, [], 'nothing runs after preflight: ' + after.join(', '))
+    assert.ok(!r.calls.some((c) => /tasks\.register|campaign\.(deliver|report|stuck)/.test(c.label)), 'no campaign write')
+  }
+})
+await scenario('a resume whose progress line fails still runs, with the failure as a risk', async () => {
+  const camp = { found: true, signature_valid: true, evidence_outside_guard: false, status: 'active', goal: 'g', features: [{ id: 'ac-1', description: 'export --json prints valid JSON', passes: true }, { id: 'ac-2', description: 'docs mention --json', passes: false }], progress_tail: '- created' }
+  const r = await go({ ...ARGS, campaign: 'deliver-old1' }, { 'campaign.load': camp, preflight: { ...base.preflight, campaign_ok: false, campaign_output: 'locked' } })
+  assert.equal(r.result.status, 'done')
+  assert.match(r.result.report, /campaign record failed at start: locked/)
 })
 await scenario('dirty working tree is surfaced as a risk', async () => {
   const r = await go(ARGS, { preflight: { ...base.preflight, dirty: true } })

@@ -673,6 +673,88 @@ fn inspect_returns_the_newest_output_once_more_than_16_kib_is_retained() {
     app.sup.kill(&stream).unwrap();
 }
 
+/// Plan #217 L2: run ids are predictable minutes, so an agent can make a future run's campaign folder first. Whatever
+/// form it takes (a folder with planted files, a link to another folder, a dangling link, a plain file, a case
+/// variant, or the outside-guard `-og` name), that id is never issued: the run moves to the next minute and the
+/// planted entry is left as it was. The start checks again just before the launch, for one that appears after the pick.
+#[test]
+fn a_campaign_folder_made_before_a_run_never_becomes_that_runs() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let camps = t.home().join(".claude/vajra/campaigns");
+    fs::create_dir_all(&camps).unwrap();
+    let elsewhere = t.0.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let base = 1_793_881_800; // 2026-11-05 12:30:00 UTC
+    type Plant = Box<dyn Fn(&Path)>;
+    let cases: Vec<(&str, &str, Plant)> = vec![
+        ("a folder with planted files", "", Box::new(|p: &Path| {
+            fs::create_dir_all(p.join("checkpoints")).unwrap();
+            fs::write(p.join("campaign.json"), "{}").unwrap();
+            fs::write(p.join("state.sig"), "x").unwrap();
+        })),
+        ("a link to another folder", "", Box::new({ let e = elsewhere.clone(); move |p: &Path| symlink(&e, p).unwrap() })),
+        ("a dangling link", "", Box::new(|p: &Path| symlink("/nonexistent/vajra-217", p).unwrap())),
+        ("a plain file", "", Box::new(|p: &Path| fs::write(p, "x").unwrap())),
+        ("the -og name", "-og", Box::new(|p: &Path| fs::create_dir_all(p).unwrap())),
+    ];
+    for (i, (what, suffix, plant)) in cases.iter().enumerate() {
+        let now = base + 600 * i as u64;
+        let taken = ids::run_id_at(now);
+        let planted = camps.join(format!("deliver-{taken}{suffix}"));
+        plant(&planted);
+        let (t2, id) = app.fresh_run_id(now).unwrap();
+        assert_ne!(id, taken, "{what}: the planted id is never issued");
+        assert_eq!((t2, id.as_str()), (now + 60, ids::run_id_at(now + 60).as_str()), "{what}: the next minute");
+        assert!(planted.symlink_metadata().is_ok(), "{what}: left as it was");
+    }
+    // A case variant names the same entry on this disk (case-insensitive), so it holds the id too.
+    let now = base + 6000;
+    let taken = ids::run_id_at(now);
+    fs::create_dir_all(camps.join(format!("DELIVER-{taken}"))).unwrap();
+    if camps.join(format!("deliver-{taken}")).symlink_metadata().is_ok() {
+        assert_ne!(app.fresh_run_id(now).unwrap().1, taken, "a case variant holds the id");
+    }
+    // One that appears after the pick: the start refuses the id rather than launch into it.
+    let now = base + 7200;
+    let (t3, id) = app.fresh_run_id(now).unwrap();
+    fs::create_dir_all(camps.join(format!("deliver-{id}"))).unwrap();
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    git_in(&cwd, &["init", "-q"]);
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let e = app.start_run_as(input, cwd.to_str().unwrap(), Some((t3, id.clone()))).unwrap_err();
+    assert_eq!(code(&e), "run_id_taken", "{e}");
+    assert!(lock(&app.runs).values().all(|r| r.run_id != id), "nothing launched under it");
+}
+
+/// The finding asked about (plan #217 follow-up, read-only): the Claude launch argv rebuilds its run id from a minute,
+/// not from the id string. `start_run_as` passes it the minute `fresh_run_id` picked (one tuple with the id), never
+/// the clock. So when the pick skips to a later minute (a taken one), or the clock rolls over between the pick and the
+/// launch, the argv still carries the picked id, which is the id the core records and names its campaign after. This
+/// builds the argv exactly as `start_run_as` does and fails if the two ever differ.
+#[test]
+fn the_claude_launch_argv_carries_the_run_id_the_core_picked() {
+    let t = Tmp::new();
+    let app = t.app();
+    let camps = t.home().join(".claude/vajra/campaigns");
+    fs::create_dir_all(&camps).unwrap();
+    let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC: one second before the minute rolls over
+    fs::create_dir_all(camps.join(format!("deliver-{}", ids::run_id_at(now)))).unwrap();
+    let (minute, run_id) = app.fresh_run_id(now).unwrap();
+    assert_eq!(run_id, "20261105-1231", "the pick skipped the taken minute");
+    let campaign = format!("deliver-{run_id}");
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let argv = argv::build_run_argv_at(&input, &"a".repeat(32), minute, sid).unwrap();
+    assert_eq!(argv[..3], ["claude", "--session-id", sid]);
+    let json: Value = serde_json::from_str(argv[3].strip_prefix("/vajra-deliver ").unwrap()).unwrap();
+    assert_eq!(json["run_id"], run_id.as_str(), "the argv's run id is the picked one, not the clock's");
+    assert_eq!(format!("deliver-{}", json["run_id"].as_str().unwrap()), campaign, "and names the same campaign");
+    assert!(json.get("campaign").is_none(), "a fresh run lets the workflow name it deliver-<run_id>");
+}
+
 #[test]
 fn two_resumes_of_one_campaign_get_distinct_run_ids() {
     // Review P1: a resume reused one identity, so its task ids and branches collided with the previous resume's.
@@ -2197,6 +2279,28 @@ fn read_report_refuses_a_report_edited_after_it_was_signed() {
     let r = t.app().read_report("real1").unwrap();
     assert_eq!(r["integrity"], "integrity_failed", "{r}");
     assert!(r.get("text").is_none());
+}
+
+/// PR 261 review: the digest covers only the file contents, so an intact signed campaign and report copied into another
+/// campaign's folder keep a valid signature. The held read must refuse it because the slug inside isn't the one asked
+/// for, and its failure must not be settled back to ok.
+#[test]
+fn read_report_refuses_an_intact_campaign_copied_into_another_folder() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let (from, to) = (camp_file(&t, ""), t.home().join(".claude/vajra/campaigns/real2"));
+    fs::create_dir(&to).unwrap();
+    for name in ["campaign.json", "features.json", "progress.md", "state.sig", "report.md"] {
+        fs::copy(from.join(name), to.join(name)).unwrap();
+    }
+    let app = t.app();
+    let r = app.read_report("real2").unwrap();
+    assert_eq!(r["integrity"], "integrity_failed", "{r}");
+    assert!(r.get("text").is_none(), "{r}");
+    let badges = with_badges(&app, false);
+    let copied = badges["campaigns"].as_array().unwrap().iter().find(|c| c["slug"] == "real2").cloned();
+    assert_eq!(copied.map(|c| c["integrity"].clone()), Some(json!("failed")), "{badges}");
+    assert_eq!(app.read_report("real1").unwrap()["integrity"], "ok", "the original still reads");
 }
 
 #[test]
