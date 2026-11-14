@@ -24,6 +24,23 @@ fn state(data: &Path) -> Arc<Mutex<Failures>> {
     crate::lock(S.get_or_init(Mutex::default)).entry(data.to_path_buf()).or_default().clone()
 }
 
+type SessionKey = (PathBuf, String, String);
+
+/// The (data folder, version, shape) triples a self-test passed in this app process. Memory only: nothing written to
+/// disk, so nothing another process writes, can add one.
+fn session_passes() -> &'static Mutex<std::collections::HashSet<SessionKey>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<SessionKey>>> = OnceLock::new();
+    S.get_or_init(Mutex::default)
+}
+
+fn proven_this_session(data: &Path, version: &str, shape: &str) -> bool {
+    crate::lock(session_passes()).contains(&(data.to_path_buf(), version.to_string(), shape.to_string()))
+}
+
+fn remember(data: &Path, version: &str, shape: &str) {
+    crate::lock(session_passes()).insert((data.to_path_buf(), version.to_string(), shape.to_string()));
+}
+
 fn list_path(data: &Path) -> PathBuf {
     data.join("control").join("claude-proven.json")
 }
@@ -108,12 +125,16 @@ fn add_pair(data: &Path, version: &str, shape: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, list_path(data))
 }
 
-/// Whether `version` with today's `shape` is proven here: on this Mac's list, or by a self-test run now. `probe` asks
+/// Whether `version` with today's `shape` is proven here: by a self-test this app process ran (now, or earlier in this
+/// session). The list on disk records passes but is never read as proof. `probe` asks
 /// the binary for its version again; a PASS is recorded only if it still says `version` (#195 bhishma: an update in
 /// place during the test would otherwise record the old version for a test of the new binary).
 pub(super) fn proven_here(claude: &Path, home: &Path, data: &Path, version: &str, shape: &str, probe: &dyn Fn() -> Option<String>) -> Result<(), &'static str> {
     let refused = profiles::CLAUDE_SELFTEST_FAILED.reason;
-    let have = |data: &Path| local_pairs(data).iter().any(|(v, s)| v == version && s == shape);
+    // Only a pass this app process saw counts (plan #215 L1, option A). The list on disk is a record, never proof: an
+    // agent running as this user before key A (a Codex seat can write the data folder) could write a list that passes
+    // every file check and holds any pair, since a build's version and shape can both be computed.
+    let have = |data: &Path| proven_this_session(data, version, shape);
     if have(data) {
         return Ok(());
     }
@@ -135,7 +156,12 @@ pub(super) fn proven_here(claude: &Path, home: &Path, data: &Path, version: &str
         }
         Ok(()) => {
             failed.remove(&key);
-            add_pair(data, version, shape).map_err(|_| refused)
+            remember(data, version, shape);
+            // The record on disk is kept for the owner to see; a failed write doesn't undo a pass seen here.
+            if add_pair(data, version, shape).is_err() {
+                eprintln!("vajra: Claude Code {version} passed its worker self-test, but the record of it couldn't be saved");
+            }
+            Ok(())
         }
         Err(why) => {
             eprintln!("vajra: Claude Code {version} failed the worker self-test ({why}); Claude workers stay off");
