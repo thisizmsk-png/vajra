@@ -520,16 +520,75 @@ fn a_read_back_mismatch_kills_the_session() {
 /// `CLAUDE_WORKER_PROVEN` (the spike prints the pair). Only exact `claude --version` strings in that list pass.
 #[test]
 fn only_a_claude_build_s4_proved_with_todays_flag_shape_is_dispatched() {
-    let shape = claude_worker_flag_shape().unwrap();
+    let shape = claude_worker_flag_shape(&repo_hooks()).unwrap();
     assert_eq!(shape.len(), 64);
     assert!(CLAUDE_WORKER_PROVEN.iter().any(|(_, s)| *s == shape), "today's flag shape {shape} is not one S4 proved: rerun S4 and add its pair");
-    assert_eq!(claude_worker_flag_shape().unwrap(), shape, "the shape is the same on every call");
-    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)"), Ok(()));
-    assert_eq!(claude_worker_proven("  2.1.296 (Claude Code)\n"), Ok(()), "--version output is trimmed");
+    assert_eq!(claude_worker_flag_shape(&repo_hooks()).unwrap(), shape, "the shape is the same on every call");
+    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)", &shape), Ok(()));
+    assert_eq!(claude_worker_proven("  2.1.296 (Claude Code)\n", &shape), Ok(()), "--version output is trimmed");
     for bad in ["2.1.322 (Claude Code)", "2.1.296", "2.1.2960 (Claude Code)", "", "SHAPE_PENDING"] {
-        assert_eq!(claude_worker_proven(bad), Err(CLAUDE_UNPROVEN), "{bad:?}");
+        assert_eq!(claude_worker_proven(bad, &shape), Err(CLAUDE_UNPROVEN), "{bad:?}");
     }
+    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)", &"0".repeat(64)), Err(CLAUDE_UNPROVEN), "a proven version with another shape");
     assert_eq!(CLAUDE_UNPROVEN.reason, "claude_unproven");
+}
+
+fn repo_hooks() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hooks")
+}
+
+/// #186 codex: the flag file names the guard scripts, but S4 proved what they do, so their bytes are in the shape.
+/// One changed byte in the installed pre-tool-use.sh is a different shape; a missing or symlinked script is no shape.
+#[test]
+fn the_flag_shape_covers_the_installed_guard_scripts_bytes() {
+    let names = claude_worker_hook_scripts().unwrap();
+    assert!(names.iter().any(|n| n == "pre-tool-use.sh"), "{names:?}");
+    let d = tmpdir("guard-shape");
+    let copy = |to: &Path| {
+        std::fs::create_dir_all(to).unwrap();
+        for n in &names {
+            std::fs::copy(repo_hooks().join(n), to.join(n)).unwrap();
+        }
+    };
+    let same = d.join("same");
+    copy(&same);
+    let want = claude_worker_flag_shape(&repo_hooks()).unwrap();
+    assert_eq!(claude_worker_flag_shape(&same).unwrap(), want, "an exact install of the repo's hooks has the repo's shape");
+
+    let edited = d.join("edited");
+    copy(&edited);
+    let p = edited.join("pre-tool-use.sh");
+    let mut b = std::fs::read(&p).unwrap();
+    let i = b.len() / 2;
+    b[i] ^= 1;
+    std::fs::write(&p, b).unwrap();
+    assert_ne!(claude_worker_flag_shape(&edited).unwrap(), want, "one changed byte in the guard");
+
+    let missing = d.join("missing");
+    copy(&missing);
+    std::fs::remove_file(missing.join("pre-tool-use.sh")).unwrap();
+    assert!(claude_worker_flag_shape(&missing).is_err());
+
+    let linked = d.join("linked");
+    copy(&linked);
+    std::fs::remove_file(linked.join("pre-tool-use.sh")).unwrap();
+    std::os::unix::fs::symlink(repo_hooks().join("pre-tool-use.sh"), linked.join("pre-tool-use.sh")).unwrap();
+    assert!(claude_worker_flag_shape(&linked).is_err(), "a symlinked guard script is not hashed through");
+}
+
+/// #186 bhishma Low: the shape covers the worker argv S4 relied on, not only the flag file, so dropping or changing
+/// `--setting-sources user`, `--permission-mode dontAsk` or the `--tools` pair needs a new S4 PASS too.
+#[test]
+fn the_flag_shape_covers_the_worker_argv_flags_s4_relied_on() {
+    let input = claude_worker_shape_input().unwrap();
+    let argv: Vec<String> = serde_json::from_str(input.rsplit_once('\n').unwrap().1).unwrap();
+    for pair in [["--setting-sources", "user"], ["--permission-mode", "dontAsk"], ["--tools", "Read,Grep,Glob,Bash,Edit,Write"], ["--allowedTools", "Read,Grep,Glob,Bash,Edit,Write"], ["--output-format", "stream-json"]] {
+        assert!(argv.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]), "{pair:?} in {argv:?}");
+    }
+    assert!(argv.iter().any(|a| a == "-p") && argv.iter().any(|a| a == "--settings"), "{argv:?}");
+    let flag: serde_json::Value = serde_json::from_str(input.rsplit_once('\n').unwrap().0).unwrap();
+    assert_eq!(flag["permissions"]["defaultMode"], "dontAsk", "the flag file is the first part");
+    assert!(claude_worker_flag_shape(&repo_hooks()).is_ok());
 }
 
 #[test]

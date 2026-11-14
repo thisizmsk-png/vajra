@@ -1802,16 +1802,30 @@ impl Launch {
         Ok((engine, kind))
     }
 
-    /// #180 bhishma: the running Claude Code build, asked of the binary on every dispatch (never cached by path, as
-    /// the Lead's self-test does: a CLI updated in place is a new build), must be one S4 proved with today's flag
-    /// shape. A probe that fails, times out or prints anything else is refused (fail closed).
+    /// #180 bhishma: the running Claude Code build, asked of the binary on every dispatch and every retry (never
+    /// cached by path, as the Lead's self-test does: a CLI updated in place is a new build), must be one S4 proved with
+    /// today's flag shape, or (canary A) one this Mac's self-test proved. A version probe that fails, times out or
+    /// prints nothing is refused (`claude_unproven`); a self-test that fails is refused (`claude_selftest_failed`).
     fn claude_proven(cfg: &Config) -> Result<(), &'static str> {
         let refused = profiles::CLAUDE_UNPROVEN.reason;
         let dir = cfg.claude.parent().ok_or(refused)?;
         let path = std::env::join_paths([dir, std::path::Path::new("/usr/bin"), std::path::Path::new("/bin")]).map_err(|_| refused)?;
         let env = [("PATH", path), ("HOME", cfg.home.clone().into_os_string())];
-        let version = super::lead::claude_version(&cfg.claude, &env).map_err(|_| refused)?;
-        profiles::claude_worker_proven(&version).map_err(|u| u.reason)
+        let probe = || {
+            let v = super::lead::claude_version(&cfg.claude, &env);
+            let v = v.map_err(|e| eprintln!("vajra: could not ask Claude Code for its version ({e:?}); Claude workers stay off")).ok()?;
+            Some(v.trim().to_string()).filter(|v| !v.is_empty())
+        };
+        let version = probe().ok_or(refused)?;
+        // The installed guard's own bytes are part of the shape: a guard that differs from what S4 proved is unproven.
+        let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&cfg.home)).map_err(|e| {
+            eprintln!("vajra: the installed Vajra guard can't be checked ({e}); Claude workers stay off");
+            refused
+        })?;
+        if profiles::claude_worker_proven(&version, &shape).is_ok() {
+            return Ok(());
+        }
+        super::claude_canary::proven_here(&cfg.claude, &cfg.home, &cfg.data, &version, &shape, &probe)
     }
 
     /// `opened` is called with the worker's session id as soon as its steering channel exists, before any later step

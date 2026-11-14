@@ -2639,6 +2639,7 @@ impl Pace {
 
 mod worker_diff;
 pub mod workers;
+mod claude_canary;
 pub mod plan;
 pub mod record;
 mod record_app;
