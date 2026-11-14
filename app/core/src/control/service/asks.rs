@@ -26,6 +26,9 @@ impl Service {
             extra["project_id"] = json!(project);
             extra["generation"] = json!(generation);
         }
+        if let Some(tokens) = r.tokens {
+            extra["tokens"] = tokens.clone();
+        }
         if let Some(t) = r.text {
             extra["text"] = json!(t);
             extra["text_sha256"] = json!(sha256::hex_digest(t.as_bytes()));

@@ -6,6 +6,7 @@ import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import { useCampaignIntegrity } from "../campaignIntegrity";
+import { FolderField } from "../FolderField";
 import type { Campaign, Report } from "../../ipc";
 import { useRoute } from "../../router";
 import { ago } from "../when";
@@ -46,7 +47,7 @@ const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, ver
   { key: "slug", header: S.history.colSlug, sort: (a, b) => text(a.slug, b.slug), cell: (c) => (
     <div className="v-history__camp">
       {c.error ? <Badge status="danger">{S.history.unreadable}: {c.error}</Badge> : <span className="v-history__goal" title={c.goal}>{c.goal ?? ""}</span>}
-      <button type="button" className="v-history__slug" onClick={() => open(c)}>{c.slug}</button>
+      <button type="button" className="v-history__slug" title={c.slug} onClick={() => open(c)}>{c.slug}</button>
     </div>
   ) },
   { key: "status", header: S.history.colStatus, sort: (a, b) => text(a.status, b.status), cell: (c) => (c.status ? <Badge status={TONE[c.status]}>{S.history.state[c.status] ?? c.status}</Badge> : null) },
@@ -155,7 +156,7 @@ export function History() {
             <div className="v-panel__body">
             <form className="v-history__form" onSubmit={(e) => { e.preventDefault(); void search(); }} noValidate>
               <div className="v-history__q"><Input label={S.history.query} hint={S.history.queryHint} value={q} onChange={setQ} error={shown && !q.trim() ? S.history.errQuery : undefined} /></div>
-              <div className="v-history__repo"><Input label={S.history.repo} value={repo} onChange={setRepo} error={shown && !repo.trim() ? S.history.errRepo : undefined} /></div>
+              <div className="v-history__repo"><FolderField label={S.history.repo} value={repo} onChange={setRepo} error={shown && !repo.trim() ? S.history.errRepo : undefined} /></div>
               <Button variant="primary" className="v-history__go" onClick={() => void search()} busy={res.state === "busy"}>{res.state === "busy" ? S.history.searching : S.history.go}</Button>
             </form>
             {res.state === "ok" && res.hits.length === 0 && <Text variant="body-sm" muted>{S.history.none}</Text>}

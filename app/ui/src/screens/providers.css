@@ -67,3 +67,9 @@
 .v-setup__tool { color: var(--c-text-muted); }
 .v-setup__cmds code, .v-setup__docs code { user-select: text; overflow-wrap: anywhere; }
 .v-setup__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); }
+/* The one-click sheet (ADR-17 17b): the exact command and what it binds, then Install, then the live output. */
+.v-setup__sheet { display: flex; flex-direction: column; gap: var(--space-sm); padding: var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); }
+.v-setup__sheet .v-setup__cmds li { grid-template-columns: 48px minmax(0, 1fr) auto; }
+.v-setup__status { margin: 0; }
+.v-setup__sheet .v-prov__path { user-select: text; overflow-wrap: anywhere; }
+.v-setup__output { margin: 0; max-height: 240px; overflow: auto; padding: var(--space-sm); border-radius: var(--radius-sm); background: var(--c-surface); font-family: var(--font-mono); font-size: 12px; line-height: 17px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }

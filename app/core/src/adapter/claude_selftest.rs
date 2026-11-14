@@ -127,7 +127,8 @@ pub fn run(claude: &Path, home: &Path, shape: &str, timeout: Duration) -> Result
     let stub = Stub::start(plan)?;
 
     let sid = crate::ids::uuid_v4().map_err(|_| "setup: no session id".to_string())?;
-    let l = WorkerLaunch { kind: RoleKind::Worker, prompt: "Run the Vajra self-test", model: None, effort: None, network: false, ticket_tmp: &tmp };
+    // `deny` and `profile` are Codex's permission profile; the Claude argv reads none of them.
+    let l = WorkerLaunch { kind: RoleKind::Worker, prompt: "Run the Vajra self-test", model: None, effort: None, network: false, ticket_tmp: &tmp, worktree: &wt, deny: &[], profile: "" };
     let c = ClaudeWorker { claude, session_id: &sid, settings: &flag_path, tools: TOOLS };
     let argv = claude_worker_argv(&l, &c).map_err(|e| format!("argv: {}: {}", e.field, e.reason))?;
     let events = t.join("events.jsonl");
