@@ -923,6 +923,83 @@ bash_case ALLOW "reading the script is fine"            "cat scripts/generate-ma
 bash_case ALLOW "grep for the name is fine"              "grep -n generate-manifest.sh README.md" "$WT"
 bash_case ALLOW "other worktree scripts still run"       "bash scripts/vajra-doctor.sh" "$WT"
 
+# --- Fail closed on an unexpected runtime error (item 4) -------------------
+# A copy of the hook with one runtime error injected, either just after the payload is read (every tool reaches it)
+# or just before the final allow (a Bash call that passed every check). Each call below is one the real hook allows,
+# so a copy that still allows it has failed open. The no-op copies prove the injection itself changes nothing.
+INJ_N=0
+INJ_TMP="$H/inj-tmp"; mkdir -p "$INJ_TMP"
+inject() { # where(early|late) snippet -> sets INJ_HOOK to a hook copy with the snippet added once
+  INJ_HOOK="$SKILL/hooks/inj-$INJ_N.sh"; INJ_N=$((INJ_N + 1))
+  case "$1" in
+    early) awk -v s="$2" '{ print } $0 == "PAYLOAD=\"$(cat)\" || PAYLOAD=\"\"" { print s }' "$HOOK" > "$INJ_HOOK" ;;
+    late)  awk -v s="$2" 'NR > 1 { print prev } { prev = $0 } END { print s; print prev }' "$HOOK" > "$INJ_HOOK" ;;
+  esac
+  [ "$(grep -cxF -- "$2" "$INJ_HOOK")" = 1 ]; judge ALLOW "inject[$1] anchor found once: $2" $?
+}
+inj_run() { # payload-json -> rc of the injected copy; its stderr in INJ_ERR
+  local rc
+  INJ_ERR="$(printf '%s' "$1" | TMPDIR="$INJ_TMP" bash "$INJ_HOOK" 2>&1 >/dev/null)"; rc=$?
+  return "$rc"
+}
+INJ_BASH="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"ls src"}}')"
+INJ_WRITE="$(jq -nc --arg d "$PROJ" --arg p "$PROJ/src/a.rs" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{file_path:$p,content:"x"}}')"
+INJ_READ="$(jq -nc --arg d "$PROJ" --arg p "$PROJ/src/a.rs" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Read",tool_input:{file_path:$p}}')"
+INJ_ERRORS=(
+  'inj() { echo "${#PAYLOAD//x/y}"; }; INJ="$(inj)"'
+  'INJ="$(echo "$VAJRA_INJ_UNSET")"'
+  'if [ "abc" -gt 3 ]; then :; fi'
+  'inj() { local v; v="$(echo "${#PAYLOAD//x/y}")"; return 0; }; inj'
+  'inj() { [ "abc" -gt 3 ] && return 1; return 0; }; inj'
+  'false'
+  'false | true'
+  'INJ=$(( 1 / 0 ))'
+  'exit 0'
+)
+for where in early late; do
+  inject "$where" ':'
+  for p in INJ_BASH INJ_WRITE INJ_READ; do
+    [ "$where" = late ] && [ "$p" != INJ_BASH ] && continue
+    inj_run "${!p}"; judge ALLOW "inject[$where] no-op still allows ${p#INJ_}" $?
+  done
+  for e in "${INJ_ERRORS[@]}"; do
+    inject "$where" "$e"
+    for p in INJ_BASH INJ_WRITE INJ_READ; do
+      [ "$where" = late ] && [ "$p" != INJ_BASH ] && continue
+      inj_run "${!p}"; judge BLOCK "inject[$where] ${p#INJ_} :: $e" $?
+    done
+  done
+done
+inject early 'inj() { echo "${#PAYLOAD//x/y}"; }; INJ="$(inj)"'
+inj_run "$INJ_BASH"
+r=1
+case "$INJ_ERR" in *"bad substitution"*) case "$INJ_ERR" in *"(fail-closed)"*) r=0 ;; esac ;; esac
+judge ALLOW "an injected error is named on stderr with the fail-closed reason" "$r"
+[ -z "$(ls -A "$INJ_TMP")" ]; judge ALLOW "the hook leaves no error file behind" $?
+# bhishma #218 M: while the hook checks, its error file has no name a leftover process could open and truncate.
+inject late '[ -e "$GERR" ] && { DECIDED=1; exit 7; }'
+inj_run "$INJ_BASH"; judge ALLOW "the error file is deleted by name before any check runs" $?
+[ -z "$(ls -A "$INJ_TMP")" ]; judge ALLOW "no error file is in the temp folder during the check" $?
+# Truncating what used to be the file's name changes nothing: the error is still seen through the hook's own fd.
+inject late 'inj() { local v; v="$(echo "${#PAYLOAD//x/y}")"; return 0; }; inj; : > "$GERR"'
+inj_run "$INJ_BASH"; judge BLOCK "an error is still seen after its old file name is truncated" $?
+# bhishma #218 L: a signal or a timeout kill blocks.
+# A signal ignored when bash starts can neither be trapped nor kill it (CI runners start jobs with SIGPIPE ignored), so
+# the hook then reaches its normal decision; the case is judged only where the signal is live.
+for s in TERM HUP INT PIPE; do
+  inject late "kill -$s \$\$"
+  if [ "$(bash -c "kill -$s \$\$; echo alive" 2>/dev/null)" = alive ]; then
+    inj_run "$INJ_BASH"; judge ALLOW "inject[late] SIG$s is ignored by this environment, so the hook decides normally" $?
+  else
+    inj_run "$INJ_BASH"; judge BLOCK "inject[late] SIG$s blocks" $?
+  fi
+done
+# An unwritable temp folder blocks every call, and says why.
+UT_ERR="$(printf '%s' "$INJ_BASH" | TMPDIR="$H/no-such-tmp" bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+judge BLOCK "an unwritable temp folder blocks" "$rc"
+case "$UT_ERR" in *"private error file"*"not writable"*) r=0 ;; *) r=1 ;; esac
+judge ALLOW "an unwritable temp folder is named in the message" "$r"
+
 # --- #190 H1 (4): agents never write a campaign Vajra Desktop's core runs ---
 CS="bash ~/.claude/skills/vajra/scripts/vajra-campaign.sh"; TP="python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py"
 # The CLI workflow's own campaign, before any core run exists: every write it makes is allowed.

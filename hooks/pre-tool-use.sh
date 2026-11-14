@@ -23,6 +23,7 @@
 # empty arrays are expanded with ${a[@]+"${a[@]}"} because of set -u.
 
 set -u
+set -o pipefail
 unset CDPATH
 # NFR-SEC-2: a hook runs outside the guard, and the programs it starts can read the HMAC key file. A same-uid worker
 # can write user dirs (for example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs
@@ -32,15 +33,66 @@ PYTHON3="/usr/bin/python3"
 # Path comparisons are case-insensitive (nocasematch is switched on only inside
 # classify/inside/icase, so `case` on flags like -c vs -C stays exact).
 
+# Fail closed on any unexpected error (item 4). The EXIT trap blocks every exit without a decision, and the ERR trap
+# blocks a failing top-level command. Neither sees an error that does not end the script: a bad substitution or an
+# unbound variable inside `$(...)` only ends that subshell and leaves an empty value, and a `[` test that errors reads
+# as false, so the check is skipped and the call would be allowed. Every such error is printed by bash on stderr, so
+# the hook's own stderr goes to a private file, its messages go to fd 3 (the real stderr), and `allow` refuses to
+# allow when that file holds anything. errtrace is not used: the helpers answer with their return code.
+# bhishma #218 M: the file is opened twice (fd 2 to write, fd 4 to read) and deleted by name at once, so a process the
+# agent left running can't find it to truncate it; only fd 4 is ever read. A signal or timeout kill blocks too (L).
+exec 3>&2
 DECIDED=0
+GERR=""
+GERR_OPEN=0
+GERR_SEEN=0
+GERR_BUF=""
+# Everything bash wrote to the captured stderr so far, up to 4096 characters, read once through fd 4 (built-ins
+# only, so it can run inside a trap). GERR_LINE: its first non-blank line, printable, at most 300 characters.
+gerr_read() {
+  if [ "$GERR_OPEN" = 1 ] && [ "$GERR_SEEN" = 0 ]; then
+    GERR_SEEN=1
+    IFS= read -r -d '' -n 4096 GERR_BUF <&4 || true
+  fi
+  local l
+  GERR_LINE=""
+  while IFS= read -r l; do
+    l="${l//[^[:print:]]/}"
+    [ -n "${l// /}" ] && { GERR_LINE="${l:0:300}"; break; }
+  done <<<"$GERR_BUF"
+  return 0
+}
+internal_error() { # what -> the one fail-closed message, on the real stderr
+  gerr_read
+  echo "Vajra guard: internal error ($1${GERR_LINE:+: $GERR_LINE}); blocking the tool call (fail-closed)." >&3
+}
 on_exit() {
   local rc=$?
   if [ "$DECIDED" != 1 ]; then
-    echo "Vajra guard: internal error (rc=${rc}); blocking the tool call (fail-closed)." >&2
+    internal_error "exit ${rc} without a decision"
     exit 2
   fi
 }
 trap on_exit EXIT
+on_err() {
+  local rc=$?
+  internal_error "line ${1:-?} failed with ${rc}"
+  DECIDED=1
+  exit 2
+}
+trap 'on_err $LINENO' ERR
+# Killed by a signal or a timeout: never an exit Claude Code would let through.
+for sig in TERM HUP INT PIPE; do
+  trap "internal_error 'stopped by SIG$sig'; DECIDED=1; exit 2" "$sig"
+done
+if ! GERR="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/vajra-guard-err.XXXXXX" 2>/dev/null)" || [ -z "$GERR" ]; then
+  echo "Vajra guard: it could not create its private error file in the temp folder (${TMPDIR:-/tmp} is not writable), so every tool call is blocked (fail-closed). Make the temp folder writable and retry." >&3
+  DECIDED=1
+  exit 2
+fi
+exec 2>"$GERR" 4<"$GERR"
+GERR_OPEN=1
+/bin/rm -f "$GERR"
 
 VS="${HOME}/.claude/vajra"
 AUDIT_LOG="${VS}/audit.log"
@@ -53,12 +105,16 @@ audit() { # verdict tool reason
 
 block() {
   audit BLOCK "${TOOL:-unknown}" "$1"
-  echo "Vajra guard blocked this ${TOOL:-tool} call: $1" >&2
+  echo "Vajra guard blocked this ${TOOL:-tool} call: $1" >&3
   DECIDED=1
   exit 2
 }
 
 allow() {
+  gerr_read
+  if [ "$GERR_OPEN" != 1 ] || [ -n "$GERR_BUF" ]; then
+    block "an internal error occurred while checking it, so it is not allowed (fail-closed): ${GERR_LINE:-unknown error}"
+  fi
   audit ALLOW "${TOOL:-unknown}" ""
   DECIDED=1
   exit 0
@@ -67,7 +123,9 @@ allow() {
 TOOL=""
 NOJQ="jq was not found in /usr/bin, /bin, /usr/sbin or /sbin and /usr/bin/python3 could not parse the payload, so every tool call is blocked (fail-closed). Vajra's hooks use only those root-owned system dirs: a jq in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq; otherwise xcode-select --install provides /usr/bin/python3, which the guard then uses. Retry after."
 
-PAYLOAD="$(cat)"
+# A failed read (no `cat` in the pinned dirs) falls through to the parse step's own, more specific block; `allow`
+# refuses anyway, because the failure is on the captured stderr.
+PAYLOAD="$(cat)" || PAYLOAD=""
 CWD_IN="" CMD="" P1="" P2="" P3="" PAT="" AID=""
 if command -v jq >/dev/null 2>&1; then
 PARSED="$(jq -r '
@@ -654,7 +712,7 @@ case "$TOOL" in
   Write|Edit|MultiEdit|NotebookEdit)
     for f in "$P1" "$P2" "$P3"; do
       [ -n "$f" ] || continue
-      amb_check "$f" "$CWD" uni
+      amb_check "$f" "$CWD" uni || true  # it blocks itself; 1 only means "not ambiguous"
       canon "$f" "$CWD"
       classify "$CANON"
       case "$PKIND" in
