@@ -277,24 +277,43 @@ describe("Shell B frame (FG-03)", () => {
     expect(screen.queryByRole("button", { name: /found here/ })).toBeNull();
   });
 
-  it("with no projects yet, Add project puts the cursor in the Repository folder field", async () => {
-    boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] } });
+  const EMPTY = { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] } };
+
+  it("with no projects yet, Add project opens the folder picker; a pick fills the Repository folder field and focuses it", async () => {
+    boot("", { ...EMPTY, "plugin:dialog|open": "/Users/me/code/app" });
     await screen.findByRole("heading", { name: S.home.start });
-    const repo = screen.getByLabelText(S.home.repo);
-    expect(document.activeElement).not.toBe(repo);
+    expect(document.activeElement).not.toBe(screen.getByLabelText(S.home.repo));
     fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe("/Users/me/code/app"));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
-    // Pressed again from the same place, it still lands there.
-    (document.activeElement as HTMLElement).blur();
+    expect(ipc.calls.some((c) => c.cmd === "plugin:dialog|open")).toBe(true);
+  });
+
+  it("cancelling the picker leaves everything as it was", async () => {
+    boot("", { ...EMPTY, "plugin:dialog|open": null });
+    await screen.findByRole("heading", { name: S.home.start });
+    fireEvent.change(screen.getByLabelText(S.home.repo), { target: { value: "/typed/path" } });
+    const hash = window.location.hash;
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "plugin:dialog|open")).toBe(true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe("/typed/path");
+    expect(window.location.hash).toBe(hash);
+  });
+
+  it("when the picker cannot open, Add project still puts the cursor in the Repository folder field", async () => {
+    boot("", { ...EMPTY, "plugin:dialog|open": () => { throw { error: "unavailable" }; } });
+    await screen.findByRole("heading", { name: S.home.start });
     fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
   });
 
-  it("from inside a project, Add project opens the launcher with the cursor in the Repository folder field", async () => {
-    boot();
+  it("from inside a project, a picked folder opens the launcher with it in the Repository folder field", async () => {
+    boot("", { "plugin:dialog|open": "/Users/me/code/other" });
     await screen.findByRole("navigation", { name: S.frame.projects });
     fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
     await waitFor(() => expect(window.location.hash).toContain("new=1"));
+    await waitFor(() => expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe("/Users/me/code/other"));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
   });
 

@@ -46,7 +46,7 @@ const fetchCampaigns = () => api.listCampaigns().then((r) => r.campaigns);
 const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 
 export function Home() {
-  const [, go] = useRoute();
+  const [route, go] = useRoute();
   const prefs = usePreferences();
   // Inside a project the folder is the project's, and the list is the project's own campaigns (FG-03).
   const { project } = useCurrentProject();
@@ -75,7 +75,10 @@ export function Home() {
     : targets;
   const retryCamps = allCamps.state === "error" ? reloadCamps : reloadTargets;
   const campsFailed = allCamps.state === "error" ? S.home.campaignsFailed : S.home.targetsFailed;
-  const [d, setD] = useState<Draft>({ repo: project?.root ?? "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
+  const [d, setD] = useState<Draft>({ repo: route.params.repo || project?.root || "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
+  // A folder picked by the title bar's Add project arrives as a route param, also when this screen is already open.
+  const pickedRepo = route.params.repo;
+  useEffect(() => { if (pickedRepo) setD((x) => (x.repo === pickedRepo ? x : { ...x, repo: pickedRepo })); }, [pickedRepo]);
   // The preference scope whose defaults the form holds, or which the user has edited (PR 100 review): switching projects
   // applies the next project's defaults once its own view arrives, and an edit keeps them only within its scope.
   const scope = preferenceScope(project);
