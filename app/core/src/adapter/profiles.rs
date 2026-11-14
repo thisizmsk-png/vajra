@@ -111,7 +111,7 @@ pub const S4_UNVERIFIED: Unsupported = Unsupported {
 
 const CODEX_LEAD_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`codex exec --json --skip-git-repo-check`, stdin /dev/null" },
-    Always { setting: "sandbox", how: "`--sandbox read-only`" },
+    Always { setting: "sandbox", how: "a fresh `vajra-<16 hex>` permission profile per launch: the Vajra dirs `none`, the lead dir `read`, no `write` entry, network off; no `--sandbox` flag, which would switch the profile off" },
     Always { setting: "working_dir", how: "`-C <data>/runs/<run>/lead`" },
     Always { setting: "approval", how: "`-c approval_policy=\"never\"`" },
     Always { setting: "user_config", how: "`--ignore-rules`; login: `--ignore-user-config` (N3; spike S2); gateway: a Vajra-owned CODEX_HOME" },
@@ -475,12 +475,13 @@ pub struct CodexLead {
 }
 
 /// The Codex lead launch, both routes, built in this one function (16.4 as amended for Codex leads by spike S2):
-/// - `codex exec --json --skip-git-repo-check --sandbox read-only -C <lead dir>`, stdin `/dev/null`;
+/// - `codex exec --json --skip-git-repo-check -C <lead dir>`, stdin `/dev/null`, read-only by its profile (below);
 /// - `approval_policy="never"`, `notify=[]`, `web_search="disabled"`, and `features.multi_agent=false` and
 ///   `features.goals=false`, so the lead spawns no sub-agents of its own;
 /// - **6k:** a fresh per-launch permission profile (`codex_profile_name`): the whole disk readable, the Vajra dirs
-///   (`l.deny`) unreadable with the lead dir read back in, no write entry at all and no network. Codex ignores
-///   `--sandbox` under a profile, so the profile is what holds the lead read-only; the flag stays as a second net. N3
+///   (`l.deny`) unreadable with the lead dir read back in, no write entry at all and no network. It replaces
+///   `--sandbox read-only`, which would switch the profile off (an explicit `--sandbox` wins on 0.166); Codex reports
+///   a no-write profile as a `read-only` sandbox with the deny entries, which `check_codex_lead_applied` requires. N3
 ///   is unchanged: the core lead is Vajra's own controller, so the user's MCP servers and `notify` stay off (the
 ///   owner's "keep my extras" is for the seats the user drives, vajra-1 2026-11-13);
 /// - `--ignore-rules` on both routes: no user or project execpolicy `.rules` file loads, so no saved "always allow"
@@ -499,7 +500,9 @@ pub fn codex_lead_launch(l: &LeadLaunch<'_>, route: CodexRoute<'_>) -> Result<Co
     check_lead_prompt(l.prompt)?;
     let dir = toml_path(l.lead_dir, "lead_dir")?;
     let (exe, run, token, socket) = check_server(&l.server)?;
-    let mut a: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-C"]
+    // No `--sandbox`: on 0.166 an explicit `--sandbox read-only` wins over `default_permissions`, and the profile's deny
+    // entries never apply (measured 2026-11-13). The profile alone makes the lead read-only.
+    let mut a: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "exec", "--json", "--skip-git-repo-check", "-C"]
         .map(String::from)
         .into();
     a.extend([dir, "--ignore-rules".into()]);

@@ -759,6 +759,8 @@ fn the_codex_lead_runs_under_a_fresh_profile_with_the_vajra_dirs_denied_and_no_w
             assert_eq!(kv.iter().filter(|k| **k == p).count(), 1, "{p} in {kv:?}");
         }
         assert!(!kv.iter().any(|k| k.contains("\"write\"")), "a lead's profile has no write entry: {kv:?}");
+        // On 0.166 an explicit --sandbox wins over default_permissions and the deny entries never apply (2026-11-13).
+        assert!(!a.iter().any(|x| x == "--sandbox"), "no --sandbox flag, which would switch the profile off: {a:?}");
         assert!(kv.contains(&"notify=[]") && kv.contains(&run_server_kv().as_str()), "N3 holds alongside the profile");
     }
     let mut l = lead(Some("m"), None);
@@ -788,7 +790,7 @@ fn run_server_kv() -> String {
 fn codex_login_lead_argv_snapshot() {
     let a = codex_lead_argv_of(&lead(Some("model-a"), Some("high")), CodexRoute::Login).unwrap();
     let want: Vec<String> = [
-        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
+        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--skip-git-repo-check",
         "-C", "/d/runs/20261112-0930/lead", "--ignore-rules", "--ignore-user-config", "-m", "model-a",
         "-c", "approval_policy=\"never\"", "-c", "notify=[]", "-c", "web_search=\"disabled\"",
         "-c", "features.multi_agent=false", "-c", "features.goals=false",
@@ -945,6 +947,22 @@ fn the_codex_lead_read_back_wants_read_only_no_network_and_the_lead_dir() {
     assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[]), Path::new("/elsewhere"), d).is_err());
     assert!(check_codex_lead_applied(&rollout(json!({"type": "read-only"}), &[], "on-request"), wt, d).is_err());
     assert!(check_codex_lead_applied("{}\n", wt, d).is_err());
+}
+
+/// The `turn_context` codex 0.166 wrote on 2026-11-13 for a lead launched as `codex_lead_launch` builds it (a no-write
+/// profile, no `--sandbox`): a `read-only` sandbox and the profile's entries, `deny` for the data dir and `read` for
+/// the lead dir inside it. Run with a temp CODEX_HOME and a placeholder provider on a closed loopback port; no key.
+const OBSERVED_LEAD_TC: &str = r#"{"type":"turn_context","payload":{"cwd":"/private/tmp/v52-nowrite/data/runs/r1/lead","approval_policy":"never","sandbox_policy":{"type":"read-only"},"file_system_sandbox_policy":{"kind":"restricted","entries":[{"path":{"type":"path","path":"/"},"access":"read"},{"path":{"type":"path","path":"/private/tmp/v52-nowrite/data"},"access":"deny"},{"path":{"type":"path","path":"/private/tmp/v52-nowrite/data/runs/r1/lead"},"access":"read"}]}}}"#;
+
+/// The same launch with `--sandbox read-only` added: the flag wins and the profile is gone (only the root reads).
+const OBSERVED_FLAG_TC: &str = r#"{"type":"turn_context","payload":{"cwd":"/private/tmp/v52-nowrite/data/runs/r1/lead","approval_policy":"never","sandbox_policy":{"type":"read-only"},"permission_profile":{"type":"managed","file_system":{"type":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"}]},"network":"restricted"}}}"#;
+
+#[test]
+fn the_codex_lead_read_back_passes_what_real_codex_reports_and_refuses_a_profile_the_flag_switched_off() {
+    let lead = Path::new("/private/tmp/v52-nowrite/data/runs/r1/lead");
+    let deny = [PathBuf::from("/private/tmp/v52-nowrite/data")];
+    assert!(check_codex_lead_applied(OBSERVED_LEAD_TC, lead, &deny).is_ok());
+    assert!(check_codex_lead_applied(OBSERVED_FLAG_TC, lead, &deny).is_err(), "--sandbox switched the profile off");
 }
 
 /// 6k: a lead whose profile didn't apply never runs. A Vajra dir with no deny entry fails, an older layout with no
