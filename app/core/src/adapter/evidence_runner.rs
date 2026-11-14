@@ -685,8 +685,10 @@ fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), String> {
 /// fsmonitor and hooks need no refusal: `GIT_RUN_CONFIG` turns them off for every git in the run.
 /// Also refused (bhishma L4 on 8ca4e0a): `core.worktree` and `core.attributesFile`, which redirect what git adds and
 /// which attributes pick a driver, and the external diff and textconv commands, programs any diff in the run would
-/// start. Keys come back from git in canonical form (section and key lowercase), so the pattern is lowercase.
-const REFUSED_CONFIG: &str = r"^(filter\..+\.(clean|smudge|process)|include\.path|includeif\..+\.path|core\.worktree|core\.attributesfile|diff\.external|diff\..+\.(textconv|command))$";
+/// start. Keys come back from git in canonical form (section and key lowercase), so the pattern is lowercase. A
+/// subsection name may be empty (codex P1 on #251): git accepts `[filter ""]` and a `filter=` attribute with no value
+/// picks it, so each subsection matches zero or more characters (`filter..clean`).
+const REFUSED_CONFIG: &str = r"^(filter\..*\.(clean|smudge|process)|include\.path|includeif\..*\.path|core\.worktree|core\.attributesfile|diff\.external|diff\..*\.(textconv|command))$";
 
 /// The refusal for a repo config that sets `key`: what was found, why, and the way out (bhishma L2 on 8ca4e0a). The
 /// key is shown as plain text only (printable, at most 80 characters): a subsection name is the repo's own text.

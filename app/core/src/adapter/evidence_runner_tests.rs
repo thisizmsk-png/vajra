@@ -1293,6 +1293,27 @@ fn a_repo_configured_filter_driver_or_include_refuses_the_run() {
         assert!(gitc(&["config", key, val]).status.success(), "{key}");
         assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused(&key.to_lowercase()), "{key}");
     }
+    // codex P1 on #251: an empty subsection name. `[filter ""]` is picked by a `filter=` attribute with no value. The
+    // control shows plain git runs it; the runner refuses it (and the same for an empty diff driver).
+    let _ = fs::remove_file(&marker);
+    fs::write(work.join(".gitattributes"), "* filter=\n").unwrap();
+    let mut c = clean_config.clone();
+    c.extend_from_slice(format!("[filter \"\"]\n\tclean = {}\n", filter.display()).as_bytes());
+    fs::write(common.join("config"), c).unwrap();
+    assert!(gitc(&["add", "-A"]).status.success());
+    assert!(marker.exists(), "control: an empty-named filter runs outside the runner");
+    assert!(gitc(&["reset", "-q"]).status.success());
+    let _ = fs::remove_file(&marker);
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused("filter..clean"), "an empty-named filter");
+    assert!(!marker.exists(), "the runner refused before any git ran the filter");
+    for key in ["filter..smudge", "filter..process", "diff..textconv", "diff..command"] {
+        let (section, name) = key.split_once("..").unwrap();
+        let mut c = clean_config.clone();
+        c.extend_from_slice(format!("[{section} \"\"]\n\t{name} = {}\n", filter.display()).as_bytes());
+        fs::write(common.join("config"), c).unwrap();
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused(key), "{key}");
+    }
+    fs::write(work.join(".gitattributes"), "* filter=evil\n").unwrap();
     // In the worktree's own config (config.worktree in its admin folder).
     fs::write(common.join("config"), &clean_config).unwrap();
     fs::write(common.join("worktrees/work/config.worktree"), format!("[filter \"evil\"]\n\tclean = {}\n", filter.display())).unwrap();
