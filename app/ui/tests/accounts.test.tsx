@@ -146,7 +146,8 @@ describe("Settings > Providers > Accounts", () => {
     const claude = await account("Claude Code");
     const weekly = within(claude).getByRole("meter", { name: "Claude Code Weekly" });
     expect(weekly.getAttribute("aria-valuenow")).toBe("84");
-    expect(within(claude).getAllByText(C.used(84))).toHaveLength(2); // the figure and the warning chip
+    expect(within(claude).getAllByText(C.used(84))).toHaveLength(1); // the figure, said once
+    expect(within(claude).getAllByText(C.nearLimit)).toHaveLength(1); // the warning chip does not repeat the figure
     expect(within(claude).getAllByText(C.used(62))).toHaveLength(1); // the 5-hour window: figure only, no chip
     expect(within(claude).getByText(C.resets("Thu 09:00"))).toBeTruthy();
     expect(within(await account("Codex CLI")).getByText(C.notReported)).toBeTruthy();

@@ -27,6 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use super::{fail, invalid, App, Res};
+use crate::adapter::evidence_runner::{self as runner, EvidenceRun, Profile, RunOutcome};
 use crate::control::{audit, fsx, sha256::hex_digest};
 
 /// `evidence_hold_max_s`: how long an ask waits for its answer, and how long an approval stays usable.
@@ -79,7 +80,35 @@ pub(crate) struct Held {
 /// these, so none can reach the dialog. Also the line and paragraph separators U+2028 and U+2029 (bhishma on #226):
 /// they are neither, but a renderer breaks the line at them, so one command could show as two.
 fn hides_text(c: char) -> bool {
-    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') || default_ignorable(c)
+    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') || default_ignorable(c) || hides_or_overlays(c)
+}
+
+/// bhishma L2 on PR 247: what a renderer may draw as nothing, as a private glyph, or over its neighbour (Unicode
+/// 16.0). Every format character (Cf) that isn't default-ignorable; all private use (Co); the noncharacters; and the
+/// combining marks that overlay or enclose the character before them (canonical combining class 1, and Me). And every
+/// code point unassigned in the Unicode data the core is built with (Cn, bhishma L1 on the wiring): one assigned later
+/// might draw as nothing.
+fn hides_or_overlays(c: char) -> bool {
+    use icu_properties::{props::GeneralCategory, CodePointMapData};
+    let u = c as u32;
+    CodePointMapData::<GeneralCategory>::new().get(c) == GeneralCategory::Unassigned
+        || (u & 0xFFFE) == 0xFFFE
+        || matches!(
+            c,
+            // Cf, not default-ignorable
+            '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}' | '\u{08E2}'
+                | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}'
+                // Co
+                | '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+                // noncharacters (and U+nFFFE, U+nFFFF above)
+                | '\u{FDD0}'..='\u{FDEF}'
+                // overlay marks (ccc 1)
+                | '\u{0334}'..='\u{0338}' | '\u{1CD4}' | '\u{1CE2}'..='\u{1CE8}' | '\u{20D2}'..='\u{20D3}'
+                | '\u{20D8}'..='\u{20DA}' | '\u{20E5}'..='\u{20E6}' | '\u{20EA}'..='\u{20EB}' | '\u{10A39}'
+                | '\u{16AF0}'..='\u{16AF4}' | '\u{1BC9E}' | '\u{1D167}'..='\u{1D169}'
+                // enclosing marks (Me)
+                | '\u{0488}'..='\u{0489}' | '\u{1ABE}' | '\u{20DD}'..='\u{20E0}' | '\u{20E2}'..='\u{20E4}' | '\u{A670}'..='\u{A672}'
+        )
 }
 
 /// Unicode's Default_Ignorable_Code_Point property, in full (Unicode 16.0 DerivedCoreProperties.txt).
@@ -342,6 +371,39 @@ impl App {
             h.consumed = true;
         }
         Ok(sha)
+    }
+
+    /// Runs a `guarded_by_approval` run's check commands, only as approved (bhishma L1 on PR 247). The ask's network
+    /// is set from `profile`, the one the runner really launches with, so an approval given with the network off can't
+    /// be used by a run with it on. The approval is then used up for that exact ask, and the commands that run are
+    /// `ask.commands`, the very strings the approval's sha covers: `run.commands` is ignored, and nothing is re-read
+    /// from a file or an agent between the check and the run. Any refusal runs nothing. Returns the approval's sha
+    /// (for the signed progress line) and the run's outcome.
+    #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
+    pub(crate) fn run_approved_evidence(&self, ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime) -> Result<(String, RunOutcome), String> {
+        self.run_approved_evidence_with(ask, profile, run, now, runner::run)
+    }
+
+    /// `run_approved_evidence` with the runner passed in, so tests see exactly what would run.
+    #[allow(dead_code)] // as above
+    pub(crate) fn run_approved_evidence_with<F>(&self, mut ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime, exec: F) -> Result<(String, RunOutcome), String>
+    where
+        F: FnOnce(&Profile, &EvidenceRun) -> RunOutcome,
+    {
+        ask.network = profile.network;
+        // Where the commands run must be what was approved (bhishma M1 on the wiring), checked before the approval is
+        // used, so a mismatch runs nothing and leaves it unused: the slug is this run's; the worktree has ask.commit
+        // checked out, read from its admin folder in the run's git common dir, which also proves that dir is its own.
+        if super::proof_app::run_of(run.slug) != Some(ask.run_id.as_str()) {
+            return Err("the evidence folder belongs to another run".into());
+        }
+        let head = runner::worktree_head(&profile.worktree, run.git_common).map_err(String::from)?;
+        if head != ask.commit {
+            return Err("the worktree isn't at the approved commit".into());
+        }
+        let sha = self.consume_evidence_approval(&ask, now)?;
+        let approved = EvidenceRun { commands: &ask.commands, ..run.clone() };
+        Ok((sha, exec(profile, &approved)))
     }
 
     /// The run's approval, for the UI: the state, and while pending the exact list to show. A pending or approved

@@ -91,6 +91,8 @@ h1.v-run__name { margin-bottom: var(--space-lg); }
 .v-approval__list li { padding: 2px 0; color: var(--c-text-secondary); }
 .v-approval__list li::marker { color: var(--c-text-muted); }
 .v-approval__list code { font: inherit; color: var(--c-text); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Non-ASCII in a command (bhishma L3): a tint plus a solid underline, so it never relies on the faint tint alone. */
+.v-approval__nonascii { color: inherit; background: var(--c-warn-tint); border-radius: 2px; text-decoration: underline 2px var(--c-warning); text-underline-offset: 3px; }
 .v-home__report { margin: 0; padding: var(--space-md); max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/16px var(--font-mono); color: var(--c-text-secondary); border: 1px solid var(--c-border); }
 .v-home__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .v-home__list li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); border-bottom: 1px solid var(--c-border); }

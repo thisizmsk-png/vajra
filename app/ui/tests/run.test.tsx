@@ -41,6 +41,14 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
   });
 
+  it("offers a button to History next to the ask to choose a run, since History has no tab", async () => {
+    setTransport(fakeIpc({ list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } }).transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    await screen.findByText(S.run.pick);
+    fireEvent.click(screen.getByRole("button", { name: S.states.openHistory }));
+    await waitFor(() => expect(window.location.hash).toContain("history"));
+  });
+
   it("still asks for a choice in History when the project list was read", async () => {
     const ipc = fakeIpc({ list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } });
     setTransport(ipc.transport);

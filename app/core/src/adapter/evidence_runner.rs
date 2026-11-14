@@ -631,6 +631,56 @@ fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), &'static str> {
 /// the worktree isn't in git, or nothing was ever staged.
 fn worktree_index(worktree: &Path, common: &Path) -> Result<Option<Vec<u8>>, &'static str> {
     const CAP: u64 = 512 << 20;
+    let Some(admin) = git_admin(worktree, common)? else { return Ok(None) };
+    // A regular file only (#234 follow-up): the pinned open uses O_NOFOLLOW (a symlink fails), O_NONBLOCK (a FIFO
+    // can't stall the run) and checks the opened file is regular (a directory, FIFO or device fails).
+    match admin.read_single_link("index", CAP) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("the worktree's git index isn't a plain file with one link"),
+    }
+}
+
+/// The commit `worktree` has checked out, read from protected data only, through the same pinned walk as its index
+/// (bhishma M1 on the approval wiring): the HEAD in the worktree's admin folder inside the run's git common dir
+/// `common`, which also proves `common` is this worktree's own repository. A symbolic HEAD is followed one level, to a
+/// loose ref under `common`'s refs folder or a line of its packed-refs. Never the worktree's own `.git` file or git.
+pub(crate) fn worktree_head(worktree: &Path, common: &Path) -> Result<String, &'static str> {
+    const CAP: u64 = 4096;
+    let not_ours = "the worktree's git folder isn't the run's repository";
+    let unreadable = "the worktree's checked-out commit can't be read";
+    let admin = git_admin(worktree, common)?.ok_or(not_ours)?;
+    let text = |b: Vec<u8>| String::from_utf8(b).ok().map(|s| s.trim_end_matches('\n').to_string());
+    let head = admin.read_single_link("HEAD", CAP).ok().and_then(text).ok_or(unreadable)?;
+    let is_sha = |s: &str| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+    let Some(name) = head.strip_prefix("ref: ") else {
+        return if is_sha(&head) { Ok(head) } else { Err(unreadable) };
+    };
+    // Only a branch or tag-like ref under refs, with plain components: no `..`, no empty part.
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() < 2 || parts[0] != "refs" || parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
+        return Err(unreadable);
+    }
+    let common_dir = walk(None, common, false).map_err(|_| not_ours)?;
+    let mut dir = common_dir.child(parts[0], false).ok();
+    for p in &parts[1..parts.len() - 1] {
+        dir = dir.and_then(|d| d.child(p, false).ok());
+    }
+    if let Some(sha) = dir.and_then(|d| d.read_single_link(parts[parts.len() - 1], CAP).ok()).and_then(text) {
+        return if is_sha(&sha) { Ok(sha) } else { Err(unreadable) };
+    }
+    let packed = common_dir.read_single_link("packed-refs", 64 << 20).ok().and_then(text).ok_or(unreadable)?;
+    packed
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with('^'))
+        .find_map(|l| l.split_once(' ').filter(|(_, r)| *r == name).map(|(s, _)| s.to_string()))
+        .filter(|s| is_sha(s))
+        .ok_or(unreadable)
+}
+
+/// The worktree's admin folder inside the run's git common dir, pinned; `None` when the worktree isn't in git. See
+/// `worktree_index` for how it is found without trusting anything the worktree can write.
+fn git_admin(worktree: &Path, common: &Path) -> Result<Option<crate::projects::pinned::Pinned>, &'static str> {
     let dotgit = worktree.join(".git");
     let Ok(kind) = std::fs::symlink_metadata(&dotgit).map(|m| m.file_type()) else { return Ok(None) };
     let not_ours = "the worktree's git folder isn't the run's repository";
@@ -658,13 +708,7 @@ fn worktree_index(worktree: &Path, common: &Path) -> Result<Option<Vec<u8>>, &'s
     } else {
         return Err(not_ours);
     };
-    // A regular file only (#234 follow-up): the pinned open uses O_NOFOLLOW (a symlink fails), O_NONBLOCK (a FIFO
-    // can't stall the run) and checks the opened file is regular (a directory, FIFO or device fails).
-    match admin.read_single_link("index", CAP) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err("the worktree's git index isn't a plain file with one link"),
-    }
+    Ok(Some(admin))
 }
 
 fn save_evidence(base: &Path, slug: &str, json: &[u8]) -> std::io::Result<()> {
