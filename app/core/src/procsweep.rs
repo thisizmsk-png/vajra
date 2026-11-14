@@ -406,6 +406,8 @@ mod tests {
     #[ignore]
     fn sleeper_body() {
         if std::env::var_os("VAJRA_SWEEP_SLEEP").is_some() {
+            // With VAJRA_SWEEP_JOB, also start a job in this session (an agent's tool child), kept until the sleep ends.
+            let _job = std::env::var_os("VAJRA_SWEEP_JOB").map(|_| Command::new("/bin/sleep").arg("600").spawn().unwrap());
             std::thread::sleep(Duration::from_secs(600));
         }
     }

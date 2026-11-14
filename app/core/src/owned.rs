@@ -484,15 +484,18 @@ impl Members {
     /// How many are not provably gone: proven members by `provably_gone`, unwatched ones the same way (their watch
     /// never reports an exit, so only the kernel's pid, stamp and zombie reads can prove them gone).
     fn left(&self, w: &mut ExitWatch) -> usize {
-        let unwatched = self
-            .unwatched
+        left(w, &self.proven) + self.unwatched_left(w)
+    }
+
+    /// How many unwatched members are not provably gone.
+    fn unwatched_left(&self, w: &mut ExitWatch) -> usize {
+        self.unwatched
             .iter()
             .filter(|&&(p, s)| match s {
                 Some(s) => !provably_gone(w, p, s),
                 None => Seen::read(w, p).exists,
             })
-            .count();
-        left(w, &self.proven) + unwatched
+            .count()
     }
 
     /// Add what a later listing found that this one does not hold.
@@ -558,7 +561,14 @@ fn snapshot(w: &mut ExitWatch, o: &Owner) -> Option<Members> {
 pub fn recover(o: &Owner) -> Recovery {
     let mut w = ExitWatch::new();
     let Some(mut members) = snapshot(&mut w, o) else { return Recovery::NotOwned };
-    // Only watched members are signalled; an unwatched one is waited on and counted, never signalled.
+    // PR 259 review: while any member can't be watched, nothing of the session is signalled, the leader included. The
+    // record names only the leader, so ending it would leave the unwatched member alive with no identity to retry by:
+    // the next try would find the leader gone and forget the record. The leader stays, the record stays, and a later
+    // try, when every member can be watched, ends the whole session.
+    let unwatched = members.unwatched_left(&mut w);
+    if unwatched > 0 {
+        return Recovery::Survived { remaining: members.left(&mut w) };
+    }
     for &(p, s) in &members.proven {
         signal_verified(&mut w, p, s, libc::SIGHUP);
     }
@@ -624,13 +634,14 @@ fn could_be_ours(o: &Owner) -> bool {
 fn end_session(o: &Owner) -> Ended {
     let mut w = ExitWatch::new();
     let Some(members) = snapshot(&mut w, o) else { return Ended::Gone };
-    let Members { proven, unwatched } = members;
+    // PR 259 review: as in `recover`, an unwatched member that may still run means nothing is signalled, the leader
+    // included, so the kept record still names a live leader and the next start can end the whole session.
+    if members.unwatched_left(&mut w) > 0 {
+        return Ended::Survived;
+    }
     drop(w);
-    let swept = crate::procsweep::kill_proved(proven);
-    // An unwatched member is never signalled: if it may still run, the session survived and its record is kept.
-    let mut w = ExitWatch::new();
-    let unwatched = Members { proven: Vec::new(), unwatched }.left(&mut w);
-    if swept.survived == 0 && unwatched == 0 { Ended::Killed } else { Ended::Survived }
+    let swept = crate::procsweep::kill_proved(members.proven);
+    if swept.survived == 0 { Ended::Killed } else { Ended::Survived }
 }
 
 pub fn ledger_path(data: &Path) -> PathBuf {
@@ -993,9 +1004,10 @@ mod tests {
         crate::terminal::kill::session_members(o.pid).into_iter().map(|p| p as u32).find(|&p| p != o.pid).expect("the session has its job")
     }
 
-    /// Plan #248: a member whose exit watch fails to register is not left out of the session. It is listed as not proven:
-    /// never signalled, and counted as still running, so recovery reports `Survived` (the record is kept) and an agent's
-    /// end reports `Survived`, never `Ended`/`Killed` while it runs.
+    /// Plan #248: a member whose exit watch fails to register is not left out of the session. It is listed as not proven.
+    /// PR 259 review: while it may still run, nothing of the session is signalled, the leader included, so the record
+    /// keeps naming a live leader. Recovery reports `Survived` every time and the record stays usable; once every member
+    /// can be watched, the next try ends the whole session, the job included.
     #[test]
     fn given_a_member_whose_exit_watch_fails_when_the_session_is_ended_then_it_is_kept_and_never_signalled() {
         let (c, o) = leader();
@@ -1008,16 +1020,38 @@ mod tests {
         assert_eq!(m.left(&mut w), 2);
         drop(w);
 
-        assert_eq!(recover(&o), Recovery::Survived { remaining: 1 }, "the shell ended; the unwatched job is not proven gone");
-        assert!(alive(job) && !crate::procid::is_zombie(job), "the unwatched job was never signalled");
+        let lp = tmp("unwatched");
+        let _ = std::fs::remove_file(&lp);
+        let l = Ledger::new(lp.clone());
+        l.record(o.clone()).unwrap();
+        let mut found = vec![Found { owner: o.clone(), verdict: Verdict::Owned { members: 2 } }];
+        for attempt in 0..2 {
+            let r = recover(&o);
+            assert_eq!(r, Recovery::Survived { remaining: 2 }, "attempt {attempt}: nothing was ended while the job can't be watched");
+            assert!(alive(o.pid) && alive(job) && !crate::procid::is_zombie(job), "attempt {attempt}: neither was signalled");
+            apply_recovery(&l, &mut found, &o, &r);
+            assert_eq!(l.load(), vec![o.clone()], "attempt {attempt}: the record still names the live leader");
+            assert_eq!(judge(&o), Verdict::Owned { members: 2 }, "attempt {attempt}: and still judges owned, job counted");
+        }
+        // A restart's settle keeps it too.
+        assert_eq!(l.settle(), vec![Found { owner: o.clone(), verdict: Verdict::Owned { members: 2 } }]);
+        // Once the job can be watched, the next try ends the whole session, the job included.
+        REFUSE_WATCH.with(|r| r.borrow_mut().clear());
+        assert_eq!(recover(&o), Recovery::Ended);
+        let t0 = Instant::now();
+        while alive(job) && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(job), "the job is ended with its session");
         gone(c);
+        let _ = std::fs::remove_file(&lp);
 
         // The same for an agent's end, and for `kill_proved` given a hit it cannot watch.
         let (c2, o2) = leader();
         let job2 = job_of(&o2);
         REFUSE_WATCH.with(|r| r.borrow_mut().insert(job2));
         assert_eq!(end_session(&o2), Ended::Survived, "not Killed while the unwatched job runs");
-        assert!(alive(job2) && !crate::procid::is_zombie(job2), "never signalled");
+        assert!(alive(o2.pid) && alive(job2) && !crate::procid::is_zombie(job2), "neither the leader nor the job was signalled");
         let s = crate::procsweep::kill_proved(vec![(job2, start_stamp(job2).unwrap())]);
         assert_eq!((s.killed, s.survived), (0, 1), "an unwatched hit counts as survived, not dropped");
         assert!(alive(job2), "and is not signalled");
