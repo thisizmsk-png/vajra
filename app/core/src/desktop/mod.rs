@@ -511,7 +511,13 @@ impl App {
         }
     }
 
+    /// On a Mac that has never run Claude Code `~/.claude` does not exist yet. That is a normal first launch, not an
+    /// error: the empty folder is made (the one Claude Code makes itself) and the checks then say what is not installed.
+    /// Only a truly absent path is created; a dangling link or a file stays an error.
     fn allow(&self) -> Result<Allowlist, Value> {
+        if matches!(std::fs::symlink_metadata(&self.claude), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+            std::fs::create_dir_all(&self.claude).map_err(|e| fail("claude_dir_missing", e))?;
+        }
         Allowlist::new(&self.claude, &self.data).map_err(|e| fail("claude_dir_missing", e))
     }
 

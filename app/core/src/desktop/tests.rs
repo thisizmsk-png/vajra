@@ -295,12 +295,24 @@ fn workers_are_discovered_from_the_session_subagents_dir() {
 }
 
 #[test]
-fn missing_claude_dir_is_an_error_not_a_panic() {
+fn missing_claude_dir_is_a_first_launch_not_an_error() {
     let t = Tmp::new();
     fs::remove_dir_all(t.home().join(".claude")).unwrap();
     let app = t.app();
-    assert_eq!(code(&app.list_campaigns().unwrap_err()), "claude_dir_missing");
+    assert!(app.list_campaigns().is_ok());
+    let pre = app.preflight().unwrap();
+    assert_eq!(pre["start_enabled"], false, "nothing is installed, so Start stays off");
+    assert!(t.home().join(".claude").is_dir());
+}
+
+#[test]
+fn a_dangling_claude_link_stays_an_error() {
+    let t = Tmp::new();
+    fs::remove_dir_all(t.home().join(".claude")).unwrap();
+    std::os::unix::fs::symlink(t.home().join("nowhere"), t.home().join(".claude")).unwrap();
+    let app = t.app();
     assert_eq!(code(&app.preflight().unwrap_err()), "claude_dir_missing");
+    assert!(!t.home().join("nowhere").exists());
 }
 
 fn rss_kb() -> u64 {
