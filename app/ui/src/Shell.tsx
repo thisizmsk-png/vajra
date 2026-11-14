@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon, Kbd, ariaShortcut } from "../components/ui/base";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { PaletteHost, usePaletteOpener } from "./palette";
+import { api } from "./ipc";
 import { toHash, useRoute } from "./router";
 import type { Screen } from "./router";
 import { REGISTRY } from "./screens/registry";
@@ -107,7 +108,17 @@ function Frame() {
   // Add project opens the launcher for a new folder and puts the cursor in its Repository folder field. On a first run
   // the launcher is already on screen, so without the focus the button did nothing you could see.
   const [adding, setAdding] = useState(false);
-  const addProject = () => { go("orch", { new: "1" }, null); setAdding(true); };
+  // It opens the system folder picker first. A pick fills the Repository folder field; cancelling leaves everything as it
+  // was; a picker that cannot open falls back to the launcher with the cursor in the field.
+  const pickCount = useRef(0);
+  const addProject = () => {
+    api.chooseFolder(S.folder.title).then(
+      (picked) => {
+        if (typeof picked === "string" && picked) { go("orch", { new: "1", repo: picked, pick: `${Date.now()}-${++pickCount.current}` }, null); setAdding(true); }
+      },
+      () => { go("orch", { new: "1" }, null); setAdding(true); },
+    );
+  };
   const onLauncher = route.screen === "orch" && !!route.params.new;
   useEffect(() => {
     if (!adding || !onLauncher) return;
