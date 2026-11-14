@@ -677,12 +677,21 @@ pub fn runners_of(commands: &[String]) -> Runners {
             if part.contains('$') {
                 r.unknown = true;
             }
-            let mut words = part.split_whitespace().skip_while(|w| *w == "env" || w.contains('='));
+            // A variable set before the program reaches it (the runner clears the rest of the environment), and
+            // PYTEST_ADDOPTS or PYTEST_PLUGINS can do whatever a flag can (codex on #256): noted, and any one before
+            // pytest opens the virtualenvs.
+            let mut assigned = false;
+            let mut words = part.split_whitespace().skip_while(|w| {
+                let lead = *w == "env" || w.contains('=');
+                assigned |= lead && *w != "env";
+                lead
+            });
             let Some(first) = words.next() else { continue };
             let prog = first.rsplit('/').next().unwrap_or(first);
             let rest: Vec<&str> = words.collect();
             if PY_RUNNERS.contains(&prog) {
                 r.python = true;
+                r.py_open |= assigned;
                 pytest_args(&mut r, &rest);
             } else if JS_RUNNERS.contains(&prog) {
                 r.js = true;
@@ -690,6 +699,7 @@ pub fn runners_of(commands: &[String]) -> Runners {
                 match rest.as_slice() {
                     ["-m", "pytest" | "py.test", args @ ..] => {
                         r.python = true;
+                        r.py_open |= assigned;
                         pytest_args(&mut r, args);
                     }
                     _ => r.unknown = true,
@@ -1195,7 +1205,14 @@ mod runners_tests {
         for open in ["pytest --collect-in-virtualenv", "pytest -c x.ini", "pytest --rootdir=.", "pytest /abs", "pytest ../up", "pytest 'a*'", "python -m pytest -p x"] {
             assert!(of(&[open]).py_open, "{open}");
         }
-        let r = of(&["pytest -q -x --tb=short -k 'smoke' -m slow ./tests/ unit/test_a.py::test_b", "python3 -m pytest -ra ."]);
+        // A variable set before pytest, with and without env (codex on #256, a MUST on 36d88796).
+        for open in [
+            "PYTEST_ADDOPTS=--collect-in-virtualenv pytest", "env PYTEST_ADDOPTS=--collect-in-virtualenv pytest", "PYTEST_PLUGINS=evil pytest",
+            "env PYTEST_PLUGINS=evil python3 -m pytest", "CI=1 pytest", "cargo test && FOO=1 py.test",
+        ] {
+            assert!(of(&[open]).py_open, "{open}");
+        }
+        let r = of(&["pytest -q -x --tb=short -k 'smoke' -m slow ./tests/ unit/test_a.py::test_b", "python3 -m pytest -ra .", "env pytest", "CI=1 cargo test"]);
         assert!(!r.py_open);
         assert_eq!(r.py_paths, ["tests", "unit/test_a.py"]);
     }

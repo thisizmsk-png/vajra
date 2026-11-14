@@ -1128,6 +1128,8 @@ mod runner_wiring {
             "pytest -p plugin", "pytest ../x", "pytest /abs/tests", "pytest 'sandbox*'",
             // Shell quoting isn't parsed: a quoted expression of several words fails closed.
             "pytest -m 'not slow' tests",
+            // A variable set before pytest (codex on 36d88796): PYTEST_ADDOPTS can carry any flag.
+            "PYTEST_ADDOPTS=--collect-in-virtualenv pytest", "env PYTEST_ADDOPTS=--collect-in-virtualenv python -m pytest",
         ] {
             refuses(planted_with(&[cmd], ex, &[], &venv), "sandboxenv/test_planted.py");
         }
