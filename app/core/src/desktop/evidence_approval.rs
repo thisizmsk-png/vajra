@@ -20,7 +20,7 @@
 //! The record is `<data>/control/lead/<run>/approval.json`, the core's own (private dir, atomic writes); it is what the
 //! UI shows.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -36,6 +36,8 @@ const FILE: &str = "approval.json";
 /// At most this many commands, each at most this long (the list is shown whole, so it must fit on screen).
 const MAX_COMMANDS: usize = 64;
 const MAX_COMMAND: usize = 4096;
+/// The longest the check that the worktree is exactly the approved commit may take (its tree is computed with git).
+const TREE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// File read-modify-writes run under this lock, so a consume can't race an answer.
 static LOCK: Mutex<()> = Mutex::new(());
@@ -379,7 +381,9 @@ impl App {
     /// `ask.commands`, the very strings the approval's sha covers: `run.commands` is ignored, and nothing is re-read
     /// from a file or an agent between the check and the run. Any refusal runs nothing. Returns the approval's sha
     /// (for the signed progress line) and the run's outcome.
-    #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
+    // The evidence ticket (spec PR 6i) is its first production caller. Until then only the tests and the dialog's
+    // end-to-end test call it, so the allow stays (bhishma L3 on c5765e0, kept by vajra-1's decision C).
+    #[allow(dead_code)]
     pub(crate) fn run_approved_evidence(&self, ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime) -> Result<(String, RunOutcome), String> {
         self.run_approved_evidence_with(ask, profile, run, now, runner::run)
     }
@@ -392,18 +396,50 @@ impl App {
     {
         ask.network = profile.network;
         // Where the commands run must be what was approved (bhishma M1 on the wiring), checked before the approval is
-        // used, so a mismatch runs nothing and leaves it unused: the slug is this run's; the worktree has ask.commit
-        // checked out, read from its admin folder in the run's git common dir, which also proves that dir is its own.
+        // used, so a mismatch runs nothing and leaves it unused: the slug is this run's; the worktree is exactly
+        // ask.commit, its HEAD and every file (`at_approved_commit`).
         if super::proof_app::run_of(run.slug) != Some(ask.run_id.as_str()) {
             return Err("the evidence folder belongs to another run".into());
         }
-        let head = runner::worktree_head(&profile.worktree, run.git_common).map_err(String::from)?;
-        if head != ask.commit {
+        let at_commit = || self.at_approved_commit(&profile.worktree, run.git_common, run.base, &ask.commit);
+        at_commit()?;
+        let sha = self.consume_evidence_approval(&ask, now)?;
+        // Checked again by the runner immediately before it spawns (bhishma L1 on 07a0ee4): a change made after the check
+        // above, by anything outside the sandbox, runs nothing.
+        let approved = EvidenceRun { commands: &ask.commands, at_spawn: Some(runner::AtSpawn(&at_commit)), ..run.clone() };
+        Ok((sha, exec(profile, &approved)))
+    }
+
+    /// The worktree is exactly `commit` (bhishma M1 on the wiring, L1 on 07a0ee4): its HEAD, read through the pinned
+    /// walk in the run's git common dir `common` (which proves that dir is its own), is `commit`; and the tree of its
+    /// files, tracked edits and untracked files alike, equals `commit`'s tree. A dirty worktree is refused rather than
+    /// run and labelled: the person approved the commands for that commit, so the proof must be about that commit's
+    /// files. The tree is the one `vajra-verify-work.sh` records as `git.worktreeTree` (the bridge's `tree_id`: the
+    /// repository's config read once, no filter, hook or fsmonitor ever run), with the walkthrough folder `base` left
+    /// out; a commit that itself has files under `base` is refused, since the two trees could then never be compared.
+    fn at_approved_commit(&self, worktree: &Path, common: &Path, base: &Path, commit: &str) -> Result<(), String> {
+        let head = runner::worktree_head(worktree, common).map_err(String::from)?;
+        if head != commit {
             return Err("the worktree isn't at the approved commit".into());
         }
-        let sha = self.consume_evidence_approval(&ask, now)?;
-        let approved = EvidenceRun { commands: &ask.commands, ..run.clone() };
-        Ok((sha, exec(profile, &approved)))
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = TREE_TIMEOUT;
+        let git = |args: &[&str]| {
+            let req = crate::vajra::bridge::Request::Git { cwd: worktree.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() };
+            bridge.run(&req).ok().filter(|o| o.exit() == Some(0)).map(|o| o.stdout.trim().to_string()).filter(|s| !s.is_empty())
+        };
+        let want = git(&["rev-parse", "--verify", "--quiet", &format!("{commit}^{{tree}}")]).ok_or("the approved commit's tree can't be read")?;
+        if let Ok(rel) = base.strip_prefix(worktree) {
+            if !rel.as_os_str().is_empty() && git(&["rev-parse", "--verify", "--quiet", &format!("{commit}:{}", rel.display())]).is_some() {
+                return Err("the approved commit has files in the walkthrough folder, so its tree can't be compared".into());
+            }
+        }
+        let base_str = base.to_string_lossy();
+        let tree = bridge.tree_id(worktree, &[base_str.as_ref()]).ok_or("the worktree's files couldn't be read as one tree (the repository's config defines a filter, or git took too long)")?;
+        if tree != want {
+            return Err("the worktree has changes that aren't in the approved commit".into());
+        }
+        Ok(())
     }
 
     /// The run's approval, for the UI: the state, and while pending the exact list to show. A pending or approved

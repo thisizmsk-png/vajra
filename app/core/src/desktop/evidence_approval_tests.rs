@@ -589,15 +589,27 @@ mod runner_wiring {
     /// What the fake runner saw: the commands and the profile's network, per call.
     type Seen = RefCell<Vec<(Vec<String>, bool)>>;
 
+    /// A named change a test applies to a repository or a path.
+    type Step<'a, T> = (&'a str, &'a dyn Fn(&T));
+
     fn go_at(app: &App, w: &Where, a: Ask, network: bool, now: SystemTime, seen: &Seen) -> Result<(String, RunOutcome), String> {
         let prof = Profile { worktree: w.worktree.clone(), tmp: w.worktree.with_file_name("run-tmp"), deny: vec![], network };
         let caller: Vec<String> = CALLER.iter().map(|s| s.to_string()).collect();
         let p: &Path = &w.worktree;
-        let run = EvidenceRun { script: p, slug: &w.slug, commands: &caller, base: p, git_common: &w.common, home: p, state_dir: p, tool_path: &[], limit: Duration::from_secs(60) };
-        app.run_approved_evidence_with(a, &prof, &run, now, |p, r| {
-            seen.borrow_mut().push((r.commands.to_vec(), p.network));
-            RunOutcome::Ran { passed: true, sha256: "e".repeat(64) }
-        })
+        let base = w.worktree.join("data/walkthroughs");
+        let run = EvidenceRun { script: p, slug: &w.slug, commands: &caller, base: &base, git_common: &w.common, home: p, state_dir: p, tool_path: &[], limit: Duration::from_secs(60), at_spawn: None };
+        app.run_approved_evidence_with(a, &prof, &run, now, |p, r| record(seen, p, r))
+    }
+
+    /// The recording runner: like `runner::run`, it asks `at_spawn` last and runs nothing when that refuses.
+    fn record(seen: &Seen, p: &Profile, r: &EvidenceRun) -> RunOutcome {
+        if let Some(crate::adapter::evidence_runner::AtSpawn(check)) = r.at_spawn {
+            if let Err(why) = check() {
+                return RunOutcome::Failed(why);
+            }
+        }
+        seen.borrow_mut().push((r.commands.to_vec(), p.network));
+        RunOutcome::Ran { passed: true, sha256: "e".repeat(64) }
     }
 
     fn go(app: &App, g: &Git, a: Ask, network: bool, now: SystemTime, seen: &Seen) -> Result<(String, RunOutcome), String> {
@@ -816,5 +828,170 @@ mod runner_wiring {
             assert!(go_at(&app, &w, a, false, at(T0 + 2), &seen).is_ok(), "packed={packed}");
             assert_eq!(seen.borrow().len(), 1);
         }
+    }
+
+    // bhishma L1 on 07a0ee4: the worktree must be exactly the approved commit, every file, when checked and again at
+    // spawn. A dirty worktree is refused (not run and labelled): the approval is for that commit's files.
+
+    #[test]
+    fn a_dirty_worktree_never_runs_and_the_approval_stays_unused() {
+        for (what, dirty) in [("a tracked file edited", "a.txt"), ("an untracked file", "new.txt"), ("an untracked file in a folder", "src/x.js")] {
+            let t = Tmp::new();
+            let app = t.app();
+            let g = repo(&t);
+            approved(&app, &g.ask());
+            let f = g.work().join(dirty);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(&f, "changed\n").unwrap();
+            let seen = Seen::default();
+            let err = go(&app, &g, g.ask(), false, at(T0 + 2), &seen).unwrap_err();
+            assert!(err.contains("changes that aren't in the approved commit"), "{what}: {err}");
+            assert!(seen.borrow().is_empty(), "{what}: nothing ran");
+            assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "approved", "{what}: the approval isn't used");
+            // Put back exactly: it runs.
+            if dirty == "a.txt" {
+                fs::write(&f, "a\n").unwrap();
+            } else {
+                fs::remove_file(&f).unwrap();
+            }
+            assert!(go(&app, &g, g.ask(), false, at(T0 + 3), &seen).is_ok(), "{what}: clean again");
+        }
+    }
+
+    #[test]
+    fn the_walkthrough_folder_is_left_out_of_the_comparison() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        approved(&app, &g.ask());
+        let bundle = g.work().join("data/walkthroughs/deliver-old/evidence.json");
+        fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        fs::write(&bundle, "{}\n").unwrap();
+        assert!(go(&app, &g, g.ask(), false, at(T0 + 2), &Seen::default()).is_ok());
+    }
+
+    #[test]
+    fn a_commit_with_files_in_the_walkthrough_folder_is_refused() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        let w = g.work();
+        fs::create_dir_all(w.join("data/walkthroughs")).unwrap();
+        fs::write(w.join("data/walkthroughs/kept.json"), "{}\n").unwrap();
+        git_in(&w, &["add", "data"]);
+        git_in(&w, &["commit", "-qm", "w"]);
+        let c3 = git_in(&w, &["rev-parse", "HEAD"]);
+        let a = Ask { commit: c3, ..super::ask() };
+        approved(&app, &a);
+        let seen = Seen::default();
+        let err = go(&app, &g, a, false, at(T0 + 2), &seen).unwrap_err();
+        assert!(err.contains("walkthrough folder"), "{err}");
+        assert!(seen.borrow().is_empty());
+        assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "approved");
+    }
+
+    #[test]
+    fn a_change_after_the_check_and_before_the_spawn_runs_nothing() {
+        // Something outside the sandbox edits a file, or moves HEAD, after the approval is used and before the runner
+        // spawns: the runner's last check refuses, and no command runs.
+        let moves: [Step<Git>; 3] = [
+            ("a file edited", &|g| fs::write(g.work().join("a.txt"), "changed\n").unwrap()),
+            ("a file added", &|g| fs::write(g.work().join("planted.sh"), "exit 0\n").unwrap()),
+            ("HEAD moved", &|g| {
+                git_in(&g.work(), &["checkout", "-q", "--detach", &g.c2]);
+            }),
+        ];
+        for (what, change) in moves {
+            let t = Tmp::new();
+            let app = t.app();
+            let g = repo(&t);
+            approved(&app, &g.ask());
+            let seen = Seen::default();
+            let w = g.here();
+            let prof = Profile { worktree: w.worktree.clone(), tmp: w.worktree.with_file_name("run-tmp"), deny: vec![], network: false };
+            let base = w.worktree.join("data/walkthroughs");
+            let caller: Vec<String> = vec![];
+            let p: &Path = &w.worktree;
+            let run = EvidenceRun { script: p, slug: &w.slug, commands: &caller, base: &base, git_common: &w.common, home: p, state_dir: p, tool_path: &[], limit: Duration::from_secs(60), at_spawn: None };
+            let (_, out) = app
+                .run_approved_evidence_with(g.ask(), &prof, &run, at(T0 + 2), |p, r| {
+                    change(&g);
+                    record(&seen, p, r)
+                })
+                .unwrap();
+            assert!(matches!(&out, RunOutcome::Failed(why) if why.contains("approved commit")), "{what}: {out:?}");
+            assert!(seen.borrow().is_empty(), "{what}: nothing ran");
+        }
+    }
+
+    #[test]
+    fn a_loose_ref_that_is_there_but_unreadable_is_refused_not_read_from_packed_refs() {
+        // The main checkout is on branch main; its packed value is c2. A loose main that can't be read must refuse.
+        let breakers: [Step<Path>; 3] = [
+            ("a link", &|r| std::os::unix::fs::symlink("../../packed-refs", r).unwrap()),
+            ("a folder", &|r| fs::create_dir(r).unwrap()),
+            ("not a sha", &|r| fs::write(r, "garbage\n").unwrap()),
+        ];
+        for (what, breaker) in breakers {
+            let t = Tmp::new();
+            let app = t.app();
+            let g = repo(&t);
+            let repo_dir = g.root.join("repo");
+            git_in(&repo_dir, &["pack-refs", "--all", "--prune"]);
+            breaker(&g.common().join("refs/heads/main"));
+            let a = Ask { commit: g.c2.clone(), ..super::ask() };
+            approved(&app, &a);
+            let w = Where { worktree: repo_dir, ..g.here() };
+            let seen = Seen::default();
+            let err = go_at(&app, &w, a, false, at(T0 + 2), &seen).unwrap_err();
+            assert!(err.contains("can't be read"), "{what}: {err}");
+            assert!(seen.borrow().is_empty(), "{what}: nothing ran");
+        }
+    }
+
+    // End to end from the dialog: the ask the core holds is what the dialog reads, the person answers through the same
+    // act the dialog sends (act_answer_evidence_approval, with the sha it showed), then the helper runs, or doesn't.
+
+    fn dialog_answers(app: &App, approve: bool) -> Value {
+        let shown = app.evidence_approval(RUN).unwrap();
+        assert_eq!(shown["state"], "pending");
+        let sha = shown["sha256"].as_str().unwrap().to_string();
+        app.act_answer_evidence_approval(&env(if approve { "dialog-approve-01" } else { "dialog-decline-01" }), RUN, &sha, approve)
+    }
+
+    #[test]
+    fn end_to_end_the_dialogs_approve_runs_exactly_the_shown_commands_once() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        let a = Ask { commands: vec!["npm ci".into(), "npm test -- --grep 'rate limit'".into()], ..g.ask() };
+        app.request_evidence_approval(&a, at(T0)).unwrap();
+        // What the dialog shows is the list the core will run.
+        assert_eq!(app.evidence_approval(RUN).unwrap()["ask"]["commands"], json!(a.commands));
+        let r = dialog_answers(&app, true);
+        assert_eq!(r["receipt"]["state"], "done", "{r}");
+        let seen = Seen::default();
+        let (sha, out) = go(&app, &g, a.clone(), false, SystemTime::now(), &seen).unwrap();
+        assert!(matches!(out, RunOutcome::Ran { passed: true, .. }));
+        assert_eq!(*seen.borrow(), vec![(a.commands.clone(), false)]);
+        assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "consumed");
+        assert_eq!(app.evidence_approval_consumed(RUN).as_deref(), Some(sha.as_str()));
+        assert!(t.audit().contains("evidence-approval consumed"), "the use is in the audit log");
+    }
+
+    #[test]
+    fn end_to_end_the_dialogs_decline_runs_nothing() {
+        let t = Tmp::new();
+        let app = t.app();
+        let g = repo(&t);
+        app.request_evidence_approval(&g.ask(), at(T0)).unwrap();
+        let r = dialog_answers(&app, false);
+        assert_eq!(r["receipt"]["state"], "done", "{r}");
+        assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "declined");
+        let seen = Seen::default();
+        let err = go(&app, &g, g.ask(), false, SystemTime::now(), &seen).unwrap_err();
+        assert!(err.contains("declined"), "{err}");
+        assert!(seen.borrow().is_empty(), "nothing ran");
+        assert!(app.evidence_approval_consumed(RUN).is_none());
     }
 }

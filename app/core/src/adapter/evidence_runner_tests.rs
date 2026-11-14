@@ -366,7 +366,7 @@ fn base(t: &Tmp) -> PathBuf {
 fn evidence_run<'a>(script: &'a Path, base: &'a Path, cmds: &'a [String], common: &'a Path, home: &'a Path) -> EvidenceRun<'a> {
     // The fake state dir under the fake HOME (leaked: a few bytes per test, so the borrow outlives the helper).
     let state_dir: &'a Path = Box::leak(home.join(".claude/vajra").into_boxed_path());
-    EvidenceRun { script, slug: SLUG, commands: cmds, base, git_common: common, home, state_dir, tool_path: &[], limit: Duration::from_secs(20) }
+    EvidenceRun { script, slug: SLUG, commands: cmds, base, git_common: common, home, state_dir, tool_path: &[], limit: Duration::from_secs(20), at_spawn: None }
 }
 
 /// `run` under a fresh profile: each call gets its own tmp dir, as `run` requires.
@@ -786,6 +786,35 @@ exit $rc"#,
     let mut r = evidence_run(&script, &base, &cmds, &common, &home);
     r.tool_path = &path;
     assert!(matches!(go(&t, &r), RunOutcome::Ran { passed: true, .. }), "a check command sees the user's PATH");
+}
+
+/// The last check before spawning (bhishma L1 on 07a0ee4): asked once, after the preparation, and when it refuses the
+/// script never starts, so no command runs; when it passes, the run goes ahead as usual.
+#[test]
+fn a_refusing_at_spawn_check_starts_no_process() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("atspawn");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let ran = t.0.join("work/ran");
+    let cmds = vec![format!("touch '{}'", ran.display())];
+    let asked = std::cell::Cell::new(0);
+    let refuse = || -> Result<(), String> {
+        asked.set(asked.get() + 1);
+        Err("the worktree isn't at the approved commit".into())
+    };
+    let p = t.fresh(false, "run-atspawn-no");
+    let r = EvidenceRun { at_spawn: Some(AtSpawn(&refuse)), ..evidence_run(&script, &base, &cmds, &common, &home) };
+    let out = run(&p, &r);
+    assert!(matches!(&out, RunOutcome::Failed(why) if why.contains("approved commit")), "{out:?}");
+    assert_eq!(asked.get(), 1, "asked once");
+    assert!(!ran.exists(), "no command ran");
+    let pass = || -> Result<(), String> { Ok(()) };
+    let p = t.fresh(false, "run-atspawn-yes");
+    let r = EvidenceRun { at_spawn: Some(AtSpawn(&pass)), ..evidence_run(&script, &base, &cmds, &common, &home) };
+    assert!(matches!(run(&p, &r), RunOutcome::Ran { .. }), "a passing check lets the run go ahead");
+    assert!(ran.exists(), "the command ran");
 }
 
 /// The BASH_ENV file every check's bash sources is out of every check's reach (codex P1 on d85a04a2): a first command

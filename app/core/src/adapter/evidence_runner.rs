@@ -255,6 +255,20 @@ pub struct EvidenceRun<'a> {
     /// run. Only absolute entries are kept; the system dirs follow. The sandbox applies whatever a tool is.
     pub tool_path: &'a [PathBuf],
     pub limit: Duration,
+    /// Asked once, after every other preparation and immediately before the sandboxed process is spawned: an error
+    /// runs nothing. An approval run uses it to re-check that the worktree is still at the approved commit with no
+    /// other change (bhishma L1 on 07a0ee4).
+    pub at_spawn: Option<AtSpawn<'a>>,
+}
+
+/// A last check before spawning (see `EvidenceRun::at_spawn`).
+#[derive(Clone, Copy)]
+pub struct AtSpawn<'a>(pub &'a dyn Fn() -> Result<(), String>);
+
+impl std::fmt::Debug for AtSpawn<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AtSpawn")
+    }
 }
 
 /// After the script exits, how long the core waits for its evidence channel to close. A background process of the
@@ -450,6 +464,12 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
             Ok(())
         });
     }
+    // The last check, as late as it can be: nothing is spawned when it fails.
+    if let Some(AtSpawn(check)) = r.at_spawn {
+        if let Err(why) = check() {
+            return RunOutcome::Failed(why);
+        }
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return RunOutcome::Failed(format!("the evidence runner didn't start: {e}")),
@@ -639,7 +659,11 @@ pub(crate) fn worktree_head(worktree: &Path, common: &Path) -> Result<String, &'
     for p in &parts[1..parts.len() - 1] {
         dir = dir.and_then(|d| d.child(p, false).ok());
     }
-    if let Some(sha) = dir.and_then(|d| d.read_single_link(parts[parts.len() - 1], CAP).ok()).and_then(text) {
+    // A loose ref that is there wins, as in git; one that is there but can't be read (a link, a second name, a folder,
+    // not text) refuses, never falls back to an older packed value (bhishma L2 on 07a0ee4).
+    let leaf = parts[parts.len() - 1];
+    if let Some(d) = dir.filter(|d| d.exists(leaf)) {
+        let sha = d.read_single_link(leaf, CAP).ok().and_then(text).ok_or(unreadable)?;
         return if is_sha(&sha) { Ok(sha) } else { Err(unreadable) };
     }
     let packed = common_dir.read_single_link("packed-refs", 64 << 20).ok().and_then(text).ok_or(unreadable)?;
