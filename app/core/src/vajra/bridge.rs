@@ -302,7 +302,7 @@ impl Bridge {
     /// there. `None` if any step fails, the total `timeout` runs out, or the repo's own config defines an executable filter
     /// (`repo_filters`: `add` would run it). Same git hardening as `Request::Git`.
     pub fn tree_id(&self, repo: &Path, exclude: &[&str]) -> Option<String> {
-        self.snapshot(repo, exclude, false).map(|s| s.tree)
+        self.snapshot(repo, exclude, None).map(|s| s.tree)
     }
 
     /// `tree_id`'s tree, plus what it leaves out by the ignore rules (bhishma M2 on 7c09e27): `add -A` honours the
@@ -318,11 +318,12 @@ impl Bridge {
     ///   config that replaces the defaults (`RUNNER_CONFIGS`) drops every skip.
     ///
     /// `None` as for `tree_id`, and when a listing is cut at `OUTPUT_CAP`: never a partial answer.
-    pub fn worktree_snapshot(&self, repo: &Path, exclude: &[&str]) -> Option<Snapshot> {
-        self.snapshot(repo, exclude, true)
+    /// `commands`: the approved list, which decides the virtualenv and `target` skips (`runners_of`).
+    pub fn worktree_snapshot(&self, repo: &Path, exclude: &[&str], commands: &[String]) -> Option<Snapshot> {
+        self.snapshot(repo, exclude, Some(runners_of(commands)))
     }
 
-    fn snapshot(&self, repo: &Path, exclude: &[&str], ignored: bool) -> Option<Snapshot> {
+    fn snapshot(&self, repo: &Path, exclude: &[&str], runners: Option<Runners>) -> Option<Snapshot> {
         let start = Instant::now();
         // The one read of the config this snapshot uses; the steps below never read the repo's config files again.
         let frozen = self.frozen_config(repo, self.timeout)?;
@@ -416,9 +417,9 @@ impl Bridge {
             if tree.len() < 40 {
                 return None;
             }
-            if !ignored {
+            let Some(runners) = runners else {
                 return Some(Snapshot { tree, ..Snapshot::default() });
-            }
+            };
             let names = |o: Output| -> Vec<String> { o.stdout_raw.split(|b| *b == 0).filter(|n| !n.is_empty()).map(|n| String::from_utf8_lossy(n).into_owned()).collect() };
             // The runner configs as this tree has them: listed from the session's index and read from its blobs, so
             // they are the very files the tree compare binds. More than `MAX_CONFIGS` drops every skip (fail safe).
@@ -470,8 +471,11 @@ impl Bridge {
                     let d = top_dir.join(entry);
                     let has = |f: &str| std::fs::symlink_metadata(d.join(f)).is_ok_and(|m| m.is_file());
                     let name = Path::new(entry).file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                    let venv = has("pyvenv.cfg") && !rules.js_config;
-                    let cargo = name == "target" && has("CACHEDIR.TAG") && !rules.py_config && !rules.js_config;
+                    // bhishma M1 on cd9525a: decided by the runners the approved commands could start (pytest, jest
+                    // and the rest run with no config at all, and the marker files can be planted), never by a
+                    // config alone. A command Vajra can't place keeps both folders in.
+                    let venv = has("pyvenv.cfg") && !runners.js && !runners.unknown && !rules.js_config;
+                    let cargo = name == "target" && has("CACHEDIR.TAG") && !runners.python && !runners.js && !runners.unknown && !rules.py_config && !rules.js_config;
                     if venv || cargo {
                         skip.push(format!(":(exclude,literal){entry}"));
                     }
@@ -555,6 +559,56 @@ const MAX_CONFIGS: usize = 200;
 
 /// The folders `go test ./...` itself skips: names starting with a dot or an underscore, `testdata` and `vendor`.
 pub const GO_SKIP: [&str; 4] = ["**/.*/**", "**/_*/**", "**/testdata/**", "**/vendor/**"];
+
+/// Which test runners the approved commands could start (bhishma M1 on cd9525a).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Runners {
+    /// pytest itself: `pytest`, `py.test` or `python -m pytest`.
+    pub python: bool,
+    /// jest, vitest or mocha itself.
+    pub js: bool,
+    /// Anything else that isn't a known non-runner. A launcher (tox, nox, uv, poetry, npm, npx, pnpm, yarn, bun), a
+    /// package script, `make`, a shell or a script runs whatever its config says, so it could start either runner.
+    pub unknown: bool,
+}
+
+const PY_RUNNERS: [&str; 2] = ["pytest", "py.test"];
+const JS_RUNNERS: [&str; 3] = ["jest", "vitest", "mocha"];
+/// Commands that start no Python or JS test runner: the Rust and Go toolchains and plain file tools. Not `make` or
+/// `git`, which run whatever a Makefile or an alias says.
+const OTHER_TOOLS: [&str; 14] = ["cargo", "rustc", "go", "true", "false", "test", "echo", "grep", "ls", "cat", "diff", "cmp", "wc", "rg"];
+
+/// What `commands` could start, word by word: each command is split on shell separators, and each part's first word
+/// (after `env` and `VAR=value` settings, and with any folder stripped) is placed. `python` and `python3` are placed
+/// by what they run: `-m pytest` is pytest; any other script, `-c` or `-m` could be anything. A `$` could expand to
+/// anything. When in doubt, `unknown`.
+pub fn runners_of(commands: &[String]) -> Runners {
+    let mut r = Runners::default();
+    for c in commands {
+        for part in c.split(['&', '|', ';', '\n', '(', ')', '`']).map(str::trim).filter(|p| !p.is_empty()) {
+            if part.contains('$') {
+                r.unknown = true;
+            }
+            let mut words = part.split_whitespace().skip_while(|w| *w == "env" || w.contains('='));
+            let Some(first) = words.next() else { continue };
+            let prog = first.rsplit('/').next().unwrap_or(first);
+            let rest: Vec<&str> = words.collect();
+            if PY_RUNNERS.contains(&prog) {
+                r.python = true;
+            } else if JS_RUNNERS.contains(&prog) {
+                r.js = true;
+            } else if prog.starts_with("python") {
+                match rest.as_slice() {
+                    ["-m", "pytest" | "py.test", ..] => r.python = true,
+                    _ => r.unknown = true,
+                }
+            } else if !OTHER_TOOLS.contains(&prog) {
+                r.unknown = true;
+            }
+        }
+    }
+    r
+}
 
 /// What the tracked runner configs say, for `worktree_snapshot`'s test-like check (bhishma M2b on 93dc4ab).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -994,5 +1048,36 @@ mod frozen_config_tests {
         assert!(parse_frozen("local\0extensions.objectformat\nmd5\0").is_none());
         assert!(parse_frozen("local\0core.autocrlf\ninput\0trailing").is_none(), "output not ending in NUL is refused");
         assert!(parse_frozen("").unwrap().entries.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod runners_tests {
+    use super::{runners_of, Runners};
+
+    fn of(commands: &[&str]) -> Runners {
+        runners_of(&commands.iter().map(|c| c.to_string()).collect::<Vec<_>>())
+    }
+
+    fn is(r: Runners, python: bool, js: bool, unknown: bool) -> bool {
+        r.python == python && r.js == js && r.unknown == unknown
+    }
+
+    #[test]
+    fn runners_are_placed_from_the_approved_commands_and_anything_unplaced_is_unknown() {
+        // bhishma M1 on cd9525a.
+        assert!(is(of(&["cargo build", "cargo test --workspace", "go test ./..."]), false, false, false));
+        assert!(is(of(&["pytest -q", "/usr/bin/py.test", "python3 -m pytest", "env CI=1 python -m pytest"]), true, false, false));
+        assert!(is(of(&["jest --ci", "node_modules/.bin/vitest run", "FORCE_COLOR=0 mocha"]), false, true, false));
+        assert!(is(of(&["cargo test && pytest", "cargo test; npx jest"]), true, false, true), "npx is a launcher");
+        assert!(is(of(&["cargo test | jest"]), false, true, false), "every part of a pipe is placed");
+        for unknown in [
+            "tox -e py", "nox", "uv run pytest", "poetry run pytest", "npm test", "pnpm test", "yarn test", "bun test",
+            "npx jest", "make check", "git test", "sh -c 'pytest'", "bash run.sh", "./run-checks.sh", "python run.py",
+            "python -c 'import pytest'", "python -m unittest", "python", "$RUNNER", "cargo test $(echo x)", "(jest)x`y`",
+        ] {
+            assert!(of(&[unknown]).unknown, "{unknown} could start anything");
+        }
+        assert!(is(of(&[]), false, false, false));
     }
 }

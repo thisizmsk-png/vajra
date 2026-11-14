@@ -964,6 +964,11 @@ mod runner_wiring {
     /// An approved run in a fresh repository with `exclude` ignored, `tracked` committed (the approved commit is the
     /// one with them) and `planted` files written: the check's refusal, or `None` when it runs.
     fn planted_run(exclude: &str, tracked: &[(&str, &str)], planted: &[&str]) -> Option<String> {
+        planted_with(&["npm ci", "npm test"], exclude, tracked, planted)
+    }
+
+    /// `planted_run` with the approved `commands`.
+    fn planted_with(commands: &[&str], exclude: &str, tracked: &[(&str, &str)], planted: &[&str]) -> Option<String> {
         let t = Tmp::new();
         let app = t.app();
         let g = repo(&t);
@@ -983,7 +988,7 @@ mod runner_wiring {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(&p, "x\n").unwrap();
         }
-        let a = Ask { commit, ..super::ask() };
+        let a = Ask { commit, commands: commands.iter().map(|c| c.to_string()).collect(), ..super::ask() };
         approved(&app, &a);
         let seen = Seen::default();
         let got = go(&app, &g, a, false, at(T0 + 2), &seen);
@@ -1000,9 +1005,17 @@ mod runner_wiring {
     /// pytest or JS config tracked) is left out.
     #[test]
     fn a_test_file_in_an_ignored_target_is_refused_unless_it_is_cargos_own() {
-        refuses(planted_run("target/\n", &[], &["target/test_x.py"]), "target/test_x.py");
-        assert_eq!(planted_run("target/\n", &[], &["target/CACHEDIR.TAG", "target/debug/build/x/tests/a.rs"]), None, "cargo's own target");
-        refuses(planted_run("target/\n", &[("pytest.ini", "[pytest]\n")], &["target/CACHEDIR.TAG", "target/test_x.py"]), "target/test_x.py");
+        const CARGO: &[&str] = &["cargo build", "cargo test --workspace"];
+        refuses(planted_with(CARGO, "target/\n", &[], &["target/test_x.py"]), "target/test_x.py");
+        assert_eq!(planted_with(CARGO, "target/\n", &[], &["target/CACHEDIR.TAG", "target/debug/build/x/tests/a.rs"]), None, "cargo's own target, cargo commands");
+        refuses(planted_with(CARGO, "target/\n", &[("pytest.ini", "[pytest]\n")], &["target/CACHEDIR.TAG", "target/test_x.py"]), "target/test_x.py");
+        // bhishma M1 on cd9525a: the marker can be planted and pytest needs no config, so what decides is the commands.
+        // A pytest command, through any launcher, keeps target in, CACHEDIR.TAG or not.
+        for cmd in ["pytest -q", "python3 -m pytest", "tox -e py", "cargo test && uv run pytest"] {
+            refuses(planted_with(&[cmd], "target/\n", &[], &["target/CACHEDIR.TAG", "target/test_x.py"]), "target/test_x.py");
+        }
+        // So does a command Vajra can't place.
+        refuses(planted_with(&["./run-checks.sh"], "target/\n", &[], &["target/CACHEDIR.TAG", "target/test_x.py"]), "target/test_x.py");
     }
 
     /// Row 2: `go test ./...` doesn't skip `node_modules`; only dot, underscore, testdata and vendor folders.
@@ -1018,9 +1031,18 @@ mod runner_wiring {
     /// Row 3: jest and vitest don't skip a virtualenv; one is left out only with its `pyvenv.cfg` and no JS config.
     #[test]
     fn a_test_file_in_an_ignored_venv_is_refused_without_its_pyvenv_cfg_or_with_a_js_runner() {
-        refuses(planted_run("venv/\n", &[], &["venv/x.test.js"]), "venv/x.test.js");
-        assert_eq!(planted_run(".venv/\n", &[], &[".venv/pyvenv.cfg", ".venv/lib/site-packages/pkg/tests/test_a.py"]), None, "a real virtualenv");
-        refuses(planted_run(".venv/\n", &[("jest.config.js", "module.exports = {}\n")], &[".venv/pyvenv.cfg", ".venv/x.test.js"]), ".venv/x.test.js");
+        const PY: &[&str] = &["python3 -m pytest -q", "pytest tests"];
+        // pip is no runner Vajra places, so it drops the skip like any unknown command.
+        refuses(planted_with(&["pip install -e .", "pytest"], ".venv/\n", &[], &[".venv/pyvenv.cfg", ".venv/x.test.js"]), ".venv/x.test.js");
+        refuses(planted_with(PY, "venv/\n", &[], &["venv/x.test.js"]), "venv/x.test.js");
+        assert_eq!(planted_with(PY, ".venv/\n", &[], &[".venv/pyvenv.cfg", ".venv/lib/site-packages/pkg/tests/test_a.py"]), None, "a real virtualenv, pytest commands");
+        refuses(planted_with(PY, ".venv/\n", &[("jest.config.js", "module.exports = {}\n")], &[".venv/pyvenv.cfg", ".venv/x.test.js"]), ".venv/x.test.js");
+        // bhishma M1 on cd9525a: jest runs with no config and pyvenv.cfg can be planted, so a JS runner in the
+        // commands keeps the virtualenv in, through any launcher.
+        for cmd in ["npx jest", "npm test", "pnpm run test", "yarn vitest run", "pytest && npx mocha"] {
+            refuses(planted_with(&[cmd], ".venv/\n", &[], &[".venv/pyvenv.cfg", ".venv/x.test.js"]), ".venv/x.test.js");
+        }
+        refuses(planted_with(&["sh -c 'make check'"], ".venv/\n", &[], &[".venv/pyvenv.cfg", ".venv/x.test.js"]), ".venv/x.test.js");
     }
 
     /// Row 4: a tracked config that replaces a runner's defaults drops every skip, `node_modules` included.
