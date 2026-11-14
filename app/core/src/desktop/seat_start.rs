@@ -29,7 +29,7 @@ pub const CODEX_WARNING: &str = "Runs outside the Vajra guard, with your own Cod
 fn codex_lead_note() -> String {
     format!("{CODEX_WARNING} {CODEX_LEAD_CAUSE}")
 }
-pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard, in Claude Code's sandbox. Your own Claude Code settings and MCP servers don't load for this worker.";
+pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard, in Claude Code's sandbox. It keeps your default model and model routing; your other Claude Code settings and MCP servers don't load for this worker.";
 pub const NETWORK_NOTE: &str = "Internet on for this worker";
 /// A Claude seat with network on: Claude Code's sandbox gives its Bash loopback only, whatever the seat says, until the
 /// registry domain list lands (#212 review).
