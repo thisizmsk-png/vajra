@@ -79,7 +79,8 @@ function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermM
 
 // ---- response shapes (the JSON the core returns) --------------------------------------------------------------------
 /** `action`: a one-click fix the core offers (today only `install_dev_tools`), with its label and what to do after. */
-export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string; action?: "install_dev_tools"; action_label?: string; action_note?: string };
+/** `checked: false` is a check that could not be made (shown as "Not run", never as a pass); `advisory` rows do not stop Start. */
+export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string; advisory?: boolean; checked?: boolean; action?: "install_dev_tools"; action_label?: string; action_note?: string };
 export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
 export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;

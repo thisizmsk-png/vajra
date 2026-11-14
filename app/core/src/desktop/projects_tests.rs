@@ -158,7 +158,7 @@ fn a_symlinked_projects_folder_does_not_stop_the_app_opening() {
 /// #106 review: with every other check passing, a refused projects folder alone holds up Start; without it Start is on.
 #[test]
 fn a_refused_projects_folder_alone_disables_start() {
-    let rows = vec![crate::vajra::preflight::Row { name: "claude".into(), ok: true, detail: "found".into(), fix: String::new() }];
+    let rows = vec![crate::vajra::preflight::Row { name: "claude".into(), ok: true, detail: "found".into(), fix: String::new(), advisory: false, checked: true }];
     assert_eq!(crate::desktop::preflight_json(&rows, None)["start_enabled"], true);
     let row = json!({"name": "Projects folder", "ok": false, "detail": "refused", "fix": "move it"});
     let pf = crate::desktop::preflight_json(&rows, Some(row));
