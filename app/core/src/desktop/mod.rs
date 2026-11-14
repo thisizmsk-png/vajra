@@ -541,7 +541,7 @@ impl App {
         // reusing an id would keep that record's Lead session and approval-only marker for a different run.
         let recorded = |id: &str| self.data.join("control").join("lead").join(id).symlink_metadata().is_ok();
         // `deliver-{id}` is the workflow's default campaign name (`CAMPAIGN = RESUME || deliver-${RUN}` in workflows/vajra-deliver.js).
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id);
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id) || self.campaign_name_held(id);
         let pick = (0..120u64)
             .map(|k| now + 60 * k)
             .map(|t| (t, ids::run_id_at(t)))
@@ -549,6 +549,23 @@ impl App {
             .ok_or_else(|| fail("run_id_exhausted", "no unused run id in the next 120 minutes; check runs.jsonl"))?;
         lock(&self.issued).insert(pick.1.clone());
         Ok(pick)
+    }
+
+    /// Plan #217 L2: is either campaign name a run under `id` would get (`deliver-<id>`, or `deliver-<id>-og` for an
+    /// outside-guard run) already present in the campaigns folder, in any form? Read without following a link
+    /// (`symlink_metadata`), so a plain file, a dangling link, a link to anywhere and a folder with planted files all
+    /// count, and so does a case variant (the disk is case-insensitive). Run ids are predictable minutes, so an agent can
+    /// make a future run's folder before the run exists; such an id is never issued, and the workflow only ever creates
+    /// its campaign folder fresh (its init refuses one that exists). The core never creates the folder itself: the
+    /// workflow's init must be the one to. An unreadable campaigns folder counts as held (fail closed).
+    fn campaign_name_held(&self, id: &str) -> bool {
+        let Ok(allow) = self.allow() else { return true };
+        let dir = allow.campaigns_dir();
+        let held = |name: String| match dir.join(name).symlink_metadata() {
+            Ok(_) => true,
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        };
+        held(format!("deliver-{id}")) || held(format!("deliver-{id}-og"))
     }
 
     // ---------------------------------------------------------------- start
@@ -1253,6 +1270,11 @@ impl App {
             Some(t) => t,
             None => self.fresh_run_id(ids::unix_now())?,
         };
+        // Plan #217 L2: checked again just before the launch, for the window since the pick. A fresh run's folder is
+        // always the workflow's own new one, never one made beforehand (a resume names its existing campaign).
+        if input.campaign.is_none() && self.campaign_name_held(&run_id) {
+            return Err(fail("run_id_taken", "a campaign folder for this run id appeared before the start; start again"));
+        }
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let workers = input.max_in_flight;
