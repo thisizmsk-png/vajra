@@ -258,6 +258,8 @@ pub struct App {
     pub bus: Arc<Bus>,
     pub sup: Arc<Supervisor>,
     pub control: Arc<Mutex<Service>>,
+    /// The live runs whose leads call `vajra-run` tools over the socket (ADR-16 16.5); never behind `control`.
+    pub run_leads: Arc<crate::control::runreg::RunRegistry>,
     /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
     _instance: Option<(instance::Held, instance::Held)>,
     bridge: Bridge,
@@ -428,6 +430,7 @@ impl App {
             sup: Arc::new(Supervisor::new(bus.clone(), log.clone())),
             bus,
             control: Arc::new(Mutex::new(svc)),
+            run_leads: crate::control::runreg::RunRegistry::new(),
             runs: Arc::new(Mutex::new(HashMap::new())),
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
@@ -704,9 +707,11 @@ impl App {
         match crate::control::socket::bind(&crate::control::socket_path(&self.data)) {
             Ok(listener) => {
                 let svc = self.control.clone();
+                // The run leads' vajra-run calls are routed to this registry, never behind `control` (ADR-16 16.5).
+                let runs = self.run_leads.clone();
                 // SAFETY: getuid has no preconditions and cannot fail.
                 let uid = unsafe { libc::getuid() };
-                std::thread::spawn(move || crate::control::socket::serve(listener, svc, uid));
+                std::thread::spawn(move || crate::control::socket::serve(listener, svc, runs, uid));
             }
             Err(e) => {
                 eprintln!("vajra-desktop: control socket: {e}");

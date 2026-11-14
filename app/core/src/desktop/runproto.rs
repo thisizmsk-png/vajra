@@ -84,6 +84,19 @@ const MAX_FILES: usize = 64;
 const MAX_DECISIONS: usize = 8;
 const MAX_PROTECTED: usize = 8;
 const MAX_AWAIT: usize = 64;
+/// Criteria a plan may hold, overall and per task; the `vajra-run` schema is built from these.
+pub const MAX_CRITERIA: usize = 12;
+pub const MAX_TASK_DEPS: usize = 8;
+pub const MAX_TASK_FILES: usize = MAX_FILES;
+pub const MAX_PLAN_DECISIONS: usize = MAX_DECISIONS;
+pub const MAX_PLAN_PROTECTED: usize = MAX_PROTECTED;
+/// The plan's text limits, in bytes: a protected action and its why, a decision's title and its rationale. The
+/// `vajra-run` tool schema advertises the same numbers.
+pub const MAX_ACTION: usize = 40;
+pub const MAX_ACTION_WHY: usize = 300;
+pub const MAX_DECISION_TITLE: usize = 300;
+pub const MAX_RATIONALE: usize = 2000;
+pub const MAX_AWAIT_TICKETS: usize = MAX_AWAIT;
 
 /// One run, as the core started it from the vouched proposal.
 pub struct RunConfig {
@@ -1037,12 +1050,12 @@ impl RunProtocol {
             if t.title.len() > MAX_TITLE || t.brief.len() > MAX_BRIEF {
                 return Err(format!("task {}: the title may have {MAX_TITLE} bytes and the brief {MAX_BRIEF}", plan_id(&t.id)));
             }
-            if t.files.len() > MAX_FILES || t.deps.len() > 8 || t.criteria.len() > 12 {
-                return Err(format!("task {}: at most {MAX_FILES} files, 8 deps and 12 criteria", plan_id(&t.id)));
+            if t.files.len() > MAX_FILES || t.deps.len() > MAX_TASK_DEPS || t.criteria.len() > MAX_CRITERIA {
+                return Err(format!("task {}: at most {MAX_FILES} files, {MAX_TASK_DEPS} deps and {MAX_CRITERIA} criteria", plan_id(&t.id)));
             }
         }
-        if p.protected_actions.len() > MAX_PROTECTED || p.protected_actions.iter().any(|a| a.action.len() > 40 || a.why.len() > 300) {
-            return Err(format!("at most {MAX_PROTECTED} protected_actions, each an action of 40 bytes and a why of 300"));
+        if p.protected_actions.len() > MAX_PROTECTED || p.protected_actions.iter().any(|a| a.action.len() > MAX_ACTION || a.why.len() > MAX_ACTION_WHY) {
+            return Err(format!("at most {MAX_PROTECTED} protected_actions, each an action of {MAX_ACTION} bytes and a why of {MAX_ACTION_WHY}"));
         }
         let (criteria, tasks) = if p.round == 1 {
             let Some(c) = &p.criteria else { return Err("round 1 needs the criteria, each with a check".into()) };
@@ -1051,8 +1064,8 @@ impl RunProtocol {
             if p.decisions.len() > MAX_DECISIONS {
                 return Err(format!("plan may record at most {MAX_DECISIONS} decisions"));
             }
-            if p.decisions.iter().any(|d| d.title.len() > 300 || d.rationale.len() > 2000 || self.text(&d.title).trim().is_empty() || self.text(&d.rationale).trim().is_empty()) {
-                return Err("every decision needs a title (300 bytes) and a rationale (2000 bytes)".into());
+            if p.decisions.iter().any(|d| d.title.len() > MAX_DECISION_TITLE || d.rationale.len() > MAX_RATIONALE || self.text(&d.title).trim().is_empty() || self.text(&d.rationale).trim().is_empty()) {
+                return Err(format!("every decision needs a title ({MAX_DECISION_TITLE} bytes) and a rationale ({MAX_RATIONALE} bytes)"));
             }
             (c, p.tasks.clone())
         } else {
@@ -1085,8 +1098,8 @@ impl RunProtocol {
 
     /// The criteria as they are stored: each text within its byte cap, then sanitised and redacted.
     fn criteria(&self, c: &[Criterion]) -> Result<Vec<Criterion>, String> {
-        if c.len() > 12 || c.iter().any(|x| x.criterion.len() > MAX_CRITERION || x.check.len() > MAX_CHECK) {
-            return Err(format!("at most 12 criteria, each a criterion of {MAX_CRITERION} bytes and a check of {MAX_CHECK}"));
+        if c.len() > MAX_CRITERIA || c.iter().any(|x| x.criterion.len() > MAX_CRITERION || x.check.len() > MAX_CHECK) {
+            return Err(format!("at most {MAX_CRITERIA} criteria, each a criterion of {MAX_CRITERION} bytes and a check of {MAX_CHECK}"));
         }
         Ok(c.iter().map(|x| Criterion { id: x.id.clone(), criterion: self.text(&x.criterion), check: self.text(&x.check) }).collect())
     }
@@ -1450,7 +1463,8 @@ impl RunProtocol {
     fn start_integrate(&self, st: &mut St, r: u32) -> Result<Option<(Vec<String>, Vec<String>)>, Refusal> {
         let Some(round) = st.rounds.get(&r).filter(|x| x.planned && r == st.round) else { return refuse(NOT_READY, format!("round {r} is not the round being run")) };
         if round.integrated {
-            return refuse(NOT_READY, format!("round {r} is already integrated"));
+            // A lead whose integrate call timed out learns its round ticket here.
+            return refuse(NOT_READY, format!("round {r} is already integrated; await its round ticket {}", self.round_ticket(r)));
         }
         if let Some((_, tk, _)) = st.tasks.iter().flat_map(|t| &t.tickets).find(|(_, tk, _)| self.live(tk)) {
             return refuse(NOT_READY, format!("ticket {tk} is still running; await it first"));
@@ -1760,6 +1774,41 @@ impl RunProtocol {
         if let Some(r) = &self.0.record {
             r.flush();
         }
+    }
+
+    /// The round tickets of every integrated round, with their status: what `list_workers` adds after the workers.
+    pub fn rounds(&self) -> Vec<Value> {
+        let mut st = self.lock();
+        // A status query is a lead call too (N16): it restarts the stuck-lead wait.
+        self.called(&mut st);
+        let out = st
+            .rounds
+            .iter()
+            .filter(|(_, r)| r.integrated)
+            .filter_map(|(n, _)| Some(json!({"round": n, "status": self.status_of(&st, &self.round_ticket(*n))?})))
+            .collect();
+        // The call may have ended the run (its time limit): the kill and the wake-up happen here, as on every call.
+        self.release(st);
+        out
+    }
+
+    /// `list_workers` and `inspect_worker` (read-only, this run only): each worker ticket with its task, round, seat
+    /// and status, in dispatch order; `only` keeps one ticket.
+    pub fn workers(&self, only: Option<&str>) -> Vec<Value> {
+        let mut st = self.lock();
+        self.called(&mut st);
+        let out = st
+            .tasks
+            .iter()
+            .flat_map(|t| t.tickets.iter().map(move |tk| (t, tk)))
+            .filter(|(_, (_, id, _))| only.is_none_or(|o| o == id))
+            .filter_map(|(t, (round, id, slot))| {
+                let s = self.status_of(&st, id)?;
+                Some(json!({"task": t.spec.id, "round": round, "slot": slot, "status": s}))
+            })
+            .collect();
+        self.release(st);
+        out
     }
 
     /// The accepted plan, as the guarded `plan.json` keeps it for the resume charter (6d2) and memory (6j).

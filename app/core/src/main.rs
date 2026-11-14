@@ -34,6 +34,11 @@ fn is_mcp(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| a == "--mcp")
 }
 
+/// `--mcp-run`: a run lead's `vajra-run` server (ADR-16 16.5).
+fn is_mcp_run(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a == "--mcp-run")
+}
+
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
@@ -706,6 +711,17 @@ fn set_run_limits(app: State<'_, App>, max_runs: u32) -> Res {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if is_mcp_run(&args) {
+        // Before Tauri and before the data dir: the run server is told its socket and creates nothing on disk.
+        let code = match mcp::run_stdio_run() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("vajra-desktop --mcp-run: {e}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     let data = match paths::data_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -737,7 +753,8 @@ fn main() {
     if let Some(l) = &app.log {
         let _ = l.log_cold_start(logging::process_start_time());
     }
-    // Only the app holding the instance locks ticks the control ledger and serves the Lead socket.
+    // Only the app holding the instance locks ticks the control ledger and serves the Lead socket (and the run leads'
+    // vajra-run calls on it).
     let _watcher = app.serve_control();
     let sub = app.bus.subscribe();
 
@@ -958,5 +975,8 @@ mod tests {
         assert!(is_mcp(&a(&["vajra-desktop", "-x", "--mcp"])));
         assert!(!is_mcp(&a(&["--mcp"])));
         assert!(!is_mcp(&a(&["vajra-desktop", "--mcpx"])));
+        assert!(is_mcp_run(&a(&["vajra-desktop", "--mcp-run"])));
+        assert!(!is_mcp_run(&a(&["vajra-desktop", "--mcp"])), "--mcp is the Lead chat server, never the run server");
+        assert!(!is_mcp(&a(&["vajra-desktop", "--mcp-run"])));
     }
 }
