@@ -131,6 +131,10 @@ verify_state() {
   local d="$1" want got
   for f in campaign.json features.json progress.md state.sig; do [ -f "$d/$f" ] || return 1; done
   jq -e . "$d/campaign.json" >/dev/null 2>&1 || return 1
+  # bhishma #217 L1: the signed record names its own folder. A signed campaign copied whole into another campaign's
+  # folder keeps a valid signature (the digest covers only the file contents), so the slug it carries must be the
+  # folder's name, or it is not this campaign.
+  [ "$(jq -r '.slug // ""' "$d/campaign.json" 2>/dev/null)" = "$(basename "$d")" ] || return 1
   jq -e '.features | type == "array"' "$d/features.json" >/dev/null 2>&1 || return 1
   want="$(tr -d ' \r\n' < "$d/state.sig")"
   got="$(state_digest "$d" | hmac_stdin)"

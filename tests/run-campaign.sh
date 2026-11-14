@@ -517,6 +517,19 @@ sleep 1.5
 [ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" = "424242" ]; check "release helper: the surviving helper leaves writer B's lock alone" $?
 rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock" 2>/dev/null
 
+# --- bhishma #217 L1: a signed campaign copied whole into another campaign's folder is not that campaign ---
+C create "swap-src" --goal "g" --feature "ac-1|x" >/dev/null 2>&1
+C create "swap-dst" --goal "g" --feature "ac-1|x" >/dev/null 2>&1
+C verify swap-src >/dev/null 2>&1; check "swap: the source verifies in its own folder" $?
+rm -rf "$CD/swap-dst"; cp -R "$CD/swap-src" "$CD/swap-dst"
+C verify swap-dst >/dev/null 2>&1; [ $? -eq 3 ]; check "swap: a copied signed campaign does not verify under another folder name (exit 3)" $?
+C pass ac-1 --campaign swap-dst >/dev/null 2>&1; [ $? -eq 3 ]; check "swap: no write through the copied campaign" $?
+LS_OUT="$(C list 2>/dev/null)"; printf '%s\n' "$LS_OUT" | grep -E "^. swap-dst +" | grep -q "sig:INVALID"; check "swap: list shows it as INVALID" $?
+C verify swap-src >/dev/null 2>&1; check "swap: the source still verifies" $?
+# A campaign.json with no slug at all is not trusted either.
+jq 'del(.slug)' "$CD/swap-src/campaign.json" > "$WORK/noslug.json" && cp "$WORK/noslug.json" "$CD/swap-src/campaign.json"
+C verify swap-src >/dev/null 2>&1; [ $? -eq 3 ]; check "swap: a record without a slug does not verify" $?
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]
