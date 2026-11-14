@@ -98,10 +98,15 @@ pub(super) struct Active {
 
 /// Everything the Lead needs that is not the run itself.
 pub(super) struct LeadState {
-    /// The absolute claude binary, resolved once at startup. Never a PATH lookup at ask time.
+    /// The absolute claude binary, resolved once, at first use (`bin()`): the app does not wait for the user PATH to
+    /// open its window. Never a PATH lookup at ask time after that.
     bin: Mutex<Option<PathBuf>>,
-    /// The environment the Lead (and the self-test) runs with: `HOME`, `PATH`, `LANG`, `TERM`, `USER`, `SHELL`.
+    bin_once: std::sync::Once,
+    /// The environment the Lead (and the self-test) runs with: `HOME`, `PATH`, `LANG`, `TERM`, `USER`, `SHELL`. Built
+    /// once, at first use (`env()`), for the same reason.
     env: Mutex<Vec<(&'static str, OsString)>>,
+    env_once: std::sync::Once,
+    home: PathBuf,
     /// The running ask per project id. Taking the entry is the "one ask in flight per Director-General" lock, and the
     /// map's size is the app-wide turn count (`orchestrator::MAX_TURNS`).
     pub(super) active: Arc<Mutex<HashMap<String, Active>>>,
@@ -121,10 +126,12 @@ pub(super) struct LeadState {
 
 impl LeadState {
     pub(super) fn new(home: &Path) -> Self {
-        let path_dirs = crate::vajra::preflight::path_dirs();
         Self {
-            bin: Mutex::new(resolve_claude(home, &path_dirs)),
-            env: Mutex::new(user_env()),
+            bin: Mutex::new(None),
+            bin_once: std::sync::Once::new(),
+            env: Mutex::new(Vec::new()),
+            env_once: std::sync::Once::new(),
+            home: home.to_path_buf(),
             active: Arc::new(Mutex::new(HashMap::new())),
             proven: Mutex::new(HashSet::new()),
             closing: AtomicBool::new(false),
@@ -138,13 +145,28 @@ impl LeadState {
         }
     }
 
+    /// The claude binary. The first call reads the user PATH (and so waits for its first resolution); later calls
+    /// return the same answer.
+    fn bin(&self) -> Option<PathBuf> {
+        self.bin_once.call_once(|| *lock(&self.bin) = resolve_claude(&self.home, &crate::vajra::preflight::path_dirs()));
+        lock(&self.bin).clone()
+    }
+
+    /// The Lead's environment. Built at the first call, like `bin`.
+    fn env(&self) -> Vec<(&'static str, OsString)> {
+        self.env_once.call_once(|| *lock(&self.env) = user_env());
+        lock(&self.env).clone()
+    }
+
     #[cfg(test)]
     pub(super) fn set_bin(&self, p: Option<PathBuf>) {
+        self.bin_once.call_once(|| {});
         *lock(&self.bin) = p;
     }
 
     #[cfg(test)]
     pub(super) fn set_env(&self, e: Vec<(&'static str, OsString)>) {
+        self.env_once.call_once(|| {});
         *lock(&self.env) = e;
     }
 
@@ -298,7 +320,7 @@ impl App {
     fn orchestrator_status(&self, orch: &Orchestrator) -> Res {
         let off = status_off;
         let busy = lock(&self.lead.active).get(&orch.id).map(|a| a.ask_id.clone());
-        if lock(&self.lead.bin).is_none() {
+        if self.lead.bin().is_none() {
             return off("claude not found".into());
         }
         // ADR-15 2.1 states, each with its reason in words.
@@ -390,7 +412,7 @@ impl App {
         self.data_dir_guarded()?;
         let target = self.lead_target(run_id)?;
         let orch = self.orchestrator_for_run(&target.run_id, &target.cwd)?;
-        let bin = lock(&self.lead.bin).clone().ok_or(LeadError::ClaudeNotFound)?;
+        let bin = self.lead.bin().ok_or(LeadError::ClaudeNotFound)?;
         let ask_id = lead::new_ulid(SystemTime::now())?;
         // The nonce of every session of this run, plus every live one, is redacted from the text.
         let red = self.project_redactor(&target, &orch);
@@ -1205,7 +1227,7 @@ impl App {
         if !orch.root.is_dir() {
             return Err(LeadError::Invalid("cwd: the project's folder is gone".into()));
         }
-        let env = lock(&self.lead.env).clone();
+        let env = self.lead.env();
         self.guard_preconditions(&env)?;
         // Same environment for the version probe, the self-test and the ask, with the CLI's own directory on PATH.
         let env = cli_env(env, bin);
