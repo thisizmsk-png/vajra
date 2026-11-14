@@ -405,6 +405,10 @@ impl Supervisor {
     /// A one-click install (ADR-17, bhishma condition 8) on bus stream `setup-<id>`: exactly the Setup env profile,
     /// never `user_env`, and the profile's proxy value and login are redacted from every line. Only `setup-` streams.
     pub fn spawn_setup(&self, id: &str, argv: Vec<String>, cwd: &Path, env: &SetupEnv, redact: Redactor) -> Result<(), SessionError> {
+        // A second instance starts nothing, an install included (#176 L2): the rule is the same for every spawn.
+        if let Some(why) = lock(&self.refuse_all).clone() {
+            return Err(SessionError::Ledger(why));
+        }
         if !id.starts_with(SETUP_STREAM) {
             return Err(SessionError::InvalidId);
         }

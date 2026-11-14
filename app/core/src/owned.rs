@@ -233,6 +233,9 @@ impl Ledger {
         let mut out = Vec::new();
         for o in entries {
             let mut ended = match judge(&o) {
+                // An unreadable stamp also judges Gone; a pid still held that no stamp proves is another process is
+                // kept for the next start instead (#248 L1).
+                Verdict::Gone if leader_unproven(&o) => Ended::NotProven,
                 Verdict::Gone => Ended::Gone,
                 Verdict::Reused => Ended::Reused,
                 // The stamp proves the record names a live process, not that this app started it: one that could not
@@ -241,10 +244,13 @@ impl Ledger {
                 Verdict::Owned { .. } => end_session(&o),
             };
             let _ = self.forget(o.pid, o.stamp);
-            if ended == Ended::Survived {
+            if matches!(ended, Ended::Survived | Ended::NotProven) {
                 // Tried again at the next start, a few times at most: a record that never ends must not fill the ledger.
                 // Saturating: the count is read from the file.
-                ended = self.keep_survivor(&o);
+                ended = match (ended, self.keep_survivor(&o)) {
+                    (Ended::NotProven, Ended::Survived) => Ended::NotProven,
+                    (_, kept) => kept,
+                };
             }
             out.push((o, ended));
         }
@@ -309,12 +315,26 @@ pub enum Recovery {
     Survived { remaining: usize },
     /// Not provably ours (gone, or the pid was reused): nothing was signalled.
     NotOwned,
+    /// The leader's pid is still held, but it can't be proven ours or gone: its stamp can't be read, or it is a zombie
+    /// of that very process (#248 L1). Nothing was signalled, and the record stays, so a later try can settle it.
+    NotProven,
+}
+
+/// #248 L1: when a leader can't be listed, is its record still worth keeping? True while something holds the pid and no
+/// readable stamp, live or zombie, shows it is a different process: the leader may be a zombie (macOS can't read a
+/// zombie's stamp through `proc_pidinfo`), between its stamp check and exit, or unreadable. Forgetting such a record
+/// would drop the retry. False only when the pid is free, or now holds another process.
+fn leader_unproven(o: &Owner) -> bool {
+    let s = Seen::read(&mut ExitWatch::new(), o.pid);
+    s.exists && s.stamp.is_none_or(|x| x == o.stamp) && s.zombie.is_none_or(|z| z == o.stamp)
 }
 
 /// Settle one recovery: `Ended` and `NotOwned` forget the record (the ledger entry and the list the UI shows); `Survived`
 /// keeps both, with the number of processes that are really left, so the human can try again and a restart can still find it.
+/// `NotProven` keeps both unchanged: nothing was learnt, so a later try decides.
 pub fn apply_recovery(ledger: &Ledger, found: &mut Vec<Found>, owner: &Owner, result: &Recovery) {
     match result {
+        Recovery::NotProven => {}
         Recovery::Survived { remaining } => {
             if let Some(f) = found.iter_mut().find(|f| f.owner == *owner) {
                 f.verdict = Verdict::Owned { members: *remaining };
@@ -492,7 +512,7 @@ fn snapshot(w: &mut ExitWatch, o: &Owner) -> Option<Vec<(u32, u64)>> {
 /// of them is provably gone (`provably_gone`); otherwise `Survived` says how many are not.
 pub fn recover(o: &Owner) -> Recovery {
     let mut w = ExitWatch::new();
-    let Some(mut members) = snapshot(&mut w, o) else { return Recovery::NotOwned };
+    let Some(mut members) = snapshot(&mut w, o) else { return if leader_unproven(o) { Recovery::NotProven } else { Recovery::NotOwned } };
     for &(p, s) in &members {
         signal_verified(&mut w, p, s, libc::SIGHUP);
     }
@@ -538,6 +558,9 @@ pub enum Ended {
     GivenUp,
     /// It survived, and its record could not be written back: the next start cannot try again.
     Unrecorded,
+    /// Its pid is still held but it can't be proven ours or gone (#248 L1): never signalled, kept recorded so the next
+    /// start tries again (at most `MAX_TRIES` starts, like a survivor).
+    NotProven,
 }
 
 /// Is the recorded process a lead or worker this app's supervisor started? Each is its own session's leader (the PTY
@@ -561,7 +584,7 @@ fn could_be_ours(o: &Owner) -> bool {
 /// immediately before its signal. An agent has no work to save, so there is no SIGHUP grace.
 fn end_session(o: &Owner) -> Ended {
     let mut w = ExitWatch::new();
-    let Some(members) = snapshot(&mut w, o) else { return Ended::Gone };
+    let Some(members) = snapshot(&mut w, o) else { return if leader_unproven(o) { Ended::NotProven } else { Ended::Gone } };
     drop(w);
     if crate::procsweep::kill_proved(members).survived == 0 { Ended::Killed } else { Ended::Survived }
 }
@@ -654,6 +677,34 @@ mod tests {
         let (c, o) = leader();
         assert_eq!(judge(&o), Verdict::Owned { members: 2 });
         gone(c);
+    }
+
+    /// #248 L1: a leader that is a zombie of the recorded process can't be listed, so nothing is signalled, but its pid is
+    /// held and no stamp shows another process: `NotProven`, and the record and the list entry stay. A zombie of another
+    /// stamp, or a freed pid, is `NotOwned` and forgotten.
+    #[test]
+    fn given_a_zombie_leader_when_recovery_is_asked_then_it_is_not_proven_and_the_record_stays() {
+        let mut c = Command::new("sleep").arg("300").spawn().unwrap();
+        let o = Owner::shell(c.id(), start_stamp(c.id()).unwrap(), "/tmp".into());
+        c.kill().unwrap();
+        let t0 = Instant::now();
+        while !crate::procid::is_zombie(c.id()) && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(recover(&o), Recovery::NotProven);
+        let other = Owner { stamp: o.stamp + 7, ..o.clone() };
+        assert_eq!(recover(&other), Recovery::NotOwned, "a zombie of another process is not ours");
+        let dir = std::env::temp_dir().join(format!("vajra-notproven-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let l = Ledger::new(dir.join("owned.jsonl"));
+        l.record(o.clone()).unwrap();
+        let mut found = vec![Found { owner: o.clone(), verdict: Verdict::Owned { members: 1 } }];
+        apply_recovery(&l, &mut found, &o, &Recovery::NotProven);
+        assert_eq!((l.load().len(), found.len()), (1, 1), "NotProven keeps the record and the entry");
+        c.wait().unwrap();
+        assert_eq!(recover(&o), Recovery::NotOwned, "reaped: the pid is free");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
