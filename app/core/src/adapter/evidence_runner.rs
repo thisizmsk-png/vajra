@@ -669,15 +669,31 @@ pub(crate) fn worktree_head(worktree: &Path, common: &Path) -> Result<String, &'
         return Err(unreadable);
     }
     let common_dir = walk(None, common, false).map_err(|_| not_ours)?;
-    let mut dir = common_dir.child(parts[0], false).ok();
-    for p in &parts[1..parts.len() - 1] {
-        dir = dir.and_then(|d| d.child(p, false).ok());
-    }
     // A loose ref that is there wins, as in git; one that is there but can't be read (a link, a second name, a folder,
-    // not text) refuses, never falls back to an older packed value (bhishma L2 on 07a0ee4).
+    // too big, not text) refuses, never falls back to an older packed value (bhishma L2 on 07a0ee4). Only a name that
+    // isn't there at all, at the ref or at a folder on its way, means "look in packed-refs": any other error on the way
+    // (a folder that is a link, not a folder, or can't be opened) could hide a loose ref, so it refuses too (codex P2 on
+    // #249).
+    let absent = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let mut dir = Some(common_dir.child(parts[0], false));
+    for p in &parts[1..parts.len() - 1] {
+        dir = match dir {
+            Some(Ok(d)) => Some(d.child(p, false)),
+            Some(Err(e)) if absent(&e) => None,
+            other => other,
+        };
+    }
     let leaf = parts[parts.len() - 1];
-    if let Some(d) = dir.filter(|d| d.exists(leaf)) {
-        let sha = d.read_single_link(leaf, CAP).ok().and_then(text).ok_or(unreadable)?;
+    let loose = match dir {
+        None => None,
+        Some(Err(e)) if absent(&e) => None,
+        Some(Err(_)) => return Err(unreadable),
+        Some(Ok(d)) => match d.read_single_link(leaf, CAP) {
+            Err(e) if absent(&e) => None,
+            got => Some(got.ok().and_then(text).ok_or(unreadable)?),
+        },
+    };
+    if let Some(sha) = loose {
         return if is_sha(&sha) { Ok(sha) } else { Err(unreadable) };
     }
     let packed = common_dir.read_single_link("packed-refs", 64 << 20).ok().and_then(text).ok_or(unreadable)?;

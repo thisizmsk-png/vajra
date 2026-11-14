@@ -64,6 +64,11 @@ pub struct Ask {
     /// The runner's network setting for these commands (the verifier seat's, `Profile::network`): shown with the list
     /// and bound into its sha, so an approval given with the network off can't be used by a run with it on (PR 247).
     pub network: bool,
+    /// The run's repository: its git common dir, set by the core from the run's own record when it asks (codex P1 on
+    /// #249). Compared in memory when the approval is used, and with the run's git common dir before anything runs, so
+    /// an approval asked for one repository can't run its commands in another at the same commit. Not in the sha or
+    /// the dialog's record: the in-memory hold is what binds it.
+    pub repo: PathBuf,
 }
 
 /// An ask this app made, and a person's answer to it (held in memory only).
@@ -160,6 +165,9 @@ impl Ask {
         }
         if self.seat.is_empty() || self.account.is_empty() || [&self.seat, &self.account].iter().any(|s| s.chars().any(hides_text)) {
             return Err("the evidence seat and account are required, as plain text".into());
+        }
+        if !self.repo.is_absolute() {
+            return Err("the run's repository is required, as an absolute path".into());
         }
         if self.commands.is_empty() || self.commands.len() > MAX_COMMANDS {
             return Err(format!("1 to {MAX_COMMANDS} commands"));
@@ -457,7 +465,7 @@ impl ApprovalDesk {
             return Err(format!("the approval is {}", if held.answer == Some(false) { "declined" } else { "not answered" }));
         }
         if held.ask != *ask || held.sha != sha {
-            return refuse("the commands, commit, round or seat changed after approval");
+            return refuse("the commands, commit, round, seat or repository changed after approval");
         }
         if expired(held.asked_at, now) {
             return refuse("the approval is older than the hold");
@@ -497,6 +505,13 @@ impl ApprovalDesk {
         // ask.commit, its HEAD and every file (`at_approved_commit`).
         if super::proof_app::run_of(run.slug) != Some(ask.run_id.as_str()) {
             return Err("the evidence folder belongs to another run".into());
+        }
+        // The repository is the one the approval was asked for (codex P1 on #249): the held ask's `repo` must equal
+        // `ask.repo` (`consume_evidence_approval`), and that must be the run's git common dir, which the worktree is
+        // then proved to belong to (`at_approved_commit`). A clone at the same commit is a different folder.
+        let same = matches!((std::fs::canonicalize(&ask.repo), std::fs::canonicalize(run.git_common)), (Ok(a), Ok(b)) if a == b);
+        if !same {
+            return Err("the run's repository isn't the one the approval was asked for".into());
         }
         let at_commit = || self.at_approved_commit(&profile.worktree, run.git_common, run.base, run.slug, &ask.commit, &ask.commands).map(Some);
         at_commit()?;

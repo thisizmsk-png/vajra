@@ -104,7 +104,7 @@ fn signed_line(t: &Tmp, slug: &str, text: &str) {
 /// consumed by the evidence ticket, which then writes the signed progress line (`signed`) naming the list.
 fn approve_and_consume(t: &Tmp, app: &App, slug: &str, signed: bool) {
     use crate::desktop::evidence_approval::{progress_line, Ask};
-    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()], network: false };
+    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()], network: false, repo: "/tmp/no-repo/.git".into() };
     let now = std::time::SystemTime::now();
     let sha = app.request_evidence_approval(&ask, now).unwrap();
     app.answer_evidence_approval_at(RUN, &sha, true, now).unwrap();
@@ -238,7 +238,7 @@ fn a_forged_consumed_record_and_signed_line_with_no_approval_in_this_app_is_not_
     let slug = format!("deliver-{RUN}");
     let Some((t, app)) = signed_run(&slug, "g", "done", vec![green("t1", "c")]) else { return };
     seats(&t, "guarded_by_approval", &slug, false);
-    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()], network: false };
+    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()], network: false, repo: "/tmp/no-repo/.git".into() };
     let sha = ask.sha256();
     let rec = json!({"state": "consumed", "ask": {"run_id": RUN, "round": 1, "commit": "0".repeat(40), "seat": "verifier", "account": "openai", "commands": ["npm test"]}, "sha256": sha, "asked_at": 1, "consumed_at": 2});
     fs::write(t.0.join("data/control/lead").join(RUN).join("approval.json"), rec.to_string()).unwrap();
