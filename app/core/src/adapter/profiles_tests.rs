@@ -1399,6 +1399,39 @@ fn the_codex_lead_read_back_fails_unless_every_vajra_dir_shows_denied() {
     assert!(check_codex_lead_applied(&ok, wt, &[]).is_err(), "nothing to check is never a pass");
 }
 
+/// Plan #175 L1: the read-entry check compares canonical forms on both sides. A deny dir spelled through a link, and a
+/// read entry spelled through a link or with `..`, still meet; the lead dir itself stays readable in either spelling.
+#[test]
+fn the_lead_read_entry_check_compares_canonical_forms_of_the_deny_dirs() {
+    let t = std::env::temp_dir().join(format!("vajra-canon-{}-{:?}", std::process::id(), std::thread::current().id()));
+    let _ = std::fs::remove_dir_all(&t);
+    let real = t.join("real");
+    std::fs::create_dir_all(real.join("data/control/lead/run1")).unwrap();
+    std::os::unix::fs::symlink(&real, t.join("alias")).unwrap();
+    let real = real.canonicalize().unwrap();
+    let alias = t.join("alias");
+    let tc = |p: &Path| json!({"payload": {"file_system_sandbox_policy": {"entries": [{"access": "read", "path": {"type": "path", "path": p.to_str().unwrap()}}]}}});
+    let lead = real.join("data/control/lead/run1");
+    let allowed = std::slice::from_ref(&lead);
+    // The deny dir spelled through the link; the entry in the real form.
+    let deny_alias = vec![alias.join("data")];
+    assert!(check_no_read_reopens(&tc(&real.join("data/control")), &deny_alias, allowed).is_err(), "a real-path entry inside a deny dir spelled through a link");
+    // The deny dir real; entries through the link, and with `..`.
+    let deny = vec![real.join("data")];
+    assert!(check_no_read_reopens(&tc(&alias.join("data/control")), &deny, allowed).is_err(), "an entry through a link");
+    assert!(check_no_read_reopens(&tc(&real.join("elsewhere/../data/control")), &deny, allowed).is_err(), "an entry with ..");
+    // A `..` spelling that only looks like the lead dir is not the lead dir.
+    assert!(check_no_read_reopens(&tc(&lead.join("../run1/..")), &deny, allowed).is_err(), "a .. spelling of the lead's parent");
+    // The lead dir, as written or through the link, stays allowed; an entry outside every deny dir is fine.
+    assert!(check_no_read_reopens(&tc(&lead), &deny, allowed).is_ok());
+    assert!(check_no_read_reopens(&tc(&alias.join("data/control/lead/run1")), &deny_alias, allowed).is_ok(), "the lead dir through the link");
+    assert!(check_no_read_reopens(&tc(&real.join("other")), &deny, allowed).is_ok());
+    assert!(check_no_read_reopens(&tc(Path::new("/")), &deny, allowed).is_ok(), "the root entry is exempt");
+    // An entry that doesn't exist yet is still placed by its existing ancestor.
+    assert!(check_no_read_reopens(&tc(&alias.join("data/not-yet")), &deny, allowed).is_err(), "a missing entry under a linked deny dir");
+    let _ = std::fs::remove_dir_all(&t);
+}
+
 fn lead_init(tools: &[String], servers: &[&str], mode: &str) -> String {
     lead_init_status(tools, servers, mode, "connected")
 }

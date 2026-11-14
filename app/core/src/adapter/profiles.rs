@@ -1430,16 +1430,54 @@ pub fn check_codex_lead_applied(rollout: &str, lead_dir: &Path, deny: &[PathBuf]
 
 /// bhishma L1 on #174, shared by both Codex lead read-backs: a `read` entry inside a denied dir, or of a dir that holds
 /// one (other than `/`), reopens what the profile shut, unless it is one of `allowed`.
+///
+/// Plan #175 L1: paths are compared as given **and** in canonical form (`canonical_form`) on both sides, so a read entry
+/// spelled through a link (`/var` for `/private/var`) or with `..` still counts as inside a denied dir, and an allowed
+/// entry matches only if it is the lead dir itself in either form.
 fn check_no_read_reopens(tc: &Value, deny: &[PathBuf], allowed: &[PathBuf]) -> Result<(), NotApplied> {
     let entries = tc.pointer("/payload/file_system_sandbox_policy/entries").and_then(Value::as_array).cloned().unwrap_or_default();
+    let deny_c: Vec<PathBuf> = deny.iter().map(|d| canonical_form(d)).collect();
+    let allowed_c: Vec<PathBuf> = allowed.iter().map(|a| canonical_form(a)).collect();
+    let root = Path::new("/");
+    let inside = |p: &Path, ds: &[PathBuf]| ds.iter().any(|d| p.starts_with(d) || (d.starts_with(p) && p != root));
     for e in entries.iter().filter(|e| e["access"] == "read") {
         let Some(p) = e.pointer("/path/path").and_then(Value::as_str).map(Path::new) else { continue };
-        let reopens = deny.iter().any(|d| p.starts_with(d) || (d.starts_with(p) && p != Path::new("/")));
-        if reopens && !allowed.iter().any(|a| a == p) {
+        let pc = canonical_form(p);
+        let reopens = inside(p, deny) || inside(&pc, &deny_c);
+        // Allowed only as the lead dir: as written (no `..` to slip past) or by its canonical form.
+        let is_allowed = allowed.iter().any(|a| a == p && !has_dot_dot(p)) || allowed_c.contains(&pc);
+        if reopens && !is_allowed {
             return Err(NotApplied(format!("{} is readable inside a Vajra dir", p.display())));
         }
     }
     Ok(())
+}
+
+fn has_dot_dot(p: &Path) -> bool {
+    p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+/// The path the OS would resolve `p` to, for a path that may not exist yet: the longest existing ancestor through
+/// `canonicalize` (links resolved, `..` after a link handled by the OS), then the missing rest lexically (`.` dropped,
+/// `..` removes one name). A relative path is returned as given (the read-back's entries are absolute).
+fn canonical_form(p: &Path) -> PathBuf {
+    use std::path::Component;
+    if !p.is_absolute() {
+        return p.to_path_buf();
+    }
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    let (Some(parent), Some(last)) = (p.parent(), p.components().next_back()) else { return p.to_path_buf() };
+    let mut base = canonical_form(parent);
+    match last {
+        Component::ParentDir => {
+            base.pop();
+        }
+        Component::Normal(n) => base.push(n),
+        _ => {}
+    }
+    base
 }
 
 /// Check a Claude run lead's `system`/`init` event: `dontAsk`, every tool in `claude_lead_tools()` (an MCP tool of any

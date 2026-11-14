@@ -28,18 +28,69 @@ fn list_path(data: &Path) -> PathBuf {
     data.join("control").join("claude-proven.json")
 }
 
+/// The list's largest size: a few pairs are a few hundred bytes.
+const LIST_MAX: u64 = 64 * 1024;
+
+/// The list's bytes, read once from one descriptor (plan #215 L2): opened with O_NOFOLLOW (a link fails) and
+/// O_NONBLOCK (a FIFO can't stall a dispatch), then checked on that same descriptor, so nothing can be swapped in
+/// between the check and the read (plan #215 L1): a regular file, one link (a hard link is a second name another folder
+/// could hold), owned by this user, and writable by no one else. `Ok(None)` when there's no list. `Err` says in plain
+/// words why the list is ignored, which then counts as empty.
+fn read_list(p: &Path) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let f = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(p) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("the list of Claude Code builds proven on this Mac is a link or can't be opened, so it is ignored".into()),
+    };
+    let m = f.metadata().map_err(|_| "the list of Claude Code builds proven on this Mac can't be checked, so it is ignored".to_string())?;
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    let why = if !m.is_file() {
+        Some("isn't a regular file")
+    } else if m.nlink() != 1 {
+        Some("has a second name (a hard link)")
+    } else if m.uid() != me {
+        Some("belongs to another user")
+    } else if m.mode() & 0o022 != 0 {
+        Some("can be changed by other users")
+    } else if m.len() > LIST_MAX {
+        Some("is too large")
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        return Err(format!("the list of Claude Code builds proven on this Mac {why}, so it is ignored and those builds are self-tested again"));
+    }
+    let mut buf = Vec::new();
+    f.take(LIST_MAX + 1).read_to_end(&mut buf).map_err(|_| "the list of Claude Code builds proven on this Mac can't be read, so it is ignored".to_string())?;
+    Ok(Some(buf))
+}
+
 /// The pairs this Mac's self-tests proved, the current self-test only (`claude_selftest::VERSION`). A pair an older,
 /// weaker test recorded, or one with no test number at all, isn't proof: that build is self-tested again. A missing,
-/// odd or non-regular file is an empty list (fail closed).
+/// odd or unsafe file (`read_list`) is an empty list (fail closed); an unsafe one is reported once per reason.
 fn local_pairs(data: &Path) -> Vec<(String, String)> {
-    let p = list_path(data);
-    if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
-        return Vec::new();
-    }
-    let v: Value = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let bytes = match read_list(&list_path(data)) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Vec::new(),
+        Err(why) => {
+            static SAID: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+            if crate::lock(SAID.get_or_init(Mutex::default)).insert(why.clone()) {
+                eprintln!("vajra: {why}");
+            }
+            return Vec::new();
+        }
+    };
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let current = |p: &Value| p["test"].as_u64() == Some(u64::from(claude_selftest::VERSION));
     v["pairs"].as_array().into_iter().flatten().filter(|p| current(p)).filter_map(|p| Some((p["version"].as_str()?.to_string(), p["shape"].as_str()?.to_string()))).collect()
 }
+
+#[cfg(test)]
+#[path = "claude_canary_tests.rs"]
+mod tests;
 
 /// Records a pass of the current self-test. Pairs an older test recorded are dropped as the list is rewritten.
 fn add_pair(data: &Path, version: &str, shape: &str) -> std::io::Result<()> {
