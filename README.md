@@ -128,11 +128,18 @@ is not guarded: [docs/desktop/DATA.md](docs/desktop/DATA.md). In short:
 - The app's own code makes one outbound call, and only if you saved an OpenRouter key: a usage read, at most once a
   minute. It has no telemetry, analytics, crash upload or updater code. Claude Code, Codex and `gh` send what they always
   send, under your sign-ins.
-- Claude workers that Claude Code's own campaign starts run under the Vajra guard, and the OS sandbox (opt-in) is the real
-  boundary. The app's own Claude worker dispatch is off at this base, until the S4 spike passes and #224 lands.
-- **Codex workers run outside the Vajra guard today** and can read the signing key; their cards say so. They write only in
-  their worktree, but their network follows the seat setting and your own Codex MCP servers and `notify` hook run outside
-  that sandbox. Until the per-launch Codex profile (#216) merges, do not treat a Codex seat as guarded.
+- Claude workers the app starts run under the Vajra guard **inside Claude Code's OS sandbox**, which the app turns on for
+  every launch: writes only in the worktree and the ticket's temp folder, the signing key and the app's data folder
+  unreadable, no internet (this Mac only), and the launch is refused if the sandbox cannot start. They load none of your
+  Claude Code settings or MCP servers. A Claude Code build runs workers only after Vajra's S4 safety check has passed on it.
+  Claude workers that Claude Code's own campaign starts still depend on the sandbox being on, which is opt-in.
+- **Codex seats you drive run with your own Codex settings and are not guarded against key reads.** Your MCP servers,
+  `notify` hook and plugins stay on, and the seat's network switch decides the sandbox's internet. The card says so. Vajra
+  denies its own folders in the Codex permission profile as defense in depth, but your own Codex tools run outside that
+  profile, so Vajra makes no claim that the signing key is out of reach. Do not treat a Codex seat as guarded.
+- The one Codex seat the core runs itself, the run lead, is isolated instead: a per-launch profile that denies the Vajra
+  folders, with no writes, no network, your MCP servers and `notify` off, and only Vajra's `vajra_run` tools. A run whose
+  lead is Codex is still not counted as guarded.
 
 ## Using it
 
