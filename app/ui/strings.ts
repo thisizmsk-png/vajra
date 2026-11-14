@@ -89,6 +89,9 @@ export const S = {
       pickOne: "Tick at least one repository to add it.",
       partial: (ok: number, bad: number) => `Added ${ok}. ${bad} could not be added.`,
       truncated: "More may exist; only the first ones are listed.",
+      scanFailed: "Could not look for repositories on this Mac.",
+      scanAgain: "Look again",
+      scanning: "Looking...",
     },
   },
   closeout: {
