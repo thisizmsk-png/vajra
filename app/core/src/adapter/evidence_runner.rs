@@ -745,10 +745,9 @@ fn repo_admin(worktree: &Path, common: &Path) -> Result<Option<Repo>, &'static s
         let wt = walk(None, worktree, false).map_err(|_| not_ours)?;
         let line = wt.read_single_link(".git", 4096).ok().and_then(|b| String::from_utf8(b).ok()).ok_or(not_ours)?;
         let target = line.strip_suffix('\n').unwrap_or(&line).strip_prefix("gitdir: ").ok_or(not_ours)?;
-        // An absolute line as git writes it, or a relative one (`worktree.useRelativePaths`) resolving to the same.
-        let named = Path::new(target);
-        let resolved = if named.is_absolute() { named.to_path_buf() } else { worktree.join(named).canonicalize().map_err(|_| not_ours)? };
-        if target.contains('\n') || resolved != admin_path {
+        // An absolute line as git writes it, or a relative one (`worktree.useRelativePaths`) naming the same folder.
+        let resolved = if target.contains('\n') { None } else { gitdir_line_target(worktree, Path::new(target)) };
+        if resolved.as_deref() != Some(admin_path.as_path()) {
             return Err("the worktree's .git file doesn't name this worktree's own folder in the repository, so the run's git would read another repository");
         }
         dir
@@ -756,6 +755,47 @@ fn repo_admin(worktree: &Path, common: &Path) -> Result<Option<Repo>, &'static s
         return Err(not_ours);
     };
     Ok(Some(Repo { common: common_dir, admin }))
+}
+
+/// The folder a `.git` file's `gitdir:` line names, worked out as text only, never through the file system
+/// (bhishma M1 on e84cc21). Anything inside the worktree is writable during the run, so a link there can be re-pointed
+/// after this check: a line that steps through a worktree name (`gitdir: hop`, or `gitdir: sub/../../x`) would be
+/// followed by the run's later git through whatever that name then is. So:
+/// - an absolute line must have no `.` or `..` step, and is taken as written;
+/// - a relative line must be `..` steps only, then plain names: it leaves the worktree before naming anything, which is
+///   the form git writes. Its `..` steps are folded against `worktree`, which must itself be fully resolved so that the
+///   text folding is the folder git reaches.
+///
+/// `None` when the line is any other shape. The caller compares the result with the admin folder it found.
+fn gitdir_line_target(worktree: &Path, line: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    if line.as_os_str().is_empty() || line.to_str().is_none_or(|s| s.split('/').any(|p| p == ".")) {
+        return None;
+    }
+    if line.is_absolute() {
+        return line.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_))).then(|| line.to_path_buf());
+    }
+    // A relative line names nothing inside the worktree: it starts by leaving it.
+    if line.components().next() != Some(Component::ParentDir) || worktree.canonicalize().ok().as_deref() != Some(worktree) {
+        return None;
+    }
+    let mut out = worktree.to_path_buf();
+    let mut named = false;
+    for c in line.components() {
+        match c {
+            Component::ParentDir if !named => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(n) => {
+                named = true;
+                out.push(n);
+            }
+            _ => return None, // a `..` after a name steps back through a name inside the worktree
+        }
+    }
+    named.then_some(out)
 }
 
 /// The worktree's git index from its admin folder: a plain file with exactly one link, at most 512 MiB. `None` when

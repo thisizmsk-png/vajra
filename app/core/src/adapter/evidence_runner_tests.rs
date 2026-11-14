@@ -1257,6 +1257,58 @@ fn a_dot_git_repointed_at_a_planted_gitdir_refuses_the_run() {
     assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &ok, &common, &home)), RunOutcome::Ran { passed: true, .. }), "a relative gitdir line");
 }
 
+/// bhishma M1 on e84cc21: a relative `.git` line that steps through a name inside the worktree is refused before any
+/// command runs, even when that name is, right now, a link to the real admin folder. A check command could re-point the
+/// link mid-run at a planted admin folder, and the run's later git would follow it. The line is worked out as text, so
+/// `gitdir: hop`, and a line stepping into a worktree folder and back out with `..`, never match the admin folder.
+#[test]
+fn a_relative_dot_git_line_through_a_worktree_link_refuses_the_run() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("dotgithop");
+    let (repo, work) = linked_worktree(&t);
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    let admin = common.join("worktrees/work");
+    // The hop: a link in the worktree to the real admin folder, so today it resolves to exactly that folder.
+    std::os::unix::fs::symlink(&admin, work.join("hop")).unwrap();
+    assert_eq!(work.join("hop").canonicalize().unwrap(), admin.canonicalize().unwrap(), "the link names the real admin folder");
+    let marker = t.0.join("a-command-ran");
+    let cmds = vec![format!("touch '{}'", marker.display())];
+    fs::create_dir_all(work.join("sub")).unwrap();
+    for line in ["gitdir: hop\n", "gitdir: ./hop\n", "gitdir: sub/../hop\n", "gitdir: sub/../../repo/.git/worktrees/work\n", "gitdir: ../work/hop\n"] {
+        fs::write(work.join(".git"), line).unwrap();
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Failed(REPOINTED.into()), "{line:?}");
+        assert!(!marker.exists(), "no command ran for {line:?}");
+    }
+    // The form git writes (`..` steps out, then names) still runs.
+    fs::write(work.join(".git"), "gitdir: ../repo/.git/worktrees/work\n").unwrap();
+    let ok = vec!["true".to_string()];
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &ok, &common, &home)), RunOutcome::Ran { passed: true, .. }));
+}
+
+#[test]
+fn a_gitdir_line_is_worked_out_as_text_with_parent_steps_only_before_names() {
+    let wt = std::env::temp_dir().canonicalize().unwrap().join("vajra-er-gitdir-line");
+    fs::create_dir_all(&wt).unwrap();
+    let parent = wt.parent().unwrap().to_path_buf();
+    let f = |l: &str| super::gitdir_line_target(&wt, Path::new(l));
+    assert_eq!(f("../repo/.git/worktrees/w"), Some(parent.join("repo/.git/worktrees/w")));
+    assert_eq!(f("/abs/repo/.git/worktrees/w"), Some(PathBuf::from("/abs/repo/.git/worktrees/w")));
+    for bad in ["hop", "./x", "a/../../x", "../a/../b", "..", "", "/abs/../x", "/abs/./x", "../x/.", "../x/./y"] {
+        assert_eq!(f(bad), None, "{bad:?}");
+    }
+    // An unresolved worktree path is refused for a relative line: folding text over a link is not where git goes.
+    let link = wt.parent().unwrap().join("vajra-er-gitdir-line-link");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(&wt, &link).unwrap();
+    assert_eq!(super::gitdir_line_target(&link, Path::new("../repo/x")), None);
+    fs::remove_file(&link).unwrap();
+    fs::remove_dir_all(&wt).unwrap();
+}
+
 /// Plan #214 L1: every git in the run has fsmonitor and hooks off, whatever the repository's config says, and no
 /// command can rewrite the worktree's `.git` to point the run's git at a repo of its own. The control shows the
 /// fsmonitor hook is real: outside the runner, `git status` runs it.
