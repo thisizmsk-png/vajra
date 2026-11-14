@@ -103,3 +103,20 @@ jobs:
           npm run build
       - name: Core Rust tests
         run: bash app/core/ci/run-tests.sh
+
+  core-advisories:
+    # Plan #184 L1: fail on any crate in the core's Cargo.lock with a RustSec advisory, or that is yanked (the rules are in
+    # app/core/deny.toml). Reads the lockfile only, so it needs no build. cargo-deny is installed at a pinned version from
+    # crates.io with its own lockfile, not through a third-party action.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Advisories and yanked crates
+        working-directory: app/core
+        run: cargo deny --locked check advisories

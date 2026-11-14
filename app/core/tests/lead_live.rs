@@ -161,11 +161,11 @@ impl Live {
 impl Drop for Live {
     fn drop(&mut self) {
         // The CLI made a project dir for the scratch repo under the real ~/.claude/projects: remove ours (only).
-        if let (Some(home), Some(name)) = (std::env::var_os("HOME"), self.root.file_name().and_then(|n| n.to_str())) {
-            if let Ok(rd) = fs::read_dir(PathBuf::from(home).join(".claude/projects")) {
-                for e in rd.flatten().filter(|e| e.file_name().to_string_lossy().contains(name)) {
-                    let _ = fs::remove_dir_all(e.path());
-                }
+        if let (Some(home), Some(name)) = (std::env::var_os("HOME"), self.root.file_name().and_then(|n| n.to_str()))
+            && let Ok(rd) = fs::read_dir(PathBuf::from(home).join(".claude/projects"))
+        {
+            for e in rd.flatten().filter(|e| e.file_name().to_string_lossy().contains(name)) {
+                let _ = fs::remove_dir_all(e.path());
             }
         }
         let _ = fs::remove_dir_all(&self.root);
