@@ -435,7 +435,7 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
         return RunOutcome::Failed("Vajra's signing key has a second name somewhere, so the runner can't keep it out of reach".into());
     }
     if let Err(why) = make_tmp(profile, r.git_common) {
-        return RunOutcome::Failed(why.into());
+        return RunOutcome::Failed(why);
     }
     // bash gets the script's text, read here once, never its path: the engine folder is denied inside the profile,
     // and a copy anywhere a command can write could be rewritten while bash reads it, so a command could print a
@@ -604,22 +604,22 @@ fn tmp_hook(_stage: &str) {
 /// refuses a link anywhere on the way, and checked to be a plain folder at its resolved path; every folder in it is
 /// made relative to that descriptor. A swap afterwards can't widen anything: the profile names only the literal tmp,
 /// and Seatbelt judges a write by the path it resolves to.
-fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), &'static str> {
+fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), String> {
     let resolved = |p: &Path| p.canonicalize().ok().as_deref() == Some(p);
     if !resolved(&profile.worktree) || !profile.tmp.parent().is_some_and(resolved) {
-        return Err("the run's folders aren't plain, resolved paths");
+        return Err("the run's folders aren't plain, resolved paths".into());
     }
     tmp_hook("before-create");
     // A fresh tmp for every run (L2): a process an earlier run left behind can't have prepared this one's files.
     if std::fs::create_dir(&profile.tmp).is_err() {
-        return Err("the run's temp folder already exists; each run needs a fresh one");
+        return Err("the run's temp folder already exists; each run needs a fresh one".into());
     }
     tmp_hook("after-create");
     let replaced = "the run's temp folder was replaced as it was made";
     let tmp = walk(None, &profile.tmp, false).map_err(|_| replaced)?;
     let plain = std::fs::symlink_metadata(&profile.tmp).is_ok_and(|m| m.file_type().is_dir()) && resolved(&profile.tmp);
     if !plain {
-        return Err(replaced);
+        return Err(replaced.into());
     }
     let rel = |d: &Path| d.strip_prefix(&profile.tmp).map(Path::to_path_buf).map_err(|_| replaced);
     for d in std::iter::once(profile.tmp.join("objects")).chain(cache_env(&profile.tmp).into_iter().map(|(_, d)| d)) {
@@ -643,18 +643,30 @@ fn make_tmp(profile: &Profile, git_common: &Path) -> Result<(), &'static str> {
 /// #214 L1): a filter driver's clean, smudge or process command (`.gitattributes`, which the worktree holds, picks
 /// the driver), and an include, which could pull a later-written file from the worktree into the config mid-run.
 /// fsmonitor and hooks need no refusal: `GIT_RUN_CONFIG` turns them off for every git in the run.
-const REFUSED_CONFIG: &str = r"^(filter\..+\.(clean|smudge|process)|include\.path|includeif\..+\.path)$";
+/// Also refused (bhishma L4 on 8ca4e0a): `core.worktree` and `core.attributesFile`, which redirect what git adds and
+/// which attributes pick a driver, and the external diff and textconv commands, programs any diff in the run would
+/// start. Keys come back from git in canonical form (section and key lowercase), so the pattern is lowercase.
+const REFUSED_CONFIG: &str = r"^(filter\..+\.(clean|smudge|process)|include\.path|includeif\..+\.path|core\.worktree|core\.attributesfile|diff\.external|diff\..+\.(textconv|command))$";
+
+/// The refusal for a repo config that sets `key`: what was found, why, and the way out (bhishma L2 on 8ca4e0a). The
+/// key is shown as plain text only (printable, at most 80 characters): a subsection name is the repo's own text.
+fn refused_key(key: &str) -> String {
+    let shown: String = key.chars().filter(|c| !c.is_control()).take(80).collect();
+    format!(
+        "the repository's own git config sets {shown}, which could change what this run records or start a program inside it. Move it to your global git config, or run the check outside Vajra. A repository that uses git-crypt or a repository-local git-lfs install isn't supported for evidence runs yet."
+    )
+}
 
 /// Refuse the run if the repo config file `name` in `dir` sets a `REFUSED_CONFIG` key. The file is read through the
 /// pinned folder (no link followed, one link only), copied into the run's fresh tmp and parsed there by git itself
 /// (`--file`, no includes, no system or user config), so git's own syntax decides and the worktree can't redirect it.
 /// A file git can't parse refuses the run too.
-fn repo_config_ok(tmp: &crate::projects::pinned::Pinned, tmp_path: &Path, dir: &crate::projects::pinned::Pinned, name: &str) -> Result<(), &'static str> {
-    let refused = "the repository's git config sets a filter driver or an include, which could change what the run's tree ids record";
+fn repo_config_ok(tmp: &crate::projects::pinned::Pinned, tmp_path: &Path, dir: &crate::projects::pinned::Pinned, name: &str) -> Result<(), String> {
+    let unreadable = || "the repository's git config couldn't be read as git config, so the run can't prove it starts no program".to_string();
     let bytes = match dir.read_single_link(name, 1 << 20) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err("the repository's git config isn't a plain file with one link"),
+        Err(_) => return Err("the repository's git config isn't a plain file with one link".into()),
     };
     const COPY: &str = "repo-config-check";
     tmp.write_atomic(COPY, &bytes).map_err(|_| "couldn't check the repository's git config")?;
@@ -666,7 +678,8 @@ fn repo_config_ok(tmp: &crate::projects::pinned::Pinned, tmp_path: &Path, dir: &
     match o {
         // Exit 1: no key matched. 0 is a match; anything else (a parse error, a timeout) isn't proven clean.
         Ok(o) if !o.timed_out && o.code == Some(1) && o.stdout.is_empty() => Ok(()),
-        _ => Err(refused),
+        Ok(o) if !o.timed_out && o.code == Some(0) => Err(refused_key(o.stdout.lines().next().unwrap_or("a refused key"))),
+        _ => Err(unreadable()),
     }
 }
 
@@ -720,10 +733,25 @@ fn repo_admin(worktree: &Path, common: &Path) -> Result<Option<Repo>, &'static s
                 if found.is_some() {
                     return Err(not_ours);
                 }
-                found = Some(dir);
+                found = Some((name, dir));
             }
         }
-        found.ok_or(not_ours)?
+        let (name, dir) = found.ok_or(not_ours)?;
+        // The run's git finds its repository through this `.git` file, not through the admin folder the core checked
+        // (bhishma M1 on 8ca4e0a): a `.git` rewritten to name a gitdir planted inside the worktree (a filter in its
+        // config, a commondir back to the real repo) would pass every check and still run the filter. So the file
+        // must name exactly the admin folder found above; the profile then keeps it unwritable for the whole run.
+        let admin_path = common.join("worktrees").join(&name);
+        let wt = walk(None, worktree, false).map_err(|_| not_ours)?;
+        let line = wt.read_single_link(".git", 4096).ok().and_then(|b| String::from_utf8(b).ok()).ok_or(not_ours)?;
+        let target = line.strip_suffix('\n').unwrap_or(&line).strip_prefix("gitdir: ").ok_or(not_ours)?;
+        // An absolute line as git writes it, or a relative one (`worktree.useRelativePaths`) resolving to the same.
+        let named = Path::new(target);
+        let resolved = if named.is_absolute() { named.to_path_buf() } else { worktree.join(named).canonicalize().map_err(|_| not_ours)? };
+        if target.contains('\n') || resolved != admin_path {
+            return Err("the worktree's .git file doesn't name this worktree's own folder in the repository, so the run's git would read another repository");
+        }
+        dir
     } else {
         return Err(not_ours);
     };

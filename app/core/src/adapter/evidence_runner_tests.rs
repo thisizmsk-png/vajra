@@ -1038,8 +1038,10 @@ fn a_run_sees_a_clean_worktree_as_clean_in_git() {
     assert!(matches!(go(&t2, &evidence_run(&script2, &base2, &["true".to_string()], &t2.0.join("none.git"), &home2)), RunOutcome::Ran { passed: true, .. }));
 }
 
+const REPOINTED: &str = "the worktree's .git file doesn't name this worktree's own folder in the repository, so the run's git would read another repository";
+
 /// The index the core copies comes only from the run's repository (bhishma F1 on b04316cb): a worktree whose `.git`
-/// file points elsewhere still gets its own admin folder's index, a worktree of another repository is refused, and an
+/// file points elsewhere is refused (M1), a worktree of another repository is refused, and an
 /// index that is a hard link to a file kept elsewhere is refused.
 #[test]
 fn the_copied_index_is_only_ever_the_run_repositorys_own() {
@@ -1071,9 +1073,12 @@ fn the_copied_index_is_only_ever_the_run_repositorys_own() {
     let real_dotgit = fs::read_to_string(t.0.join("work/.git")).unwrap();
     fs::write(t.0.join("work/.git"), format!("gitdir: {}\n", elsewhere.display())).unwrap();
     let cmds = vec!["! grep -q PLANTED-INDEX \"$GIT_INDEX_FILE\" && test -s \"$GIT_INDEX_FILE\"".to_string()];
+    // Since bhishma M1 on 8ca4e0a a .git pointing anywhere but its own admin folder refuses the run outright, so the
+    // planted index is never copied, nor read by the run's git.
     let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
-    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "the planted index was copied: {out:?}");
+    assert_eq!(out, RunOutcome::Failed(REPOINTED.into()), "the planted gitdir was used");
     fs::write(t.0.join("work/.git"), real_dotgit).unwrap();
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Ran { passed: true, .. }), "the real index wasn't copied");
     // The run's repository isn't the worktree's: refused, nothing runs.
     let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &other.join(".git"), &home));
     assert_eq!(out, RunOutcome::Failed("the worktree's git folder isn't the run's repository".into()));
@@ -1137,7 +1142,8 @@ fn a_repo_configured_filter_driver_or_include_refuses_the_run() {
     fs::write(work.join(".gitattributes"), "* filter=evil\n").unwrap();
     fs::write(work.join("a.txt"), "changed\n").unwrap();
     let gitc = |args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(&work).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", &home).output().unwrap();
-    let refused = RunOutcome::Failed("the repository's git config sets a filter driver or an include, which could change what the run's tree ids record".into());
+    // The refusal names the key and the way out (bhishma L2 on 8ca4e0a).
+    let refused = |key: &str| RunOutcome::Failed(format!("the repository's own git config sets {key}, which could change what this run records or start a program inside it. Move it to your global git config, or run the check outside Vajra. A repository that uses git-crypt or a repository-local git-lfs install isn't supported for evidence runs yet."));
     let cmds = vec!["true".to_string()];
     let clean_config = fs::read(common.join("config")).unwrap();
     // In the common config. The control: outside the runner, `git add` runs it.
@@ -1145,34 +1151,110 @@ fn a_repo_configured_filter_driver_or_include_refuses_the_run() {
     assert!(gitc(&["add", "-A"]).status.success());
     assert!(marker.exists(), "control: the filter should run outside the runner");
     assert!(gitc(&["reset", "-q"]).status.success());
-    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "a common-config filter");
-    // smudge and process are refused the same way.
-    for key in ["filter.evil.smudge", "filter.evil.process"] {
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused("filter.evil.clean"), "a common-config filter");
+    // smudge and process, and (L4) the keys that redirect what git adds or start a diff program.
+    for (key, val) in [
+        ("filter.evil.smudge", filter.to_str().unwrap()),
+        ("filter.evil.process", filter.to_str().unwrap()),
+        ("core.worktree", "/tmp"),
+        ("core.attributesFile", "/tmp/attrs"),
+        ("diff.external", filter.to_str().unwrap()),
+        ("diff.evil.textconv", filter.to_str().unwrap()),
+        ("diff.evil.command", filter.to_str().unwrap()),
+    ] {
         fs::write(common.join("config"), &clean_config).unwrap();
-        assert!(gitc(&["config", key, filter.to_str().unwrap()]).status.success());
-        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "{key}");
+        assert!(gitc(&["config", key, val]).status.success(), "{key}");
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused(&key.to_lowercase()), "{key}");
     }
     // In the worktree's own config (config.worktree in its admin folder).
     fs::write(common.join("config"), &clean_config).unwrap();
     fs::write(common.join("worktrees/work/config.worktree"), format!("[filter \"evil\"]\n\tclean = {}\n", filter.display())).unwrap();
-    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "a worktree-config filter");
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused("filter.evil.clean"), "a worktree-config filter");
     fs::remove_file(common.join("worktrees/work/config.worktree")).unwrap();
     // Through an include: the included file could be written by a check mid-run, so any include refuses.
-    for inc in ["[include]\n\tpath = /dev/null\n", "[includeIf \"gitdir:/\"]\n\tpath = /dev/null\n"] {
+    for (inc, key) in [("[include]\n\tpath = /dev/null\n", "include.path"), ("[includeIf \"gitdir:/\"]\n\tpath = /dev/null\n", "includeif.gitdir:/.path")] {
         let mut c = clean_config.clone();
         c.extend_from_slice(inc.as_bytes());
         fs::write(common.join("config"), c).unwrap();
-        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "{inc}");
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused(key), "{inc}");
     }
     // A config git can't parse isn't proven clean.
     let mut c = clean_config.clone();
     c.extend_from_slice(b"[broken\n");
     fs::write(common.join("config"), c).unwrap();
-    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused, "an unparsable config");
+    assert_eq!(
+        go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)),
+        RunOutcome::Failed("the repository's git config couldn't be read as git config, so the run can't prove it starts no program".into()),
+        "an unparsable config"
+    );
     // Back to a clean config: the same worktree, `.gitattributes` and all, runs (an attribute naming no configured
     // driver does nothing).
     fs::write(common.join("config"), &clean_config).unwrap();
     assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Ran { passed: true, .. }));
+}
+
+/// bhishma M1 on 8ca4e0a: the worktree's `.git` rewritten to name a gitdir planted inside the worktree refuses the
+/// run, so the run's git never loads the planted config. The plant is a copy of the real admin folder whose commondir
+/// leads to a planted common dir: the real config plus a filter, the real objects through a link. The control shows
+/// the plant works on plain git: `git add` there runs the filter. A relative `.git` line naming the real admin folder
+/// (git's `worktree.useRelativePaths`) still runs.
+#[test]
+fn a_dot_git_repointed_at_a_planted_gitdir_refuses_the_run() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("plantgitdir");
+    let (repo, work) = linked_worktree(&t);
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    let admin = common.join("worktrees/work");
+    let marker = t.0.join("planted-filter-ran");
+    let filter = t.0.join("planted-filter.sh");
+    fs::write(&filter, format!("#!/bin/sh\ntouch '{}'\nprintf constant\n", marker.display())).unwrap();
+    fs::set_permissions(&filter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // The plant, inside the worktree: an admin folder (HEAD, index, gitdir) and a common dir (HEAD, refs, the real
+    // config plus a filter, the real objects through a link).
+    let (plant, plant_common) = (work.join(".hidden-gitdir"), work.join(".hidden-common"));
+    fs::create_dir_all(&plant).unwrap();
+    for f in ["HEAD", "index", "gitdir"] {
+        fs::copy(admin.join(f), plant.join(f)).unwrap();
+    }
+    fs::create_dir_all(plant_common.join("refs/heads")).unwrap();
+    fs::copy(common.join("HEAD"), plant_common.join("HEAD")).unwrap();
+    fs::copy(common.join("refs/heads/main"), plant_common.join("refs/heads/main")).unwrap();
+    let mut cfg = fs::read(common.join("config")).unwrap();
+    cfg.extend_from_slice(format!("[filter \"evil\"]\n\tclean = {}\n", filter.display()).as_bytes());
+    fs::write(plant_common.join("config"), cfg).unwrap();
+    std::os::unix::fs::symlink(common.join("objects"), plant_common.join("objects")).unwrap();
+    fs::write(plant.join("commondir"), format!("{}\n", plant_common.display())).unwrap();
+    fs::write(work.join(".gitattributes"), "* filter=evil\n").unwrap();
+    fs::write(work.join("a.txt"), "changed\n").unwrap();
+    let real_dotgit = fs::read(work.join(".git")).unwrap();
+    fs::write(work.join(".git"), format!("gitdir: {}\n", plant.display())).unwrap();
+    // The control: plain git, through the rewritten .git, loads the planted config and runs the filter.
+    let gitc = |args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(&work).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", &home).output().unwrap();
+    assert!(gitc(&["add", "a.txt"]).status.success());
+    assert!(marker.exists(), "control: the planted gitdir's filter should run under plain git");
+    fs::remove_file(&marker).unwrap();
+    // The run: refused before any command, and nothing ran the filter.
+    let cmds = vec!["git add -A".to_string()];
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Failed(REPOINTED.into()));
+    assert!(!marker.exists(), "the planted filter ran inside a run");
+    // A gitdir line with a trailing second line, or no prefix, is refused the same way.
+    for bad in [format!("gitdir: {}\nextra\n", admin.display()), format!("{}\n", admin.display())] {
+        fs::write(work.join(".git"), bad).unwrap();
+        assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Failed(_)));
+    }
+    // The real line, and the relative form of it, run.
+    fs::remove_dir_all(&plant).unwrap();
+    fs::remove_dir_all(&plant_common).unwrap();
+    fs::remove_file(work.join(".gitattributes")).unwrap();
+    let ok = vec!["true".to_string()];
+    fs::write(work.join(".git"), &real_dotgit).unwrap();
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &ok, &common, &home)), RunOutcome::Ran { passed: true, .. }));
+    fs::write(work.join(".git"), "gitdir: ../repo/.git/worktrees/work\n").unwrap();
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &ok, &common, &home)), RunOutcome::Ran { passed: true, .. }), "a relative gitdir line");
 }
 
 /// Plan #214 L1: every git in the run has fsmonitor and hooks off, whatever the repository's config says, and no
