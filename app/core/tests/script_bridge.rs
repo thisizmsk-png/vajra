@@ -240,10 +240,12 @@ fn preflight_all_green() {
     assert_eq!(names, ["claude", "vajra doctor", "hooks registered", "sandbox", "git", "python3", "jq", "openssl", "workflow"]);
     assert!(start_enabled(&rows), "{rows:?}");
     assert_eq!(get(&rows, "claude").detail, "2.1.0 (Claude Code)");
-    assert_eq!(get(&rows, "sandbox").detail, "off");
-    assert!(get(&rows, "sandbox").ok);
+    // The fixture doctor warns that the OS sandbox is off: shown as not ok, but advisory, so Start stays enabled.
+    let sandbox = get(&rows, "sandbox");
+    assert!(sandbox.detail.starts_with("Off."), "{sandbox:?}");
+    assert!(!sandbox.ok && sandbox.advisory && sandbox.checked, "{sandbox:?}");
     assert_eq!(get(&rows, "hooks registered").detail, "yes (2 events)");
-    assert!(rows.iter().all(|r| r.fix.is_empty()));
+    assert!(rows.iter().filter(|r| !r.advisory).all(|r| r.fix.is_empty()));
 }
 
 #[test]
@@ -266,7 +268,10 @@ fn preflight_doctor_fail_lists_failures() {
     assert!(d.detail.contains("integrity: manifest"));
     assert!(!d.fix.is_empty());
     assert!(!get(&rows, "hooks registered").ok);
-    assert_eq!(get(&rows, "sandbox").detail, "unknown");
+    // The doctor said nothing about the sandbox: not checked, never a pass.
+    let sandbox = get(&rows, "sandbox");
+    assert!(!sandbox.ok && !sandbox.checked && sandbox.advisory, "{sandbox:?}");
+    assert!(sandbox.detail.starts_with("Not checked"), "{sandbox:?}");
 }
 
 #[test]

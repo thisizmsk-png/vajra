@@ -2871,7 +2871,7 @@ mod state_tests;
 /// (FG-02c), so it would only be refused (#106 review).
 fn preflight_json(rows: &[preflight::Row], projects_row: Option<Value>) -> Value {
     let mut ok = preflight::start_enabled(rows);
-    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
+    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix, "advisory": r.advisory, "checked": r.checked})).collect();
     if let Some(row) = projects_row {
         out.push(row);
         ok = false;

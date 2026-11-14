@@ -17,15 +17,32 @@ pub struct Row {
     pub detail: String,
     /// One command or link; empty when the row is fine.
     pub fix: String,
+    /// An advisory row can fail without stopping Start (the OS sandbox: Vajra's own guard still runs). It is still shown
+    /// as not passing: advice never reads as a pass.
+    pub advisory: bool,
+    /// False when the check could not be made at all. Such a row is never `ok`; the screen shows it as "Not run".
+    pub checked: bool,
 }
 
 fn row(name: &str, ok: bool, detail: impl Into<String>, fix: &str) -> Row {
-    Row { name: name.into(), ok, detail: detail.into(), fix: if ok { String::new() } else { fix.into() } }
+    Row { name: name.into(), ok, detail: detail.into(), fix: if ok { String::new() } else { fix.into() }, advisory: false, checked: true }
 }
 
-/// "Start run" is enabled only when every row is ok (AC-1.3.2).
+/// "Start run" is enabled only when every required row is ok (AC-1.3.2).
 pub fn start_enabled(rows: &[Row]) -> bool {
-    rows.iter().all(|r| r.ok)
+    rows.iter().all(|r| r.ok || r.advisory)
+}
+
+/// The OS sandbox row, from the doctor's own lines. Only a line that says PASS makes it ok; a sandbox that is off fails
+/// (advisory) and a doctor that did not say anything about it is "not checked", never a pass.
+fn sandbox_row(doctor_text: &str) -> Row {
+    let line = doctor_text.lines().find(|l| l.contains("OS sandbox"));
+    let (ok, checked, detail) = match line {
+        Some(l) if l.starts_with("PASS") => (true, true, "On"),
+        Some(_) => (false, true, "Off. Agents run without the OS boundary, only behind the Vajra guard."),
+        None => (false, false, "Not checked: the engine self-check did not report on it."),
+    };
+    Row { name: "sandbox".into(), ok, detail: detail.into(), fix: if ok { String::new() } else { "/sandbox".into() }, advisory: true, checked }
 }
 
 pub fn find_on_path(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
@@ -80,13 +97,8 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
         row("hooks registered", false, "The Vajra safety hooks are not registered with Claude Code.", INSTALL_CMD)
     });
 
-    // Informational: never blocks Start.
-    let sandbox = match text.lines().find(|l| l.contains("OS sandbox")) {
-        Some(l) if l.starts_with("PASS") => "on",
-        Some(_) => "off",
-        None => "unknown",
-    };
-    rows.push(row("sandbox", true, sandbox, ""));
+    // Advisory: never blocks Start, but never reads as a pass unless the doctor said PASS.
+    rows.push(sandbox_row(&text));
 
     for tool in ["git", "python3", "jq", "openssl"] {
         rows.push(match find_on_path(tool, dirs) {
@@ -139,6 +151,28 @@ mod tests {
         assert!(!doc.ok && doc.detail.contains("cap"), "{doc:?}");
         assert!(!find("hooks registered").ok, "a cut doctor proves no hooks: {rows:?}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An unknown sandbox state must never read as a pass (proof honesty): only a doctor PASS line makes the row ok.
+    #[test]
+    fn the_sandbox_row_is_ok_only_when_the_doctor_says_pass() {
+        let on = sandbox_row("PASS  OS sandbox enabled\n");
+        assert!(on.ok && on.checked && on.detail == "On", "{on:?}");
+        let off = sandbox_row("WARN  OS sandbox is off (the enforced boundary; enable with /sandbox)\n");
+        assert!(!off.ok && off.checked && off.advisory && off.fix == "/sandbox", "{off:?}");
+        for silent in ["", "PASS  hook registered: PreToolUse\n"] {
+            let unknown = sandbox_row(silent);
+            assert!(!unknown.ok && !unknown.checked && unknown.advisory, "{unknown:?}");
+            assert!(unknown.detail.starts_with("Not checked"), "{unknown:?}");
+        }
+    }
+
+    /// An advisory row that does not pass never stops Start; a required row that fails still does.
+    #[test]
+    fn an_advisory_failure_does_not_block_start_but_a_required_one_does() {
+        let required = row("git", true, "/usr/bin/git", "");
+        assert!(start_enabled(&[required.clone(), sandbox_row("")]));
+        assert!(!start_enabled(&[required, row("jq", false, "not found on PATH", "brew install jq"), sandbox_row("")]));
     }
 
     /// A Mac with no engine scripts: the doctor and hooks rows say so in words, with no OS error text and no bare "no".
