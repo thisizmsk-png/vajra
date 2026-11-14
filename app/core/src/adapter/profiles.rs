@@ -115,11 +115,10 @@ pub const CLAUDE_WORKER_S4_PASSED: bool = true;
 /// these deny rules and hooks, and users' CLIs auto-update. A new build, or any change to the rules, the hooks or the
 /// flag's fields, needs an S4 PASS on it first; `s4-claude-settings.sh` prints the pair to add. Fails closed.
 pub const CLAUDE_WORKER_PROVEN: &[(&str, &str)] = &[
-    // The owner's S4 PASS on batch-3 1f5641f4, 2026-11-12 (the extended run: the guard and the deny rules refused
-    // Bash, Write and Edit into the data dir).
-    // The shape since the argv flags (#186 bhishma) and the guard scripts' bytes (#186 codex) joined it, over the
-    // repo's hooks/: pending the owner's S4 rerun on this branch.
-    ("2.1.296 (Claude Code)", "4151c31fe955b4d746350bc911a9f0b8e58edff18eacf507bf1a92eb9ac12f4c"),
+    // The owner's S4 rerun on the final sandbox tree with batch-3 (ao/vajra-70/s4-final-2 a9180077, 2026-11-14):
+    // claude 2.1.296, S4 PASS, every check ok, including the data-dir run with the OS sandbox's key-read and data-write
+    // refusals. The shape covers the flag file, the argv and the repo's guard scripts' bytes.
+    ("2.1.296 (Claude Code)", "3006ecb90e00e8de3b6a5acdf8f0492949f969ae697a4606a09a9df843831425"),
 ];
 
 /// Canary A: a build not on `CLAUDE_WORKER_PROVEN` whose self-test on this Mac failed, timed out or could not run (no
