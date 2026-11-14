@@ -739,7 +739,14 @@ mod tests {
             while alive(p as u32) && t0.elapsed() < Duration::from_secs(2) {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            assert!(!alive(p as u32) || crate::procid::is_zombie(p as u32), "the HUP-ignoring job {p} must be gone, not reported ended while running");
+            // Diagnostics for a failure seen only on the macOS CI runner (#182): could recover read this pid at all?
+            let (stamp, probe) = (crate::procid::start_stamp(p as u32), unsafe { libc::kill(p, 0) });
+            let errno = std::io::Error::last_os_error();
+            assert!(
+                !alive(p as u32) || crate::procid::is_zombie(p as u32),
+                "the HUP-ignoring job {p} must be gone, not reported ended while running \
+                 (its start stamp now {stamp:?}; kill(pid, 0) = {probe}, errno {errno})"
+            );
         }
     }
 

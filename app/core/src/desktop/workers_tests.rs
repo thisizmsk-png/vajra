@@ -104,7 +104,11 @@ WT=$(pwd -P)
 HARNESS=codex
 [ "$1" = -p ] && HARNESS=claude
 case "$1" in
-  -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
+  -p) printf '%s\n' "$@" > '{log}.argv'
+    # The tools it was given (`--tools a,b,c`), as the real CLI lists them: a checker's init must not list Edit or
+    # Write, or the read-back rightly fails it (that raced the test on a slow runner, #182 CI).
+    TOOLS=$(printf '%s\n' "$@" | sed -n '/^--tools$/{{n;p;q;}}' | sed 's/,/","/g')
+    echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["'"$TOOLS"'"]}}' ;;
   *)
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
