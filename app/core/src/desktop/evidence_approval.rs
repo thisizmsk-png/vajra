@@ -535,6 +535,16 @@ impl ApprovalDesk {
         let mut bridge = self.bridge.clone();
         bridge.timeout = TREE_TIMEOUT;
         let want = bridge.commit_tree(common, commit).ok_or("the approved commit's tree can't be read from the repository's own git folder")?;
+        // The tree records a submodule as its commit alone, and neither the tree nor the ignored listing looks inside
+        // its folder, so a file planted there would run unseen (owner review on #256). Refused, not labelled.
+        let links = bridge.gitlinks(common, &want).ok_or("the approved commit's submodules can't be listed from the repository's own git folder")?;
+        if let Some(first) = links.first() {
+            let more = if links.len() > 1 { format!(" and {} more", links.len() - 1) } else { String::new() };
+            return Err(format!(
+                "the approved commit has a submodule ({}{more}); files inside a submodule's folder can't be compared with the approved commit, so the checks don't run in a repository with submodules",
+                super::plan::one_line(first, 200)
+            ));
+        }
         if let Ok(rel) = base.strip_prefix(worktree) {
             let rel = rel.to_str().ok_or("the walkthrough folder's name isn't plain text")?;
             if !rel.is_empty() && bridge.tree_has(common, &want, rel) != Some(false) {
