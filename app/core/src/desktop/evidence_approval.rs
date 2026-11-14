@@ -56,6 +56,9 @@ pub struct Ask {
     pub account: String,
     /// Every setup, check and suite command, in order.
     pub commands: Vec<String>,
+    /// The runner's network setting for these commands (the verifier seat's, `Profile::network`): shown with the list
+    /// and bound into its sha, so an approval given with the network off can't be used by a run with it on (PR 247).
+    pub network: bool,
 }
 
 /// An ask this app made, and a person's answer to it (held in memory only).
@@ -73,9 +76,10 @@ pub(crate) struct Held {
 /// (CR, ESC and the other C0 and C1 codes), and every Unicode Default_Ignorable_Code_Point (DerivedCoreProperties.txt,
 /// Unicode 16): the bidi controls, zero-width and joiner characters, soft hyphen, the combining grapheme joiner,
 /// variation selectors, Hangul fillers, tag characters and the reserved ignorable ranges. A renderer may draw none of
-/// these, so none can reach the dialog.
+/// these, so none can reach the dialog. Also the line and paragraph separators U+2028 and U+2029 (bhishma on #226):
+/// they are neither, but a renderer breaks the line at them, so one command could show as two.
 fn hides_text(c: char) -> bool {
-    (c.is_control() && c != '\t') || default_ignorable(c)
+    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') || default_ignorable(c)
 }
 
 /// Unicode's Default_Ignorable_Code_Point property, in full (Unicode 16.0 DerivedCoreProperties.txt).
@@ -126,7 +130,7 @@ impl Ask {
     }
 
     fn to_json(&self) -> Value {
-        json!({"run_id": self.run_id, "round": self.round, "commit": self.commit, "seat": self.seat, "account": self.account, "commands": self.commands})
+        json!({"run_id": self.run_id, "round": self.round, "commit": self.commit, "seat": self.seat, "account": self.account, "commands": self.commands, "network": self.network})
     }
 
     /// sha256 of the canonical list (compact JSON, fixed key order): what the human approved, and what the audit and
