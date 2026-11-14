@@ -14,6 +14,11 @@ use super::{bus, fail, invalid, App, Envelope, Res};
 use crate::lock;
 use crate::crew::redact::{redact_provider_text, Redactor};
 
+/// The run id a `deliver-<run>` or `deliver-<run>-og` campaign belongs to.
+fn run_of(slug: &str) -> Option<&str> {
+    slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r)).filter(|r| crate::ids::valid_run_id(r))
+}
+
 /// `gh pr comment` gets this long.
 const POST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The largest comment GitHub takes is 65536 characters; the proof stays well under it.
@@ -55,7 +60,7 @@ impl App {
         // `checking`, which is not a pass, so the label can only come out weaker, never stronger.
         let list = self.evidence_list(slug).unwrap_or_else(|_| json!({"rows": []}));
         let rows_json = list["rows"].as_array().cloned().unwrap_or_default();
-        let (trust, checker, consumed) = self.trust_of(slug);
+        let (trust, checker, consumed, key_readable) = self.trust_of(slug);
         // N20 (bhishma M1, Opus on #226): the consume this app holds in memory names the list, the core's record agrees
         // (`evidence_approval_consumed`), and a signed progress line is exactly the approval line for that list (the
         // whole line text after its timestamp, no prefix). Neither the file nor the line counts alone.
@@ -72,9 +77,10 @@ impl App {
             rows: statuses,
             trust: trust.as_deref(),
             approval_consumed: approval,
+            approval_unheld: !approval && run_of(slug).is_some_and(|r| self.evidence_approval_unheld(r)),
             rejected,
             slug_field: &slug_field,
-            ledger: self.ledger_of(slug),
+            ledger: self.ledger_of(slug, &verified),
         });
         let red = self.campaign_redactor(slug);
         // Text only: the nonce set, secret fields, then key-shaped words and home paths. Commits and the record hash are
@@ -102,24 +108,29 @@ impl App {
             record_sha256: report["record_sha256"].as_str().filter(|h| is_hex(h, 64..=64)).map(str::to_string),
             rows,
             report: report_text,
+            key_readable,
         })
     }
 
     /// The core's own trust record for the campaign's run: `seats.json`'s trust, who checked (harness and account of the
     /// evidence seat) and whether a single-use approval was consumed. A campaign no run of this app started has none; one
     /// whose record can't be read answers `"?"`, so the label fails closed.
-    fn trust_of(&self, slug: &str) -> (Option<String>, Option<String>, Option<String>) {
-        let run = slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r));
-        let Some(run) = run.filter(|r| crate::ids::valid_run_id(r)) else { return (None, None, None) };
+    ///
+    /// The last value is true when a worker in the run could read the signing key: any seat that isn't a Claude seat
+    /// (Codex can, by the owner's choice; an unknown harness counts too), or a seats record that can't be read or names
+    /// another campaign. A campaign no run of this app started keeps today's note (bhishma M1 on #237).
+    fn trust_of(&self, slug: &str) -> (Option<String>, Option<String>, Option<String>, bool) {
+        let Some(run) = run_of(slug) else { return (None, None, None, false) };
         let seats = match self.read_run_seats(run) {
             Ok(Some(s)) => s,
-            Ok(None) => return (None, None, None),
-            Err(_) => return (Some("?".into()), None, None),
+            Ok(None) => return (None, None, None, false),
+            Err(_) => return (Some("?".into()), None, None, true),
         };
         // The record must name this campaign; one that names another is not this run's.
         if seats["campaign_slug"].as_str() != Some(slug) {
-            return (Some("?".into()), None, None);
+            return (Some("?".into()), None, None, true);
         }
+        let key_readable = seats["seats"].as_array().is_none_or(|all| all.iter().any(|s| s["harness"].as_str() != Some("claude")));
         let trust = seats["evidence_trust"].as_str().unwrap_or("?").to_string();
         let seat = seats["evidence_seat"].as_str();
         let checker = seats["seats"].as_array().and_then(|all| all.iter().find(|s| s["seat"].as_str() == seat)).map(|s| {
@@ -128,18 +139,63 @@ impl App {
         });
         // N20: the list the core's own approval record says this run consumed (never a `seats.json` field); the caller
         // also needs the signed progress line.
-        (Some(trust), checker, self.evidence_approval_consumed(run))
+        (Some(trust), checker, self.evidence_approval_consumed(run), key_readable)
     }
 
-    /// The read-back record against the core's own write ledger. The ledger comes with the signed record (6h, #190);
-    /// until it is wired here every record is `Missing`, so no run reads Verified (the Codex H1 follow-up and the
-    /// evidence runner gate it too, in PR B).
-    fn ledger_of(&self, _slug: &str) -> proof::Ledger {
+    /// The record against the core's own write ledger (6h, #190; bhishma's rule): the campaign, features and progress
+    /// are the bytes the record check just verified (the same ones the label reads, so a signed swap between two
+    /// reads can't pass one check and feed the other), with the task graph read by `list --json`; the ledger is the
+    /// core's own file for this slug. A run with no ledger (one this app's core didn't record) is `Missing`. A match
+    /// also needs the run's record held live by this app, whose in-memory ledger checks the same snapshot
+    /// (`CoreRecord::check_snapshot`, no second read); a matching file with no held record is `NotHeld`, never `Match`.
+    pub(super) fn ledger_of(&self, slug: &str, verified: &Value) -> proof::Ledger {
+        use super::record::{LedgerStore, ReadBack};
+        use crate::vajra::bridge::Request;
         #[cfg(test)]
         if let Some(l) = self.proof_ledger {
             return l;
         }
-        proof::Ledger::Missing
+        let Ok(store) = self.ledger_store(slug, &self.bridge) else { return proof::Ledger::Mismatch };
+        let ledger = match store.load() {
+            Ok(Some(l)) if l.slug == slug => l,
+            Ok(None) => return proof::Ledger::Missing,
+            // Unreadable, or saved under another campaign's name: never a match.
+            _ => return proof::Ledger::Mismatch,
+        };
+        let (Some(campaign), Some(features), Some(progress)) = (verified.get("campaign"), verified.get("features"), verified["progress"].as_str()) else {
+            return proof::Ledger::Mismatch;
+        };
+        // A run still going reads In progress before the ledger counts: no task-graph read on every poll.
+        if campaign["status"] == "active" {
+            return proof::Ledger::Missing;
+        }
+        let tasks = match self.bridge.run(&Request::TasksList { slug: slug.into() }) {
+            Ok(o) if o.exit() == Some(0) && !o.truncated => match serde_json::from_str::<Value>(&o.stdout) {
+                Ok(v) => v,
+                Err(_) => return proof::Ledger::Mismatch,
+            },
+            _ => return proof::Ledger::Mismatch,
+        };
+        let back = ReadBack { campaign: campaign.clone(), features: features.clone(), progress: progress.to_string(), tasks };
+        if ledger.check(&back).is_err() {
+            return proof::Ledger::Mismatch;
+        }
+        // The file alone is never a match (#226's rule): until key A an agent can write it and sign a campaign to fit.
+        // Only a record this app still holds counts, and its in-memory ledger checks this same snapshot: a second read
+        // could see the genuine files restored after an altered snapshot passed the file check (#237 review).
+        let Some(rec) = self.live_record(slug) else { return proof::Ledger::NotHeld };
+        if rec.check_snapshot(&back).is_err() {
+            return proof::Ledger::Mismatch;
+        }
+        proof::Ledger::Match
+    }
+
+    /// The run's record, if the app still holds it, for this campaign.
+    pub(super) fn live_record(&self, slug: &str) -> Option<std::sync::Arc<super::record::CoreRecord>> {
+        use super::record::RunRecord;
+        let run = slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r))?;
+        let rec = lock(&self.live_records).get(run)?.upgrade()?;
+        (rec.card().campaign == slug).then_some(rec)
     }
 
     fn campaign_redactor(&self, slug: &str) -> Redactor {

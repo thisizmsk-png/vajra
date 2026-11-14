@@ -72,6 +72,9 @@ struct Inner {
     reg: Arc<RunRegistry>,
     sup: Arc<Supervisor>,
     bus: Arc<crate::bus::Bus>,
+    /// 6k: the Vajra dirs a Codex lead's profile denies, worked out once, so every launch and every read-back of this
+    /// run use the same list (bhishma L3 on #174).
+    deny: Vec<PathBuf>,
     state: Mutex<State>,
 }
 
@@ -101,8 +104,9 @@ impl RunLead {
         reg: Arc<RunRegistry>, sup: Arc<Supervisor>, bus: Arc<crate::bus::Bus>,
     ) -> Result<Self, LaunchFailed> {
         let engine = crate::providers::launch::harness_of(&seat.account).ok_or_else(|| LaunchFailed("the lead's account has no harness".into()))?;
+        let deny = profiles::vajra_deny_dirs(&env.home, &env.data);
         Ok(RunLead(Arc::new(Inner {
-            run: run.into(), project_root: project_root.into(), ask: ask.into(), max_rounds, roles, seat, engine, env, proto, reg, sup, bus,
+            run: run.into(), project_root: project_root.into(), ask: ask.into(), max_rounds, roles, seat, engine, env, proto, reg, sup, bus, deny,
             state: Mutex::new(State::default()),
         })))
     }
@@ -138,6 +142,12 @@ impl RunLead {
         fsx::private_dir(&i.env.data.join("runs")).map_err(|e| f(&e))?;
         fsx::private_dir(&run_dir).map_err(|e| f(&e))?;
         fsx::private_dir(&dir).map_err(|e| f(&e))?;
+        // bhishma L2 on #174: the lead dir is read back in under the denied data dir, so its real path must stay inside
+        // that dir; a link anywhere on the way out would open a dir the profile meant to keep shut.
+        match (dir.canonicalize(), i.env.data.canonicalize()) {
+            (Ok(real), Ok(data)) if real.starts_with(&data) && real != data => {}
+            _ => return Err(LaunchFailed("the lead dir is not inside the app data dir".into())),
+        }
         // A fresh token for every launch: a restart's old tree, if any of it lingers, holds a dead one.
         let (token_file, hash) = runreg::write_token(&run_dir).map_err(|e| f(&e))?;
         if !i.reg.rotate_token(&i.run, hash) {
@@ -146,7 +156,12 @@ impl RunLead {
         let prompt = self.prompt(resume);
         let server = RunServer { exe: &i.env.exe, run: &i.run, token_file: &token_file, socket: &i.env.socket };
         let project = PathBuf::from(&i.project_root);
-        let launch = LeadLaunch { prompt: &prompt, model: i.seat.model.as_deref(), effort: i.seat.effort.as_deref(), lead_dir: &dir, project: &project, server };
+        // A fresh profile name for every launch (6k); the Claude lead has its own deny rules in its flag file.
+        let profile = profiles::codex_profile_name().map_err(|e| f(&e))?;
+        let launch = LeadLaunch {
+            prompt: &prompt, model: i.seat.model.as_deref(), effort: i.seat.effort.as_deref(), lead_dir: &dir, project: &project, server, deny: &i.deny,
+            profile: &profile,
+        };
         let (mut argv, extra_env) = match i.engine {
             Engine::Codex => {
                 let gateway_home;
@@ -255,7 +270,8 @@ impl RunLead {
                 if !rollout.lines().any(|l| l.contains("\"turn_context\"")) {
                     return None;
                 }
-                Some(profiles::check_codex_lead_applied(&rollout, &lead_dir(&self.0.env.data, &self.0.run)).map_err(|e| e.0))
+                // The same deny list the launch used (bhishma L3 on #174).
+                Some(profiles::check_codex_lead_applied(&rollout, &lead_dir(&self.0.env.data, &self.0.run), &self.0.deny).map_err(|e| e.0))
             }
             Engine::Claude => {
                 if !events.contains("\"init\"") {

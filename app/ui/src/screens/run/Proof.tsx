@@ -142,6 +142,7 @@ export function Proof({ slug }: { slug: string }) {
             )}
           </dl>
           <Text variant="body-sm" muted>{proof.record_note}</Text>
+          <Text variant="body-sm" muted>{proof.requires}</Text>
           <div className="v-proof__acts">
             <Button size="sm" disabled={!!exportReason} busy={busy} onClick={exportPage} aria-describedby={exportReason ? "v-proof-off" : undefined}>{L.exportPage}</Button>
             <Button size="sm" disabled={!!exportReason} onClick={copyComment} aria-describedby={exportReason ? "v-proof-off" : undefined}>{L.copyComment}</Button>

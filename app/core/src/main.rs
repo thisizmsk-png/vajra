@@ -143,6 +143,18 @@ fn record_orphans(app: State<'_, App>) -> Value {
     app.record_orphans(&[])
 }
 
+/// A core run's log entries after `after_seq` (W2): the UI applies these deltas in order instead of refetching.
+#[tauri::command(async)]
+fn run_log_since(app: State<'_, App>, run_id: String, after_seq: u64, limit: Option<usize>) -> Res {
+    vajra_desktop::desktop::run_log_answered(app.run_log_since(&run_id, after_seq, limit.unwrap_or(vajra_desktop::desktop::runlog_store::PAGE_MAX)))
+}
+
+/// How far a core run's hash-chained log holds, and how far its signed record vouches for it (W2).
+#[tauri::command(async)]
+fn run_log_verify(app: State<'_, App>, run_id: String) -> Res {
+    vajra_desktop::desktop::run_log_answered(app.run_log_verify(&run_id))
+}
+
 #[tauri::command(async)]
 fn act_close_orphan(app: State<'_, App>, envelope: Envelope, run_id: String) -> Value {
     app.act_close_orphan(&envelope, &run_id)
@@ -474,6 +486,25 @@ fn setup_list(app: State<'_, App>) -> Res {
     app.setup_list()
 }
 
+/// The one-click plan for a catalog harness, or why it is "Install it yourself" (ADR-17 rule 3). Main window only: the
+/// app manifest guards it and only the main window's capability allows it.
+#[tauri::command(async)]
+fn setup_plan(app: State<'_, App>, id: String) -> Res {
+    app.setup_plan(&id)
+}
+
+/// The user's Install click on the plan whose hash is `hash`: a single-use consent token (ADR-17 rule 4). Main window only.
+#[tauri::command(async)]
+fn setup_consent(app: State<'_, App>, id: String, hash: String) -> Res {
+    app.setup_consent(&id, &hash)
+}
+
+/// Run the consented install; its output streams on `setup-<id>`. Main window only.
+#[tauri::command(async)]
+fn setup_run(app: State<'_, App>, id: String, token: String) -> Res {
+    app.setup_run(&id, &token)
+}
+
 /// A CLI's own sign-in in a user terminal tab. The UI names a catalog harness id, never a program; the core builds the
 /// argv from the compiled catalog and the binary detection found.
 #[tauri::command(async)]
@@ -722,8 +753,9 @@ fn main() {
         std::process::exit(code);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT).
-    vajra_desktop::userpath::init(&home);
+    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT), in the
+    // background so the window does not wait for it. The first reader of the PATH waits for the answer instead.
+    vajra_desktop::userpath::start(&home);
     let app = match App::open(&data, &home) {
         Ok(a) => a,
         Err(e) => {
@@ -743,6 +775,8 @@ fn main() {
     // start stamp, never a name). Nothing is signalled until the human asks.
     let owned_ledger = Ledger::new(vajra_desktop::owned::ledger_path(&data));
     let built = tauri::Builder::default()
+        // The system folder picker for the repository field (D5). The capability grants only `dialog:allow-open`.
+        .plugin(tauri_plugin_dialog::init())
         .manage(app)
         .manage(Ownership { found: std::sync::Mutex::new(owned_ledger.settle()), ledger: owned_ledger, home: home.display().to_string() })
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))
@@ -825,6 +859,9 @@ fn main() {
             provider_accounts,
             setup_list,
             setup_sign_in,
+            setup_plan,
+            setup_consent,
+            setup_run,
             provider_key_saved,
             provider_key_save,
             provider_key_replace,
@@ -892,6 +929,8 @@ fn main() {
             labs_set,
             act_worker_clean_up,
             record_orphans,
+            run_log_since,
+            run_log_verify,
             act_close_orphan,
             closeout_status,
             act_start_run,

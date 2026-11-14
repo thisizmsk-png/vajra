@@ -6,8 +6,100 @@ const WT: &str = "/w/proj/run/t1-r1";
 /// A value that would be a key if one leaked. Never a real key.
 const SENTINEL: &str = "sk-vajra-sentinel-0000";
 
+/// The Vajra dirs a Codex session may not read (6k), as `vajra_deny_dirs` would give them.
+const DENY: [&str; 2] = ["/h/.claude/vajra", "/h/data"];
+
+fn deny() -> &'static [PathBuf] {
+    static D: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    D.get_or_init(|| DENY.iter().map(PathBuf::from).collect())
+}
+
+/// A launch's permission profile name, as `codex_profile_name` would make it.
+const PROFILE: &str = "vajra-0123456789abcdef";
+
 fn launch(kind: RoleKind, network: bool) -> WorkerLaunch<'static> {
-    WorkerLaunch { kind, prompt: "Do the task", model: Some("vendor/model-a"), effort: Some("high"), network, ticket_tmp: Path::new(TMP) }
+    WorkerLaunch {
+        kind, prompt: "Do the task", model: Some("vendor/model-a"), effort: Some("high"), network, ticket_tmp: Path::new(TMP), worktree: Path::new(WT),
+        deny: deny(), profile: PROFILE,
+    }
+}
+
+/// Owner 2026-11-13, "keep my extras, no key claim": no Codex launch switches off the user's own hooks, plugins, apps,
+/// MCP servers or notify.
+#[test]
+fn a_codex_launch_keeps_the_users_own_codex_tools() {
+    let lead = codex_run_lead_argv(Path::new("/opt/tools/bin/codex"), "x", PROFILE, deny(), Path::new(WT), Path::new(TMP)).unwrap();
+    for a in [codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), codex_login_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), lead] {
+        let c = pairs(&a);
+        assert!(!c.iter().any(|x| x.starts_with("features.") || x.starts_with("mcp_servers") || x.starts_with("notify")), "{c:?}");
+    }
+}
+
+/// bhishma #216 M1-b: Codex loads a worktree's own `.codex` and `.agents`; any non-empty one refuses a launch.
+#[test]
+fn a_worktree_with_its_own_codex_or_agents_folder_never_gets_a_codex_session() {
+    let wt = tmpdir("wtcodex");
+    assert_eq!(codex_project_outside(&wt), None, "neither folder");
+    std::fs::create_dir_all(wt.join(".codex")).unwrap();
+    std::fs::create_dir_all(wt.join(".agents")).unwrap();
+    assert_eq!(codex_project_outside(&wt), None, "empty folders load nothing");
+    std::fs::write(wt.join(".codex/hooks.json"), "{}").unwrap();
+    assert_eq!(codex_project_outside(&wt).as_deref(), Some(CODEX_PROJECT_TOOLS), "a hooks.json");
+    std::fs::remove_file(wt.join(".codex/hooks.json")).unwrap();
+    std::fs::create_dir_all(wt.join(".agents/skills")).unwrap();
+    assert!(codex_project_outside(&wt).is_some(), "a skills folder");
+    let wt2 = tmpdir("wtcodex2");
+    std::os::unix::fs::symlink(&wt, wt2.join(".codex")).unwrap();
+    assert!(codex_project_outside(&wt2).is_some(), "a symlinked .codex counts as one");
+    let wt3 = tmpdir("wtcodex3");
+    std::fs::write(wt3.join(".agents"), "x").unwrap();
+    assert!(codex_project_outside(&wt3).is_some(), "a file named .agents");
+}
+
+/// The three profile values every Codex worker gets (S11).
+fn profile_kv(network: bool) -> [String; 3] {
+    [
+        format!("permissions.{PROFILE}.filesystem={{\"/\"=\"read\",\"{}\"=\"none\",\"{}\"=\"none\",\"{WT}\"=\"write\",\"{TMP}\"=\"write\"}}", DENY[0], DENY[1]),
+        format!("permissions.{PROFILE}.network={{enabled={network}}}"),
+        format!("default_permissions=\"{PROFILE}\""),
+    ]
+}
+
+/// bhishma #216 H1 and M-Lead: the plain Codex run Lead gets a worker's profile and approvals, with the project and
+/// temp dir writable and no network; web search is the user's own setting (vajra-1 2026-11-13).
+#[test]
+fn the_codex_run_lead_runs_like_a_worker_with_no_approvals() {
+    let bin = Path::new("/opt/tools/bin/codex");
+    let a = codex_run_lead_argv(bin, "exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP)).unwrap();
+    // bhishma #216 Low 1: the binary Vajra found, by its absolute path.
+    let mut want: Vec<String> = vec!["/opt/tools/bin/codex".into(), "-c".into(), "approval_policy=\"never\"".into()];
+    for o in codex_profile_overrides(PROFILE, deny(), &[Path::new(WT), Path::new(TMP)], false).unwrap() {
+        want.extend(["-c".into(), o]);
+    }
+    want.extend(["--".into(), "exec this --flag".into()]);
+    assert_eq!(a, want);
+    assert!(a.iter().any(|x| x.contains(&format!("\"{}\"=\"none\"", DENY[0]))), "{a:?}");
+    assert!(a.iter().any(|x| x.ends_with(".network={enabled=false}")), "{a:?}");
+    assert!(!a.iter().any(|x| x.starts_with("web_search")), "{a:?}");
+    assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
+    assert!(codex_run_lead_argv(bin, "x", PROFILE, &[], Path::new(WT), Path::new(TMP)).is_err(), "never without the deny set");
+    assert!(codex_run_lead_argv(bin, "x", "vajra", deny(), Path::new(WT), Path::new(TMP)).is_err(), "never under a guessable name");
+    assert!(codex_run_lead_argv(Path::new("codex"), "x", PROFILE, deny(), Path::new(WT), Path::new(TMP)).is_err(), "never the bare word");
+}
+
+/// S11 hostile-config check: a user table named like ours merges into it, so each launch gets a name nobody can guess,
+/// and a fixed or malformed name never goes out.
+#[test]
+fn each_launch_gets_a_fresh_profile_name_and_a_guessable_one_is_refused() {
+    let (a, b) = (codex_profile_name().unwrap(), codex_profile_name().unwrap());
+    assert_ne!(a, b);
+    for n in [&a, &b] {
+        assert!(valid_profile_name(n), "{n}");
+        assert!(codex_profile_overrides(n, deny(), &[], false).is_ok());
+    }
+    for n in ["vajra", "default", "vajra-0123", "vajra-0123456789ABCDEF", "vajra-0123456789abcdeg", "x-0123456789abcdef", "vajra-0123456789abcdef0"] {
+        assert_eq!(codex_profile_overrides(n, deny(), &[], false).unwrap_err().field, "profile", "{n}");
+    }
 }
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -24,14 +116,13 @@ fn pairs(a: &[String]) -> Vec<&str> {
 fn codex_gateway_worker_argv_snapshot() {
     let a = codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap();
     let id = crate::providers::codex_home::PROVIDER_ID;
+    let [fs, net, dp] = profile_kv(false);
     let want: Vec<String> = [
-        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--sandbox", "workspace-write", "-m", "vendor/model-a",
+        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
         "-c", &format!("model_providers.{id}.request_max_retries=0"), "-c", &format!("model_providers.{id}.stream_max_retries=0"),
-        "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-        "-c", "approval_policy=\"never\"", "-c", "sandbox_workspace_write.network_access=false",
-        "-c", &format!("sandbox_workspace_write.writable_roots=[\"{TMP}\"]"),
-        "-c", "web_search=\"disabled\"", "--", "Do the task",
+        "-c", "approval_policy=\"never\"", "-c", &fs, "-c", &net, "-c", &dp,
+        "--", "Do the task",
     ].map(String::from).into();
     assert_eq!(a, want);
 }
@@ -39,41 +130,47 @@ fn codex_gateway_worker_argv_snapshot() {
 #[test]
 fn codex_login_worker_argv_snapshot_has_no_builtin_provider_override() {
     let a = codex_login_worker_argv(&launch(RoleKind::Verifier, false)).unwrap();
+    let [fs, net, dp] = profile_kv(false);
     let want: Vec<String> = [
-        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--sandbox", "workspace-write", "-m", "vendor/model-a",
+        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
-        "-c", "approval_policy=\"never\"", "-c", "sandbox_workspace_write.network_access=false",
-        "-c", &format!("sandbox_workspace_write.writable_roots=[\"{TMP}\"]"),
-        "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-        "-c", "web_search=\"disabled\"", "--", "Do the task",
+        "-c", "approval_policy=\"never\"", "-c", &fs, "-c", &net, "-c", &dp,
+        "--", "Do the task",
     ].map(String::from).into();
     assert_eq!(a, want);
     // S3: `model_providers.openai.*` makes codex refuse to load, so the login route never passes one.
     assert!(!a.iter().any(|x| x.contains("model_providers.openai")));
 }
 
+/// vajra-1 2026-11-13: network follows the seat's switch, and web search is always left to the user's own Codex
+/// setting (no `web_search` override, on or off).
 #[test]
-fn a_network_seat_turns_network_on_and_leaves_web_search_to_the_user() {
-    let a = codex_login_worker_argv(&launch(RoleKind::Worker, true)).unwrap();
-    let c = pairs(&a);
-    assert!(c.contains(&"sandbox_workspace_write.network_access=true"));
-    assert!(!c.iter().any(|x| x.starts_with("web_search")), "{c:?}");
+fn network_follows_the_seat_and_web_search_is_left_to_the_user() {
+    for net in [false, true] {
+        for a in [codex_login_worker_argv(&launch(RoleKind::Worker, net)).unwrap(), codex_worker_argv(&launch(RoleKind::Verifier, net)).unwrap()] {
+            let c = pairs(&a);
+            let want = format!("permissions.vajra-0123456789abcdef.network={{enabled={net}}}");
+            assert!(c.contains(&want.as_str()), "{c:?}");
+            assert!(!c.iter().any(|x| x.starts_with("web_search")), "{c:?}");
+        }
+    }
 }
 
-/// The "always" settings are present whatever the seat, and nothing switches the user's MCP servers or notify off for
-/// a worker (Q4: they are kept, and disclosed). Spike S3 ran this argv's overrides with a real codex 0.166 against a
-/// hostile temp `config.toml` (`danger-full-access`, `on-request`, network on, a user writable root, web search live,
-/// a user MCP server, notify) and every override won; this test pins the argv the spike proved.
+/// The "always" settings are present whatever the seat. Spike S3 ran this argv's overrides with a real codex 0.166
+/// against a hostile temp `config.toml` (`danger-full-access`, `on-request`, network on, a user writable root, web
+/// search live) and every override won. The user's own hooks, plugins, MCP servers and notify stay on (owner
+/// 2026-11-13); `a_codex_launch_keeps_the_users_own_codex_tools` pins that.
 #[test]
-fn codex_worker_forces_every_always_setting_and_keeps_the_users_mcp_servers() {
+fn codex_worker_forces_every_always_setting() {
     for a in [codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), codex_login_worker_argv(&launch(RoleKind::Worker, false)).unwrap()] {
         let c = pairs(&a);
-        for want in ["approval_policy=\"never\"", "sandbox_workspace_write.network_access=false", "sandbox_workspace_write.exclude_slash_tmp=true", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "web_search=\"disabled\""] {
+        let [fs, net, dp] = profile_kv(false);
+        for want in ["approval_policy=\"never\"", fs.as_str(), net.as_str(), dp.as_str()] {
             assert!(c.contains(&want), "{want} missing from {c:?}");
         }
-        assert!(c.iter().any(|x| x.starts_with("sandbox_workspace_write.writable_roots=")));
-        assert_eq!(a[7..9], ["--sandbox".to_string(), "workspace-write".into()]);
-        assert!(!c.iter().any(|x| x.starts_with("mcp_servers") || x.starts_with("notify")), "{c:?}");
+        // S11: `--sandbox` would switch the profile off, and the legacy keys are ignored under one.
+        assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
+        assert!(!c.iter().any(|x| x.starts_with("sandbox_workspace_write.")), "{c:?}");
         assert!(!a.iter().any(|x| x.contains("danger") || x.contains("bypass")));
         assert_eq!(a[a.len() - 2], "--");
     }
@@ -282,7 +379,9 @@ fn profiles_refuse_what_is_not_proven() {
 
 /// The `turn_context` shape codex 0.166 wrote in spike S3 (paths shortened).
 fn rollout(sandbox: Value, writes: &[&str], approval: &str) -> String {
+    // 6k: the profile's deny entries, as codex 0.166 reports them in S11 (`none` comes back as `deny`).
     let entries: Vec<Value> = std::iter::once(json!({"path": {"type": "special", "value": {"kind": "root"}}, "access": "read"}))
+        .chain(DENY.iter().map(|d| json!({"path": {"type": "path", "path": d}, "access": "deny"})))
         .chain(writes.iter().map(|w| if w.starts_with('/') { json!({"path": {"type": "path", "path": w}, "access": "write"}) } else { json!({"path": {"type": "special", "value": {"kind": w}}, "access": "write"}) }))
         .collect();
     let meta = json!({"type": "session_meta", "payload": {"model_provider": "vajra-openrouter"}});
@@ -295,7 +394,41 @@ fn good_sandbox() -> Value {
 }
 
 fn want() -> CodexWant {
-    CodexWant { cwd: WT.into(), ticket_tmp: TMP.into(), network: false }
+    CodexWant { cwd: WT.into(), ticket_tmp: TMP.into(), network: false, deny: deny().to_vec() }
+}
+
+/// 6k: a session where a Vajra dir is readable never runs: no entry, a `read` entry or a `write` entry all fail.
+#[test]
+fn the_read_back_refuses_a_session_that_can_read_a_vajra_dir() {
+    let good = rollout(good_sandbox(), &[WT, TMP], "never");
+    assert_eq!(check_codex_applied(&good, &want()), Ok(()));
+    let entry = |a: &str| format!("{{\"access\":\"{a}\",\"path\":{{\"path\":\"{}\",\"type\":\"path\"}}}}", DENY[0]);
+    let deny_entry = entry("deny");
+    assert!(good.contains(&deny_entry), "{good}");
+    for (bad, why) in [(good.replace(&format!("{deny_entry},"), ""), "no entry"), (good.replace(&deny_entry, &entry("read")), "read"), (good.replace(&deny_entry, &entry("write")), "write")] {
+        let e = check_codex_applied(&bad, &want()).unwrap_err();
+        assert!(e.0.contains("Vajra dir") || e.0.contains("write entry"), "{why}: {}", e.0);
+    }
+    assert_eq!(check_codex_applied(&good.replace(&deny_entry, &entry("none")), &want()), Ok(()), "none is as good as deny");
+    // An older layout with no file-system entries can't show the dirs are locked.
+    let mut v: Value = serde_json::from_str(good.lines().nth(1).unwrap()).unwrap();
+    v["payload"].as_object_mut().unwrap().remove("file_system_sandbox_policy");
+    assert!(check_codex_applied(&format!("{v}\n"), &want()).is_err());
+}
+
+#[test]
+fn the_deny_dirs_are_the_state_dir_and_the_data_dir_in_written_and_real_form() {
+    let d = tmpdir("deny");
+    let real = d.join("real");
+    std::fs::create_dir_all(real.join(".claude/vajra")).unwrap();
+    std::os::unix::fs::symlink(&real, d.join("link")).unwrap();
+    let home = d.join("link");
+    let got = vajra_deny_dirs(&home, &home.join("data-not-made-yet"));
+    assert_eq!(got, vec![home.join(".claude/vajra"), real.join(".claude/vajra"), home.join("data-not-made-yet"), real.join("data-not-made-yet")]);
+    let flat = vajra_deny_dirs(&real, &real.join("data"));
+    assert_eq!(flat, vec![real.join(".claude/vajra"), real.join("data")], "no duplicate when the path is already real");
+    assert!(codex_profile_overrides(PROFILE, &[], &[], false).is_err(), "a Codex profile never goes out with no Vajra dirs denied");
+    assert_eq!(codex_profile_overrides(PROFILE, &[PathBuf::from("/a\"b")], &[], false).unwrap_err().field, "deny");
 }
 
 #[test]
@@ -381,16 +514,91 @@ fn a_read_back_mismatch_kills_the_session() {
     sup.kill("w-ok").unwrap();
 }
 
-/// Pins today's state: spike S4 has not run, so both Claude worker kinds are refused with `s4_unverified`. When the
-/// owner's S4 run prints PASS, flip `CLAUDE_WORKER_S4_PASSED` and change this test with it.
+/// Pins today's state: the owner's S4 run on batch-3 printed PASS, so both Claude worker kinds are supported. Setting
+/// `CLAUDE_WORKER_S4_PASSED` back to false (a new Claude Code build that fails S4) must change this test with it.
+/// #180 bhishma: today's worker flag shape must be one S4 proved. Any change to the deny-rule tables, the hooks or the
+/// flag's fields changes the shape and fails this test until S4 passes on it and its pair is added to
+/// `CLAUDE_WORKER_PROVEN` (the spike prints the pair). Only exact `claude --version` strings in that list pass.
 #[test]
-fn the_claude_worker_profile_is_refused_until_s4_passes() {
-    const { assert!(!CLAUDE_WORKER_S4_PASSED) };
+fn only_a_claude_build_s4_proved_with_todays_flag_shape_is_dispatched() {
+    let shape = claude_worker_flag_shape(&repo_hooks()).unwrap();
+    assert_eq!(shape.len(), 64);
+    assert!(CLAUDE_WORKER_PROVEN.iter().any(|(_, s)| *s == shape), "today's flag shape {shape} is not one S4 proved: rerun S4 and add its pair");
+    assert_eq!(claude_worker_flag_shape(&repo_hooks()).unwrap(), shape, "the shape is the same on every call");
+    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)", &shape), Ok(()));
+    assert_eq!(claude_worker_proven("  2.1.296 (Claude Code)\n", &shape), Ok(()), "--version output is trimmed");
+    for bad in ["2.1.322 (Claude Code)", "2.1.296", "2.1.2960 (Claude Code)", "", "SHAPE_PENDING"] {
+        assert_eq!(claude_worker_proven(bad, &shape), Err(CLAUDE_UNPROVEN), "{bad:?}");
+    }
+    assert_eq!(claude_worker_proven("2.1.296 (Claude Code)", &"0".repeat(64)), Err(CLAUDE_UNPROVEN), "a proven version with another shape");
+    assert_eq!(CLAUDE_UNPROVEN.reason, "claude_unproven");
+}
+
+fn repo_hooks() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hooks")
+}
+
+/// #186 codex: the flag file names the guard scripts, but S4 proved what they do, so their bytes are in the shape.
+/// One changed byte in the installed pre-tool-use.sh is a different shape; a missing or symlinked script is no shape.
+#[test]
+fn the_flag_shape_covers_the_installed_guard_scripts_bytes() {
+    let names = claude_worker_hook_scripts().unwrap();
+    assert!(names.iter().any(|n| n == "pre-tool-use.sh"), "{names:?}");
+    let d = tmpdir("guard-shape");
+    let copy = |to: &Path| {
+        std::fs::create_dir_all(to).unwrap();
+        for n in &names {
+            std::fs::copy(repo_hooks().join(n), to.join(n)).unwrap();
+        }
+    };
+    let same = d.join("same");
+    copy(&same);
+    let want = claude_worker_flag_shape(&repo_hooks()).unwrap();
+    assert_eq!(claude_worker_flag_shape(&same).unwrap(), want, "an exact install of the repo's hooks has the repo's shape");
+
+    let edited = d.join("edited");
+    copy(&edited);
+    let p = edited.join("pre-tool-use.sh");
+    let mut b = std::fs::read(&p).unwrap();
+    let i = b.len() / 2;
+    b[i] ^= 1;
+    std::fs::write(&p, b).unwrap();
+    assert_ne!(claude_worker_flag_shape(&edited).unwrap(), want, "one changed byte in the guard");
+
+    let missing = d.join("missing");
+    copy(&missing);
+    std::fs::remove_file(missing.join("pre-tool-use.sh")).unwrap();
+    assert!(claude_worker_flag_shape(&missing).is_err());
+
+    let linked = d.join("linked");
+    copy(&linked);
+    std::fs::remove_file(linked.join("pre-tool-use.sh")).unwrap();
+    std::os::unix::fs::symlink(repo_hooks().join("pre-tool-use.sh"), linked.join("pre-tool-use.sh")).unwrap();
+    assert!(claude_worker_flag_shape(&linked).is_err(), "a symlinked guard script is not hashed through");
+}
+
+/// #186 bhishma Low: the shape covers the worker argv S4 relied on, not only the flag file, so dropping or changing
+/// `--setting-sources user`, `--permission-mode dontAsk` or the `--tools` pair needs a new S4 PASS too.
+#[test]
+fn the_flag_shape_covers_the_worker_argv_flags_s4_relied_on() {
+    let input = claude_worker_shape_input().unwrap();
+    let argv: Vec<String> = serde_json::from_str(input.rsplit_once('\n').unwrap().1).unwrap();
+    for pair in [["--setting-sources", "user"], ["--permission-mode", "dontAsk"], ["--tools", "Read,Grep,Glob,Bash,Edit,Write"], ["--allowedTools", "Read,Grep,Glob,Bash,Edit,Write"], ["--output-format", "stream-json"]] {
+        assert!(argv.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]), "{pair:?} in {argv:?}");
+    }
+    assert!(argv.iter().any(|a| a == "-p") && argv.iter().any(|a| a == "--settings"), "{argv:?}");
+    let flag: serde_json::Value = serde_json::from_str(input.rsplit_once('\n').unwrap().0).unwrap();
+    assert_eq!(flag["permissions"]["defaultMode"], "dontAsk", "the flag file is the first part");
+    assert!(claude_worker_flag_shape(&repo_hooks()).is_ok());
+}
+
+#[test]
+fn the_claude_worker_profile_is_supported_once_s4_passed() {
+    const { assert!(CLAUDE_WORKER_S4_PASSED) };
     for kind in [RoleKind::Worker, RoleKind::Verifier] {
         let p = profile(Engine::Claude, kind);
-        assert_eq!(p.supported, Err(S4_UNVERIFIED));
-        assert_eq!(p.supported.unwrap_err().reason, "s4_unverified");
-        assert!(!p.always.is_empty(), "the profile data is complete; only the proof is missing");
+        assert_eq!(p.supported, Ok(()));
+        assert!(!p.always.is_empty(), "every override the profile applies is listed");
     }
 }
 
@@ -593,8 +801,56 @@ fn server() -> RunServer<'static> {
     RunServer { exe: Path::new("/opt/Vajra/vajra-desktop"), run: RUN, token_file: Path::new("/d/runs/20261112-0930/vajra-run.token"), socket: Path::new("/d/app.sock") }
 }
 
+/// A lead's deny dirs: the state dir and the data dir `/d`, which holds the lead dir (so the profile reads it back in).
+fn lead_deny() -> &'static [PathBuf] {
+    static D: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    D.get_or_init(|| ["/h/.claude/vajra", "/d"].iter().map(PathBuf::from).collect())
+}
+
 fn lead(model: Option<&'static str>, effort: Option<&'static str>) -> LeadLaunch<'static> {
-    LeadLaunch { prompt: "the charter", model, effort, lead_dir: Path::new("/d/runs/20261112-0930/lead"), project: Path::new("/p/repo"), server: server() }
+    LeadLaunch {
+        prompt: "the charter", model, effort, lead_dir: Path::new("/d/runs/20261112-0930/lead"), project: Path::new("/p/repo"), server: server(),
+        deny: lead_deny(), profile: PROFILE,
+    }
+}
+
+/// The lead's 6k profile `-c` values, as `codex_lead_launch` writes them.
+fn lead_profile_kv() -> [String; 3] {
+    [
+        format!("permissions.{PROFILE}.filesystem={{\"/\"=\"read\",\"/h/.claude/vajra\"=\"none\",\"/d\"=\"none\",\"/d/runs/20261112-0930/lead\"=\"read\"}}"),
+        format!("permissions.{PROFILE}.network={{enabled=false}}"),
+        format!("default_permissions=\"{PROFILE}\""),
+    ]
+}
+
+/// 6k on the core lead: a fresh profile with the Vajra dirs unreadable, the lead dir alone read back in, no write
+/// entry and no network, on both routes; N3 stays (only `vajra_run`, `notify` off). A launch with no deny dirs, a
+/// guessable profile name, or a read-back entry that would reopen a denied dir is refused.
+#[test]
+fn the_codex_lead_runs_under_a_fresh_profile_with_the_vajra_dirs_denied_and_no_writes() {
+    for route in [CodexRoute::Login, CodexRoute::Gateway { home: Path::new(GW_HOME) }] {
+        let a = codex_lead_argv_of(&lead(Some("m"), None), route).unwrap();
+        let kv = pairs(&a);
+        for p in lead_profile_kv() {
+            assert_eq!(kv.iter().filter(|k| **k == p).count(), 1, "{p} in {kv:?}");
+        }
+        assert!(!kv.iter().any(|k| k.contains("\"write\"")), "a lead's profile has no write entry: {kv:?}");
+        // On 0.166 an explicit --sandbox wins over default_permissions and the deny entries never apply (2026-11-13).
+        assert!(!a.iter().any(|x| x == "--sandbox"), "no --sandbox flag, which would switch the profile off: {a:?}");
+        assert!(kv.contains(&"notify=[]") && kv.contains(&run_server_kv().as_str()), "N3 holds alongside the profile");
+    }
+    let mut l = lead(Some("m"), None);
+    l.deny = &[];
+    assert_eq!(codex_lead_launch(&l, CodexRoute::Login).unwrap_err().field, "deny");
+    let mut l = lead(Some("m"), None);
+    l.profile = "vajra";
+    assert_eq!(codex_lead_launch(&l, CodexRoute::Login).unwrap_err().field, "profile");
+    // A lead dir that is, or holds, a denied dir would reopen it.
+    for dir in ["/d", "/"] {
+        let mut l = lead(Some("m"), None);
+        l.lead_dir = Path::new(dir);
+        assert_eq!(codex_lead_launch(&l, CodexRoute::Login).unwrap_err().field, "read", "{dir}");
+    }
 }
 
 fn run_server_kv() -> String {
@@ -610,11 +866,12 @@ fn run_server_kv() -> String {
 fn codex_login_lead_argv_snapshot() {
     let a = codex_lead_argv_of(&lead(Some("model-a"), Some("high")), CodexRoute::Login).unwrap();
     let want: Vec<String> = [
-        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
+        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--skip-git-repo-check",
         "-C", "/d/runs/20261112-0930/lead", "--ignore-rules", "--ignore-user-config", "-m", "model-a",
         "-c", "approval_policy=\"never\"", "-c", "notify=[]", "-c", "web_search=\"disabled\"",
-        "-c", "features.multi_agent=false", "-c", "features.goals=false", "-c", "model_reasoning_effort=\"high\"",
-        "-c", &run_server_kv(), "--", "the charter",
+        "-c", "features.multi_agent=false", "-c", "features.goals=false",
+        "-c", &lead_profile_kv()[0], "-c", &lead_profile_kv()[1], "-c", &lead_profile_kv()[2],
+        "-c", "model_reasoning_effort=\"high\"", "-c", &run_server_kv(), "--", "the charter",
     ].map(String::from).into();
     assert_eq!(a, want);
     // N3 on the login route holds only with the user's config ignored (spike S2): the -c table alone is merged.
@@ -757,15 +1014,46 @@ fn lead_rollout(sandbox: Value, writes: &[&str]) -> String {
 
 #[test]
 fn the_codex_lead_read_back_wants_read_only_no_network_and_the_lead_dir() {
-    let wt = Path::new(WT);
-    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[]), wt).is_ok());
+    let (wt, d) = (Path::new(WT), deny());
+    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[]), wt, d).is_ok());
     let ws = json!({"type": "workspace-write", "network_access": false, "exclude_slash_tmp": true, "exclude_tmpdir_env_var": true, "writable_roots": []});
-    assert!(check_codex_lead_applied(&lead_rollout(ws, &[]), wt).is_err(), "workspace-write is wider than a lead's profile");
-    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only", "network_access": true}), &[]), wt).is_err());
-    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[WT]), wt).is_err(), "no write entry at all");
-    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[]), Path::new("/elsewhere")).is_err());
-    assert!(check_codex_lead_applied(&rollout(json!({"type": "read-only"}), &[], "on-request"), wt).is_err());
-    assert!(check_codex_lead_applied("{}\n", wt).is_err());
+    assert!(check_codex_lead_applied(&lead_rollout(ws, &[]), wt, d).is_err(), "workspace-write is wider than a lead's profile");
+    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only", "network_access": true}), &[]), wt, d).is_err());
+    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[WT]), wt, d).is_err(), "no write entry at all");
+    assert!(check_codex_lead_applied(&lead_rollout(json!({"type": "read-only"}), &[]), Path::new("/elsewhere"), d).is_err());
+    assert!(check_codex_lead_applied(&rollout(json!({"type": "read-only"}), &[], "on-request"), wt, d).is_err());
+    assert!(check_codex_lead_applied("{}\n", wt, d).is_err());
+}
+
+/// The `turn_context` codex 0.166 wrote on 2026-11-13 for a lead launched as `codex_lead_launch` builds it (a no-write
+/// profile, no `--sandbox`): a `read-only` sandbox and the profile's entries, `deny` for the data dir and `read` for
+/// the lead dir inside it. Run with a temp CODEX_HOME and a placeholder provider on a closed loopback port; no key.
+const OBSERVED_LEAD_TC: &str = r#"{"type":"turn_context","payload":{"cwd":"/private/tmp/v52-nowrite/data/runs/r1/lead","approval_policy":"never","sandbox_policy":{"type":"read-only"},"file_system_sandbox_policy":{"kind":"restricted","entries":[{"path":{"type":"path","path":"/"},"access":"read"},{"path":{"type":"path","path":"/private/tmp/v52-nowrite/data"},"access":"deny"},{"path":{"type":"path","path":"/private/tmp/v52-nowrite/data/runs/r1/lead"},"access":"read"}]}}}"#;
+
+/// The same launch with `--sandbox read-only` added: the flag wins and the profile is gone (only the root reads).
+const OBSERVED_FLAG_TC: &str = r#"{"type":"turn_context","payload":{"cwd":"/private/tmp/v52-nowrite/data/runs/r1/lead","approval_policy":"never","sandbox_policy":{"type":"read-only"},"permission_profile":{"type":"managed","file_system":{"type":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"}]},"network":"restricted"}}}"#;
+
+#[test]
+fn the_codex_lead_read_back_passes_what_real_codex_reports_and_refuses_a_profile_the_flag_switched_off() {
+    let lead = Path::new("/private/tmp/v52-nowrite/data/runs/r1/lead");
+    let deny = [PathBuf::from("/private/tmp/v52-nowrite/data")];
+    assert!(check_codex_lead_applied(OBSERVED_LEAD_TC, lead, &deny).is_ok());
+    assert!(check_codex_lead_applied(OBSERVED_FLAG_TC, lead, &deny).is_err(), "--sandbox switched the profile off");
+}
+
+/// 6k: a lead whose profile didn't apply never runs. A Vajra dir with no deny entry fails, an older layout with no
+/// file-system policy can't show the dirs are locked so it fails, and an empty deny list is never a pass.
+#[test]
+fn the_codex_lead_read_back_fails_unless_every_vajra_dir_shows_denied() {
+    let wt = Path::new(WT);
+    let ok = lead_rollout(json!({"type": "read-only"}), &[]);
+    let one_more = [deny().to_vec(), vec![PathBuf::from("/h/other")]].concat();
+    assert!(check_codex_lead_applied(&ok, wt, &one_more).unwrap_err().0.contains("/h/other"), "a dir with no deny entry is readable");
+    let mut v: Vec<Value> = ok.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    v[1]["payload"].as_object_mut().unwrap().remove("file_system_sandbox_policy");
+    let old = v.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+    assert!(check_codex_lead_applied(&old, wt, deny()).is_err(), "no file-system policy can't show the dirs are denied");
+    assert!(check_codex_lead_applied(&ok, wt, &[]).is_err(), "nothing to check is never a pass");
 }
 
 fn lead_init(tools: &[String], servers: &[&str], mode: &str) -> String {

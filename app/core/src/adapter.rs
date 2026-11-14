@@ -9,7 +9,9 @@
 
 use std::ffi::OsString;
 
+pub mod claude_selftest;
 pub mod profiles;
+pub mod evidence_runner;
 
 use crate::sessions::argv::{self, InvalidInput, RunInput};
 

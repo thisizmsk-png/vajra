@@ -39,7 +39,7 @@ pub struct PlanTask {
 // ---------------------------------------------------------------- text (`clean`, `oneLine`)
 
 /// JS `\s` and `String.prototype.trim`: Unicode white space plus the BOM.
-fn js_space(c: char) -> bool {
+pub(super) fn js_space(c: char) -> bool {
     c.is_whitespace() || c == '\u{feff}'
 }
 
@@ -50,7 +50,7 @@ fn clean(s: &str, n: usize) -> String {
 }
 
 /// `oneLine(s, n)`: `clean`, every run of white space one space, cut to `n`.
-fn one_line(s: &str, n: usize) -> String {
+pub(super) fn one_line(s: &str, n: usize) -> String {
     let mut out = String::new();
     let mut gap = false;
     for c in clean(s, 4000).chars() {

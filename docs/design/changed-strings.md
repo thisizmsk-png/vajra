@@ -367,3 +367,20 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | "A decision needs you in P" / "A worker has a question in P" / "A task is blocked in P" / "N things need you: ..." | ping toast and the recent-pings list | counts and project names only, never an item's text |
 | "Pinged because your rule is on for ..." / "Grouped: they arrived within M min of the first." / "Held until now: you allow N pings an hour." / "Not pinged: notifications are off." / "Not pinged: your rule is off for ..." | under every ping and every quiet arrival | why it pinged, or why not |
 | Run to start / Review in Director-General | Inbox card for a run the Director-General proposes | it starts only from the Director-General view |
+
+One-click install (ADR-17 17b). Only a source that passed its security review gets the sheet; every other row keeps the step-1 wording and has no Install button.
+
+| String | Where | Note |
+|---|---|---|
+| Not installed. Install it in one click, or run one of these in a terminal. | missing row, verified source | |
+| The last install didn't match what was approved. / The last install couldn't be undone. / The last upgrade failed partway. / The last upgrade ran too long and was stopped. + "Repair it, or reinstall it with the vendor's steps." | broken row after a one-click install | the Broken mark's reason (bhishma condition 1) |
+| "Plan a one-click install of NAME" / Checking the pinned package and your tools / Could not plan the install. | row button, loading, error | planning installs nothing |
+| "One-click install: NAME" | sheet title | |
+| Command / From / Version / Tools / Installs into / Registry for its scope / Also installs or upgrades / Needs admin | sheet fields | the exact argv; the tarball shows as "<verified tarball>" |
+| owned by you | tool row | a tool in a Homebrew prefix the user owns (condition 4) |
+| Your npm config (.npmrc) applies to this install. / The tool folder it uses belongs to you, not to the system. / Homebrew installs its current version, not a pinned one. / Your Homebrew settings (brew.env) apply to this install. | sheet notes | conditions 5 and 6 |
+| This folder belongs to the system, so installing needs admin rights. / belongs to another user. / You can't write to this folder. / has too many files to check. + "Run the command yourself in a terminal." | needs-admin line | no Install button then (ADR-17 rule 5) |
+| "Install NAME" / "Repair NAME" / Installs exactly this. If anything changes before it runs, you'll be asked again. | consent button and hint | Repair on a broken row |
+| Installing / "NAME install output" | while running; accessible label of the live output | the `setup-<id>` stream |
+| Installed / The install failed. Nothing changed. / The install didn't match what was approved, so it was removed again. / The install couldn't be confirmed or undone. It stays marked Broken until a clean install. | result | |
+| Install-it-yourself reasons: not reviewed, unpinned packages, install scripts, package didn't match its pin, no npm, no Homebrew, no ready-built package, script doesn't check its download; otherwise "This one can't be installed in one click here." Each ends "Install it yourself with the steps above." | sheet, when the core answers manual | |

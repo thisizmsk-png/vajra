@@ -129,8 +129,6 @@ impl App {
             clock: None,
             redact: Redactor::default(),
             steer: None,
-            #[cfg(test)]
-            claude_unverified_ok: false,
         })?;
         Ok(rt.clone())
     }

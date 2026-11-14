@@ -232,6 +232,8 @@ type StateKey = (PathBuf, Option<PathBuf>);
 type WorktreeCache = HashMap<StateKey, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
+pub const SETUP_PLAN_SCHEMA: &str = "vajra.setup_plan/1";
+
 pub struct App {
     preferences: Mutex<crate::preferences::Store>,
     data: PathBuf,
@@ -261,7 +263,7 @@ pub struct App {
     /// The leads of the core runs (6d2c), each watched on its own thread.
     lead_runs: Arc<lead_start::LeadRuns>,
     /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
-    _instance: Option<(std::fs::File, std::fs::File)>,
+    _instance: Option<(instance::Held, instance::Held)>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -291,6 +293,11 @@ pub struct App {
     /// Each core run's record, by run id: live until its protocol finalizes, so it is never listed as an orphan
     /// between tickets (6h).
     live_records: Mutex<HashMap<String, std::sync::Weak<record::CoreRecord>>>,
+    /// Each core run's open log, by run id (W2): `run_log_since` reads the held one, so it sees what is written.
+    live_logs: Mutex<HashMap<String, std::sync::Weak<runlog_store::RunLog>>>,
+    /// Every anchor this app session sent to a run's signed record, by run id, kept for the app's life (W2, bhishma F4):
+    /// only these confirm an anchor, and a reopened log must still hold the last one.
+    log_anchors: Arc<Mutex<HashMap<String, Vec<runlog::Anchor>>>>,
     /// Workers closed once finished (see `closeout`); persisted.
     closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
@@ -337,6 +344,8 @@ pub struct App {
     sink: Mutex<Option<ChangeSink>>,
     /// New-item notifications (`inbox_new`), coalesced over 5 s (see `arrivals`).
     events: Arc<arrivals::Hub>,
+    /// One-click install consents (ADR-17 rule 4): tokens in memory only, one run per harness at a time.
+    consents: crate::providers::install::consent::Consents,
     /// ADR 16.6: the global git baseline (taken first thing in `open`) and the worker runtime, built on first use.
     workers: Arc<worker_host::WorkerHost>,
 }
@@ -443,7 +452,10 @@ impl App {
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
             live_records: Mutex::new(HashMap::new()),
+            live_logs: Mutex::new(HashMap::new()),
+            log_anchors: Default::default(),
             closeout: closeout::Store::open(data),
+            consents: Default::default(),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -926,6 +938,12 @@ impl App {
         Ok(engine)
     }
 
+    /// The absolute codex binary a Codex Lead launches (bhishma #216 Low 1: never the bare word looked up again).
+    fn codex_for_lead(&self) -> Result<PathBuf, Value> {
+        use crate::providers::detect::Probe;
+        self.provider_probe().find("codex").ok_or_else(|| fail("provider_not_installed", "codex is not installed; install it or choose another provider"))
+    }
+
     fn provider_probe(&self) -> crate::providers::detect::System {
         crate::providers::detect::System::new(self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs)).with_home(self.home.clone())
     }
@@ -949,7 +967,58 @@ impl App {
             crate::userpath::refresh(&self.home);
         }
         let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
-        serde_json::to_value(crate::providers::setup::list(&self.provider_probe(), engine)).map_err(|e| fail("internal", e))
+        let marks = crate::providers::install::marks::Marks::at(&self.data);
+        serde_json::to_value(crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks)).map_err(|e| fail("internal", e))
+    }
+
+    /// `setup_plan` (`vajra.setup_plan/1`): the one-click plan for catalog harness `id` (ADR-17 rule 3: the exact
+    /// command, source, version, tools, target, needs_admin, notes, scope registry and dependencies), or `manual` with
+    /// why it is "Install it yourself". Installs nothing; npm's pack folder is private and removed before this answers.
+    pub fn setup_plan(&self, id: &str) -> Res {
+        use crate::providers::install::flow;
+        let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        let answer = |r: Result<Value, &str>| match r {
+            Ok(plan) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "plan": plan }),
+            Err(code) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "manual": code }),
+        };
+        // An unverified source never resolves a tool or runs anything.
+        if !h.verified() {
+            return Ok(answer(Err("source_not_verified")));
+        }
+        let offer = flow::offer(h, &flow::Machine::this(&self.home));
+        Ok(answer(offer.and_then(|o| serde_json::to_value(&o.plan).map_err(|_| "internal"))))
+    }
+
+    /// `setup_consent`: the user clicked Install on the plan whose hash is `hash`. A single-use token bound to {id,
+    /// hash}, valid for two minutes; it is never logged or stored.
+    pub fn setup_consent(&self, id: &str, hash: &str) -> Res {
+        crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(fail("bad_hash", "a plan hash is 64 hex digits"));
+        }
+        Ok(serde_json::json!({ "token": self.consents.mint(id, hash, std::time::Instant::now()) }))
+    }
+
+    /// `setup_run`: install `id` with consent `token`. The plan is recomputed and must hash the same; the install
+    /// streams on `setup-<id>`, is checked on every exit, rolled back or marked Broken, and audited. Blocks until done.
+    pub fn setup_run(&self, id: &str, token: &str) -> Res {
+        use crate::providers::install::{flow, run};
+        let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if !h.verified() {
+            return Err(fail("source_not_verified", "this harness is Install it yourself"));
+        }
+        // Read after the install too (a repair counts only if the program runs), so the PATH is refreshed first and
+        // the probe is built fresh: a newly linked binary must be found.
+        let current = || {
+            crate::userpath::refresh(&self.home);
+            crate::providers::setup::current(h, &self.provider_probe())
+        };
+        let audit = self.claude.join("vajra/audit.log");
+        let paths = flow::Paths { data: &self.data, audit: &audit };
+        let r = flow::run(h, &flow::Machine::this(&self.home), &self.consents, token, &self.sup, paths, &current).map_err(|c| fail(c, "setup refused"))?;
+        // The new binary is found without a restart.
+        crate::userpath::refresh(&self.home);
+        Ok(serde_json::json!({ "stream": run::stream(id), "report": r }))
     }
 
     /// The CLI's own sign-in for `id`, for a user terminal: only for a catalog harness that is installed and reports a
@@ -1102,7 +1171,14 @@ impl App {
             if engine == Engine::Claude {
                 argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
             } else {
-                adapter_for(engine).run_argv(&input, n).map_err(invalid_input)
+                // bhishma #216 H1: a Codex Lead never runs without the Vajra dirs denied.
+                let deny = crate::adapter::profiles::vajra_deny_dirs(&self.home, &self.data);
+                let profile = crate::adapter::profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
+                let real = |p: &Path| p.canonicalize().map_err(|e| fail("io_error", e));
+                let (project, tmp) = (real(&cwd)?, real(&std::env::temp_dir())?);
+                // A second Lead in this project was already held by the one-run-per-project cap, under the launching lock.
+                let codex = self.codex_for_lead()?;
+                crate::adapter::profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)
             }
         }, false, workers)?;
         self.note("run_started", &[]);
@@ -2286,12 +2362,13 @@ impl App {
         seam("check:report");
         // The record hash (6i export): the sha256 of the exact digest lines the script just accepted, so a reader on this
         // Mac can match an export to the record it came from. It carries no key material.
-        // `VERIFIED_KEY`: the campaign and progress exactly as checked here, for the proof label (6i). `read_report` drops it.
+        // `VERIFIED_KEY`: the campaign, features and progress exactly as checked here, for the proof label and its
+        // write-ledger check (6i). `read_report` drops it.
         let progress = String::from_utf8_lossy(&h.progress).into_owned();
         let record = |v: Res| {
             v.map(|mut v| {
                 v["record_sha256"] = json!(hex_digest(input.as_bytes()));
-                v[VERIFIED_KEY] = json!({"campaign": campaign, "progress": progress});
+                v[VERIFIED_KEY] = json!({"campaign": campaign, "features": features, "progress": progress});
                 v
             })
         };
@@ -2588,6 +2665,7 @@ impl Pace {
 
 mod worker_diff;
 pub mod workers;
+mod claude_canary;
 pub mod plan;
 pub mod record;
 mod record_app;
@@ -2597,6 +2675,14 @@ pub mod charter;
 pub mod run_lead;
 mod lead_start;
 pub mod labs;
+pub mod verify;
+pub mod phases;
+pub mod runlog;
+pub mod runlog_store;
+mod runlog_app;
+pub use runlog_app::answered as run_log_answered;
+#[cfg(test)]
+mod runlog_tests;
 pub mod worker_host;
 mod instance;
 mod arrivals;

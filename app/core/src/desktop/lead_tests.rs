@@ -674,6 +674,21 @@ fn claude_is_resolved_to_an_absolute_path_once() {
     assert_eq!(app.lead_status(RUN_ID).unwrap()["read_only_reason"], "claude not found");
 }
 
+/// Opening the app must not read the user PATH: that read waits for the login shell (up to `userpath::FIRST_WAIT`),
+/// and `App::open` runs before the window exists. The binary and the environment are found at the first use instead.
+#[test]
+fn opening_the_app_does_not_look_up_the_binary_or_build_the_environment() {
+    let t = Tmp::new();
+    let app = App::open(&t.data(), &t.home()).unwrap();
+    assert!(!app.lead.bin_once.is_completed(), "the claude lookup ran while the app opened");
+    assert!(!app.lead.env_once.is_completed(), "the Lead environment was built while the app opened");
+    // The first use resolves once; a later call gives the same answer without another lookup.
+    let first = app.lead.bin();
+    assert!(app.lead.bin_once.is_completed());
+    assert_eq!(app.lead.bin(), first);
+    assert!(app.lead.env().iter().any(|(k, _)| *k == "PATH"));
+}
+
 #[test]
 fn two_projects_asking_at_once_each_get_their_own_settings() {
     let t = Tmp::new();
