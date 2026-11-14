@@ -48,24 +48,51 @@ fn exe(p: &Path, body: &str) {
     fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A fake Codex worker: `thread.started`, a rollout whose `turn_context` is the worker profile's, then it writes the
-/// file named `touch:<file>` in its brief.
+/// What codex 0.166 writes as a session's `file_system_sandbox_policy` under a per-launch permission profile (S12, run
+/// live in the bench spike for the plain Codex Lead): every entry of the launch's own `permissions.<name>.filesystem`
+/// argument, in order, each path as given and `none` reported as `deny`. The fakes build theirs from their own argv, so
+/// the deny read-back judges what the core asked for, as it does with a real Codex. With `<role>.no-fs` next to the
+/// script (role `worker` or `lead`), it prints `null` instead: the shape S12 saw when a sandbox flag beat the profile,
+/// for the refusal check. (The supervisor clears the environment, so a flag file, not a variable.)
+///
+///     python3 -I fs_policy.py <role> [argv...]   prints the policy as JSON, or `null`
+const FS_POLICY: &str = r#"import json, os, re, sys
+role, args = sys.argv[1], sys.argv[2:]
+fs = [a.split("=", 1)[1] for a in args if re.match(r"permissions\.vajra-[0-9a-f]{16}\.filesystem=", a)]
+if not fs or os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), role + ".no-fs")):
+    print("null")
+    sys.exit(0)
+body = fs[-1].strip()
+assert body.startswith("{") and body.endswith("}"), body
+entries = []
+for path, access in re.findall(r'"((?:[^"\\]|\\.)*)"\s*=\s*"(read|write|none)"', body[1:-1]):
+    entries.append({"path": {"type": "path", "path": json.loads('"' + path + '"')}, "access": "deny" if access == "none" else access})
+print(json.dumps({"kind": "restricted", "entries": entries}))
+"#;
+
+/// A fake Codex worker: `thread.started`, a rollout whose `turn_context` is the worker profile's (its sandbox and, as
+/// codex 0.166 reports them, the file-system entries of the profile on its own command line), then it writes the file
+/// named `touch:<file>` in its brief.
 fn fake_worker(dir: &Path, user_codex_home: &Path) -> PathBuf {
     let p = dir.join("codex-worker");
+    let fs_policy = dir.join("fs_policy.py");
+    fs::write(&fs_policy, FS_POLICY).unwrap();
     exe(&p, &format!(
         r#"#!/bin/sh
 WT=$(pwd -P)
 TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
 D="${{CODEX_HOME:-{home}}}/sessions/2026/11/12"
 mkdir -p "$D"
-printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"m","sandbox_policy":{{"type":"workspace-write","network_access":false,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":["%s"]}}}}}}\n' "$WT" "$TMPDIR" > "$D/rollout-x-$TID.jsonl"
+FS=$(/usr/bin/python3 -I '{fs_policy}' worker "$@")
+printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"m","sandbox_policy":{{"type":"workspace-write","network_access":false,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":["%s"]}},"file_system_sandbox_policy":%s}}}}\n' "$WT" "$TMPDIR" "$FS" > "$D/rollout-x-$TID.jsonl"
 echo '{{"type":"thread.started","thread_id":"'$TID'"}}'
 for a in "$@"; do LAST=$a; done
 F=$(printf '%s' "$LAST" | sed -n 's/.*touch:\([a-z0-9.]*\).*/\1/p' | head -n 1)
 [ -n "$F" ] && echo "made by a worker" > "$F"
 exit 0
 "#,
-        home = user_codex_home.display()
+        home = user_codex_home.display(),
+        fs_policy = fs_policy.display()
     ));
     p
 }
@@ -89,8 +116,10 @@ else:
     tid = str(uuid.uuid4())
     d = os.path.join(CODEX_HOME, "sessions/2026/11/12")
     os.makedirs(d, exist_ok=True)
+    # As codex 0.166 reports a no-write profile: a read-only sandbox, with the profile's entries ("none" as "deny").
+    fs = json.loads(subprocess.run(["/usr/bin/python3", "-I", FS_POLICY, "lead"] + argv, capture_output=True, text=True, check=True).stdout)
     with open(os.path.join(d, "rollout-x-%s.jsonl" % tid), "w") as f:
-        f.write(json.dumps({"type": "turn_context", "payload": {"approval_policy": "never", "cwd": lead_dir, "sandbox_policy": {"type": "read-only"}}}) + "\n")
+        f.write(json.dumps({"type": "turn_context", "payload": {"approval_policy": "never", "cwd": lead_dir, "sandbox_policy": {"type": "read-only"}, "file_system_sandbox_policy": fs}}) + "\n")
     print(json.dumps({"type": "thread.started", "thread_id": tid}), flush=True)
     srv = [a for a in argv if a.startswith("mcp_servers=")][0]
     g = lambda k: re.search(k + '="([^"]+)"', srv).group(1)
@@ -202,7 +231,10 @@ fn rig(lead_account: &str) -> Rig {
     // The shebang stays the first line; the constants go right after it.
     let (shebang, rest) = FAKE_LEAD.split_once('\n').unwrap();
     // The fake and the server it starts see only the temp HOME, never the runner's.
-    let script = format!("{shebang}\nTOOLS = {:?}\nCODEX_HOME = {:?}\nTEST_HOME = {:?}\n{rest}", profiles::claude_lead_tools(), codex_home.to_str().unwrap(), home.to_str().unwrap());
+    let script = format!(
+        "{shebang}\nTOOLS = {:?}\nCODEX_HOME = {:?}\nTEST_HOME = {:?}\nFS_POLICY = {:?}\n{rest}",
+        profiles::claude_lead_tools(), codex_home.to_str().unwrap(), home.to_str().unwrap(), d.join("fs_policy.py").to_str().unwrap()
+    );
     exe(&fake, &script);
     let env = LeadEnv {
         data: data.clone(), home: home.clone(), exe: PathBuf::from(env!("CARGO_BIN_EXE_vajra-desktop")), socket: sock, codex: fake.clone(), claude: fake,
@@ -240,4 +272,39 @@ fn a_codex_lead_runs_a_core_run_to_not_verified() {
 #[test]
 fn a_claude_lead_runs_a_core_run_to_not_verified() {
     run_to_the_end("claude");
+}
+
+/// The stubs prove nothing unless the read-back still refuses a session that leaves the deny entries out: a Codex lead
+/// whose session file shows no file-system entries (S12's shape when a sandbox flag beat the profile) is never let run,
+/// so the run ends with the lead lost and no worker dispatched.
+#[test]
+fn a_codex_lead_whose_session_hides_the_deny_entries_is_refused() {
+    let r = rig("codex");
+    fs::write(r.d.join("lead.no-fs"), "").unwrap();
+    r.lead.start().unwrap();
+    r.lead.watch();
+    let (status, why) = r.lead.ended();
+    assert_eq!(status, Some(RunStatus::LeadLost), "{why:?}");
+    assert!(why.as_deref().is_some_and(|w| w.contains("profile_not_applied")), "{why:?}");
+    assert!(r.rt.list("20261112-0930").is_empty(), "no worker was dispatched");
+}
+
+/// The same for a worker: one whose session file leaves the deny entries out ends `profile_not_applied`, and its work
+/// never counts.
+#[test]
+fn a_codex_worker_whose_session_hides_the_deny_entries_is_refused() {
+    let r = rig("claude");
+    fs::write(r.d.join("worker.no-fs"), "").unwrap();
+    r.lead.start().unwrap();
+    r.lead.watch();
+    let codex: Vec<_> = r.rt.list("20261112-0930").into_iter().filter(|v| v.account == "codex").collect();
+    assert!(!codex.is_empty(), "a Codex worker ran");
+    for v in &codex {
+        assert_eq!(v.reason.as_deref(), Some("profile_not_applied"), "{v:?}");
+        assert!(v.commit.is_none(), "{v:?}");
+    }
+    // The stub gate never passes a round, so the run ends not verified either way: what counts is that the refused
+    // worker's files never reach the round.
+    let wt_files: Vec<String> = codex.iter().flat_map(|v| v.files.clone()).collect();
+    assert!(wt_files.is_empty(), "a refused worker's files are never counted: {wt_files:?}");
 }

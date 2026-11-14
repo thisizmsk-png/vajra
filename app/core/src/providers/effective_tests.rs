@@ -576,3 +576,29 @@ fn a_file_that_shrinks_while_it_is_read_is_uncounted() {
     // An empty file really is empty: size 0, nothing to read, 0 lines.
     assert_eq!(count_lines(&mut &b""[..], 0, &mut left, far()), Some(0));
 }
+
+/// Codex review #241: a Lead read-back pass picks the newest `MAX_LEAD_FILES` by metadata and reads only those, however
+/// many recent session files the day folders hold. Files from before `since` are never read.
+#[test]
+fn a_lead_read_back_pass_reads_at_most_its_file_limit_newest_first() {
+    let home = tmp();
+    let day = home.join("sessions/2026/11/14");
+    std::fs::create_dir_all(&day).unwrap();
+    let old = home.join("sessions/2026/11/13");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("rollout-2026-11-13T00-00-00-old.jsonl"), "old\n").unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+    let since = std::time::SystemTime::now();
+    // Created after `since`, oldest first, with a pause so their creation times are ordered.
+    let total = MAX_LEAD_FILES + 9;
+    for i in 0..total {
+        std::fs::write(day.join(format!("rollout-2026-11-14T00-00-{i:02}-f{i:02}.jsonl")), format!("file {i:02}\n")).unwrap();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    LEAD_READS.with(|c| c.set(0));
+    let got = codex_rollouts_since(&home, since);
+    assert_eq!(LEAD_READS.with(|c| c.get()), MAX_LEAD_FILES, "only the picked files are read");
+    let want: Vec<String> = (total - MAX_LEAD_FILES..total).rev().map(|i| format!("file {i:02}\n")).collect();
+    assert_eq!(got, want, "the newest {MAX_LEAD_FILES}, newest first");
+    assert!(!got.iter().any(|t| t.starts_with("old")));
+}

@@ -633,6 +633,12 @@ mod tests {
         reaper.join().unwrap();
         for p in job {
             // `kill(pid, 0)` succeeds for an exited job its new parent has not reaped yet; that is not running.
+            // On macOS `proc_pidinfo` cannot read a zombie (ESRCH), so `is_zombie` never sees one there:
+            // give the reaper a bounded moment to collect the killed job before asserting.
+            let t0 = Instant::now();
+            while alive(p as u32) && t0.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             // Diagnostics for a failure seen only on the macOS CI runner (#182): could recover read this pid at all?
             let (stamp, probe) = (crate::procid::start_stamp(p as u32), unsafe { libc::kill(p, 0) });
             let errno = std::io::Error::last_os_error();

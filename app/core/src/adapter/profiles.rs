@@ -342,9 +342,11 @@ fn valid_profile_name(n: &str) -> bool {
 }
 
 /// The profile's `-c` values (S11): the whole disk readable, each deny dir unreadable, only the `write` dirs writable,
-/// network as given. Under a profile, Codex ignores `--sandbox` and the `sandbox_workspace_write` keys, and the
-/// profile wins over the user's own `sandbox_mode` and `default_permissions` (S11, codex 0.166). `name` is a fresh
-/// `codex_profile_name`, so no user table merges into it.
+/// network as given. S12 (codex 0.166, live, both `codex exec` and the interactive Codex): the profile wins over the
+/// user's own `sandbox_mode` (top level or in a `[profiles.*]` table), `sandbox_workspace_write` writable roots and
+/// `default_permissions`, but an explicit sandbox flag on the command line (`--sandbox`, `-s`, `--sandbox=`) beats it,
+/// so no Codex argv carries one (`drop_sandbox_flag`; S11 had this wrong). `name` is a fresh `codex_profile_name`, so no
+/// user table merges into it. What the session really ran under is read back from its own `turn_context`.
 pub fn codex_profile_overrides(name: &str, deny: &[PathBuf], write: &[&Path], network: bool) -> Result<Vec<String>, InvalidInput> {
     codex_profile_entries(name, deny, &[], write, network)
 }
@@ -449,18 +451,28 @@ fn before_prompt(mut argv: Vec<String>, extra: Vec<String>) -> Vec<String> {
 pub fn codex_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> {
     let model = l.model.ok_or(bad("model", "a gateway seat names a model"))?;
     let mut base = argv::build_gateway_argv(l.prompt, model, l.effort)?;
-    // 6k: the permission profile sets the sandbox; `--sandbox` would switch the profile off (S11).
+    // 6k: the permission profile sets the sandbox; an explicit sandbox flag beats it (S12), so none is passed.
     drop_sandbox_flag(&mut base);
     Ok(before_prompt(base, codex_confinement(l)?))
 }
 
-/// Remove `--sandbox <mode>` and the `sandbox_workspace_write.*` overrides, which a permission profile replaces.
-fn drop_sandbox_flag(a: &mut Vec<String>) {
-    if let Some(i) = a.iter().position(|x| x == "--sandbox") {
-        a.drain(i..(i + 2).min(a.len()));
-    }
-    while let Some(i) = a.windows(2).position(|w| w[0] == "-c" && w[1].starts_with("sandbox_workspace_write.")) {
-        a.drain(i..i + 2);
+/// Remove every sandbox flag before the `--` that ends Codex's options, and the `sandbox_mode` and
+/// `sandbox_workspace_write.*` overrides, which a permission profile replaces. S12 (codex 0.166, live): `--sandbox X`,
+/// `-s X` and `--sandbox=X` each beat a per-launch profile (the session ran with `danger-full-access` and read a denied
+/// file), so every form goes, and `-sX` too (bhishma #216 L1). The prompt after `--` is never touched.
+pub fn drop_sandbox_flag(a: &mut Vec<String>) {
+    let mut i = 0;
+    while i < a.len() && a[i] != "--" {
+        let x = a[i].as_str();
+        if x == "--sandbox" || x == "-s" {
+            a.drain(i..(i + 2).min(a.len()));
+        } else if x.starts_with("--sandbox=") || (x.starts_with("-s") && !x.starts_with("--")) {
+            a.remove(i);
+        } else if x == "-c" && a.get(i + 1).is_some_and(|v| v.starts_with("sandbox_workspace_write.") || v.starts_with("sandbox_mode=")) {
+            a.drain(i..i + 2);
+        } else {
+            i += 1;
+        }
     }
 }
 
@@ -1249,6 +1261,69 @@ fn check_fs_entries(p: &Value, allowed: &[PathBuf]) -> Result<(), NotApplied> {
     Ok(())
 }
 
+/// What the plain Codex Lead's read-back decided.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LeadVerdict {
+    /// No session file has shown its first turn yet: look again on the next pass.
+    Pending,
+    /// The Lead's own first turn ran under its profile, the Vajra dirs denied.
+    Applied,
+    /// The Lead ends: its profile isn't shown in force, or a session it can't be told apart from runs without it.
+    NotApplied(String),
+}
+
+pub const LEAD_UNMARKED: &str = "a Codex session started in the project without the Lead's Vajra profile in force (if you started Codex there yourself just now, start the run again)";
+
+/// The plain Lead's per-launch marker: a deny entry for a path that doesn't exist, inside the app data dir (already
+/// denied, so it changes nothing). S12: Codex reports each deny entry of the profile verbatim in `turn_context`, so the
+/// marker tells this launch's session file apart from any other Codex session.
+pub fn codex_lead_marker(data_real: &Path, profile: &str) -> PathBuf {
+    data_real.join(format!(".lead-{profile}"))
+}
+
+/// bhishma MUST (before batch-3 goes to main): the plain Codex Lead loads the user's own Codex config, and an explicit
+/// sandbox flag beats a permission profile (S12), so its first turn is read back like a worker's. `rollouts` are the
+/// session files created since the launch (`effective::codex_rollouts_since`). A file whose `session_meta` names another
+/// folder is someone else's. The file whose first `turn_context` lists `marker` is the Lead's, judged by
+/// `check_codex_applied` and #175's read-entry check. bhishma L1 on #241: a file in the project whose first turn shows
+/// no marker can't be told apart from the Lead running without its profile (a sandbox flag drops every file-system
+/// entry, the marker with them), so ANY such file ends the Lead, even beside a marked file that passes. A marked file
+/// that fails ends it at once. With neither, the read-back waits.
+pub fn codex_lead_verdict(rollouts: &[String], want: &CodexWant, marker: &Path) -> LeadVerdict {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let cwd = canon(&want.cwd);
+    let (mut applied, mut unmarked) = (false, false);
+    for text in rollouts {
+        let recs: Vec<Value> = text.lines().take(10_000).filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
+        let first = |t: &str| recs.iter().find(|r| r["type"] == t);
+        // Only a folder that is given and differs rules a file out: a layout with no cwd still counts.
+        let other = |r: Option<&Value>| r.and_then(|r| r["payload"]["cwd"].as_str()).is_some_and(|c| canon(Path::new(c)) != cwd);
+        if other(first("session_meta")) || other(first("turn_context")) {
+            continue;
+        }
+        let Some(tc) = first("turn_context") else { continue };
+        let marked = tc.pointer("/payload/file_system_sandbox_policy/entries").and_then(Value::as_array).is_some_and(|es| {
+            es.iter().any(|e| matches!(e["access"].as_str(), Some("none" | "deny")) && e.pointer("/path/path").and_then(Value::as_str).is_some_and(|s| Path::new(s) == marker))
+        });
+        if !marked {
+            unmarked = true;
+            continue;
+        }
+        // The worker check, then #175's L1 check: no read entry reopens a Vajra dir (the plain Lead reads none back).
+        if let Err(e) = check_codex_applied(text, want).and_then(|()| check_no_read_reopens(tc, &want.deny, &[])) {
+            return LeadVerdict::NotApplied(e.0);
+        }
+        applied = true;
+    }
+    if unmarked {
+        LeadVerdict::NotApplied(LEAD_UNMARKED.into())
+    } else if applied {
+        LeadVerdict::Applied
+    } else {
+        LeadVerdict::Pending
+    }
+}
+
 /// Check a Claude worker's `system`/`init` event: permission mode `dontAsk`, and no built-in tool outside the role's
 /// list. An MCP tool, `mcp__*`, doesn't fail the read-back (Q4), except Vajra's own namespaces: a worker has no Vajra
 /// tools (16.4), so an `mcp__vajra*` tool from a server named like Vajra's fails. Any MCP server that loaded marks the
@@ -1348,8 +1423,14 @@ pub fn check_codex_lead_applied(rollout: &str, lead_dir: &Path, deny: &[PathBuf]
     }
     check_codex_applied(rollout, &CodexWant { cwd: lead_dir.to_path_buf(), ticket_tmp: lead_dir.to_path_buf(), network: false, deny: deny.to_vec() })?;
     // bhishma L1 on #174: inside a denied dir, the only entry that may read is the lead dir itself (as written or as
-    // its real path). Any other read, or a read of a dir that holds a denied one, reopens what the profile shut.
+    // its real path).
     let allowed: Vec<PathBuf> = std::iter::once(lead_dir.to_path_buf()).chain(lead_dir.canonicalize().ok()).collect();
+    check_no_read_reopens(&tc, deny, &allowed)
+}
+
+/// bhishma L1 on #174, shared by both Codex lead read-backs: a `read` entry inside a denied dir, or of a dir that holds
+/// one (other than `/`), reopens what the profile shut, unless it is one of `allowed`.
+fn check_no_read_reopens(tc: &Value, deny: &[PathBuf], allowed: &[PathBuf]) -> Result<(), NotApplied> {
     let entries = tc.pointer("/payload/file_system_sandbox_policy/entries").and_then(Value::as_array).cloned().unwrap_or_default();
     for e in entries.iter().filter(|e| e["access"] == "read") {
         let Some(p) = e.pointer("/path/path").and_then(Value::as_str).map(Path::new) else { continue };
