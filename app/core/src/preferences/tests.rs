@@ -25,6 +25,68 @@ impl Drop for Home {
 fn patch(v: serde_json::Value) -> Patch {
     serde_json::from_value(v).unwrap()
 }
+/// The app spawns processes all the time (git, workers, the Lead). A child forked while a store call holds the lock
+/// gets a copy of the directory descriptor until it execs, and a flock lives on until every copy is closed. So the
+/// store must release its lock itself, not leave it to closing its own copy, or the next call is `preferences_busy`
+/// for as long as some unrelated child sits between fork and exec (seen as random failures in the parallel suite).
+#[test]
+fn a_child_forked_while_the_lock_is_held_does_not_keep_the_store_busy() {
+    use std::os::unix::process::CommandExt;
+    let h = Home::new();
+    let s = h.store();
+    s.read(None).unwrap();
+    let dir = s.directory().unwrap();
+    let held = lock_file(&dir, true).unwrap();
+    // Two close-on-exec pipes (no other test's child keeps them): the child says it has forked, holding its copy of
+    // the descriptor, and then waits in its pre-exec hook until the parent has finished both store calls.
+    let pipe = || {
+        let mut fds = [0; 2];
+        // SAFETY: pipe writes two descriptors into the array; fcntl only sets their close-on-exec flag.
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+            for fd in fds {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+        (fds[0], fds[1])
+    };
+    let ((ready_r, ready_w), (go_r, go_w)) = (pipe(), pipe());
+    let child = std::thread::spawn(move || {
+        let mut c = std::process::Command::new("/usr/bin/true");
+        // SAFETY: the hook calls only close, write and read, which are async-signal-safe, and reads errno.
+        unsafe {
+            c.pre_exec(move || {
+                // Its own copies of the ends it never uses: a parent that dies before `go` leaves it at EOF, not stuck.
+                libc::close(ready_r);
+                libc::close(go_w);
+                libc::write(ready_w, b"x".as_ptr().cast(), 1);
+                let mut b = 0u8;
+                while libc::read(go_r, (&mut b as *mut u8).cast(), 1) < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {}
+                Ok(())
+            })
+        };
+        c.status().unwrap()
+    });
+    let mut p = libc::pollfd { fd: ready_r, events: libc::POLLIN, revents: 0 };
+    // SAFETY: poll and read on our own pipe's read end.
+    assert_eq!(unsafe { libc::poll(&mut p, 1, 20_000) }, 1, "the child never forked");
+    let mut b = 0u8;
+    assert_eq!(unsafe { libc::read(ready_r, (&mut b as *mut u8).cast(), 1) }, 1);
+    // The child now holds a copy of the descriptor. The call ends, as read() and update() end: the lock, then the
+    // descriptor go.
+    drop(held);
+    drop(dir);
+    let read = s.read(None);
+    let wrote = s.update(None, 0, patch(json!({"theme": "light"})), false);
+    // SAFETY: a one-byte write to our own pipe lets the child exec, then every pipe end is closed once.
+    unsafe { libc::write(go_w, b"x".as_ptr().cast(), 1) };
+    assert!(child.join().unwrap().success());
+    for fd in [ready_r, ready_w, go_r, go_w] {
+        unsafe { libc::close(fd) };
+    }
+    assert!(read.is_ok(), "{:?}", read.err());
+    assert!(wrote.is_ok(), "{:?}", wrote.err());
+}
 #[test]
 fn fg08_global_defaults_and_project_overrides_survive_reopen_without_touching_other_scopes() {
     let h = Home::new();
