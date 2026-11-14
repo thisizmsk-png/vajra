@@ -1469,6 +1469,10 @@ impl RunProtocol {
         if let Some((_, tk, _)) = st.tasks.iter().flat_map(|t| &t.tickets).find(|(_, tk, _)| self.live(tk)) {
             return refuse(NOT_READY, format!("ticket {tk} is still running; await it first"));
         }
+        // A held task is not a failed one: integrating past it would spend a round on work no worker was let do.
+        if let Some(Question::PickSeat { task, .. }) = st.questions.iter().find(|q| matches!(q, Question::PickSeat { task, .. } if round.rework.contains(task))) {
+            return refuse(NOT_READY, format!("task {task} waits for the human to pick its seat; with nothing else running, call finish_run with your notes"));
+        }
         let order = plan::topo(&st.specs());
         let mut commits = Vec::new();
         let mut broken = BTreeMap::new();
