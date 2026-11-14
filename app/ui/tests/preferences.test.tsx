@@ -20,6 +20,13 @@ describe("FG-08 preferences",()=>{
   fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");expect(f.calls.find(c=>c.cmd==="act_preferences_update")?.args).toMatchObject({envelope:{project_id:P,expect_generation:0},patch:{theme:"dark"},reset:false});
   fireEvent.click(screen.getByRole("button",{name:"Reset this scope"}));await waitFor(()=>expect(f.calls.filter(c=>c.cmd==="act_preferences_update")).toHaveLength(2));expect(f.calls.filter(c=>c.cmd==="act_preferences_update")[1].args).toMatchObject({envelope:{project_id:P},reset:true});
  });
+ it("puts Save and Discard first, and sets the rare Reset and Reload apart from them",async()=>{
+  setTransport(fakeIpc({preferences_read:view()}).transport);render(<PreferenceForm projectId={null} section="appearance"/>);
+  const save=await screen.findByRole("button",{name:"Save preferences"});const rare=(n:string)=>screen.getByRole("button",{name:n}).closest(".v-pref__rare");
+  expect(rare("Reset this scope")).not.toBeNull();expect(rare("Reload preferences")).toBe(rare("Reset this scope"));
+  expect(save.closest(".v-pref__rare")).toBeNull();expect(rare("Discard changes")).toBeNull();
+  expect(save.compareDocumentPosition(screen.getByRole("button",{name:"Reset this scope"}))&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+ });
  it("shows inherited values and lets one field inherit without resetting the rest",async()=>{
   const f=fakeIpc({preferences_read:()=>({...view(P),sources:{...view(P).sources,theme:"project"},overrides:{theme:"dark"}}),act_preferences_update:()=>done(view(P,1))});setTransport(f.transport);
   render(<PreferenceForm projectId={P} projectName="Project A" section="appearance"/>);fireEvent.click(await screen.findByRole("button",{name:"Use global Theme"}));fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");expect(f.calls.find(c=>c.cmd==="act_preferences_update")?.args?.patch).toEqual({inherit:["theme"]});

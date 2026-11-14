@@ -6,6 +6,7 @@ use std::path::Path;
 
 use super::contract::Tested;
 use super::detect::{self, Probe};
+use super::install::marks::Marks;
 use super::keychain::{Keys, KEY_ACCOUNTS};
 use crate::adapter::Engine;
 use crate::crew::roles::Kind;
@@ -54,6 +55,11 @@ pub fn launchable(choice: &Choice, kind: Kind, agents: &Agents, probe: &dyn Prob
 }
 
 pub fn launchable_with(route_available: bool, choice: &Choice, kind: Kind, agents: &Agents, probe: &dyn Probe, keys: &Keys) -> Result<(), Refused> {
+    launchable_marked(route_available, choice, kind, agents, probe, keys, &Marks::none())
+}
+
+/// `launchable_with`, also refusing a harness a failed one-click install marked Broken (bhishma condition 1).
+pub fn launchable_marked(route_available: bool, choice: &Choice, kind: Kind, agents: &Agents, probe: &dyn Probe, keys: &Keys, marks: &Marks) -> Result<(), Refused> {
     if !agents.permits(choice) {
         return refuse("outside_allowed", "this choice is outside the project's allowed list");
     }
@@ -66,6 +72,11 @@ pub fn launchable_with(route_available: bool, choice: &Choice, kind: Kind, agent
     }
     if info.version.is_none() {
         return refuse("harness_broken", format!("{} did not report a version. Settings > Providers > Set up.", info.name));
+    }
+    if let Some(path) = info.path.as_deref() {
+        if marks.active(&info.id, Path::new(path), info.version.as_deref()).is_some() {
+            return refuse("harness_broken", format!("{}'s last install did not check out. Settings > Providers > Set up.", info.name));
+        }
     }
     if needs_key {
         match keys.saved(&choice.account) {

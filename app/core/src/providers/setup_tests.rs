@@ -174,8 +174,14 @@ fn no_mcp_or_control_tool_can_reach_set_up_or_sign_in() {
     }
     // No file under src/control (the socket, the MCP server and every control-service tool, at any depth) names set up,
     // sign-in or the PATH refresh.
-    let banned = ["providers::setup", "open_sign_in", "SignInCommand", "setup_sign_in_command", "setup_list", "userpath::refresh"];
-    let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control")];
+    // Nor the one-click install (bhishma condition 7): its consent and run are main-window commands only, and the CLI
+    // example drives no install either.
+    let banned = [
+        "providers::setup", "open_sign_in", "SignInCommand", "setup_sign_in_command", "setup_list", "userpath::refresh",
+        "providers::install", "setup_plan", "setup_consent", "setup_run", "spawn_setup", "Consents",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut dirs = vec![root.join("src/control"), root.join("examples")];
     let mut scanned = 0;
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -192,4 +198,47 @@ fn no_mcp_or_control_tool_can_reach_set_up_or_sign_in() {
         }
     }
     assert!(scanned > 0);
+}
+
+#[test]
+fn a_broken_mark_holds_even_when_the_version_check_passes() {
+    let d = std::env::temp_dir().join(format!("vajra-setup-marks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let marks = crate::providers::install::marks::Marks::at(&d);
+    let fake = Fake::default().with("claude", 0, "2.1.322 (Claude Code)");
+    let path = list(&fake, false).rows.iter().find(|r| r.id == "claude").unwrap().path.clone().unwrap();
+    marks.set("claude", Path::new(&path), Some("2.1.322"), "closure_mismatch").unwrap();
+    let r = list_marked(&fake, false, &marks).rows.into_iter().find(|r| r.id == "claude").unwrap();
+    assert_eq!((r.state, r.reason_code.as_deref()), (State::Broken, Some("closure_mismatch")));
+    assert!(!r.can_sign_in);
+    let newer = Fake::default().with("claude", 0, "2.1.323 (Claude Code)");
+    let r = list_marked(&newer, false, &marks).rows.into_iter().find(|r| r.id == "claude").unwrap();
+    assert_eq!(r.state, State::Installed, "a new version clears it");
+}
+
+#[test]
+fn current_names_the_binary_and_its_version_or_none() {
+    let h = catalog::find("claude").unwrap();
+    let (path, v) = current(h, &Fake::default().with("claude", 0, "2.1.322 (Claude Code)")).unwrap();
+    assert_eq!((path.to_str(), v.as_deref()), (Some("/opt/homebrew/bin/claude"), Some("2.1.322")));
+    assert_eq!(current(h, &Fake::default().with("claude", 1, "")).unwrap().1, None, "broken: a path, no version");
+    assert!(current(h, &Fake::default()).is_none());
+}
+
+#[test]
+fn one_click_is_offered_only_for_a_verified_source_that_is_missing_or_broken() {
+    let mut h = catalog::find("claude").unwrap().clone();
+    let none = crate::providers::install::marks::Marks::none();
+    let r = super::row(&h, &Fake::default(), &none);
+    assert!(!r.one_click, "unverified: install it yourself");
+    assert_eq!(r.reason_code.as_deref(), Some("source_not_verified"));
+    h.source_verified_by = Some("owner".into());
+    h.source_verified_on = Some("2026-11-11".into());
+    h.verification_ref = Some("ref".into());
+    let r = super::row(&h, &Fake::default(), &none);
+    assert!(r.one_click);
+    assert_eq!(r.reason_code.as_deref(), Some("not_installed"));
+    assert!(super::row(&h, &Fake::default().with("claude", 1, ""), &none).one_click, "a broken one can be repaired");
+    assert!(!super::row(&h, &Fake::default().with("claude", 0, "2.1.322 (Claude Code)"), &none).one_click, "installed: nothing to do");
 }

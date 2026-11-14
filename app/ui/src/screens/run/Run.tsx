@@ -10,6 +10,8 @@ import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
 import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
 import { Problem } from "../states";
+import { Proof } from "./Proof";
+import { RunLog } from "./RunLog";
 
 const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
 const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
@@ -120,8 +122,9 @@ export function Run() {
   }
   return (
     <div className="v-home">
-      <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+      <Text as="h1" variant="headline-lg" className="v-run__name">{S.run.title}</Text>
       <RunProvider slug={slug} />
+      <Proof slug={slug} />
       <Section title={S.run.timeline}>
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
         {overview && (
@@ -166,6 +169,8 @@ export function Run() {
           />
         )}
       </Section>
+      {/* The run's own hash-chained log, live; keyed by run so a new run starts from its kept view or from 0. */}
+      {overview && <RunLog key={overview.run_id} runId={overview.run_id} />}
       <Section title={S.run.evidence}>
         {err && <div role="alert"><Text variant="body-sm">{S.run.failed} {err}</Text></div>}
         {rows && rows.length === 0 && <Text variant="body-sm" muted>{S.run.none}</Text>}

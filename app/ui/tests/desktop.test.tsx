@@ -250,6 +250,12 @@ describe("CrewTree", () => {
     const [sel, setSel] = useState("lead");
     return <CrewTree label="Crew" nodes={nodes} selected={sel} onSelect={setSel} />;
   }
+  it("Given a status too long for the row, When it is clipped, Then the whole status is still on the cell as its tooltip", () => {
+    render(<CrewTree label="Crew" nodes={[{ id: "w", label: "Backend", status: "in_progress", statusLabel: "In progress, Active now" }]} selected="w" onSelect={() => {}} />);
+    const cell = document.querySelector(".v-tree .v-row__meta") as HTMLElement;
+    expect(cell.getAttribute("title")).toBe("In progress, Active now");
+    expect(cell.textContent).toBe("In progress, Active now");
+  });
   it("expands and collapses a branch with the pointer, and still selects the row", () => {
     render(<Host />);
     expect(screen.getAllByRole("treeitem")).toHaveLength(1);

@@ -7,4 +7,4 @@ pub mod discover;
 pub mod identity;
 pub mod migrate;
 pub mod store;
-mod pinned;
+pub(crate) mod pinned;

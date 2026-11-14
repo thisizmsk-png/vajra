@@ -25,6 +25,68 @@ impl Drop for Home {
 fn patch(v: serde_json::Value) -> Patch {
     serde_json::from_value(v).unwrap()
 }
+/// The app spawns processes all the time (git, workers, the Lead). A child forked while a store call holds the lock
+/// gets a copy of the directory descriptor until it execs, and a flock lives on until every copy is closed. So the
+/// store must release its lock itself, not leave it to closing its own copy, or the next call is `preferences_busy`
+/// for as long as some unrelated child sits between fork and exec (seen as random failures in the parallel suite).
+#[test]
+fn a_child_forked_while_the_lock_is_held_does_not_keep_the_store_busy() {
+    use std::os::unix::process::CommandExt;
+    let h = Home::new();
+    let s = h.store();
+    s.read(None).unwrap();
+    let dir = s.directory().unwrap();
+    let held = lock_file(&dir, true).unwrap();
+    // Two close-on-exec pipes (no other test's child keeps them): the child says it has forked, holding its copy of
+    // the descriptor, and then waits in its pre-exec hook until the parent has finished both store calls.
+    let pipe = || {
+        let mut fds = [0; 2];
+        // SAFETY: pipe writes two descriptors into the array; fcntl only sets their close-on-exec flag.
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+            for fd in fds {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+        (fds[0], fds[1])
+    };
+    let ((ready_r, ready_w), (go_r, go_w)) = (pipe(), pipe());
+    let child = std::thread::spawn(move || {
+        let mut c = std::process::Command::new("/usr/bin/true");
+        // SAFETY: the hook calls only close, write and read, which are async-signal-safe, and reads errno.
+        unsafe {
+            c.pre_exec(move || {
+                // Its own copies of the ends it never uses: a parent that dies before `go` leaves it at EOF, not stuck.
+                libc::close(ready_r);
+                libc::close(go_w);
+                libc::write(ready_w, b"x".as_ptr().cast(), 1);
+                let mut b = 0u8;
+                while libc::read(go_r, (&mut b as *mut u8).cast(), 1) < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {}
+                Ok(())
+            })
+        };
+        c.status().unwrap()
+    });
+    let mut p = libc::pollfd { fd: ready_r, events: libc::POLLIN, revents: 0 };
+    // SAFETY: poll and read on our own pipe's read end.
+    assert_eq!(unsafe { libc::poll(&mut p, 1, 20_000) }, 1, "the child never forked");
+    let mut b = 0u8;
+    assert_eq!(unsafe { libc::read(ready_r, (&mut b as *mut u8).cast(), 1) }, 1);
+    // The child now holds a copy of the descriptor. The call ends, as read() and update() end: the lock, then the
+    // descriptor go.
+    drop(held);
+    drop(dir);
+    let read = s.read(None);
+    let wrote = s.update(None, 0, patch(json!({"theme": "light"})), false);
+    // SAFETY: a one-byte write to our own pipe lets the child exec, then every pipe end is closed once.
+    unsafe { libc::write(go_w, b"x".as_ptr().cast(), 1) };
+    assert!(child.join().unwrap().success());
+    for fd in [ready_r, ready_w, go_r, go_w] {
+        unsafe { libc::close(fd) };
+    }
+    assert!(read.is_ok(), "{:?}", read.err());
+    assert!(wrote.is_ok(), "{:?}", wrote.err());
+}
 #[test]
 fn fg08_global_defaults_and_project_overrides_survive_reopen_without_touching_other_scopes() {
     let h = Home::new();
@@ -365,4 +427,56 @@ fn a_settings_file_already_on_disk_with_any_role_key_still_loads() {
     // An unrelated write still works, and the old key is left alone.
     s.update(None, v.rev, patch(json!({"theme": "dark"})), false).unwrap();
     assert!(s.read(None).unwrap().agents.roles.contains_key("some_old_role"));
+}
+
+// Given the ping rule, When it is saved globally, Then it reads back and survives a reopen; out-of-range budgets are refused.
+#[test]
+fn the_ping_rule_is_a_bounded_global_preference() {
+    let h = Home::new();
+    let s = h.store();
+    assert_eq!(s.read(None).unwrap().effective.ping, Ping::default());
+    let rule = json!({"ping": {"per_hour": 3, "batch_minutes": 0, "decisions": true, "questions": false, "blocked": true}});
+    s.update(None, 0, patch(rule), false).unwrap();
+    let v = h.store().read(Some(P)).unwrap();
+    assert_eq!((v.effective.ping.per_hour, v.effective.ping.batch_minutes, v.effective.ping.questions), (3, 0, false));
+    assert_eq!(v.sources["ping"], "global");
+    for bad in [
+        json!({"ping": {"per_hour": 0}}),
+        json!({"ping": {"per_hour": 31}}),
+        json!({"ping": {"batch_minutes": 11}}),
+    ] {
+        assert_eq!(s.update(None, 1, patch(bad), false).unwrap_err().code(), "invalid_preferences");
+    }
+    assert!(serde_json::from_value::<Patch>(json!({"ping": {"start_work": true}})).is_err(), "the rule has no field that acts");
+    assert_eq!(s.read(None).unwrap().rev, 1);
+}
+
+// Given a project, When it tries to set or inherit its own ping rule, Then it is refused: one budget for the person.
+#[test]
+fn a_project_cannot_override_the_ping_rule() {
+    let h = Home::new();
+    let s = h.store();
+    let rule = json!({"ping": {"per_hour": 1}});
+    assert_eq!(s.update(Some(P), 0, patch(rule), false).unwrap_err().code(), "global_only");
+    assert_eq!(s.update(Some(P), 0, patch(json!({"inherit": ["ping"]})), false).unwrap_err().code(), "global_only");
+    // A file on disk that carries a project ping override is refused on read, not half-applied.
+    s.update(Some(P), 0, patch(json!({"theme": "dark"})), false).unwrap();
+    let path = h.0.join("preferences/settings.json");
+    let mut doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    doc["overrides"][P]["ping"] = json!({"per_hour": 1});
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_eq!(s.read(None).unwrap_err().code(), "invalid_preferences");
+}
+
+// Given a settings file written before the ping rule existed, Then it loads with the default rule.
+#[test]
+fn a_settings_file_without_a_ping_rule_reads_the_default() {
+    let h = Home::new();
+    let s = h.store();
+    s.update(None, 0, patch(json!({"theme": "dark"})), false).unwrap();
+    let path = h.0.join("preferences/settings.json");
+    let mut doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    doc["global"].as_object_mut().unwrap().remove("ping");
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_eq!(s.read(None).unwrap().effective.ping, Ping::default());
 }
