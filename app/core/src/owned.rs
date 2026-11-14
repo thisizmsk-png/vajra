@@ -633,6 +633,12 @@ mod tests {
         reaper.join().unwrap();
         for p in job {
             // `kill(pid, 0)` succeeds for an exited job its new parent has not reaped yet; that is not running.
+            // On macOS `proc_pidinfo` cannot read a zombie (ESRCH), so `is_zombie` never sees one there:
+            // give the reaper a bounded moment to collect the killed job before asserting.
+            let t0 = Instant::now();
+            while alive(p as u32) && t0.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             assert!(!alive(p as u32) || crate::procid::is_zombie(p as u32), "the HUP-ignoring job {p} must be gone, not reported ended while running");
         }
     }
