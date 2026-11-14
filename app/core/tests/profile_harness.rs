@@ -1,6 +1,7 @@
 //! The resource-profile harness (`examples/profile_run.rs`) must still be able to start a run on the real core. It is
 //! not part of the app, so a change to what `launch` requires can break it without any other test noticing: it once
 //! launched in a folder that was not a project, was refused, and every load scenario of the bench stopped working.
+#![allow(clippy::disallowed_methods)] // test code: the app's own spawns go through the spawn lock
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

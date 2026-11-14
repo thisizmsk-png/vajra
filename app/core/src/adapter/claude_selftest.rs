@@ -160,25 +160,26 @@ fn spawn_bounded(argv: &[String], wt: &Path, h: &Path, cc: &Path, tmp: &Path, po
     let dir = Path::new(&argv[0]).parent().ok_or("argv: claude has no directory")?;
     let path = std::env::join_paths([dir, Path::new("/usr/bin"), Path::new("/bin")]).map_err(|_| "setup: PATH")?;
     let out = std::fs::File::create(events).map_err(|e| format!("setup: {e}"))?;
-    let mut child = std::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .current_dir(wt)
-        .env_clear()
-        .env("PATH", path)
-        .env("HOME", h)
-        .env("CLAUDE_CONFIG_DIR", cc)
-        .env("TMPDIR", tmp)
-        .env("TERM", "dumb")
-        .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{port}"))
-        .env("ANTHROPIC_API_KEY", "vajra-selftest-placeholder-not-a-key")
-        .env("DISABLE_AUTOUPDATER", "1")
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(out)
-        .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("spawn: {e}"))?;
+    let mut child = crate::spawnlock::spawn(
+        std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(wt)
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", h)
+            .env("CLAUDE_CONFIG_DIR", cc)
+            .env("TMPDIR", tmp)
+            .env("TERM", "dumb")
+            .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{port}"))
+            .env("ANTHROPIC_API_KEY", "vajra-selftest-placeholder-not-a-key")
+            .env("DISABLE_AUTOUPDATER", "1")
+            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(out)
+            .stderr(std::process::Stdio::null())
+            .process_group(0),
+    )
+    .map_err(|e| format!("spawn: {e}"))?;
     let pid = child.id() as i32;
     let end = Instant::now() + timeout;
     loop {

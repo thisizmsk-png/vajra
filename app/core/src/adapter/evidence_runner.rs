@@ -375,7 +375,7 @@ fn known_refusal(reason: &str, slug: &str) -> bool {
 /// core never re-reads a file a command could rewrite) and returns its sha256 for `sign`.
 pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     use std::io::Read;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     if !crate::bus::valid_stream_id(r.slug) || r.commands.is_empty() {
         return RunOutcome::Failed("not a runnable evidence check".into());
@@ -402,24 +402,11 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
         Ok(a) => a,
         Err(e) => return RunOutcome::Failed(e),
     };
-    let mut fds = [0i32; 2];
-    // SAFETY: a fresh pipe; both ends are owned below.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return RunOutcome::Failed("couldn't open the evidence pipe".into());
-    }
-    // SAFETY: the pipe just made; each fd is owned once.
-    let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    // Close-on-exec on both ends, so no other child the app spawns later inherits either end. The child gets only fd
-    // 3, made inheritable below. macOS has no pipe2, so a child another thread forks between pipe() and these fcntls
-    // could still inherit both ends (L1). Agent sessions can't: portable-pty closes every fd above 2 in a PTY child.
-    // What's left is the core's own short-lived helpers; a held write end is bounded by EOF_GRACE and the deadline,
-    // and a stray byte breaks the one-line rule, so either ends the run Failed, never with evidence it didn't write.
-    for fd in fds {
-        // SAFETY: fcntl on an fd this function owns.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-            return RunOutcome::Failed("couldn't open the evidence pipe".into());
-        }
-    }
+    // Both ends close-on-exec before any process can start (L1): macOS has no pipe2, so `cloexec_pipe` holds the
+    // app-wide spawn lock exclusive from pipe() until both flags are set, and every spawn in the app takes it shared.
+    // No child another thread starts can inherit either end. The runner's own child gets only fd 3, made inheritable
+    // below. A held write end is still bounded by EOF_GRACE and the deadline (a background process of a check).
+    let Ok((rd, wr)) = crate::spawnlock::cloexec_pipe() else { return RunOutcome::Failed("couldn't open the evidence pipe".into()) };
     let wfd = wr.as_raw_fd();
     let mut cmd = std::process::Command::new(SANDBOX_EXEC);
     cmd.args(&argv).current_dir(&profile.worktree).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
@@ -450,7 +437,7 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
             Ok(())
         });
     }
-    let mut child = match cmd.spawn() {
+    let mut child = match crate::spawnlock::spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => return RunOutcome::Failed(format!("the evidence runner didn't start: {e}")),
     };
@@ -633,6 +620,8 @@ fn worktree_index(worktree: &Path, common: &Path) -> Result<Option<Vec<u8>>, &'s
     } else {
         return Err(not_ours);
     };
+    // A regular file only (#234 follow-up): the pinned open uses O_NOFOLLOW (a symlink fails), O_NONBLOCK (a FIFO
+    // can't stall the run) and checks the opened file is regular (a directory, FIFO or device fails).
     match admin.read_single_link("index", CAP) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

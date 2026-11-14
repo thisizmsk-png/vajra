@@ -639,6 +639,64 @@ fn a_held_open_or_oversized_evidence_channel_fails_fast() {
     assert!(!base.join(SLUG).join("evidence.json").exists());
 }
 
+/// The #234 follow-up (before key A): a process another thread starts while the runner is between `pipe()` and the
+/// close-on-exec flags never holds the evidence write end. A child that did would keep the channel open after the
+/// script ends, and the run would fail. The racer goes through the app's spawn lock, so it waits out the window; the
+/// control run starts a bare child in the same window, which does inherit the write end and fails the run.
+#[test]
+fn a_process_started_during_the_evidence_pipe_window_never_holds_the_write_end() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let t = Tmp::new("spawnrace");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let cmds = vec!["true".to_string()];
+    let kids: Arc<Mutex<Vec<std::process::Child>>> = Arc::default();
+    let sleeper = || {
+        let mut c = Command::new("/bin/sleep");
+        c.arg("8").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        c
+    };
+    let hook = |f: Box<dyn Fn([libc::c_int; 2]) + Send>| *crate::spawnlock::PIPE_HOOK.lock().unwrap() = Some((std::thread::current().id(), f));
+    // The routed racer, from another thread, while the runner holds the window.
+    let (k, ran_early) = (kids.clone(), Arc::new(AtomicBool::new(false)));
+    let early = ran_early.clone();
+    let racer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+    let r = racer.clone();
+    hook(Box::new(move |_| {
+        let (k, e) = (k.clone(), early.clone());
+        let started = Arc::new(AtomicBool::new(false));
+        let s = started.clone();
+        *r.lock().unwrap() = Some(std::thread::spawn(move || {
+            let c = crate::spawnlock::spawn(&mut sleeper()).unwrap();
+            s.store(true, Ordering::SeqCst);
+            k.lock().unwrap().push(c);
+        }));
+        std::thread::sleep(Duration::from_millis(300));
+        e.store(started.load(Ordering::SeqCst), Ordering::SeqCst);
+    }));
+    let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
+    *crate::spawnlock::PIPE_HOOK.lock().unwrap() = None;
+    racer.lock().unwrap().take().unwrap().join().unwrap();
+    assert!(!ran_early.load(Ordering::SeqCst), "a routed spawn ran inside the evidence pipe window");
+    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "a racing child held the evidence channel: {out:?}");
+    // The control: a bare spawn in the same window inherits the write end, so the channel stays open and the run fails.
+    let k = kids.clone();
+    hook(Box::new(move |_| {
+        let k = k.clone();
+        std::thread::spawn(move || k.lock().unwrap().push(sleeper().spawn().unwrap())).join().unwrap();
+    }));
+    let out = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
+    *crate::spawnlock::PIPE_HOOK.lock().unwrap() = None;
+    for mut c in kids.lock().unwrap().drain(..) {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    assert_eq!(out, RunOutcome::Failed("the evidence channel stayed open after the script ended".into()), "control: a bare spawn in the window should hold the channel");
+}
+
 /// The script runs from its real place in the engine folder, which the profile denies: bash gets its text, never its
 /// path. A command that rewrites the script's file mid-run changes nothing, since bash read it all before any command.
 #[test]
@@ -963,6 +1021,24 @@ fn the_copied_index_is_only_ever_the_run_repositorys_own() {
     fs::hard_link(elsewhere.join("index"), &admin_index).unwrap();
     let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
     assert_eq!(out, RunOutcome::Failed("the worktree's git index isn't a plain file with one link".into()));
+    // #234 follow-up: the index must be a regular file. A symlink (even to a real index), a directory and a FIFO are
+    // each refused, and the FIFO doesn't hang the run (the open never blocks).
+    let not_plain = RunOutcome::Failed("the worktree's git index isn't a plain file with one link".into());
+    let real_index = t.0.join("real-index");
+    fs::copy(repo.join(".git/index"), &real_index).unwrap();
+    fs::remove_file(&admin_index).unwrap();
+    std::os::unix::fs::symlink(&real_index, &admin_index).unwrap();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), not_plain, "a symlinked index");
+    fs::remove_file(&admin_index).unwrap();
+    fs::create_dir(&admin_index).unwrap();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), not_plain, "a directory index");
+    fs::remove_dir(&admin_index).unwrap();
+    let c = std::ffi::CString::new(admin_index.to_str().unwrap()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let start = std::time::Instant::now();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), not_plain, "a FIFO index");
+    assert!(start.elapsed() < Duration::from_secs(5), "a FIFO index stalled the run");
 }
 
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.

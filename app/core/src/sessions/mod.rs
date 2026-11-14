@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::bus::{self, Bus};
 use crate::crew::redact::Redactor;
@@ -457,14 +457,13 @@ impl Supervisor {
             old.join_reader_if_done();
         }
 
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: spec.rows,
-                cols: spec.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| SessionError::Io(e.to_string()))?;
+        let pair = crate::spawnlock::openpty(PtySize {
+            rows: spec.rows,
+            cols: spec.cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(SessionError::Io)?;
 
         // CommandBuilder::from_argv runs argv directly; only new_default_prog
         // would start a shell, and we never call it.
@@ -478,10 +477,7 @@ impl Supervisor {
         }
         cmd.cwd(&spec.cwd);
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| SessionError::Spawn(e.to_string()))?;
+        let child = crate::spawnlock::spawn_pty(pair.slave.as_ref(), cmd).map_err(SessionError::Spawn)?;
         // Drop our slave fd so the reader sees EOF when the child is gone.
         drop(pair.slave);
         let pid = child.process_id().unwrap_or(0);

@@ -669,7 +669,7 @@ pub fn run_process_exact(program: &Path, argv: &[std::ffi::OsString], cwd: &Path
 /// group at `timeout` (after a SIGTERM and `grace` first, when given).
 fn run_built(mut cmd: Command, stdin: Option<&[u8]>, timeout: Duration, grace: Option<Duration>) -> Result<Output, BridgeError> {
     cmd.process_group(0);
-    let mut child = cmd.spawn().map_err(BridgeError::Spawn)?;
+    let mut child = crate::spawnlock::spawn(&mut cmd).map_err(BridgeError::Spawn)?;
     let pid = child.id();
     let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {

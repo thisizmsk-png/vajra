@@ -1,4 +1,5 @@
 //! C4 script bridge and preflight, using fake scripts in temp dirs.
+#![allow(clippy::disallowed_methods)] // test code: the app's own spawns go through the spawn lock
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
