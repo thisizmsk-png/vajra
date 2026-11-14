@@ -123,16 +123,17 @@ pub struct SpawnSpec {
     /// with the C5 redactor, before a line reaches the bus, spill or IPC.
     pub redact: Redactor,
     /// Variables added to `ENV_ALLOW` for this launch: only names in `EXTRA_ENV_ALLOW` (a Vajra-owned `CODEX_HOME` or
-    /// `CLAUDE_CONFIG_DIR`, and the per-ticket `TMPDIR`), never a key. Any other name refuses the spawn.
+    /// `CLAUDE_CONFIG_DIR`, the per-ticket `TMPDIR` and a Claude worker's build caches under it), never a key. Any
+    /// other name refuses the spawn.
     pub extra_env: Vec<(&'static str, OsString)>,
 }
 
 /// The bus stream prefix reserved for one-click installs (`Supervisor::spawn_setup`).
 pub const SETUP_STREAM: &str = "setup-";
 
-/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8), plus a Claude run lead's pinned `MCP_TOOL_TIMEOUT`
-/// (16.5, 6d2).
-pub const EXTRA_ENV_ALLOW: [&str; 4] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "MCP_TOOL_TIMEOUT"];
+/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8): a Claude run lead's pinned `MCP_TOOL_TIMEOUT` (16.5, 6d2),
+/// and a Claude worker's build caches, `adapter::profiles::CLAUDE_CACHE_ENV` (the last three).
+pub const EXTRA_ENV_ALLOW: [&str; 7] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "MCP_TOOL_TIMEOUT", "GOCACHE", "GOTMPDIR", "npm_config_cache"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitInfo {

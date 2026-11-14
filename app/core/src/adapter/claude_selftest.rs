@@ -61,7 +61,7 @@ pub fn run(claude: &Path, home: &Path, timeout: Duration) -> Result<(), String> 
     std::fs::write(cc.join("settings.json"), hostile_user.to_string()).map_err(|e| format!("setup: {e}"))?;
     std::fs::write(wt.join(".claude/settings.json"), hostile_project.to_string()).map_err(|e| format!("setup: {e}"))?;
     let flag_path = t.join("flag.json");
-    std::fs::write(&flag_path, claude_worker_flag(&h, &wt, &[], &data)?).map_err(|e| format!("setup: {e}"))?;
+    std::fs::write(&flag_path, claude_worker_flag(&h, &wt, &[], &data, &tmp)?).map_err(|e| format!("setup: {e}"))?;
 
     let ok_file = wt.join("ok-written");
     let s = |p: &Path| p.to_string_lossy().into_owned();

@@ -29,8 +29,21 @@ pub const CODEX_WARNING: &str = "Runs outside the Vajra guard, with your own Cod
 fn codex_lead_note() -> String {
     format!("{CODEX_WARNING} {CODEX_LEAD_CAUSE}")
 }
-pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard. Your own Claude Code MCP servers run with it.";
+pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard, in Claude Code's sandbox. Your own Claude Code settings and MCP servers don't load for this worker.";
 pub const NETWORK_NOTE: &str = "Internet on for this worker";
+/// A Claude seat with network on: Claude Code's sandbox gives its Bash loopback only, whatever the seat says, until the
+/// registry domain list lands (#212 review).
+pub const CLAUDE_NO_NETWORK_NOTE: &str = "No internet for this worker yet: Claude workers reach only this Mac (localhost). Use a Codex worker if it needs to download packages.";
+
+/// The network line on a seat's card: the internet note for a Codex seat with network on, the no-internet note for a
+/// Claude one, nothing when network is off.
+pub fn network_note(h: Option<Engine>, network: bool) -> Option<&'static str> {
+    match (network, h) {
+        (false, _) | (true, None) => None,
+        (true, Some(Engine::Claude)) => Some(CLAUDE_NO_NETWORK_NOTE),
+        (true, Some(Engine::Codex)) => Some(NETWORK_NOTE),
+    }
+}
 pub const OUTSIDE_GUARD_CARD: &str = "Final check runs outside the Vajra guard";
 pub const OUTSIDE_GUARD_WHY: &str = "A helper outside the Vajra guard wrote the final check. Vajra ran it with the signing key locked away, but the helper itself isn't guarded against reading the key, so it could have copied it and used it to fake Vajra records and approvals. A key already copied stays valid.";
 pub const APPROVAL_OFFER: &str = "Approve the checker's commands when they're ready, to get plain Verified.";
@@ -143,9 +156,7 @@ fn seat_entry(seat: &str, role: &str, kind: Kind, account: &str, extra: Map<Stri
         }
         None => (json!({}), vec![]),
     };
-    if network {
-        disclosures.push(NETWORK_NOTE.to_string());
-    }
+    disclosures.extend(network_note(h, network).map(String::from));
     let mut v = Map::new();
     v.insert("seat".into(), json!(seat));
     v.insert("role".into(), json!(role));

@@ -1910,7 +1910,7 @@ impl Launch {
             Engine::Claude => {
                 let tools = cfg.tools.list(&seat.role).ok_or("harness_unsupported")?.to_string();
                 let sid = claude_sid.ok_or("spawn_failed")?;
-                let body = profiles::claude_worker_flag(&cfg.home, &t.wt, std::slice::from_ref(&t.repo), &cfg.data).map_err(|_| "profile_not_applied")?;
+                let body = profiles::claude_worker_flag(&cfg.home, &t.wt, std::slice::from_ref(&t.repo), &cfg.data, &t.tmp).map_err(|_| "profile_not_applied")?;
                 let flag = profiles::write_claude_worker_flag(&cfg.data, &sid, &body).map_err(|_| "profile_not_applied")?;
                 let c = ClaudeWorker { claude: &cfg.claude, session_id: &sid, settings: &flag.path, tools: &tools };
                 l.argv = match profiles::claude_worker_argv(&wl, &c) {
