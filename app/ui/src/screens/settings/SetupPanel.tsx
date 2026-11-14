@@ -91,12 +91,32 @@ function useOutput(stream: string, on: boolean) {
   return { lines, pull };
 }
 
+/** What a one-click sheet installs: a catalog harness row, or the engine scripts (id `engine`, D7). */
+type Target = { id: string; name: string; state: string; engine?: boolean };
+
+/** The engine's own facts on its sheet (D7 E7): what kind of change it is, what is there now, the bundle's hash, the
+ * workflows it writes and, for a Repair, how many files differ. */
+function EngineFacts({ p }: { p: SetupPlan }) {
+  const e = p.engine;
+  if (!e) return null;
+  return (
+    <>
+      <dt>{C.engineField.change}</dt><dd>{C.engineCase[e.case] ?? e.case}</dd>
+      {e.old_version && <><dt>{C.engineField.installedNow}</dt><dd><span className="v-num">{e.old_version}</span></dd></>}
+      {e.differs !== null && <><dt>{C.engineField.differs}</dt><dd>{C.engineDiffers(e.differs)}</dd></>}
+      <dt>{C.engineField.bundle}</dt><dd><code className="v-prov__path">{e.tgz_sha256}</code></dd>
+      {e.workflows.length > 0 && <><dt>{C.engineField.workflows}</dt><dd><code className="v-prov__path">{e.workflows.join(", ")}</code></dd></>}
+    </>
+  );
+}
+
 /** ADR-17 17b: the one-click sheet. Shows the exact command and everything it binds; Install asks the core for a
  * consent token on that plan's hash and runs with it. The token lives only in this click's local. */
-function OneClick({ row, reload, opened }: { row: SetupRow; reload: () => Promise<void>; opened: () => void }) {
+function OneClick({ row, reload, opened }: { row: Target; reload: () => Promise<void>; opened: () => void }) {
   const [s, setS] = useState<Sheet>({ at: "idle" });
   const titleId = useId();
   const out = useOutput(`setup-${row.id}`, s.at === "running");
+  const eng = row.engine === true;
   const plan = () => {
     opened();
     setS({ at: "planning" });
@@ -119,38 +139,45 @@ function OneClick({ row, reload, opened }: { row: SetupRow; reload: () => Promis
     await reload();
   };
   if (s.at === "idle") {
-    return <div className="v-setup__actions"><Button size="sm" onClick={plan}>{C.planOneClick(row.name)}</Button></div>;
+    return <div className="v-setup__actions"><Button size="sm" onClick={plan}>{eng ? C.enginePlan : C.planOneClick(row.name)}</Button></div>;
   }
-  if (s.at === "planning") return <LoadingRows rows={2} label={C.planning} />;
+  if (s.at === "planning") return <LoadingRows rows={2} label={eng ? C.enginePlanning : C.planning} />;
   if (s.at === "error") return <Problem title={C.planFailed} detail={s.detail} retry={plan} />;
-  if (s.at === "manual") return <Text variant="body-sm" muted>{C.manual[s.code] ?? C.manualOther}</Text>;
+  if (s.at === "manual") return <Text variant="body-sm" muted>{(eng ? C.engineManual[s.code] : C.manual[s.code]) ?? C.manualOther}</Text>;
   const p = s.plan;
-  const verb = row.state === "broken" ? C.repair(row.name) : C.install(row.name);
+  const verb = eng ? C.engineVerb[p.engine?.case ?? "fresh"] ?? C.engineVerb.fresh : row.state === "broken" ? C.repair(row.name) : C.install(row.name);
+  const notes = eng ? C.engineNote : C.note;
   return (
     <section className="v-setup__sheet" aria-labelledby={titleId}>
-      <h4 id={titleId} className="v-prov__title">{C.sheetTitle(row.name)}</h4>
+      <h4 id={titleId} className="v-prov__title">{eng ? C.engineSheetTitle : C.sheetTitle(row.name)}</h4>
       <dl className="v-prov__facts">
         <dt>{C.field.command}</dt><dd><code className="v-prov__path">{p.command.join(" ")}</code></dd>
         <dt>{C.field.source}</dt><dd>{p.source}</dd>
         {p.version && <><dt>{C.field.version}</dt><dd><span className="v-num">{p.version}</span></dd></>}
-        <dt>{C.field.tools}</dt>
-        <dd>
-          <ul className="v-setup__cmds">
-            {p.tools.map((t) => (
-              <li key={t.role}>
-                <span className="v-setup__tool">{t.role}</span>
-                <code className="v-prov__path">{t.path}</code>
-                {t.owned_by_you && <Text as="span" variant="body-sm" muted>{C.ownedByYou}</Text>}
-              </li>
-            ))}
-          </ul>
-        </dd>
+        <EngineFacts p={p} />
+        {p.tools.length > 0 && (
+          <>
+            <dt>{C.field.tools}</dt>
+            <dd>
+              <ul className="v-setup__cmds">
+                {p.tools.map((t) => (
+                  <li key={t.role}>
+                    <span className="v-setup__tool">{t.role}</span>
+                    <code className="v-prov__path">{t.path}</code>
+                    {t.owned_by_you && <Text as="span" variant="body-sm" muted>{C.ownedByYou}</Text>}
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </>
+        )}
         {p.target && <><dt>{C.field.target}</dt><dd><code className="v-prov__path">{p.target}</code></dd></>}
         {p.scope_registry && <><dt>{C.field.scope}</dt><dd><code className="v-prov__path">{p.scope_registry}</code></dd></>}
         {p.deps.length > 0 && <><dt>{C.field.deps}</dt><dd>{p.deps.join(", ")}</dd></>}
         {p.needs_admin && <><dt>{C.field.admin}</dt><dd><code className="v-prov__path">{p.needs_admin.path}</code></dd></>}
       </dl>
-      {p.notes.map((n) => C.note[n] && <Text key={n} variant="body-sm" muted>{C.note[n]}</Text>)}
+      {p.notes.map((n) => notes[n] && <Text key={n} variant="body-sm" muted>{notes[n]}</Text>)}
+      {eng && s.at === "plan" && <Text variant="body-sm" muted>{C.engineRestart}</Text>}
       {p.needs_admin && <Text variant="body-sm">{C.admin[p.needs_admin.reason] ?? C.admin.not_writable}</Text>}
       {s.at === "plan" && !p.needs_admin && (
         <div className="v-setup__actions">
@@ -163,6 +190,8 @@ function OneClick({ row, reload, opened }: { row: SetupRow; reload: () => Promis
         <pre className="v-setup__output" aria-label={C.output(row.name)}>{out.lines.join("\n")}</pre>
       )}
       {s.at === "done" && <p className="v-setup__status" role="status"><Text as="span" variant="body-sm">{C.outcome[s.report.outcome] ?? C.outcome.broken}</Text></p>}
+      {s.at === "done" && eng && s.report.outcome === "installed" && <Text variant="body-sm" muted>{C.engineRestart}</Text>}
+      {s.at === "done" && s.report.backup && <Text variant="body-sm" muted>{C.engineBackup(s.report.backup)}</Text>}
     </section>
   );
 }
@@ -197,21 +226,29 @@ function Row({ row, reload }: { row: SetupRow; reload: () => Promise<void> }) {
   );
 }
 
-function Engine({ engine }: { engine: SetupList["engine"] }) {
+/** The engine-scripts row. Its state chip reuses the harness states' colours: broken is broken, installing and missing
+ * read as manual. Once the security review turns the gate on (`one_click`), the same one-click sheet as a harness. */
+function Engine({ engine, reload }: { engine: SetupList["engine"]; reload: () => Promise<void> }) {
   const id = useId();
+  const [opened, setOpened] = useState(false);
+  const open = useCallback(() => setOpened(true), []);
+  const chip = engine.state === "installed" ? "installed" : engine.state === "broken" ? "broken" : "manual";
   return (
     <section className="v-prov v-setup__row" aria-labelledby={id}>
       <h3 id={id} className="v-prov__title">{C.engine}</h3>
       <dl className="v-prov__facts">
         <dt>{S.providers.version}</dt>
-        <dd><span className="v-setup__state" data-state={engine.installed ? "installed" : "manual"}>{engine.installed ? C.engineState.installed : C.engineState.missing}</span></dd>
+        <dd><span className="v-setup__state" data-state={chip}>{C.engineState[engine.state] ?? C.engineState.missing}</span></dd>
       </dl>
-      {!engine.installed && (
+      {engine.state === "broken" && <Text variant="body-sm">{C.engineBroken}</Text>}
+      {engine.state === "installing" && <p className="v-setup__status" aria-live="polite"><Text as="span" variant="body-sm" muted>{C.engineInstalling}</Text></p>}
+      {engine.state !== "installed" && engine.state !== "installing" && (
         <div className="v-setup__steps">
           <Text variant="body-sm" muted>{C.engineHint}</Text>
           <code className="v-prov__path">{engine.command}</code>
         </div>
       )}
+      {(engine.one_click || opened) && <OneClick row={{ id: "engine", name: C.engine, state: engine.state, engine: true }} reload={reload} opened={open} />}
     </section>
   );
 }
@@ -231,7 +268,7 @@ export function SetupPanel({ setup }: { setup?: ReturnType<typeof useSetup> }) {
         {error && <Problem title={C.failed} detail={error} retry={reload} />}
         {!list && !error && <LoadingRows rows={3} label={C.checking} />}
         {list?.rows.map((r) => <Row key={r.id} row={r} reload={reload} />)}
-        {list && <Engine engine={list.engine} />}
+        {list && <Engine engine={list.engine} reload={reload} />}
       </div>
     </section>
   );

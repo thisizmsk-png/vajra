@@ -5472,6 +5472,26 @@ fn one_click_setup_offers_nothing_for_an_unverified_source_and_runs_nothing() {
     assert!(!format!("{:?}", app.consents).contains(&token));
 }
 
+/// D7, bhishma C7: until the catalog verifies the engine install, `setup_plan`, `setup_consent` and `setup_run` with id
+/// `engine` each refuse in the core, whatever the UI does, and nothing under HOME is created.
+#[test]
+fn the_engine_install_is_gated_in_plan_consent_and_run() {
+    let t = Tmp::new();
+    let app = t.app();
+    app.set_resources(t.home().join("no-resources"));
+    let v = app.setup_plan("engine").unwrap();
+    assert_eq!(v["manual"], "source_not_verified", "{v}");
+    assert_eq!(v["id"], "engine");
+    assert!(v.get("plan").is_none());
+    assert_eq!(code(&app.setup_consent("engine", &"a".repeat(64)).unwrap_err()), "source_not_verified");
+    assert_eq!(code(&app.setup_run("engine", &"b".repeat(32)).unwrap_err()), "source_not_verified");
+    assert!(!t.home().join(".claude/.vajra-install").exists(), "no work area was made");
+    assert!(!t.home().join(".claude/skills/vajra").exists(), "nothing was installed");
+    let l = app.setup_list().unwrap();
+    assert_eq!(l["engine"]["one_click"], false, "{l}");
+    assert_eq!(l["engine"]["state"], "missing", "{l}");
+}
+
 // ---------------------------------------------------------------- ADR 16.6 at startup
 
 /// A stored baseline copy with no anchor: `take_or_load` calls it tampered, so the app opens with agents off.

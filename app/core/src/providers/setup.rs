@@ -59,6 +59,32 @@ pub struct SetupRow {
 pub struct EngineRow {
     pub installed: bool,
     pub command: String,
+    /// `installed`, `missing`, `broken` (a failed engine install's mark, bhishma C9) or `installing` (the install lock is
+    /// held, C8). The mark is read, never cleared.
+    pub state: &'static str,
+    /// The one-click engine install may be offered (`setup_plan` with id `engine`): only once the security review has
+    /// verified it in the catalog (C7), and not while an install is running. The plan decides fresh, update or Repair.
+    pub one_click: bool,
+}
+
+/// The engine-scripts row: `installed` is the file detection, `installing` whether the install lock is held now.
+pub fn engine_row(installed: bool, installing: bool, marks: &Marks) -> EngineRow {
+    let cat = catalog::catalog().ok();
+    let state = if installing {
+        "installing"
+    } else if marks.any(crate::providers::install::engine::flow::ID).is_some() {
+        "broken"
+    } else if installed {
+        "installed"
+    } else {
+        "missing"
+    };
+    EngineRow {
+        installed: installed && state == "installed",
+        command: cat.map(|c| c.engine_scripts.manual_command.clone()).unwrap_or_default(),
+        state,
+        one_click: !installing && cat.is_some_and(|c| c.engine_scripts.verified()),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,7 +164,7 @@ pub fn list_marked(p: &dyn Probe, engine_installed: bool, marks: &Marks) -> Setu
     SetupList {
         schema: SETUP_SCHEMA.into(),
         rows: cat.map(|c| c.harnesses.iter().map(|h| row(h, p, marks)).collect()).unwrap_or_default(),
-        engine: EngineRow { installed: engine_installed, command: cat.map(|c| c.engine_scripts.manual_command.clone()).unwrap_or_default() },
+        engine: engine_row(engine_installed, false, marks),
     }
 }
 

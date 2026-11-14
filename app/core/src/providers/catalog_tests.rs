@@ -120,6 +120,33 @@ fn ids_are_unique() {
 }
 
 #[test]
+fn the_engine_ships_unverified_until_the_security_review_signs_off() {
+    assert!(!bundled().engine_scripts.verified(), "the engine install stays off until bhishma signs off the D7 PR");
+}
+
+#[test]
+fn the_engine_verified_fields_are_all_or_none() {
+    let with = |fields: &str| entry(NPM, "").replace(r#""manual_command":"bash install.sh""#, &format!(r#""manual_command":"bash install.sh",{fields}"#));
+    let by = r#""source_verified_by":"bhishma""#;
+    let on = r#""source_verified_on":"2026-11-12""#;
+    let r = r#""verification_ref":"https://github.com/o/r/pull/1""#;
+    for partial in [by.to_string(), format!("{by},{on}"), format!("{on},{r}"), r.to_string()] {
+        assert!(parse(&with(&partial)).is_err(), "{partial}");
+    }
+    let full = parse(&with(&format!("{by},{on},{r}"))).expect("all three set");
+    assert!(full.engine_scripts.verified());
+    assert!(parse(&with(&format!(r#"{by},"source_verified_on":"12-11-2026",{r}"#))).is_err(), "a date is YYYY-MM-DD");
+    assert!(parse(&with(&format!(r#"{by},{on},"verification_ref":"http://x/1""#))).is_err(), "the ref is https");
+    assert!(!parse(&entry(NPM, "")).unwrap().engine_scripts.verified(), "absent fields read as unverified");
+}
+
+#[test]
+fn a_harness_may_not_take_the_engine_id() {
+    let e = entry(NPM, "").replace(r#""id":"x""#, r#""id":"engine""#);
+    assert!(parse(&e).unwrap_err().0.contains("reserved"), "{:?}", parse(&e));
+}
+
+#[test]
 fn a_docs_url_must_be_https() {
     let e = entry(NPM, "").replace("https://example.com/x", "http://example.com/x");
     assert!(parse(&e).is_err());

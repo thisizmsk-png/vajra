@@ -769,6 +769,10 @@ fn main() {
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))
         .setup(move |a| {
             let handle = a.handle().clone();
+            // The packed engine (D7) is a bundle resource; without a resource dir the engine install is not offered.
+            if let Ok(dir) = handle.path().resource_dir() {
+                handle.state::<App>().set_resources(dir);
+            }
             // Receipts notify on their own: an action with no bus output still moves the projection.
             let sink_handle = handle.clone();
             handle.state::<App>().set_change_sink(Box::new(move |p| {

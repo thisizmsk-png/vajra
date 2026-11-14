@@ -114,18 +114,68 @@ fn each_refusal_code_has_a_seat_that_causes_it() {
 fn engine_checks_need_the_scripts_and_a_tested_version() {
     let d = std::env::temp_dir().join(format!("vajra-launch-engine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
-    assert_eq!(engine_ready(&d).unwrap_err().code, "engine_missing");
+    let none = crate::providers::install::marks::Marks::none();
+    assert_eq!(engine_ready(&d, &none).unwrap_err().code, "engine_missing");
     let root = d.join(".claude/skills/vajra");
     std::fs::create_dir_all(root.join("scripts")).unwrap();
     for f in ENGINE_FILES {
         std::fs::write(root.join(f), "").unwrap();
     }
-    assert!(engine_ready(&d).unwrap_err().detail.contains("install.sh"));
-    assert_eq!(engine_ready(&d).unwrap_err().code, "engine_unsupported", "no version file");
+    assert!(engine_ready(&d, &none).unwrap_err().detail.contains("Settings > Providers > Set up"), "points to Set up, not a shell command");
+    assert_eq!(engine_ready(&d, &none).unwrap_err().code, "engine_unsupported", "no version file");
     std::fs::write(root.join("package.json"), r#"{"version": "0.6.2"}"#).unwrap();
-    assert!(engine_ready(&d).is_ok());
+    assert!(engine_ready(&d, &none).is_ok());
     std::fs::write(root.join("package.json"), r#"{"version": "0.5.9"}"#).unwrap();
-    assert_eq!(engine_ready(&d).unwrap_err().code, "engine_unsupported");
+    assert_eq!(engine_ready(&d, &none).unwrap_err().code, "engine_unsupported");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// bhishma C9: a Broken engine mark refuses check 6 whatever the files say, and reading it never clears it.
+#[test]
+fn a_broken_engine_mark_refuses_until_a_passing_install_clears_it() {
+    let d = std::env::temp_dir().join(format!("vajra-launch-engine-broken-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let root = d.join(".claude/skills/vajra");
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    for f in ENGINE_FILES {
+        std::fs::write(root.join(f), "").unwrap();
+    }
+    std::fs::write(root.join("package.json"), r#"{"version": "0.6.2"}"#).unwrap();
+    let data = d.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let marks = crate::providers::install::marks::Marks::at(&data);
+    assert!(engine_ready(&d, &marks).is_ok());
+    marks.set("engine", &root, None, "rollback_failed").unwrap();
+    for _ in 0..2 {
+        assert_eq!(engine_ready(&d, &marks).unwrap_err().code, "engine_broken");
+    }
+    // Editing the version (another path or version) does not clear the engine's mark.
+    std::fs::write(root.join("package.json"), r#"{"version": "0.6.3"}"#).unwrap();
+    assert_eq!(engine_ready(&d, &marks).unwrap_err().code, "engine_broken");
+    marks.clear("engine").unwrap();
+    assert!(engine_ready(&d, &marks).is_ok());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// bhishma C8: while an engine install holds the install lock, check 6 refuses with `engine_installing`; the probe
+/// creates nothing when there is no lock file.
+#[test]
+fn check_six_refuses_while_the_engine_install_holds_its_lock() {
+    use std::os::fd::AsRawFd;
+    let d = std::env::temp_dir().join(format!("vajra-launch-engine-lock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let none = crate::providers::install::marks::Marks::none();
+    let work = d.join(".claude/.vajra-install");
+    assert_ne!(engine_ready(&d, &none).unwrap_err().code, "engine_installing");
+    assert!(!work.exists(), "the probe creates nothing");
+    std::fs::create_dir_all(&work).unwrap();
+    let lock = std::fs::File::create(work.join("lock")).unwrap();
+    assert_ne!(engine_ready(&d, &none).unwrap_err().code, "engine_installing", "an unheld lock file is not an install");
+    // SAFETY: a valid fd; released when `lock` drops.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    assert_eq!(engine_ready(&d, &none).unwrap_err().code, "engine_installing");
+    drop(lock);
+    assert_ne!(engine_ready(&d, &none).unwrap_err().code, "engine_installing");
     let _ = std::fs::remove_dir_all(&d);
 }
 

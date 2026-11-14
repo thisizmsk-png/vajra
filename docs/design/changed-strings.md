@@ -384,3 +384,22 @@ One-click install (ADR-17 17b). Only a source that passed its security review ge
 | Installing / "NAME install output" | while running; accessible label of the live output | the `setup-<id>` stream |
 | Installed / The install failed. Nothing changed. / The install didn't match what was approved, so it was removed again. / The install couldn't be confirmed or undone. It stays marked Broken until a clean install. | result | |
 | Install-it-yourself reasons: not reviewed, unpinned packages, install scripts, package didn't match its pin, no npm, no Homebrew, no ready-built package, script doesn't check its download; otherwise "This one can't be installed in one click here." Each ends "Install it yourself with the steps above." | sheet, when the core answers manual | |
+
+One-click engine install (D7, ADR-17 item 10 step 2). The engine row gets the same sheet as a harness once the security review turns the catalog gate on. Until then the row looks as it does today, plus Broken and Installing.
+
+| String | Where | Note |
+|---|---|---|
+| Broken / Installing | engine-row state | Broken: a failed engine install's mark (bhishma C9). Installing: the install lock is held (C8) |
+| The last engine install couldn't be confirmed or undone. Runs stay off until a clean install. Repair it here. | broken engine row | |
+| The engine is being installed. Runs start again when it finishes. | engine row while installing | live region |
+| Plan the engine install / Checking the bundled engine and your ~/.claude folder | row button, loading | planning writes nothing |
+| Install the Vajra engine | sheet title | |
+| Change / Current / Differs / SHA-256 / Workflows | sheet fields | beside Command, From, Version and Installs into; one word each so the label column never wraps. SHA-256 is the bundle's; Workflows are the ones it writes |
+| A fresh install / An update to the bundled version / A repair: the same version, checked again file by file / The installed copy is newer than this app's. This puts the app's version back. | Change field | the plan's case |
+| None. Every file matches the bundle. / 1 file / "N files" | Differs field | Repair and update only |
+| Install the engine / Update the engine / Repair the engine / Install the bundled engine | consent button | by case; the last one is a downgrade |
+| Vajra's guard is not active in Claude Code. Run install.sh in a terminal to turn it on. / Copies the Vajra workflows into ~/.claude/workflows. / Creates a signing key in ~/.claude/vajra. It stays on this Mac, and Vajra Desktop never reads it. / The engine's tamper lock is on. The verified files are signed again, which clears it. / An earlier engine install was interrupted. This finishes or undoes it first. / The Xcode command line tools aren't installed, so the knowledge ledger stays off until they are. / Leftover folders from an earlier install stay in ~/.claude/.vajra-install. Nothing removes them. | sheet notes | the no_hooks wording is the one bhishma asked for |
+| Restart any Claude Code session running in a terminal so it picks up the new engine. | sheet, before and after a successful install | C8 |
+| "Your edited copy was kept in ~/.claude/.vajra-install/NAME." | result, when the old copy had been changed | C5 |
+| Install-it-yourself reasons: not reviewed yet, no engine bundled, engine not pinned, bundled engine missing / doesn't match / can't be read (reinstall Vajra Desktop), in use by a run or session, missing /bin/bash, /usr/bin/jq or /usr/bin/openssl, your own copy (for example a git checkout), ~/.claude/vajra not as the engine left it, a workflow that is a link, not enough disk space, ~/.claude not writable, another engine install running | sheet, when the core answers manual | each says what to do next |
+| The Vajra engine scripts aren't installed. Set them up in Settings > Providers > Set up. / The installed Vajra engine is a version this app wasn't tested with. Update it in Settings > Providers > Set up. / The last engine install couldn't be undone cleanly. Repair it in Settings > Providers > Set up. / The engine is being installed. Start again when Set up finishes. | start-run card, when check 6 refuses | replaces the shell command (E8) |

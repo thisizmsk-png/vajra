@@ -112,6 +112,28 @@ fn the_engine_scripts_row_is_detection_only_with_the_install_command() {
     assert!(!off.engine.installed);
     assert_eq!(off.engine.command, "bash ~/.claude/skills/vajra/scripts/install.sh");
     assert!(list(&Fake::default(), true).engine.installed);
+    assert_eq!(off.engine.state, "missing");
+    assert!(!off.engine.one_click, "the engine ships unverified, so no one-click install yet");
+}
+
+/// D7: a Broken engine mark shows as broken (and not installed) whatever the files say; an install in progress shows
+/// as installing and offers nothing.
+#[test]
+fn the_engine_row_shows_a_broken_mark_and_an_install_in_progress() {
+    let d = std::env::temp_dir().join(format!("vajra-setup-engine-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let marks = Marks::at(&d);
+    assert_eq!(engine_row(true, false, &marks).state, "installed");
+    marks.set("engine", &d, None, "rollback_failed").unwrap();
+    let broken = engine_row(true, false, &marks);
+    assert_eq!(broken.state, "broken");
+    assert!(!broken.installed);
+    assert_eq!(engine_row(true, false, &marks).state, "broken", "reading the mark never clears it");
+    let busy = engine_row(true, true, &marks);
+    assert_eq!(busy.state, "installing");
+    assert!(!busy.one_click);
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
