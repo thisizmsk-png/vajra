@@ -365,6 +365,57 @@ fn a_record_that_survives_its_kill_is_tried_a_few_times_then_dropped() {
     assert!(ledger.load().is_empty());
 }
 
+/// PR 259 review: an agent whose session has a job that can't be watched is not half-ended. At start-up nothing of it
+/// is signalled, the leader included, so the kept record still names a live leader with its tries counted; the next
+/// start, once the job can be watched, ends the whole session and forgets the record.
+#[test]
+fn an_agent_with_an_unwatched_job_is_kept_whole_until_its_session_can_be_ended() {
+    let t = Tmp::new("unwatched-agent");
+    let ledger = Ledger::new(t.0.join("owned.jsonl"));
+    let mut c = Command::new(std::env::current_exe().unwrap());
+    c.args(["--exact", "procsweep::tests::sleeper_body", "--ignored", "--nocapture"]).env("VAJRA_SWEEP_SLEEP", "1").env("VAJRA_SWEEP_JOB", "1");
+    c.env(crate::owned::AGENT_MARK, MARK).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+    // SAFETY: setsid is async-signal-safe and has no preconditions.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut lead = Kid(c.spawn().unwrap());
+    let t0 = Instant::now();
+    let job = loop {
+        let job = crate::terminal::kill::session_members(lead.0.id()).into_iter().map(|p| p as u32).find(|&p| p != lead.0.id());
+        let readable = crate::procsweep::env_var(lead.0.id(), crate::owned::AGENT_MARK).is_some_and(|v| v == MARK);
+        if let (Some(j), true) = (job, readable) {
+            break j;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10), "the lead and its job never came up");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    ledger.record(agent(&lead, Kind::Lead, RUN, None)).unwrap();
+    crate::owned::REFUSE_WATCH.with(|r| r.borrow_mut().insert(job));
+    for start in 1..=2u32 {
+        let ended: Vec<Ended> = ledger.end_agents().into_iter().map(|(_, e)| e).collect();
+        assert_eq!(ended, vec![Ended::Survived], "start {start}");
+        // SAFETY: kill(pid, 0) only checks the pid.
+        assert!(alive(&mut lead) && unsafe { libc::kill(job as i32, 0) } == 0, "start {start}: neither the lead nor its job was signalled");
+        let kept = ledger.load();
+        assert_eq!((kept.len(), kept[0].pid, kept[0].tries), (1, lead.0.id(), start), "start {start}: the record still names the live lead");
+    }
+    crate::owned::REFUSE_WATCH.with(|r| r.borrow_mut().clear());
+    let ended: Vec<Ended> = ledger.end_agents().into_iter().map(|(_, e)| e).collect();
+    assert_eq!(ended, vec![Ended::Killed], "now the whole session is ended");
+    assert!(!alive(&mut lead) && ledger.load().is_empty());
+    let t1 = Instant::now();
+    // SAFETY: kill(pid, 0) only checks the pid.
+    while unsafe { libc::kill(job as i32, 0) } == 0 && t1.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: as above.
+    assert_ne!(unsafe { libc::kill(job as i32, 0) }, 0, "the job is ended with its session");
+}
+
 #[test]
 fn shells_at_the_cap_never_push_out_a_lead_or_worker_record() {
     let t = Tmp::new("trim");

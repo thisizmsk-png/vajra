@@ -57,6 +57,14 @@ pub fn zombie_stamp(pid: u32) -> Option<u64> {
     }
 }
 
+/// The start stamp of `pid`, a child the caller spawned and has not reaped yet: the live stamp, or, if the child already
+/// exited, the stamp of its zombie. On macOS `proc_pidinfo` cannot read a zombie, so a child that exits at once (`true`)
+/// would otherwise look unreadable. Only for the caller's own unreaped child: its pid cannot be reused until it is reaped,
+/// so the zombie is that very child. Not for pids read from a record (use `start_stamp` and `zombie_stamp` there).
+pub fn child_stamp(pid: u32) -> Option<u64> {
+    start_stamp(pid).or_else(|| zombie_stamp(pid))
+}
+
 /// `p_stat` of a zombie (sys/proc.h).
 #[cfg(target_os = "macos")]
 const SZOMB: libc::c_char = 5;
@@ -271,6 +279,27 @@ mod tests {
         assert_eq!(zombie_stamp(pid), Some(stamp), "the zombie carries the start stamp it was recorded with");
         c.wait().unwrap();
         assert_eq!(zombie_stamp(pid), None, "a reaped process is no zombie");
+    }
+
+    /// A spawn that exits at once is a zombie before the spawner reads its stamp. The spawner's read of its own child
+    /// must still give the stamp the child started with (the session start would otherwise refuse a fast `true`).
+    #[test]
+    fn given_our_child_already_exited_when_its_stamp_is_read_then_it_is_the_one_it_started_with() {
+        let mut c = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = c.id();
+        let stamp = start_stamp(pid).unwrap();
+        assert_eq!(child_stamp(pid), Some(stamp), "a running child reads its live stamp");
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let t0 = std::time::Instant::now();
+        while !is_zombie(pid) && t0.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(is_zombie(pid), "the killed, unreaped child must read as a zombie");
+        #[cfg(target_os = "macos")]
+        assert_eq!(start_stamp(pid), None, "the macOS live read cannot see a zombie (the cause of the refusal)");
+        assert_eq!(child_stamp(pid), Some(stamp), "the exited child still reads the stamp it started with");
+        c.wait().unwrap();
+        assert_eq!(child_stamp(pid), None, "once reaped there is nothing to read");
     }
 
     #[cfg(target_os = "macos")]

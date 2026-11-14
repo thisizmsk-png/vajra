@@ -2036,19 +2036,27 @@ fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered
     assert!(lock(&app.worktree_state).values().all(|(_, st)| st.is_none()));
 }
 
+/// The promise is the product's own: one `evidence_list` call is bounded by `EVIDENCE_BUDGET`, and a big untracked tree
+/// is still read inside it, so the answer is `stale` (the tree id was computed in time), not `unverified` (it ran out).
+/// The test measures that number, not a tighter one of its own: alone the call takes about 0.4 s, but in the parallel
+/// suite the wall clock also counts the CPU the other tests take, which a fixed 3 s limit kept missing at 3.0 to 3.2 s.
 #[test]
 fn a_big_untracked_tree_does_not_blow_the_budget() {
     if !have_jq() { eprintln!("skipped: no jq"); return; }
     let t = Tmp::new();
     let (app, slug, repo) = verified_repo(&t);
+    assert_eq!(app.evidence_budget, EVIDENCE_BUDGET, "measured against the product's budget");
     let big = repo.join("node_modules_like");
     fs::create_dir_all(&big).unwrap();
     for i in 0..3000 {
         fs::write(big.join(format!("f{i}.js")), b"x").unwrap();
     }
+    lock(&app.worktree_state).clear();
     let start = std::time::Instant::now();
-    assert_eq!(status_of(&app, &slug), "stale");
-    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+    let r = app.evidence_list(&slug).unwrap();
+    let took = start.elapsed();
+    assert_eq!(r["rows"][0]["status"], "stale", "the tree was read inside the budget: {r}");
+    assert!(took < EVIDENCE_BUDGET, "{took:?}");
 }
 
 fn detail_fixture(t: &Tmp, nonce: Option<&str>) -> (App, String, std::path::PathBuf) {
