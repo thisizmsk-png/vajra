@@ -131,8 +131,9 @@ pub struct SpawnSpec {
 /// The bus stream prefix reserved for one-click installs (`Supervisor::spawn_setup`).
 pub const SETUP_STREAM: &str = "setup-";
 
-/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8). The last three are `adapter::profiles::CLAUDE_CACHE_ENV`.
-pub const EXTRA_ENV_ALLOW: [&str; 6] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "GOCACHE", "GOTMPDIR", "npm_config_cache"];
+/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8): a Claude run lead's pinned `MCP_TOOL_TIMEOUT` (16.5, 6d2),
+/// and a Claude worker's build caches, `adapter::profiles::CLAUDE_CACHE_ENV` (the last three).
+pub const EXTRA_ENV_ALLOW: [&str; 7] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "MCP_TOOL_TIMEOUT", "GOCACHE", "GOTMPDIR", "npm_config_cache"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitInfo {

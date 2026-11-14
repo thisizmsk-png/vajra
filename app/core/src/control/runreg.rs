@@ -62,14 +62,15 @@ fn wait_prop() -> Value {
 /// The `vajra-run` tools, exactly: what `tools/list` returns.
 pub fn tools() -> Value {
     let id = json!({"type": "string", "pattern": "^t[0-9]{1,2}$"});
+    let ac = json!({"type": "string", "pattern": "^ac-[0-9]{1,2}$"});
     let short = |n: u32| json!({"type": "string", "maxLength": n});
     let criterion = json!({"type": "object", "additionalProperties": false, "required": ["id", "criterion", "check"],
-        "properties": {"id": short(32), "criterion": short(1000), "check": short(2000)}});
+        "properties": {"id": ac.clone(), "criterion": short(1000), "check": short(2000)}});
     let task = json!({"type": "object", "additionalProperties": false, "required": ["id", "title", "owner_role", "files", "brief"],
         "properties": {"id": id, "title": short(300), "owner_role": short(32),
             "files": {"type": "array", "maxItems": runproto::MAX_TASK_FILES, "items": short(300)},
             "deps": {"type": "array", "maxItems": runproto::MAX_TASK_DEPS, "items": id},
-            "criteria": {"type": "array", "maxItems": runproto::MAX_CRITERIA, "items": short(32)},
+            "criteria": {"type": "array", "maxItems": runproto::MAX_CRITERIA, "items": ac},
             "brief": short(20_000), "touches_security": {"type": "boolean"}}});
     // Byte limits: a JSON Schema length counts characters, so an ASCII string at the limit passes both.
     let pair = |a: &str, an: usize, b: &str, bn: usize| json!({"type": "object", "additionalProperties": false, "required": [a, b],
@@ -271,6 +272,10 @@ pub struct RunRegistry {
     /// Leads no longer current (cleared, replaced or their run removed) whose process may still run: their trees stay
     /// held to vajra-run tools until the process is gone. Pruned as each one goes.
     fenced: Mutex<Vec<LeadProc>>,
+    /// The processes the app started to use the Service route: the Director-General's harness for each ask and a
+    /// classic run's harness. Only they, their descendants and the app itself pass `service_allowed`; a worker the app
+    /// spawns is never one, so neither it nor anything it starts can steer another session. Pruned as each one goes.
+    service_roots: Mutex<Vec<LeadProc>>,
     /// The peer check; `procid::descends_from` outside tests.
     descends: Box<dyn Fn(u32, LeadProc) -> bool + Send + Sync>,
 }
@@ -287,7 +292,26 @@ impl RunRegistry {
     }
 
     pub fn with_peer_check(descends: Box<dyn Fn(u32, LeadProc) -> bool + Send + Sync>) -> Self {
-        RunRegistry { runs: Mutex::new(HashMap::new()), fenced: Mutex::new(Vec::new()), descends }
+        RunRegistry { runs: Mutex::new(HashMap::new()), fenced: Mutex::new(Vec::new()), service_roots: Mutex::new(Vec::new()), descends }
+    }
+
+    /// Record `pid`, a process the app just started to use the Service route, as one of its roots. Called right after
+    /// the spawn, before the process can have made a tool call; a call that came earlier is refused, never let through.
+    /// A pid whose stamp cannot be read (it is already gone) records nothing. The app itself and its ancestors are
+    /// refused: they would admit everything.
+    pub fn allow_service(&self, pid: u32) -> bool {
+        let me = std::process::id();
+        let Some(stamp) = crate::procid::start_stamp(pid) else { return false };
+        if pid == me || crate::procid::descends_from(me, pid, stamp) {
+            return false;
+        }
+        let mut roots = crate::lock(&self.service_roots);
+        roots.retain(|r| crate::procid::same_process(r.pid, r.stamp));
+        let root = LeadProc { pid, stamp };
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+        true
     }
 
     /// Serve `run` with `proto` behind the token whose hash is `token`. No call passes until `set_lead`.
@@ -342,15 +366,22 @@ impl RunRegistry {
         }
     }
 
-    /// May `peer` use the Service route? Only by positive proof: it is still the process that connected, it descends
-    /// from this app (every Service client does: the Director-General's and a classic run's `--mcp` server are the
-    /// app's grandchildren), and it is in no lead's tree, current or fenced. A lead's descendant that outlived its
-    /// parent is reparented away from the app, so it can never prove it, on any connection.
+    /// May `peer` use the Service route? Only by positive proof, an allowlist: it is still the process that connected,
+    /// it is the app itself or descends from a recorded Service root (`allow_service`: the Director-General's and a
+    /// classic run's harness, whose `--mcp` server is its child), and it is in no lead's tree, current or fenced. Being
+    /// the app's descendant is not enough: a worker the app spawns, and anything it starts, is refused. A descendant
+    /// that outlived its root is reparented away from it, so it can never prove it, on any connection.
     pub fn service_allowed(&self, peer: Option<Peer>) -> bool {
         let Some(p) = peer else { return false };
+        if !crate::procid::same_process(p.pid, p.stamp) || self.in_lead_tree(peer) {
+            return false;
+        }
         let me = std::process::id();
-        let Some(stamp) = crate::procid::start_stamp(me) else { return false };
-        crate::procid::same_process(p.pid, p.stamp) && crate::procid::descends_from(p.pid, me, stamp) && !self.in_lead_tree(peer)
+        if p.pid == me {
+            return crate::procid::start_stamp(me) == Some(p.stamp);
+        }
+        let roots: Vec<LeadProc> = crate::lock(&self.service_roots).clone();
+        roots.into_iter().any(|r| crate::procid::descends_from(p.pid, r.pid, r.stamp))
     }
 
     /// Resume: only the new token's hash is kept.
