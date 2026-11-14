@@ -11,7 +11,14 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::run_lead::{LeadEnv, LeadSeat, RunLead, Shutdown, READ_BACK_TIMEOUT, SHUTDOWN_WAIT};
-use super::runproto::{CoreWorkers, Limits, RunConfig, RunProtocol, StubGate, SystemClock};
+use super::delivery::{CoreSteps, CoreStepsConfig, Delivery, DeliveryConfig};
+use super::phases::{CoreGate, GateConfig};
+use super::proof::Trust;
+use super::record::RunRecord;
+use super::runproto::{CoreWorkers, Limits, RoundGate, RunConfig, RunProtocol, SystemClock};
+
+/// A core run's round gate (with its delivery phase) and the record it writes.
+type GateAndRecord = (Arc<dyn RoundGate>, Arc<dyn RunRecord>);
 use super::{fail, lock, workers, App};
 use crate::adapter::profiles::{self, RoleKind};
 use crate::control::service::WorkerSeat;
@@ -195,11 +202,12 @@ impl App {
         rt: workers::WorkerRuntime, gw: Arc<crate::vajra::gitw::Gitw>,
     ) -> Result<Value, Value> {
         let roles = writer_roles(&seats);
+        let (gate, record) = self.delivering_gate(project, run, &repo, &seats, &rt, &gw)?;
         let cfg = RunConfig {
             project: project.into(), run: run.into(), repo: repo.clone(), base, ask: input.ask.clone(), seats, max_in_flight: input.max_in_flight,
             limits: Limits { rounds: input.max_rounds, ..Limits::default() }, redact: Redactor::default(),
         };
-        let proto = RunProtocol::new(cfg, Arc::new(CoreWorkers { rt, gw }), Arc::new(StubGate), Arc::new(SystemClock::default()));
+        let proto = RunProtocol::new(cfg, Arc::new(CoreWorkers { rt, gw }), gate, Arc::new(SystemClock::default())).with_record(record);
         // The first launch writes the run's token and rotates this placeholder, which no client holds.
         self.run_leads.register(run, proto.clone(), crate::control::sha256::digest(crate::control::nonce::random_hex(32).map_err(|e| fail("io", e))?.as_bytes()));
         let env = self.lead_env(project, &repo)?;
@@ -244,6 +252,29 @@ impl App {
             return Err(fail("io", e));
         }
         Ok(json!({"run_id": run, "core": true}))
+    }
+
+    /// The run's round gate with its delivery phase (6i), and the run's record it writes. The gate runs verify and
+    /// the reviews on the run's own seats through the worker runtime, then, on a pass, the evidence ticket: the
+    /// approval desk this app holds, the core's git writer, the evidence runner with the engine's
+    /// `vajra-verify-work.sh`, and the record. Nothing here changes how any session is launched.
+    fn delivering_gate(
+        &self, project: &str, run: &str, repo: &std::path::Path, seats: &[WorkerSeat], rt: &workers::WorkerRuntime, gw: &Arc<crate::vajra::gitw::Gitw>,
+    ) -> Result<GateAndRecord, Value> {
+        let doc = self.read_run_seats(run).ok().flatten().ok_or_else(|| fail("io", "the run's seats were not recorded"))?;
+        let trust = doc["evidence_trust"].as_str().and_then(Trust::parse).ok_or_else(|| fail("io", "the run's seats name no evidence trust"))?;
+        let slug = doc["campaign_slug"].as_str().ok_or_else(|| fail("io", "the run's seats name no campaign"))?.to_string();
+        let record = self.core_record(run, false).map_err(|e| fail("io", e))?;
+        let state_dir = crate::vajra::allowlist::Allowlist::new(&self.claude, &self.data).map_err(|e| fail("io", e.to_string()))?.vajra_dir();
+        let steps = CoreSteps::new(CoreStepsConfig {
+            desk: self.approval_desk(), record: Arc::clone(&record), bridge: self.bridge.clone(), gw: Arc::clone(gw), repo: repo.to_path_buf(),
+            project: project.into(), run: run.into(), script: self.bridge.scripts_dir.join("vajra-verify-work.sh"), home: self.home.clone(),
+            data: self.data.clone(), state_dir, tool_path: crate::userpath::current(),
+        });
+        let delivery = Delivery::new(DeliveryConfig { run: run.into(), slug, trust }, Arc::new(steps));
+        let cfg = GateConfig { project: project.into(), repo: repo.to_path_buf(), seats: seats.to_vec(), defaults: Vec::new(), redact: Redactor::default() };
+        let gate = CoreGate::new(cfg, Arc::new(rt.clone())).with_delivery(Arc::new(delivery));
+        Ok((Arc::new(gate), record))
     }
 
     fn lead_runs_handle(&self) -> std::sync::Weak<LeadRuns> {

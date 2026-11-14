@@ -3473,7 +3473,8 @@ fn a_core_run_whose_lead_fails_to_launch_is_recorded_ended_not_left_for_the_cras
     let r = repos(&t, &["one"]);
     let p = app.launch_project(&r[0]).unwrap().1.id;
     let run = "20261112-0940";
-    let seats = json!({"seats": [{"seat": "lead", "account": "codex"}, {"slot": "w1", "role": "backend", "account": "codex"}]});
+    let seats = json!({"seats": [{"seat": "lead", "account": "codex"}, {"slot": "w1", "role": "backend", "account": "codex"}],
+        "evidence_trust": "outside_guard", "campaign_slug": format!("deliver-{run}-og")});
     app.record_run_seats(run, &seats).unwrap();
     let runs = t.0.join("data/runs");
     fs::create_dir_all(runs.join(run)).unwrap();
@@ -3489,6 +3490,33 @@ fn a_core_run_whose_lead_fails_to_launch_is_recorded_ended_not_left_for_the_cras
     let left = super::recover::reconcile(&t.0.join("data"), &crate::owned::Ledger::new(crate::owned::ledger_path(&t.0.join("data"))));
     assert!(left.runs.is_empty(), "the reconcile has nothing to call app_restarted: {:?}", left.runs);
     assert_eq!(app.active_run_count(), 0, "nothing was left counted in the caps");
+}
+
+/// 6i: Start builds the run's gate with its delivery phase from `seats.json`'s evidence trust and campaign. A seats
+/// file without them can't be delivered, so the run never starts: refused before any lead launches, and recorded
+/// ended rather than left for the crash reconcile.
+#[test]
+fn a_core_run_whose_seats_name_no_evidence_trust_never_starts() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    let p = app.launch_project(&r[0]).unwrap().1.id;
+    for (run, extra) in [("20261112-0941", json!({"campaign_slug": "deliver-20261112-0941"})), ("20261112-0942", json!({"evidence_trust": "guarded"}))] {
+        let mut seats = json!({"seats": [{"seat": "lead", "account": "codex"}, {"slot": "w1", "role": "backend", "account": "codex"}]});
+        seats.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        app.record_run_seats(run, &seats).unwrap();
+        let input = crate::sessions::argv::RunInput {
+            ask: "x".into(), max_rounds: 1, base: "0123456789abcdef0123456789abcdef01234567".into(), max_in_flight: 1, campaign: None, provider: None,
+        };
+        let e = app.start_lead_run(&p, input, r[0].to_str().unwrap(), run).unwrap_err();
+        assert_eq!(code(&e), "io", "{e}");
+        assert!(e["detail"].as_str().unwrap().contains("name no"), "{e}");
+        let runs = t.0.join("data/runs");
+        let ended: Value = serde_json::from_slice(&fs::read(runs.join(run).join("ended.json")).expect("closed")).unwrap();
+        assert_eq!(ended["status"], "lead_lost");
+        assert!(!runs.join(run).join("lead").exists(), "no lead was launched");
+    }
+    assert_eq!(app.active_run_count(), 0);
 }
 
 /// #175 review: a core run (a seated proposal's, under its lead) counts in the run caps beside classic runs. A second
