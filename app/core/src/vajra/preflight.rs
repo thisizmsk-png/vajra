@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use super::allowlist::Allowlist;
-use super::bridge::{Bridge, Request, run_process_on_path};
+use super::bridge::{Bridge, BridgeError, Request, run_process_on_path};
 
 pub const INSTALL_CMD: &str = "bash ~/.claude/skills/vajra/scripts/install.sh";
 
@@ -83,6 +83,9 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
         Ok(o) if o.timed_out => row("vajra doctor", false, "timed out", "/vajra doctor"),
         Ok(o) if o.truncated => row("vajra doctor", false, "output over the cap", "/vajra doctor"),
         Ok(_) => row("vajra doctor", false, format!("FAIL: {}", fails.join("; ")), "/vajra doctor"),
+        Err(BridgeError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            row("vajra doctor", false, "The Vajra engine scripts are not installed yet.", INSTALL_CMD)
+        }
         Err(e) => row("vajra doctor", false, e.to_string(), INSTALL_CMD),
     });
 
@@ -91,7 +94,7 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
     rows.push(if !hooks.is_empty() && missing == 0 {
         row("hooks registered", true, format!("yes ({} events)", hooks.len()), "")
     } else {
-        row("hooks registered", false, "no", INSTALL_CMD)
+        row("hooks registered", false, "The Vajra safety hooks are not registered with Claude Code.", INSTALL_CMD)
     });
 
     // Advisory: never blocks Start, but never reads as a pass unless the doctor said PASS.
@@ -170,6 +173,23 @@ mod tests {
         let required = row("git", true, "/usr/bin/git", "");
         assert!(start_enabled(&[required.clone(), sandbox_row("")]));
         assert!(!start_enabled(&[required, row("jq", false, "not found on PATH", "brew install jq"), sandbox_row("")]));
+    }
+
+    /// A Mac with no engine scripts: the doctor and hooks rows say so in words, with no OS error text and no bare "no".
+    #[test]
+    fn a_missing_engine_is_said_in_plain_words() {
+        let home = std::env::temp_dir().join(format!("vajra-preflight-noengine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("scripts")).unwrap();
+        let home = home.canonicalize().unwrap();
+        let allow = Allowlist::new(&home, &home).unwrap();
+        let rows = run(&allow, &Bridge::new(home.join("scripts")), &[]);
+        let find = |n: &str| rows.iter().find(|r| r.name == n).unwrap().clone();
+        let doc = find("vajra doctor");
+        assert!(!doc.ok && doc.detail == "The Vajra engine scripts are not installed yet." && !doc.detail.contains("os error"), "{doc:?}");
+        let hooks = find("hooks registered");
+        assert!(!hooks.ok && hooks.detail.contains("not registered"), "{hooks:?}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     fn claude_row(home: &Path, dirs: &[PathBuf]) -> Row {

@@ -460,15 +460,29 @@ pub fn codex_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInp
 /// `sandbox_workspace_write.*` overrides, which a permission profile replaces. S12 (codex 0.166, live): `--sandbox X`,
 /// `-s X` and `--sandbox=X` each beat a per-launch profile (the session ran with `danger-full-access` and read a denied
 /// file), so every form goes, and `-sX` too (bhishma #216 L1). The prompt after `--` is never touched.
+///
+/// #241 L3: also every other flag that would widen or replace the profile, though no Vajra argv carries one today:
+/// `--full-auto`, `--dangerously-bypass-approvals-and-sandbox` and its `--yolo` alias, the profile-select flag
+/// (`--profile X`, `-p X`, `--profile=X`, `-pX`: it would load a profile of the user's config over Vajra's), and the
+/// sandbox overrides in every config spelling (`-c K=V`, `--config K=V`, `--config=K=V`, `-cK=V`). Codex-only: this runs
+/// on a Codex argv, where `-p` is the profile flag (Claude's `-p` is never passed through here).
 pub fn drop_sandbox_flag(a: &mut Vec<String>) {
+    let sandbox_key = |v: &str| v.starts_with("sandbox_workspace_write.") || v.starts_with("sandbox_mode=");
     let mut i = 0;
     while i < a.len() && a[i] != "--" {
         let x = a[i].as_str();
-        if x == "--sandbox" || x == "-s" {
+        if matches!(x, "--sandbox" | "-s" | "--profile" | "-p") {
             a.drain(i..(i + 2).min(a.len()));
-        } else if x.starts_with("--sandbox=") || (x.starts_with("-s") && !x.starts_with("--")) {
+        } else if matches!(x, "--full-auto" | "--dangerously-bypass-approvals-and-sandbox" | "--yolo")
+            || x.starts_with("--sandbox=")
+            || x.starts_with("--profile=")
+            || (x.starts_with("-s") && !x.starts_with("--"))
+            || (x.starts_with("-p") && !x.starts_with("--"))
+            || x.strip_prefix("--config=").is_some_and(sandbox_key)
+            || (x.starts_with("-c") && !x.starts_with("--") && x.len() > 2 && sandbox_key(&x[2..]))
+        {
             a.remove(i);
-        } else if x == "-c" && a.get(i + 1).is_some_and(|v| v.starts_with("sandbox_workspace_write.") || v.starts_with("sandbox_mode=")) {
+        } else if matches!(x, "-c" | "--config") && a.get(i + 1).is_some_and(|v| sandbox_key(v)) {
             a.drain(i..i + 2);
         } else {
             i += 1;
