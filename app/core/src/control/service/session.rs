@@ -113,7 +113,7 @@ impl Service {
     /// reply carries a core worker's.
     pub fn redactor(&self) -> Redactor {
         let mut r = Redactor::default();
-        for n in self.sessions.values().map(|s| &s.nonce).chain(self.core_dirs.values()) {
+        for n in self.sessions.values().map(|s| &s.nonce).chain(self.core_dirs.values()).chain(self.retired_nonces.iter()) {
             r.add(Some(n));
         }
         r

@@ -128,3 +128,17 @@ fn engine_checks_need_the_scripts_and_a_tested_version() {
     assert_eq!(engine_ready(&d).unwrap_err().code, "engine_unsupported");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn a_broken_mark_refuses_the_launch_even_when_the_version_check_passes() {
+    let d = std::env::temp_dir().join(format!("vajra-launch-marks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let marks = crate::providers::install::marks::Marks::at(&d);
+    marks.set("codex", Path::new("/bin/codex"), Some("0.166.0"), "closure_mismatch").unwrap();
+    let k = keys(Ok(true));
+    let r = launchable_marked(true, &choice("codex"), Kind::Writer, &agents(&["codex"]), &good(), &k, &marks);
+    assert_eq!(code(r), "harness_broken");
+    marks.clear("codex").unwrap();
+    assert!(launchable_marked(true, &choice("codex"), Kind::Writer, &agents(&["codex"]), &good(), &k, &marks).is_ok());
+}

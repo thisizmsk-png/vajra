@@ -240,7 +240,14 @@ fn a_program_still_on_the_alternate_screen_is_nudged_to_redraw_without_a_second_
     out.until("1049h", 3);
     out.now();
     t.set_visible(info.id, false, true).unwrap(); // the view was on the alternate screen when it hid
-    std::thread::sleep(Duration::from_millis(300));
+    // The nudge is for a program that had output while hidden, so wait until it has: BUSY prints a dot about once a
+    // second, less under load, and a fixed 300 ms often saw none, rightly no nudge, and failed (flake fix).
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let mut active = false;
+    while !active && std::time::Instant::now() < end {
+        active = matches!(out.0.recv_timeout(Duration::from_millis(50)), Ok(Event::Activity));
+    }
+    assert!(active, "the program had output while hidden");
     t.set_visible(info.id, true, false).unwrap();
     let shown = out.for_ms(1000);
     assert!(skipped_of(&shown).iter().all(|s| s.1.is_none()), "no switch: the view is already there: {shown:?}");
