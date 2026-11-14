@@ -255,6 +255,21 @@ pub struct EvidenceRun<'a> {
     /// run. Only absolute entries are kept; the system dirs follow. The sandbox applies whatever a tool is.
     pub tool_path: &'a [PathBuf],
     pub limit: Duration,
+    /// Asked once, after every other preparation and immediately before the sandboxed process is spawned: an error
+    /// runs nothing. An approval run uses it to re-check that the worktree is still at the approved commit with no
+    /// other change (bhishma L1 on 07a0ee4). What it returns is added to the bundle as its `core` field, so it is
+    /// signed with the rest (bhishma M2 on 7c09e27: the ignored files' count and hash).
+    pub at_spawn: Option<AtSpawn<'a>>,
+}
+
+/// A last check before spawning (see `EvidenceRun::at_spawn`): `Ok(Some(v))` adds `v` to the bundle as `core`.
+#[derive(Clone, Copy)]
+pub struct AtSpawn<'a>(pub &'a dyn Fn() -> Result<Option<serde_json::Value>, String>);
+
+impl std::fmt::Debug for AtSpawn<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AtSpawn")
+    }
 }
 
 /// After the script exits, how long the core waits for its evidence channel to close. A background process of the
@@ -450,6 +465,14 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
             Ok(())
         });
     }
+    // The last check, as late as it can be: nothing is spawned when it fails.
+    let mut core = None;
+    if let Some(AtSpawn(check)) = r.at_spawn {
+        match check() {
+            Ok(v) => core = v,
+            Err(why) => return RunOutcome::Failed(why),
+        }
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return RunOutcome::Failed(format!("the evidence runner didn't start: {e}")),
@@ -504,14 +527,25 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     // Exactly one line: compact JSON, a newline, nothing after it.
     let ok_line = line.len() <= EVIDENCE_MAX && line.last() == Some(&b'\n') && !line[..line.len() - 1].contains(&b'\n');
     let Some(json) = ok_line.then(|| &line[..line.len() - 1]) else { return RunOutcome::Failed("the evidence script returned no single evidence line".into()) };
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(json) else { return RunOutcome::Failed("the evidence isn't JSON".into()) };
-    if v.get("hmac").is_some() || v["slug"].as_str() != Some(r.slug) {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(json) else { return RunOutcome::Failed("the evidence isn't JSON".into()) };
+    if v.get("hmac").is_some() || v.get("core").is_some() || v["slug"].as_str() != Some(r.slug) {
         return RunOutcome::Failed("the evidence isn't an unsigned bundle for this check".into());
     }
-    if save_evidence(r.base, r.slug, json).is_err() {
+    // The core's own facts go in as `core`, from the core's memory: the script's line can't set them.
+    let bytes = match core {
+        Some(c) => {
+            v["core"] = c;
+            match serde_json::to_vec(&v) {
+                Ok(b) => b,
+                Err(_) => return RunOutcome::Failed("the evidence couldn't be written".into()),
+            }
+        }
+        None => json.to_vec(),
+    };
+    if save_evidence(r.base, r.slug, &bytes).is_err() {
         return RunOutcome::Failed("the evidence folder was replaced during the run".into());
     }
-    RunOutcome::Ran { passed: code == 0, sha256: crate::control::sha256::hex_digest(json) }
+    RunOutcome::Ran { passed: code == 0, sha256: crate::control::sha256::hex_digest(&bytes) }
 }
 
 #[cfg(test)]
@@ -635,11 +669,31 @@ pub(crate) fn worktree_head(worktree: &Path, common: &Path) -> Result<String, &'
         return Err(unreadable);
     }
     let common_dir = walk(None, common, false).map_err(|_| not_ours)?;
-    let mut dir = common_dir.child(parts[0], false).ok();
+    // A loose ref that is there wins, as in git; one that is there but can't be read (a link, a second name, a folder,
+    // too big, not text) refuses, never falls back to an older packed value (bhishma L2 on 07a0ee4). Only a name that
+    // isn't there at all, at the ref or at a folder on its way, means "look in packed-refs": any other error on the way
+    // (a folder that is a link, not a folder, or can't be opened) could hide a loose ref, so it refuses too (codex P2 on
+    // #249).
+    let absent = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let mut dir = Some(common_dir.child(parts[0], false));
     for p in &parts[1..parts.len() - 1] {
-        dir = dir.and_then(|d| d.child(p, false).ok());
+        dir = match dir {
+            Some(Ok(d)) => Some(d.child(p, false)),
+            Some(Err(e)) if absent(&e) => None,
+            other => other,
+        };
     }
-    if let Some(sha) = dir.and_then(|d| d.read_single_link(parts[parts.len() - 1], CAP).ok()).and_then(text) {
+    let leaf = parts[parts.len() - 1];
+    let loose = match dir {
+        None => None,
+        Some(Err(e)) if absent(&e) => None,
+        Some(Err(_)) => return Err(unreadable),
+        Some(Ok(d)) => match d.read_single_link(leaf, CAP) {
+            Err(e) if absent(&e) => None,
+            got => Some(got.ok().and_then(text).ok_or(unreadable)?),
+        },
+    };
+    if let Some(sha) = loose {
         return if is_sha(&sha) { Ok(sha) } else { Err(unreadable) };
     }
     let packed = common_dir.read_single_link("packed-refs", 64 << 20).ok().and_then(text).ok_or(unreadable)?;
@@ -682,6 +736,32 @@ fn git_admin(worktree: &Path, common: &Path) -> Result<Option<crate::projects::p
         return Err(not_ours);
     };
     Ok(Some(admin))
+}
+
+/// bhishma M1 on 7c09e27: the walkthrough folder is left out of the worktree's tree, so nothing in it may be there
+/// for the check commands to find (a planted `conftest.py` or test file a runner would collect). A `base` outside
+/// `worktree` is fine. Inside it, `base` must hold nothing, or only this run's `slug` folder, itself empty. Read
+/// through the pinned walk: a link anywhere on the way, or anything else there, is refused.
+pub fn base_is_clear(base: &Path, worktree: &Path, slug: &str) -> Result<(), &'static str> {
+    if !base.starts_with(worktree) {
+        return Ok(());
+    }
+    let refused = "the walkthrough folder holds files from before the run, which the check commands could run";
+    // A folder that isn't there holds nothing; a link on the way, or anything else, can't be read safely.
+    let dir = match walk(None, base, false) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("the walkthrough folder can't be read safely"),
+    };
+    let names = dir.raw_names().map_err(|_| "the walkthrough folder can't be read safely")?;
+    match names.as_slice() {
+        [] => Ok(()),
+        [only] if only.as_slice() == slug.as_bytes() => {
+            let inner = dir.child(slug, false).map_err(|_| refused)?;
+            if inner.raw_names().map_err(|_| refused)?.is_empty() { Ok(()) } else { Err(refused) }
+        }
+        _ => Err(refused),
+    }
 }
 
 fn save_evidence(base: &Path, slug: &str, json: &[u8]) -> std::io::Result<()> {

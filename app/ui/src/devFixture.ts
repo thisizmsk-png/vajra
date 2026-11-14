@@ -35,7 +35,7 @@ const RUN_LOG = ([
 /** The core's `run_proof` answer for each label, as the 6i core writes it. */
 const PROOF_REASON: Record<ProofLabel, string> = {
   verified: "Every criterion passed on the delivered commit.",
-  verified_approved: "Every criterion passed. You approved the check commands for this run.",
+  verified_approved: "Every criterion passed. You approved the check commands for this run. They ran on the approved commit's tracked and untracked files; ignored files, such as dependencies and build output, weren't checked against it.",
   evidence_unguarded: "Every criterion passed, but the evidence ran outside the guard.",
   not_verified: "1 of 6 criteria have no current passing evidence.",
   rejected: "A review rejected the approach.",

@@ -299,6 +299,28 @@ impl Bridge {
     /// there. `None` if any step fails, the total `timeout` runs out, or the repo's own config defines an executable filter
     /// (`repo_filters`: `add` would run it). Same git hardening as `Request::Git`.
     pub fn tree_id(&self, repo: &Path, exclude: &[&str]) -> Option<String> {
+        self.snapshot(repo, exclude, None).map(|s| s.tree)
+    }
+
+    /// `tree_id`'s tree, plus what it leaves out by the ignore rules (bhishma M2 on 7c09e27): `add -A` honours the
+    /// `.gitignore` files, the repo's `info/exclude` and the user's excludes file, so ignored files (installed
+    /// dependencies, build output, `.env`) are never in the tree. Listed in the same private session, with the same
+    /// excludes:
+    /// - `ignored`: `ls-files --others --ignored --exclude-standard --directory`, an ignored folder as one entry,
+    ///   for the evidence's count and hash;
+    /// - `test_like`: the ignored files a test runner's default discovery collects (`TEST_LIKE`), outside the
+    ///   folders every runner the repo could use skips (bhishma M2b on 93dc4ab): `node_modules`, a virtualenv with
+    ///   its `pyvenv.cfg` when no jest, vitest or mocha config is tracked, and cargo's `target` with its
+    ///   `CACHEDIR.TAG` when no pytest or JS runner config is tracked. A Go test file is refused anywhere but under the folders Go skips (`GO_SKIP`). A tracked runner
+    ///   config that replaces the defaults (`RUNNER_CONFIGS`) drops every skip.
+    ///
+    /// `None` as for `tree_id`, and when a listing is cut at `OUTPUT_CAP`: never a partial answer.
+    /// `commands`: the approved list, which decides the virtualenv and `target` skips (`runners_of`).
+    pub fn worktree_snapshot(&self, repo: &Path, exclude: &[&str], commands: &[String]) -> Option<Snapshot> {
+        self.snapshot(repo, exclude, Some(runners_of(commands)))
+    }
+
+    fn snapshot(&self, repo: &Path, exclude: &[&str], runners: Option<Runners>) -> Option<Snapshot> {
         let start = Instant::now();
         // The one read of the config this snapshot uses; the steps below never read the repo's config files again.
         let frozen = self.frozen_config(repo, self.timeout)?;
@@ -375,22 +397,361 @@ impl Bridge {
             // Both exclude the directory LITERALLY (`literal` magic): a base whose name holds `*`, `?` or `[` never leaves out a
             // neighbour it would match as a glob, whose edits would then be missing from both trees (#134 review).
             let top_dir = top.borrow().clone();
-            add.extend(exclude.iter().filter_map(|d| {
-                let abs = if Path::new(d).is_absolute() { PathBuf::from(d) } else { repo.join(d) };
-                let abs = abs.canonicalize().unwrap_or(abs);
-                abs.strip_prefix(&top_dir).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| format!(":(exclude,literal){}", r.display()))
-            }));
+            let excluded: Vec<String> = exclude
+                .iter()
+                .filter_map(|d| {
+                    let abs = if Path::new(d).is_absolute() { PathBuf::from(d) } else { repo.join(d) };
+                    let abs = abs.canonicalize().unwrap_or(abs);
+                    abs.strip_prefix(&top_dir).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| format!(":(exclude,literal){}", r.display()))
+                })
+                .collect();
+            add.extend(excluded.iter().cloned());
             let add: Vec<&str> = add.iter().map(String::as_str).collect();
             #[cfg(test)]
             BEFORE_ADD.with(|h| if let Some(f) = h.borrow().as_ref() { f() });
             git(&add, true)?;
             let tree = git(&["write-tree"], true)?.stdout.trim().to_string();
-            (tree.len() >= 40).then_some(tree)
+            if tree.len() < 40 {
+                return None;
+            }
+            let Some(runners) = runners else {
+                return Some(Snapshot { tree, ..Snapshot::default() });
+            };
+            let names = |o: Output| -> Vec<String> { o.stdout_raw.split(|b| *b == 0).filter(|n| !n.is_empty()).map(|n| String::from_utf8_lossy(n).into_owned()).collect() };
+            // The runner configs as this tree has them: listed from the session's index and read from its blobs, so
+            // they are the very files the tree compare binds. More than `MAX_CONFIGS` drops every skip (fail safe).
+            let rules = (|| -> Option<SkipRules> {
+                let mut r = SkipRules::default();
+                let mut seen = 0usize;
+                for (i, (globs, keys, collect)) in RUNNER_CONFIGS.iter().enumerate() {
+                    let mut a: Vec<String> = ["ls-files", "-z", "--cached", "--"].map(String::from).to_vec();
+                    a.extend(globs.iter().map(|g| format!(":(glob){g}")));
+                    let files = names(git(&a.iter().map(String::as_str).collect::<Vec<_>>(), true)?);
+                    seen += files.len();
+                    if seen > MAX_CONFIGS {
+                        return Some(SkipRules::NONE);
+                    }
+                    for f in files {
+                        let body = git(&["cat-file", "blob", &format!(":{f}")], true)?.stdout_raw;
+                        let text = String::from_utf8_lossy(&body);
+                        let base = Path::new(&f).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                        // Whether this file configures a runner at all: a pyproject.toml, setup.cfg or tox.ini only
+                        // when it mentions pytest, a package.json only when it mentions a JS runner.
+                        let runner = match base {
+                            "pyproject.toml" | "setup.cfg" | "tox.ini" => text.contains("pytest"),
+                            "package.json" => ["\"jest\"", "\"vitest\"", "\"mocha\""].iter().any(|k| text.contains(k)),
+                            _ => true,
+                        };
+                        let py = i == 0;
+                        if py {
+                            r.py_config |= runner;
+                            if runner {
+                                r.py_text.push_str(&text);
+                                r.py_text.push('\n');
+                            }
+                        } else {
+                            r.js_config |= runner;
+                        }
+                        if keys.split('|').any(|k| text.contains(k)) {
+                            r.overridden = true;
+                        }
+                        // Matched as plain text anywhere in the file, so a key in a comment counts too: refusing more
+                        // is the safe side.
+                        if collect.split('|').any(|k| text.contains(k)) {
+                            if py {
+                                r.py_custom = true;
+                            } else {
+                                r.js_custom = true;
+                            }
+                        }
+                    }
+                }
+                Some(r)
+            })();
+            let mut list: Vec<String> = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", "."].map(String::from).to_vec();
+            list.extend(excluded.iter().cloned());
+            let listed = git(&list.iter().map(String::as_str).collect::<Vec<_>>(), true)?;
+            let ignored_sha256 = crate::control::sha256::hex_digest(&listed.stdout_raw);
+            let ignored = names(listed);
+            // A config that can't be read drops every skip: refusing more is the safe side.
+            let rules = rules.unwrap_or(SkipRules::NONE);
+            // bhishma M2b on 93dc4ab: a folder is left out only where every runner the repo could use skips it.
+            // - Go (`go test ./...`) skips only dot, underscore, testdata and vendor folders: its own listing.
+            // - The others: `node_modules` (jest, vitest, pytest); a folder holding `pyvenv.cfg` (pytest's own
+            //   virtualenv test) when no jest, vitest or mocha config is tracked (they don't skip virtualenvs); and a
+            //   `target` holding cargo's `CACHEDIR.TAG` when no runner config but cargo's is tracked.
+            // - None at all when a tracked runner config replaces the runners' defaults.
+            let mut skip: Vec<String> = Vec::new();
+            if !rules.overridden {
+                skip.push(":(exclude,glob)**/node_modules/**".into());
+                for entry in ignored.iter().filter_map(|e| e.strip_suffix('/')) {
+                    let d = top_dir.join(entry);
+                    let has = |f: &str| std::fs::symlink_metadata(d.join(f)).is_ok_and(|m| m.is_file());
+                    let name = Path::new(entry).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                    // bhishma M1 on cd9525a: decided by the runners the approved commands could start (pytest, jest
+                    // and the rest run with no config at all, and the marker files can be planted), never by a
+                    // config alone. A command Vajra can't place keeps both folders in.
+                    // Codex P1 on #256: nor when pytest is told to collect there, by a flag, a path into the folder
+                    // or a tracked config that names it.
+                    let named = runners.py_paths.iter().any(|p| p == name || p.starts_with(&format!("{name}/")) || p == entry || p.starts_with(&format!("{entry}/")));
+                    let configured = rules.py_text.contains("collect-in-virtualenv") || (!name.is_empty() && rules.py_text.contains(name));
+                    let venv = has("pyvenv.cfg") && !runners.js && !runners.unknown && !rules.js_config && !runners.py_open && !named && !configured;
+                    let cargo = name == "target" && has("CACHEDIR.TAG") && !runners.python && !runners.js && !runners.unknown && !rules.py_config && !rules.js_config;
+                    if venv || cargo {
+                        skip.push(format!(":(exclude,literal){entry}"));
+                    }
+                }
+            }
+            let listing = |globs: &[String], extra: &[String]| -> Option<Vec<String>> {
+                let mut a: Vec<String> = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--"].map(String::from).to_vec();
+                a.extend(globs.iter().cloned());
+                a.extend(extra.iter().cloned());
+                a.extend(excluded.iter().cloned());
+                Some(names(git(&a.iter().map(String::as_str).collect::<Vec<_>>(), true)?))
+            };
+            // A config that names its own test files makes every source file of that language collectable (codex P1
+            // on #256): every ignored one outside `node_modules` is listed, with the folder skips above.
+            let mut custom_skip = vec![":(exclude,glob)**/node_modules/**".to_string()];
+            custom_skip.extend(skip.iter().filter(|s| !s.contains("node_modules")).cloned());
+            let mut custom: Vec<&str> = Vec::new();
+            if rules.py_custom {
+                custom.extend(PY_SOURCES);
+            }
+            if rules.js_custom {
+                custom.extend(JS_SOURCES);
+            }
+            let others: Vec<String> = TEST_LIKE.iter().map(|g| format!(":(glob){g}")).collect();
+            let mut test_like = listing(&others, &skip)?.into_iter().filter(|p| !p.ends_with("_test.go")).collect::<Vec<_>>();
+            let go_skip: Vec<String> = GO_SKIP.iter().map(|g| format!(":(exclude,glob){g}")).collect();
+            test_like.extend(listing(&[":(glob)**/*_test.go".to_string()], &go_skip)?);
+            if !custom.is_empty() {
+                let sources: Vec<String> = custom.iter().map(|g| format!(":(glob){g}")).collect();
+                test_like.extend(listing(&sources, &custom_skip)?);
+            }
+            test_like.sort();
+            test_like.dedup();
+            Some(Snapshot { tree, ignored, ignored_sha256, test_like })
         })();
         let _ = std::fs::remove_dir_all(&dir);
         result
     }
+
+    /// The tree of commit `commit`, read from the git dir `git_dir` alone (bhishma M3 on 7c09e27): `GIT_DIR` set, so
+    /// no `.git` file or folder is looked up; replace objects off, so `refs/replace` can't swap the commit; and the
+    /// raw object's own hash must be `commit`, so whatever git's object lookup did, the bytes are that commit's.
+    /// `None` when any of it fails.
+    pub fn commit_tree(&self, git_dir: &Path, commit: &str) -> Option<String> {
+        if !(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
+            return None;
+        }
+        let raw = self.pinned_git(git_dir, &["cat-file", "commit", commit], None)?.stdout_raw;
+        let hashed = self.pinned_git(git_dir, &["hash-object", "-t", "commit", "--no-filters", "--stdin"], Some(&raw))?;
+        if hashed.stdout.trim() != commit {
+            return None;
+        }
+        let first = raw.split(|b| *b == b'\n').next()?;
+        let tree = std::str::from_utf8(first.strip_prefix(b"tree ")?).ok()?;
+        (tree.len() == 40 && tree.bytes().all(|b| b.is_ascii_hexdigit())).then(|| tree.to_string())
+    }
+
+    /// Whether `tree` (a tree id from `commit_tree`) has an entry at `rel`, read the same pinned way. `None` when git
+    /// can't answer.
+    pub fn tree_has(&self, git_dir: &Path, tree: &str, rel: &str) -> Option<bool> {
+        let o = self.pinned_git(git_dir, &["ls-tree", "-z", "--name-only", tree, "--", rel], None)?;
+        Some(!o.stdout_raw.is_empty())
+    }
+
+    /// The submodule entries (mode 160000, gitlinks) anywhere in `tree`, read the same pinned way. `None` when git can't
+    /// answer. The tree records only a submodule's commit, so nothing inside its folder can be compared.
+    pub fn gitlinks(&self, git_dir: &Path, tree: &str) -> Option<Vec<String>> {
+        let o = self.pinned_git(git_dir, &["ls-tree", "-r", "-z", "--full-tree", tree], None)?;
+        let mut links = Vec::new();
+        for rec in o.stdout_raw.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+            let tab = rec.iter().position(|b| *b == b'\t')?;
+            if rec.starts_with(b"160000 ") {
+                links.push(String::from_utf8_lossy(&rec[tab + 1..]).into_owned());
+            }
+        }
+        Some(links)
+    }
+
+    /// Git on `git_dir` alone, with replace objects off and no fsmonitor or hook; exit 0 only.
+    fn pinned_git(&self, git_dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Option<Output> {
+        let argv: Vec<String> = ["--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"]
+            .iter()
+            .chain(args)
+            .map(|a| a.to_string())
+            .collect();
+        let env = [("GIT_DIR", git_dir), ("GIT_NO_REPLACE_OBJECTS", Path::new("1")), ("GIT_CONFIG_GLOBAL", Path::new("/dev/null"))];
+        run_process_env(&self.git, &argv, Some(git_dir), self.timeout, self.home.as_deref(), stdin, &env).ok().filter(|o| o.exit() == Some(0))
+    }
 }
+
+/// `Bridge::worktree_snapshot`'s answer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub tree: String,
+    /// The ignored entries, an ignored folder as one entry ending in `/`.
+    pub ignored: Vec<String>,
+    /// sha256 of that listing's exact bytes (NUL-separated, git's order).
+    pub ignored_sha256: String,
+    /// Ignored files a test runner would collect by default.
+    pub test_like: Vec<String>,
+}
+
+/// Names test runners collect by default: pytest (`conftest.py`, `test_*.py`, `*_test.py`), Go (`*_test.go`), jest,
+/// vitest and mocha (`*.test.*`, `*.spec.*`, `__tests__`), and anything in a test folder (cargo's `tests/`, the
+/// common `test/` and `spec/`).
+pub const TEST_LIKE: [&str; 10] =
+    ["**/conftest.py", "**/test_*.py", "**/*_test.py", "**/*_test.go", "**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/tests/**", "**/test/**", "**/spec/**"];
+
+/// The most tracked runner config files read; past it no folder is left out of the test-like check.
+const MAX_CONFIGS: usize = 200;
+
+/// The folders `go test ./...` itself skips: names starting with a dot or an underscore, `testdata` and `vendor`.
+pub const GO_SKIP: [&str; 4] = ["**/.*/**", "**/_*/**", "**/testdata/**", "**/vendor/**"];
+
+/// Which test runners the approved commands could start (bhishma M1 on cd9525a).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Runners {
+    /// pytest itself: `pytest`, `py.test` or `python -m pytest`.
+    pub python: bool,
+    /// A pytest command has an argument that could make it collect inside a virtualenv (codex P1 on #256): any flag
+    /// but the harmless ones in `PY_SAFE_FLAGS` (so `--collect-in-virtualenv`, `-c`, `--rootdir`, `-p` and the rest),
+    /// or a path that is absolute, climbs with `..` or has a glob. Drops every virtualenv skip.
+    pub py_open: bool,
+    /// The relative paths pytest commands name (a test id's `::` part dropped): a virtualenv one of them is in, or
+    /// is, isn't skipped.
+    pub py_paths: Vec<String>,
+    /// jest, vitest or mocha itself.
+    pub js: bool,
+    /// Anything else that isn't a known non-runner. A launcher (tox, nox, uv, poetry, npm, npx, pnpm, yarn, bun), a
+    /// package script, `make`, a shell or a script runs whatever its config says, so it could start either runner.
+    pub unknown: bool,
+}
+
+const PY_RUNNERS: [&str; 2] = ["pytest", "py.test"];
+/// pytest flags that change only output or when it stops, never what it collects. `-k` and `-m` take an expression
+/// as the next word.
+const PY_SAFE_FLAGS: [&str; 20] = [
+    "-q", "-qq", "-v", "-vv", "-vvv", "-x", "-s", "-l", "-ra", "-rA", "-rf", "-rs", "-rN", "--no-header", "--strict-markers", "--exitfirst",
+    "--quiet", "--verbose", "-k", "-m",
+];
+/// pytest `--name=value` flags that are as harmless as `PY_SAFE_FLAGS`.
+const PY_SAFE_VALUED: [&str; 4] = ["--tb=", "--color=", "--maxfail=", "--durations="];
+
+/// Places one pytest command's arguments into `r` (codex P1 on #256): anything not known harmless opens the
+/// virtualenvs.
+fn pytest_args(r: &mut Runners, args: &[&str]) {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if *a == "-k" || *a == "-m" {
+            it.next();
+        } else if a.starts_with('-') {
+            if !PY_SAFE_FLAGS.contains(a) && !PY_SAFE_VALUED.iter().any(|p| a.starts_with(p)) {
+                r.py_open = true;
+            }
+        } else {
+            let path = a.split("::").next().unwrap_or(a).trim_start_matches("./").trim_end_matches('/');
+            if path.starts_with('/') || path.split('/').any(|s| s == "..") || path.contains(['*', '?', '[', '{', '~', '\'', '"', '\\']) {
+                r.py_open = true;
+            } else if !path.is_empty() && path != "." {
+                r.py_paths.push(path.to_string());
+            }
+        }
+    }
+}
+const JS_RUNNERS: [&str; 3] = ["jest", "vitest", "mocha"];
+/// Commands that start no Python or JS test runner: the Rust and Go toolchains and plain file tools. Not `make` or
+/// `git`, which run whatever a Makefile or an alias says.
+const OTHER_TOOLS: [&str; 14] = ["cargo", "rustc", "go", "true", "false", "test", "echo", "grep", "ls", "cat", "diff", "cmp", "wc", "rg"];
+
+/// What `commands` could start, word by word: each command is split on shell separators, and each part's first word
+/// (after `env` and `VAR=value` settings, and with any folder stripped) is placed. `python` and `python3` are placed
+/// by what they run: `-m pytest` is pytest; any other script, `-c` or `-m` could be anything. A `$` could expand to
+/// anything. When in doubt, `unknown`.
+pub fn runners_of(commands: &[String]) -> Runners {
+    let mut r = Runners::default();
+    for c in commands {
+        for part in c.split(['&', '|', ';', '\n', '(', ')', '`']).map(str::trim).filter(|p| !p.is_empty()) {
+            if part.contains('$') {
+                r.unknown = true;
+            }
+            // A variable set before the program reaches it (the runner clears the rest of the environment), and
+            // PYTEST_ADDOPTS or PYTEST_PLUGINS can do whatever a flag can (codex on #256): noted, and any one before
+            // pytest opens the virtualenvs.
+            let mut assigned = false;
+            let mut words = part.split_whitespace().skip_while(|w| {
+                let lead = *w == "env" || w.contains('=');
+                assigned |= lead && *w != "env";
+                lead
+            });
+            let Some(first) = words.next() else { continue };
+            let prog = first.rsplit('/').next().unwrap_or(first);
+            let rest: Vec<&str> = words.collect();
+            if PY_RUNNERS.contains(&prog) {
+                r.python = true;
+                r.py_open |= assigned;
+                pytest_args(&mut r, &rest);
+            } else if JS_RUNNERS.contains(&prog) {
+                r.js = true;
+            } else if prog.starts_with("python") {
+                match rest.as_slice() {
+                    ["-m", "pytest" | "py.test", args @ ..] => {
+                        r.python = true;
+                        r.py_open |= assigned;
+                        pytest_args(&mut r, args);
+                    }
+                    _ => r.unknown = true,
+                }
+            } else if !OTHER_TOOLS.contains(&prog) {
+                r.unknown = true;
+            }
+        }
+    }
+    r
+}
+
+/// What the tracked runner configs say, for `worktree_snapshot`'s test-like check (bhishma M2b on 93dc4ab).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkipRules {
+    /// The tracked pytest configs' text, joined (each capped by the read): a virtualenv whose name is in it (a
+    /// `testpaths` or `addopts` entry) isn't skipped, nor any when it says `collect-in-virtualenv` (codex P1 on #256).
+    pub py_text: String,
+    /// A tracked config replaces a runner's default skips (pytest `norecursedirs`; jest `testPathIgnorePatterns`,
+    /// `roots`, `testMatch` or `testRegex`; vitest `exclude`; mocha `spec`): no folder is left out.
+    pub overridden: bool,
+    /// A pytest config is tracked: pytest doesn't skip `target`.
+    pub py_config: bool,
+    /// A jest, vitest or mocha config is tracked: they skip neither `target` nor a virtualenv.
+    pub js_config: bool,
+    /// A tracked pytest config names its own test files (`python_files`) or files to run (`addopts`): any Python file
+    /// could be collected, so every ignored one outside `node_modules` is test-like (codex P1 on #256).
+    pub py_custom: bool,
+    /// A tracked jest, vitest or mocha config names its own test files (`testMatch`, `testRegex`, `include`, `spec`):
+    /// every ignored JS or TS source outside `node_modules` is test-like.
+    pub js_custom: bool,
+}
+
+impl SkipRules {
+    const NONE: SkipRules = SkipRules { py_text: String::new(), overridden: true, py_config: true, js_config: true, py_custom: true, js_custom: true };
+}
+
+/// The tracked config files each runner reads; the keys in them that replace its default skips; and the keys that
+/// replace or add to the names it collects (codex P1 on #256, bhishma M2 on cd9525a), or name files to run outright
+/// (pytest `addopts`).
+pub const RUNNER_CONFIGS: [(&[&str], &str, &str); 5] = [
+    (&["**/pytest.ini", "**/pyproject.toml", "**/setup.cfg", "**/tox.ini"], "norecursedirs", "python_files|addopts"),
+    (&["**/jest.config.*"], "testPathIgnorePatterns|roots|testMatch|testRegex", "testMatch|testRegex"),
+    (&["**/package.json"], "testPathIgnorePatterns|\"roots\"|testMatch|testRegex|\"spec\"", "testMatch|testRegex|\"spec\""),
+    (&["**/vitest.config.*", "**/vite.config.*", "**/vitest.workspace.*"], "exclude", "include"),
+    (&["**/.mocharc*"], "spec", "spec"),
+];
+
+/// Every Python file: what pytest could collect once a tracked config names its own test files.
+const PY_SOURCES: [&str; 1] = ["**/*.py"];
+/// Every JS and TS source: what jest, vitest or mocha could collect once a tracked config names its own test files.
+const JS_SOURCES: [&str; 8] = ["**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs", "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"];
 
 /// A repo config as read once by `frozen_config`: the entries `git add` gets, and the repository format.
 #[derive(Debug, Default)]
@@ -805,5 +1166,54 @@ mod frozen_config_tests {
         assert!(parse_frozen("local\0extensions.objectformat\nmd5\0").is_none());
         assert!(parse_frozen("local\0core.autocrlf\ninput\0trailing").is_none(), "output not ending in NUL is refused");
         assert!(parse_frozen("").unwrap().entries.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod runners_tests {
+    use super::{runners_of, Runners};
+
+    fn of(commands: &[&str]) -> Runners {
+        runners_of(&commands.iter().map(|c| c.to_string()).collect::<Vec<_>>())
+    }
+
+    fn is(r: Runners, python: bool, js: bool, unknown: bool) -> bool {
+        r.python == python && r.js == js && r.unknown == unknown
+    }
+
+    #[test]
+    fn runners_are_placed_from_the_approved_commands_and_anything_unplaced_is_unknown() {
+        // bhishma M1 on cd9525a.
+        assert!(is(of(&["cargo build", "cargo test --workspace", "go test ./..."]), false, false, false));
+        assert!(is(of(&["pytest -q", "/usr/bin/py.test", "python3 -m pytest", "env CI=1 python -m pytest"]), true, false, false));
+        assert!(is(of(&["jest --ci", "node_modules/.bin/vitest run", "FORCE_COLOR=0 mocha"]), false, true, false));
+        assert!(is(of(&["cargo test && pytest", "cargo test; npx jest"]), true, false, true), "npx is a launcher");
+        assert!(is(of(&["cargo test | jest"]), false, true, false), "every part of a pipe is placed");
+        for unknown in [
+            "tox -e py", "nox", "uv run pytest", "poetry run pytest", "npm test", "pnpm test", "yarn test", "bun test",
+            "npx jest", "make check", "git test", "sh -c 'pytest'", "bash run.sh", "./run-checks.sh", "python run.py",
+            "python -c 'import pytest'", "python -m unittest", "python", "$RUNNER", "cargo test $(echo x)", "(jest)x`y`",
+        ] {
+            assert!(of(&[unknown]).unknown, "{unknown} could start anything");
+        }
+        assert!(is(of(&[]), false, false, false));
+    }
+
+    #[test]
+    fn pytest_arguments_that_could_reach_a_virtualenv_open_it_and_its_paths_are_kept() {
+        // Codex P1 on #256.
+        for open in ["pytest --collect-in-virtualenv", "pytest -c x.ini", "pytest --rootdir=.", "pytest /abs", "pytest ../up", "pytest 'a*'", "python -m pytest -p x"] {
+            assert!(of(&[open]).py_open, "{open}");
+        }
+        // A variable set before pytest, with and without env (codex on #256, a MUST on 36d88796).
+        for open in [
+            "PYTEST_ADDOPTS=--collect-in-virtualenv pytest", "env PYTEST_ADDOPTS=--collect-in-virtualenv pytest", "PYTEST_PLUGINS=evil pytest",
+            "env PYTEST_PLUGINS=evil python3 -m pytest", "CI=1 pytest", "cargo test && FOO=1 py.test",
+        ] {
+            assert!(of(&[open]).py_open, "{open}");
+        }
+        let r = of(&["pytest -q -x --tb=short -k 'smoke' -m slow ./tests/ unit/test_a.py::test_b", "python3 -m pytest -ra .", "env pytest", "CI=1 cargo test"]);
+        assert!(!r.py_open);
+        assert_eq!(r.py_paths, ["tests", "unit/test_a.py"]);
     }
 }
