@@ -82,6 +82,8 @@ fn the_profile_denies_the_vajra_dirs_last_and_limits_writes() {
     assert!(p[deny_at..].contains(&format!("(subpath \"{}\")", t.0.join("data").display())));
     assert!(p.contains("(deny file-write*)\n"));
     assert!(p.contains("(deny network-outbound)"));
+    // Deny-default (#234 follow-up): nothing is allowed that no rule names.
+    assert!(p.starts_with("(version 1)\n(deny default)\n") && !p.contains("(allow default)"), "{p}");
     let net = t.profile(true).sbpl().unwrap();
     assert!(!net.contains("(deny network-outbound)"), "a network seat keeps the network");
     for text in [&p, &net] {
@@ -538,14 +540,41 @@ fn a_command_can_reach_no_mach_service_that_starts_an_unsandboxed_process() {
     for n in &reachable {
         assert_eq!(inside.iter().find(|(m, _)| m == *n).map(|(_, ok)| *ok), Some(false), "{n} answered inside: {}", text(&o));
     }
-    // A service the tools need still answers: the denial is the list, not every lookup.
+    // A service the tools need still answers: the allow-list works.
     let o = t.run(&p, &format!("python3 '{}' com.apple.system.notification_center", probe.display()), &[]);
     assert_eq!(answers(&text(&o)), vec![("com.apple.system.notification_center".to_string(), true)], "{}", text(&o));
+    // Deny-default: a service on neither list (the window server, the Dock, privacy consent) answers outside but not
+    // inside, so a service nobody thought to deny stays shut.
+    let unlisted = ["com.apple.windowserver.active", "com.apple.dock.server", "com.apple.tccd"];
+    let outside = answers(&String::from_utf8_lossy(&Command::new("python3").arg(&probe).args(unlisted).output().unwrap().stdout));
+    let o = t.run(&p, &format!("python3 '{}' {}", probe.display(), unlisted.join(" ")), &[]);
+    let inside = answers(&text(&o));
+    for (n, _) in outside.iter().filter(|(_, ok)| *ok) {
+        assert_eq!(inside.iter().find(|(m, _)| m == n).map(|(_, ok)| *ok), Some(false), "unlisted {n} answered inside: {}", text(&o));
+    }
     // LaunchServices names no app from inside (the launch-time probe's check), but does outside.
     let front = |o: &std::process::Output| String::from_utf8_lossy(&o.stdout).contains("ASN:");
     if front(&Command::new("/usr/bin/lsappinfo").arg("front").output().unwrap()) {
         assert!(!front(&t.run(&p, "/usr/bin/lsappinfo front", &[])));
     }
+}
+
+/// Deny-default still lets a network seat do what a check needs: resolve a name and fetch over HTTPS with certificate
+/// trust (curl's TLS goes through the trust daemons on the allow-list). Skipped when the Mac itself is offline.
+#[test]
+fn a_network_seat_resolves_and_fetches_over_https_under_deny_default() {
+    if !macos() || !have("curl") {
+        return eprintln!("skipped: sandbox-exec or curl");
+    }
+    let get = "/usr/bin/curl -sS -o /dev/null --max-time 15 https://example.com/";
+    if !Command::new("/bin/sh").args(["-c", get]).output().is_ok_and(|o| o.status.success()) {
+        return eprintln!("skipped: no internet here");
+    }
+    let t = Tmp::new("netseat");
+    let o = t.run(&t.profile(true), get, &[]);
+    assert!(o.status.success(), "a network seat couldn't fetch: {}", text(&o));
+    // And without one, the same fetch is refused.
+    assert!(!t.run(&t.profile(false), get, &[]).status.success());
 }
 
 /// M1: launchd starts no job for a sandboxed caller. The job would only run `/usr/bin/true`, and is removed either way.
@@ -643,10 +672,25 @@ fn a_held_open_or_oversized_evidence_channel_fails_fast() {
 /// close-on-exec flags never holds the evidence write end. A child that did would keep the channel open after the
 /// script ends, and the run would fail. The racer goes through the app's spawn lock, so it waits out the window; the
 /// control run starts a bare child in the same window, which does inherit the write end and fails the run.
+///
+/// It runs alone, in a fresh run of this test binary: in the shared one, other tests start children with a bare
+/// `spawn` (test code is exempt from the lock), and one landing in this window would hold the channel too.
 #[test]
 fn a_process_started_during_the_evidence_pipe_window_never_holds_the_write_end() {
     if !macos() {
         return eprintln!("skipped: sandbox-exec");
+    }
+    let name = "adapter::evidence_runner::tests::spawn_race_body";
+    let o = Command::new(std::env::current_exe().unwrap()).args(["--exact", name, "--ignored", "--nocapture", "--test-threads=1"]).env("VAJRA_SPAWN_RACE_BODY", "1").output().unwrap();
+    let out = text(&o);
+    assert!(o.status.success() && out.contains("1 passed"), "{out}");
+}
+
+#[test]
+#[ignore = "run alone by a_process_started_during_the_evidence_pipe_window_never_holds_the_write_end"]
+fn spawn_race_body() {
+    if std::env::var_os("VAJRA_SPAWN_RACE_BODY").is_none() {
+        return eprintln!("skipped: runs only from its parent test");
     }
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};

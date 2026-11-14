@@ -2,6 +2,8 @@
 //! macOS Seatbelt (`/usr/bin/sandbox-exec -p <profile>`), never in an agent session (PR #135 review, codex).
 //!
 //! The profile (owner answers N19 to N23, the 6i brief, 6k's dir list):
+//! - deny-default (#234 follow-up): only what a rule names is allowed (processes, reads, the writes and sockets
+//!   below, and a short list of system Mach services), so a service or IPC kind nobody listed stays shut;
 //! - every read and write of the Vajra state dir (it holds the signing key) and the app's data dir is denied: the
 //!   list is 6k's `vajra_deny_dirs`, the same one a Codex session gets (#216), plus the config's `denyRead` credential
 //!   dirs;
@@ -59,7 +61,8 @@ const RESOLVER_SOCKET: &str = "/var/run/mDNSResponder";
 /// - the pasteboard: read what the user copied.
 ///
 /// launchd refuses `launchctl submit`, `bootstrap` and `load` from a sandboxed caller by itself; `job-creation` is denied
-/// too, and the tests prove launchd's refusal.
+/// too, and the tests prove launchd's refusal. Under deny-default none of these is on the allow-list anyway; the named
+/// denies stay so a later, broader allow can't re-open them by accident.
 const DENIED_MACH: &[(&str, &str)] = &[
     ("global-name", "com.apple.coreservices.launchservicesd"),
     ("global-name-prefix", "com.apple.lsd."),
@@ -68,6 +71,24 @@ const DENIED_MACH: &[(&str, &str)] = &[
     ("global-name-prefix", "com.apple.securityd"),
     ("global-name", "com.apple.secd"),
     ("global-name-prefix", "com.apple.pasteboard."),
+];
+
+/// The only Mach services a command may look up (deny-default, #234 follow-up). Each is a system lookup a toolchain
+/// needs and none starts a process or hands back user data: user and group names, the notification and logging
+/// daemons, the per-user temp dir, network configuration (DNS and proxies) and certificate trust (TLS with a network
+/// seat). Everything else, LaunchServices, Apple Events, the security server and the pasteboard included, is refused.
+const ALLOWED_MACH: &[&str] = &[
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
+    "com.apple.system.notification_center",
+    "com.apple.system.logger",
+    "com.apple.logd",
+    "com.apple.diagnosticd",
+    "com.apple.bsd.dirhelper",
+    "com.apple.SystemConfiguration.configd",
+    "com.apple.SystemConfiguration.DNSConfiguration",
+    "com.apple.trustd",
+    "com.apple.trustd.agent",
 ];
 
 /// A path as a Seatbelt string literal: absolute, no NUL, quotes and backslashes escaped. `None` refuses it.
@@ -112,7 +133,16 @@ impl Profile {
         }
         let resolver = both(Path::new(RESOLVER_SOCKET)).iter().map(|p| lit(p).map(|l| format!(" (literal {l})"))).collect::<Option<String>>().ok_or("the resolver socket path")?;
         let deny = subpaths(&self.deny)?;
-        let mut p = String::from("(version 1)\n(allow default)\n");
+        // Deny-default (#234 follow-up): an operation is refused unless a rule below names it, so a Mach service, an
+        // IPC kind or a device nobody listed stays shut, not open.
+        let mut p = String::from("(version 1)\n(deny default)\n");
+        // Processes: start and run programs; signal and inspect only processes inside this run's sandbox.
+        p.push_str("(allow process-fork process-exec file-map-executable)\n");
+        p.push_str("(allow signal process-info* (target same-sandbox))\n(allow process-info-pidinfo process-info-setcontrol (target self))\n");
+        p.push_str("(allow sysctl-read)\n(allow ipc-posix-sem)\n");
+        // Reads: anything (toolchains live anywhere the user put them), except the final deny below.
+        p.push_str("(allow file-read*)\n");
+        p.push_str(&format!("(allow mach-lookup{})\n", ALLOWED_MACH.iter().map(|n| format!(" (global-name \"{n}\")")).collect::<String>()));
         // Writes: only the worktree, the run's tmp dir (which holds every build cache), and the null and tty devices.
         p.push_str("(deny file-write*)\n");
         p.push_str(&format!("(allow file-write*{run_dirs} (literal \"/dev/null\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n"));
@@ -125,12 +155,14 @@ impl Profile {
         // binds and is reached, names still resolve through the resolver socket, but no connection leaves the Mac.
         // A `network*` allow with `local ip` matches every outbound socket (it is bound locally), so allows name only
         // the remote end.
+        // Binds and inbound connections: unix sockets only under the run's own dirs; IP on any address with a network
+        // seat, else on loopback only (a server on every address would let a machine on the LAN connect in and read).
         if self.network {
-            p.push_str("(deny network-outbound (remote unix-socket))\n");
+            p.push_str("(allow network-outbound (remote ip))\n(allow network-bind network-inbound (local ip))\n");
         } else {
-            p.push_str("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n");
+            p.push_str("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
         }
-        p.push_str(&format!("(allow network-outbound{resolver}{run_dirs})\n"));
+        p.push_str(&format!("(allow network-outbound{resolver}{run_dirs})\n(allow network-bind network-inbound{run_dirs})\n"));
         // Last, so nothing above can re-open them: the Vajra dirs and the credentials, neither read nor written.
         p.push_str(&format!("(deny file-read* file-write*{deny})\n"));
         Ok(p)
