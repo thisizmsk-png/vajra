@@ -118,6 +118,7 @@ export function Run() {
       <div className="v-home">
         <Text as="h1" variant="headline-lg">{S.run.title}</Text>
         <Text variant="body-sm" muted>{S.run.pick}</Text>
+        <Button size="sm" onClick={() => go("history")}>{S.states.openHistory}</Button>
       </div>
     );
   }
