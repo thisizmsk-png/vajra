@@ -7,6 +7,7 @@ import { setTransport } from "./ipc";
 import type { CrewNodeDto, ProofLabel, RunProof, Transport } from "./ipc";
 import { terminalFixture } from "./terminal/fixtureShell";
 import { setupReplies } from "./setupFixture";
+import { welcomeFixture } from "./welcomeFixture";
 import { S } from "../strings";
 
 const RUN = "20261106-2140";
@@ -318,6 +319,7 @@ export function installFixture(mode = "") {
     { name: "Git", ok: true, detail: "2.46.0", fix: "" },
     { name: "Vajra engine", ok: false, detail: "not installed", fix: "bash scripts/install.sh" },
   ], start_enabled: false }) };
+  const welcome = mode.startsWith("welcome-") ? welcomeFixture(mode.slice("welcome-".length)) : null;
   let revision = 0;
   let global = mode === "pings" ? { ...DEFAULT_PREFERENCES, ping: { ...DEFAULT_PING, batch_minutes: 0, questions: false } } : { ...DEFAULT_PREFERENCES };
   const projects = new Map<string, Record<string, unknown>>();
@@ -335,6 +337,11 @@ export function installFixture(mode = "") {
     async call(cmd, args) {
       // A core that does not answer: Tauri rejects with a plain string, not the core's {error, detail}.
       if (mode === "down") throw `command ${cmd} failed: the core is not running`;
+      // `?fixture=welcome-<state>`: a Mac with no projects, for the first-run welcome (see welcomeFixture.ts).
+      if (welcome) {
+        const w = welcome(cmd, args);
+        if (w !== undefined) return w;
+      }
       if (cmd === "preferences_read") return preferenceView(args?.projectId as string | null);
       if (cmd === "act_preferences_update") {
         const envelope = args?.envelope as { action_id: string; project_id: string; expect_generation: number };
@@ -359,7 +366,7 @@ export function installFixture(mode = "") {
       if (cmd === "provider_base_url_save") { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === args?.accountId ? { ...a, base_url: String(args?.baseUrl) } : a) }; return null; }
       if (cmd === "provider_agents") return agents;
       if (cmd === "provider_agents_save") { agents = { schema: AGENTS.schema, ...(args?.agents as object) }; return agents; }
-      const r = (mode === "empty" ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd] ?? setupReplies[cmd];
+      const r = (mode === "empty" || welcome ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd] ?? setupReplies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },

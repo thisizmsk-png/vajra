@@ -124,6 +124,13 @@ export function Run() {
   return (
     <div className="v-home">
       <Text as="h1" variant="headline-lg" className="v-run__name">{S.run.title}</Text>
+      {/* The first run from the welcome: one line on what the evidence rows mean. It lives in the link, so it is gone on the next visit. */}
+      {route.params.first === "1" && (
+        <div className="v-run__first" role="note">
+          <Text variant="body-sm">{S.welcome.done.note}</Text>
+          <Button size="sm" onClick={() => go("launch")}>{S.welcome.done.another}</Button>
+        </div>
+      )}
       <RunProvider slug={slug} />
       {/* Keyed by run, so another run's dialog or answer never shows under this one. */}
       {overview && <EvidenceApproval key={overview.run_id} runId={overview.run_id} />}

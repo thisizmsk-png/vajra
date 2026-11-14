@@ -43,7 +43,7 @@ export function useSetup(on = true) {
   return { ...s, settled, reload };
 }
 
-function Steps({ row }: { row: SetupRow }) {
+export function Steps({ row }: { row: SetupRow }) {
   return (
     <div className="v-setup__steps">
       {row.reason_code && C.reason[row.reason_code] && <Text variant="body-sm" muted>{C.reason[row.reason_code]}</Text>}
@@ -93,7 +93,7 @@ function useOutput(stream: string, on: boolean) {
 
 /** ADR-17 17b: the one-click sheet. Shows the exact command and everything it binds; Install asks the core for a
  * consent token on that plan's hash and runs with it. The token lives only in this click's local. */
-function OneClick({ row, reload, opened }: { row: SetupRow; reload: () => Promise<void>; opened: () => void }) {
+export function OneClick({ row, reload, opened }: { row: SetupRow; reload: () => Promise<void>; opened: () => void }) {
   const [s, setS] = useState<Sheet>({ at: "idle" });
   const titleId = useId();
   const out = useOutput(`setup-${row.id}`, s.at === "running");
