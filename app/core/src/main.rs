@@ -13,13 +13,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::Instant;
 
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
 use vajra_desktop::control::{self, mcp};
 use serde_json::Value;
-use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
+use vajra_desktop::desktop::{App, Envelope, Pace, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
@@ -32,6 +32,11 @@ const CHANGED: &str = "changed";
 
 fn is_mcp(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| a == "--mcp")
+}
+
+/// `--mcp-run`: a run lead's `vajra-run` server (ADR-16 16.5).
+fn is_mcp_run(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a == "--mcp-run")
 }
 
 // -------------------------------------------------------------------- commands
@@ -109,6 +114,25 @@ fn install_dev_tools(app: State<'_, App>) -> Res {
     app.install_dev_tools()
 }
 
+/// Every ended core run, with whether it can be resumed and why not (6d2d). Read-only; off the event thread, since it
+/// reads each run's records.
+#[tauri::command(async)]
+fn core_runs(app: State<'_, App>) -> Res {
+    app.core_runs()
+}
+
+/// Labs for one project (ADR-16 16.13): whether this build has Labs, and whether it is on. Developer builds only.
+#[tauri::command(async)]
+fn labs_get(app: State<'_, App>, project: String) -> Res {
+    app.labs_get(&project)
+}
+
+/// Turn Labs on or off for one project. A release build refuses.
+#[tauri::command(async)]
+fn labs_set(app: State<'_, App>, project: String, on: bool) -> Res {
+    app.labs_set(&project, on)
+}
+
 /// Settings: the disk the worker copies use. A walk of the copies' folder, off the event thread.
 #[tauri::command(async)]
 fn worker_disk(app: State<'_, App>) -> Res {
@@ -118,6 +142,29 @@ fn worker_disk(app: State<'_, App>) -> Res {
 #[tauri::command(async)]
 fn act_worker_clean_up(app: State<'_, App>, envelope: Envelope) -> Value {
     app.act_worker_clean_up(&envelope)
+}
+
+/// Core runs whose signed record is still open after the app life that ran them (PR 6h).
+#[tauri::command(async)]
+fn record_orphans(app: State<'_, App>) -> Value {
+    app.record_orphans(&[])
+}
+
+/// A core run's log entries after `after_seq` (W2): the UI applies these deltas in order instead of refetching.
+#[tauri::command(async)]
+fn run_log_since(app: State<'_, App>, run_id: String, after_seq: u64, limit: Option<usize>) -> Res {
+    vajra_desktop::desktop::run_log_answered(app.run_log_since(&run_id, after_seq, limit.unwrap_or(vajra_desktop::desktop::runlog_store::PAGE_MAX)))
+}
+
+/// How far a core run's hash-chained log holds, and how far its signed record vouches for it (W2).
+#[tauri::command(async)]
+fn run_log_verify(app: State<'_, App>, run_id: String) -> Res {
+    vajra_desktop::desktop::run_log_answered(app.run_log_verify(&run_id))
+}
+
+#[tauri::command(async)]
+fn act_close_orphan(app: State<'_, App>, envelope: Envelope, run_id: String) -> Value {
+    app.act_close_orphan(&envelope, &run_id)
 }
 
 #[tauri::command(async)]
@@ -306,6 +353,31 @@ fn read_report(app: State<'_, App>, slug: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn run_proof(app: State<'_, App>, slug: String) -> Res {
+    app.run_proof(&slug)
+}
+
+#[tauri::command(async)]
+fn export_proof_page(app: State<'_, App>, slug: String) -> Res {
+    app.export_proof_page(&slug)
+}
+
+#[tauri::command(async)]
+fn act_post_proof_comment(app: State<'_, App>, envelope: Envelope, slug: String, pr_url: String) -> Value {
+    app.act_post_proof_comment(&envelope, &slug, &pr_url)
+}
+
+#[tauri::command(async)]
+fn evidence_approval(app: State<'_, App>, run_id: String) -> Res {
+    app.evidence_approval(&run_id)
+}
+
+#[tauri::command(async)]
+fn act_answer_evidence_approval(app: State<'_, App>, envelope: Envelope, run_id: String, sha256: String, approve: bool) -> Value {
+    app.act_answer_evidence_approval(&envelope, &run_id, &sha256, approve)
+}
+
+#[tauri::command(async)]
 fn verify_campaign(app: State<'_, App>, slug: String) -> Res {
     app.verify_campaign(&slug)
 }
@@ -410,7 +482,9 @@ fn term_open(
     let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
     // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+        if own.record {
+            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
+        }
     }
     Ok(term_value(&i))
 }
@@ -419,6 +493,25 @@ fn term_open(
 #[tauri::command(async)]
 fn setup_list(app: State<'_, App>) -> Res {
     app.setup_list()
+}
+
+/// The one-click plan for a catalog harness, or why it is "Install it yourself" (ADR-17 rule 3). Main window only: the
+/// app manifest guards it and only the main window's capability allows it.
+#[tauri::command(async)]
+fn setup_plan(app: State<'_, App>, id: String) -> Res {
+    app.setup_plan(&id)
+}
+
+/// The user's Install click on the plan whose hash is `hash`: a single-use consent token (ADR-17 rule 4). Main window only.
+#[tauri::command(async)]
+fn setup_consent(app: State<'_, App>, id: String, hash: String) -> Res {
+    app.setup_consent(&id, &hash)
+}
+
+/// Run the consented install; its output streams on `setup-<id>`. Main window only.
+#[tauri::command(async)]
+fn setup_run(app: State<'_, App>, id: String, token: String) -> Res {
+    app.setup_run(&id, &token)
 }
 
 /// A CLI's own sign-in in a user terminal tab. The UI names a catalog harness id, never a program; the core builds the
@@ -436,7 +529,9 @@ fn setup_sign_in(
     let cmd = app.setup_sign_in_command(&id)?;
     let i = terms.open_sign_in(&cmd, rows, cols, term_sink(on_event)).map_err(term_err)?;
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+        if own.record {
+            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
+        }
     }
     Ok(term_value(&i))
 }
@@ -485,7 +580,9 @@ fn term_list(terms: State<'_, Terminals>) -> Res {
 
 /// Shells recorded by an earlier session of the app, reconciled once at launch, and what the human did about them.
 struct Ownership {
-    ledger: Ledger,
+    ledger: std::sync::Arc<Ledger>,
+    /// False in a second instance: it writes nothing to the ledger.
+    record: bool,
     found: std::sync::Mutex<Vec<Found>>,
     home: String,
 }
@@ -639,6 +736,17 @@ fn set_run_limits(app: State<'_, App>, max_runs: u32) -> Res {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if is_mcp_run(&args) {
+        // Before Tauri and before the data dir: the run server is told its socket and creates nothing on disk.
+        let code = match mcp::run_stdio_run() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("vajra-desktop --mcp-run: {e}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     let data = match paths::data_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -658,8 +766,9 @@ fn main() {
         std::process::exit(code);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT).
-    vajra_desktop::userpath::init(&home);
+    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT), in the
+    // background so the window does not wait for it. The first reader of the PATH waits for the answer instead.
+    vajra_desktop::userpath::start(&home);
     let app = match App::open(&data, &home) {
         Ok(a) => a,
         Err(e) => {
@@ -670,16 +779,28 @@ fn main() {
     if let Some(l) = &app.log {
         let _ = l.log_cold_start(logging::process_start_time());
     }
-    // Only the app holding the instance locks ticks the control ledger and serves the Lead socket.
+    // Only the app holding the instance locks ticks the control ledger and serves the Lead socket (and the run leads'
+    // vajra-run calls on it).
     let _watcher = app.serve_control();
     let sub = app.bus.subscribe();
 
     // Crash reconciliation: shells an earlier session recorded are checked against the live process table now (pid and
     // start stamp, never a name). Nothing is signalled until the human asks.
-    let owned_ledger = Ledger::new(vajra_desktop::owned::ledger_path(&data));
+    // The App's ledger: one writer for shells, leads and workers alike.
+    let owned_ledger = app.owned_ledger();
+    let other_instance = app.other_instance();
     let built = tauri::Builder::default()
+        // The system folder picker for the repository field (D5). The capability grants only `dialog:allow-open`.
+        .plugin(tauri_plugin_dialog::init())
         .manage(app)
-        .manage(Ownership { found: std::sync::Mutex::new(owned_ledger.settle()), ledger: owned_ledger, home: home.display().to_string() })
+        // A second instance offers no shell for recovery (the first app's live terminals would look like a crash's) and
+        // records none, so it never writes the other app's ledger.
+        .manage(Ownership {
+            found: std::sync::Mutex::new(if other_instance { Vec::new() } else { owned_ledger.settle() }),
+            ledger: owned_ledger,
+            home: home.display().to_string(),
+            record: !other_instance,
+        })
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))
         .setup(move |a| {
             let handle = a.handle().clone();
@@ -699,12 +820,21 @@ fn main() {
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
+                // Nothing runs at rest: with no live run (and past `AFTER_RUN`), the loop waits on the bus. A line, the
+                // wake a new run sends, or the `IDLE_WAIT` housekeeping tick brings it back. Launch starts busy.
+                let mut pace = Pace::new(Instant::now());
+                let mut wait = vajra_desktop::desktop::LIVE_WAIT;
                 loop {
-                    let changed = collect_changes(&sub, Duration::from_secs(1));
+                    let changed = collect_changes(&sub, wait);
+                    let (busy, next) = pace.next(handle.state::<App>().active_run_count() > 0, Instant::now());
+                    wait = next;
                     // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
-                    handle.state::<App>().refresh_workers();
+                    if busy {
+                        handle.state::<App>().refresh_workers();
+                    }
                     // Finished workers that lose nothing are closed on their own (setting `auto_close_finished`). Git is
-                    // asked off this loop, so a slow repo never delays worker refreshes.
+                    // asked off this loop, so a slow repo never delays worker refreshes. Not gated on `busy`: at rest a
+                    // turn is an event or the `IDLE_WAIT` tick, so a worker that became safe later is still closed.
                     if handle.state::<App>().closeout_due() {
                         let h = handle.clone();
                         std::thread::spawn(move || {
@@ -723,7 +853,9 @@ fn main() {
                     #[cfg(target_os = "macos")]
                     {
                         let app = handle.state::<App>();
-                        app.reap_runs();
+                        if busy {
+                            app.reap_runs();
+                        }
                         nap.update(app.active_run_count());
                     }
                 }
@@ -749,6 +881,9 @@ fn main() {
             provider_accounts,
             setup_list,
             setup_sign_in,
+            setup_plan,
+            setup_consent,
+            setup_run,
             provider_key_saved,
             provider_key_save,
             provider_key_replace,
@@ -756,6 +891,11 @@ fn main() {
             provider_usage,
             verify_campaign,
             read_report,
+            run_proof,
+            export_proof_page,
+            act_post_proof_comment,
+            evidence_approval,
+            act_answer_evidence_approval,
             resume_targets,
             crew,
             tail,
@@ -807,7 +947,14 @@ fn main() {
             act_close_finished,
             worker_disk,
             install_dev_tools,
+            core_runs,
+            labs_get,
+            labs_set,
             act_worker_clean_up,
+            record_orphans,
+            run_log_since,
+            run_log_verify,
+            act_close_orphan,
             closeout_status,
             act_start_run,
             act_ask_lead,
@@ -846,10 +993,12 @@ fn main() {
             }
         }
         RunEvent::Exit => {
-            // Director-General asks, then core tickets (with their descendants), then every session: `App::quit`.
+            // The Director-General's asks, then every core run's lead, then core tickets (with their descendants), then
+            // every session: `App::quit`.
             handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
-            handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover
+            // A clean quit reaped every shell, so there is nothing to recover. A second instance leaves the ledger alone.
+            handle.state::<App>().clear_ledger_on_quit();
         }
         _ => {}
     });
@@ -866,5 +1015,8 @@ mod tests {
         assert!(is_mcp(&a(&["vajra-desktop", "-x", "--mcp"])));
         assert!(!is_mcp(&a(&["--mcp"])));
         assert!(!is_mcp(&a(&["vajra-desktop", "--mcpx"])));
+        assert!(is_mcp_run(&a(&["vajra-desktop", "--mcp-run"])));
+        assert!(!is_mcp_run(&a(&["vajra-desktop", "--mcp"])), "--mcp is the Lead chat server, never the run server");
+        assert!(!is_mcp(&a(&["vajra-desktop", "--mcp-run"])));
     }
 }

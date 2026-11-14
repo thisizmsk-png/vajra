@@ -218,6 +218,28 @@ export type CloseFinishedResult = { closed: { worker: string; label: string }[];
 export type WorkerDisk = { copies: number; bytes: number; partial?: boolean };
 export type CleanUpResult = { removed: string[]; disk: WorkerDisk };
 export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
+/** Every run label the core can answer. Views match on it exhaustively (`proofLabel` in strings.ts). */
+export type ProofLabel = "verified" | "verified_approved" | "evidence_unguarded" | "not_verified" | "rejected" | "abandoned" | "in_progress";
+export type RunProof = {
+  slug: string;
+  goal: string;
+  label: ProofLabel;
+  reason: string;
+  /** Only for `evidence_unguarded`: the risk text, and how to get plain Verified. */
+  why: string | null;
+  hint: string | null;
+  integrity: ReportIntegrity;
+  record_sha256: string | null;
+  record_note: string;
+  /** What the evidence check needs from the Mac (macOS 15 or later, for the system jq). */
+  requires: string;
+  /** The one capability check for exporting (proof on screen is always shown). */
+  export: boolean;
+  /** The PR comment, exactly as it would be posted. */
+  markdown: string;
+  /** A row's check hasn't finished; ask again (a finished sweep sends no `changed` event). */
+  pending?: boolean;
+};
 /** `vajra.project_state/1`: the one revisioned projection every surface reads. */
 export type ProjectState =
   | { schema: "vajra.project_state/1"; project_id: string; rev: number; unchanged: true }
@@ -265,6 +287,13 @@ export const api = {
   readReport: (slug: string) => call<Report>("read_report", { slug }),
   /** Run the signature check now (not the cached badge). */
   verifyCampaign: (slug: string) => call<Verified>("verify_campaign", { slug }),
+  /** The run's proof (6i): its label, computed by the core from the signed record and its own trust record. */
+  runProof: (slug: string) => call<RunProof>("run_proof", { slug }),
+  /** Write the self-contained proof page under the app data dir; answers its path. */
+  exportProofPage: (slug: string) => call<{ slug: string; path: string; label: ProofLabel }>("export_proof_page", { slug }),
+  /** Post the proof as a PR comment: a human click, confirmed per run. The core rebuilds the text it posts. */
+  actPostProofComment: (envelope: Envelope, slug: string, prUrl: string) =>
+    call<ActResult<{ repo: string; pr: number; url?: string }>>("act_post_proof_comment", { envelope, slug, prUrl }),
   /** One campaign's badge (#28): `ok`, `failed` or `unknown`. The core runs at most four verifies at once. */
   campaignIntegrity: (slug: string, refresh = false) => call<{ slug: string; integrity: "ok" | "failed" | "unknown" }>("campaign_integrity", { slug, refresh }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
@@ -279,6 +308,12 @@ export const api = {
   workerDisk: () => call<WorkerDisk>("worker_disk"),
   /** Opens Apple's developer tools installer; the core refuses it once git is installed. */
   installDevTools: () => call<{ started: boolean }>("install_dev_tools"),
+  /** Labs (developer builds only): worker picking for one project before it ships. `available` is false in a release build. */
+  /** Every ended core run, newest first, with why each can't be resumed (null when it can). */
+  coreRuns: () =>
+    call<{ runs: { run: string; project: string | null; status: string | null; reason: string | null; resumable: boolean; why: string | null }[] }>("core_runs"),
+  labsGet: (project: string) => call<{ available: boolean; on: boolean }>("labs_get", { project }),
+  labsSet: (project: string, on: boolean) => call<{ available: boolean; on: boolean }>("labs_set", { project, on }),
   actWorkerCleanUp: (envelope: Envelope) => call<ActResult<CleanUpResult>>("act_worker_clean_up", { envelope }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
   /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read (REQUIRED: the core refuses a reject without it) as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */
@@ -324,6 +359,12 @@ export const api = {
   setupSignIn: (id: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("setup_sign_in", { id, rows, cols }, onMsg),
   /** `vajra.harness_setup/1`: Settings > Providers > Set up. Parse with `parseSetupList`. */
   setupList: () => call<unknown>("setup_list"),
+  /** `vajra.setup_plan/1`: the one-click plan for a catalog harness. Parse with `parseSetupPlan`. Installs nothing. */
+  setupPlan: (id: string) => call<unknown>("setup_plan", { id }),
+  /** The user's Install click on the plan with `hash`: a single-use consent token. Keep it in a local only. */
+  setupConsent: (id: string, hash: string) => call<{ token: string }>("setup_consent", { id, hash }),
+  /** Run the consented install; output streams on `setup-<id>`. Parse with `parseSetupRun`. */
+  setupRun: (id: string, token: string) => call<unknown>("setup_run", { id, token }),
   recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string | { survived: { remaining: number } } }[] }>("recover_orphans", { pids }),
   diagnosticsPreview: () => call<{ text: string }>("diagnostics_preview"),
   lifecycle: () => call<Lifecycle>("lifecycle"),
@@ -379,6 +420,10 @@ export const api = {
   /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
   /** The project that owns a folder by the core's identity rules (symlink, linked worktree), else `p_unsorted`. Read only. */
   projectForFolder: (path: string) => call<{ project_id: string }>("project_for_folder", { path }),
+  /** The system folder picker (D5): one folder's absolute path, or null when the person cancels. The dialog plugin's
+   *  `open` is the only plugin command the main window is granted. */
+  chooseFolder: (title: string, defaultPath?: string) =>
+    call<string | null>("plugin:dialog|open", { options: { directory: true, multiple: false, title, ...(defaultPath ? { defaultPath } : {}) } }),
   projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
   /** Git repositories on this Mac that are not projects yet, from the common code folders and any `extra` absolute folders. Read only; `truncated` means the scan stopped early. */
   projectDiscover: (extra: string[] = []) => call<{ found: { root: string; name: string; worktrees: number }[]; truncated: boolean }>("project_discover", { extra }),
@@ -402,4 +447,69 @@ export const api = {
 /** `inbox_new`: something new started waiting; carries ids, a kind and a count, never item text. Coalesced over 5 s in the core. */
 export type InboxNew = { project_id: string; kind: string; count: number };
 export const onInboxNew = (cb: (payload: InboxNew) => void) => transport.on("inbox_new", (p) => cb(p as InboxNew));
-export const onChanged = (cb: (payload: unknown) => void) => transport.on("changed", cb);
+// ---- a core run's hash-chained log (W2) -----------------------------------------------------------------------------
+
+/** One log entry as the core stores it. `kind` and `body` are typed per kind in the core; the UI reads them as data. */
+export type RunLogEntry = { v: number; seq: number; prev: string; at_ms: number; source: unknown; kind: string; body?: unknown; hash: string };
+export type RunLogBreak = { seq: number; why: "edited" | "dropped" | "reordered" | "unlinked" | "wrong_run" | "format" | "unanchored" };
+export type RunLogPage = { run_id: string; entries: RunLogEntry[]; head_seq: number; broken: RunLogBreak | null; io_error: string | null };
+/** `run_log`: the run's log is written up to `seq`, and `entries` are the written ones after `after` (at most 64). Critical
+ *  entries are told at once, the rest at most every 100 ms. A view holding exactly `after` applies them with no call. */
+export type RunLogNotice = { run_id: string; seq: number; after: number; entries: RunLogEntry[]; io_error: string | null; broken: RunLogBreak | null };
+export const runLogSince = (runId: string, afterSeq: number, limit?: number) => call<RunLogPage>("run_log_since", { runId, afterSeq, limit });
+/** `signed`: every anchor is the core's write and this session sent it. `unconfirmed`: the app restarted since, so read
+ *  it as "hash-chained, anchors not confirmed by this session". Show `caveat` beside it: until the worker sandboxes land,
+ *  an agent on this Mac could rewrite the log with its anchors. Never call it tamper-proof. */
+export type RunLogStanding = "signed" | "unconfirmed" | "not_verified";
+export type RunLogVerify = {
+  run_id: string; head_seq: number; standing: RunLogStanding; verified: boolean; caveat: string;
+  chain: { ok_to: number; broken: RunLogBreak | null }; broken: RunLogBreak | null;
+  signed: { signed_to: number; unsigned_tail: number; mismatch: { seq: number; hash: string } | null } | null; record_error: string | null;
+  /** A write or sync failed (`io_error`), so `skipped_anchors` anchors weren't sent: the run didn't finish logging cleanly. */
+  io_error: string | null; skipped_anchors: number;
+};
+export const runLogVerify = (runId: string) => call<RunLogVerify>("run_log_verify", { runId });
+export const onRunLog = (cb: (payload: RunLogNotice) => void) => transport.on("run_log", (p) => cb(p as RunLogNotice));
+
+/** Every `changed` event, as the core sent it, hidden window or not. Only for code that defers on its own (`onChangedPaced`). */
+export const onChangedRaw = (cb: (payload: unknown) => void) => transport.on("changed", cb);
+
+type ChangedPayload = { streams?: unknown; snapshot_needed?: unknown; projects?: unknown; [k: string]: unknown };
+const isObj = (p: unknown): p is ChangedPayload => typeof p === "object" && p !== null && !Array.isArray(p);
+/** Two `changed` payloads as one that says at least as much: streams joined, a snapshot if either asked, each project at
+ * its newest revision. A payload that names no list means "anything may have moved", and so does the merge. */
+export function mergeChanged(a: unknown, b: unknown): unknown {
+  if (!isObj(a) || !isObj(b)) return null;
+  const out: ChangedPayload = { ...a, ...b };
+  if (Array.isArray(a.streams) && Array.isArray(b.streams)) out.streams = [...new Set([...a.streams, ...b.streams])];
+  else delete out.streams;
+  if (a.snapshot_needed || b.snapshot_needed) out.snapshot_needed = true;
+  if (Array.isArray(a.projects) && Array.isArray(b.projects)) {
+    const by = new Map<unknown, { project_id?: unknown; rev?: unknown }>();
+    for (const p of [...a.projects, ...b.projects] as { project_id?: unknown; rev?: unknown }[]) {
+      const had = by.get(p?.project_id);
+      if (!had || (typeof p?.rev === "number" && typeof had.rev === "number" && p.rev > had.rev)) by.set(p?.project_id, p);
+    }
+    out.projects = [...by.values()];
+  } else delete out.projects;
+  return out;
+}
+
+/** `changed`, held back while the window is hidden: nothing is read or drawn then. On showing, a listener that missed
+ * events gets one, merged (`mergeChanged`), so it catches up once. */
+export function onChanged(cb: (payload: unknown) => void): () => void {
+  let held: { p: unknown } | undefined;
+  const off = transport.on("changed", (p) => {
+    if (typeof document !== "undefined" && document.hidden) held = held ? { p: mergeChanged(held.p, p) } : { p };
+    else cb(p);
+  });
+  if (typeof document === "undefined") return off;
+  const onVisibility = () => {
+    if (document.hidden || !held) return;
+    const { p } = held;
+    held = undefined;
+    cb(p);
+  };
+  document.addEventListener("visibilitychange", onVisibility);
+  return () => { off(); document.removeEventListener("visibilitychange", onVisibility); };
+}

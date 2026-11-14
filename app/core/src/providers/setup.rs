@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use super::catalog::{self, Harness};
 use super::detect::{is_tested, version_of, Probe};
+use super::install::marks::Marks;
 
 pub const SETUP_SCHEMA: &str = "vajra.harness_setup/1";
 
@@ -50,6 +51,8 @@ pub struct SetupRow {
     pub commands: Vec<Command>,
     pub docs_url: String,
     pub can_sign_in: bool,
+    /// A verified catalog source this Mac may install or repair in one click (ADR-17 17b): `setup_plan` shows how.
+    pub one_click: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,11 +84,20 @@ fn found(h: &Harness, p: &dyn Probe) -> Found {
     }
 }
 
+/// The binary Set up finds for `h` and the version it reports (None: broken), for a Broken mark. None when missing.
+pub(crate) fn current(h: &Harness, p: &dyn Probe) -> Option<(PathBuf, Option<String>)> {
+    match found(h, p) {
+        Found::Missing => None,
+        Found::Broken(path) => Some((path, None)),
+        Found::Ok(path, v, _) => Some((path, Some(v))),
+    }
+}
+
 fn commands(h: &Harness) -> Vec<Command> {
     h.methods.iter().map(|m| Command { tool: m.tool().unwrap_or("script").into(), command: m.command().into() }).collect()
 }
 
-fn row(h: &Harness, p: &dyn Probe) -> SetupRow {
+fn row(h: &Harness, p: &dyn Probe, marks: &Marks) -> SetupRow {
     let base = |state, version: Option<String>, path: Option<&Path>, reason: Option<&str>, commands: Vec<Command>| SetupRow {
         id: h.id.clone(),
         name: h.name.clone(),
@@ -96,12 +108,17 @@ fn row(h: &Harness, p: &dyn Probe) -> SetupRow {
         commands,
         docs_url: h.docs_url.clone(),
         can_sign_in: matches!(state, State::Installed | State::Unsupported),
+        one_click: h.verified() && matches!(state, State::Manual | State::Broken),
     };
     match found(h, p) {
-        // Every entry is "Install it yourself" in this step; an unverified source would be so even with one-click.
-        Found::Missing => base(State::Manual, None, None, Some("source_not_verified"), commands(h)),
+        // An unverified source is always "Install it yourself"; a verified one also offers one click (`one_click`).
+        Found::Missing => base(State::Manual, None, None, Some(if h.verified() { "not_installed" } else { "source_not_verified" }), commands(h)),
         Found::Broken(path) => base(State::Broken, None, Some(&path), Some("version_failed"), commands(h)),
         Found::Ok(path, v, mm) => {
+            // A failed closure check or rollback holds until a passing check or a different binary or version (condition 1).
+            if let Some(reason) = marks.active(&h.id, &path, Some(&v)) {
+                return base(State::Broken, Some(v), Some(&path), Some(&reason), commands(h));
+            }
             // Runnable only with an adapter tested on this version (ADR-17 rule 9), the same range launch checks.
             let state = if h.adapter.as_deref().is_some_and(|a| is_tested(a, mm)) { State::Installed } else { State::Unsupported };
             base(state, Some(v), Some(&path), None, Vec::new())
@@ -112,10 +129,15 @@ fn row(h: &Harness, p: &dyn Probe) -> SetupRow {
 /// One row per catalog entry, plus the engine-scripts row (`engine_installed` from the caller's preflight read). Always
 /// answers; a catalog that does not parse gives no rows.
 pub fn list(p: &dyn Probe, engine_installed: bool) -> SetupList {
+    list_marked(p, engine_installed, &Marks::none())
+}
+
+/// `list`, with the Broken marks of a failed one-click install (`install::marks`).
+pub fn list_marked(p: &dyn Probe, engine_installed: bool, marks: &Marks) -> SetupList {
     let cat = catalog::catalog().ok();
     SetupList {
         schema: SETUP_SCHEMA.into(),
-        rows: cat.map(|c| c.harnesses.iter().map(|h| row(h, p)).collect()).unwrap_or_default(),
+        rows: cat.map(|c| c.harnesses.iter().map(|h| row(h, p, marks)).collect()).unwrap_or_default(),
         engine: EngineRow { installed: engine_installed, command: cat.map(|c| c.engine_scripts.manual_command.clone()).unwrap_or_default() },
     }
 }
@@ -181,9 +203,9 @@ impl SignInCommand {
 }
 
 /// `mkdtemp` under the temp dir: a new 0700 folder no other sign-in shares.
-fn private_dir() -> Result<PathBuf, SetupError> {
+pub(crate) fn private_dir(tag: &str) -> Result<PathBuf, SetupError> {
     use std::os::unix::ffi::OsStringExt;
-    let tmpl = std::env::temp_dir().join("vajra-signin-XXXXXXXX");
+    let tmpl = std::env::temp_dir().join(format!("{tag}-XXXXXXXX"));
     let mut bytes = std::ffi::CString::new(tmpl.into_os_string().into_vec()).map_err(|e| SetupError::Io(e.to_string()))?.into_bytes_with_nul();
     // SAFETY: a writable NUL-terminated template that outlives the call.
     let p = unsafe { libc::mkdtemp(bytes.as_mut_ptr().cast()) };
@@ -205,7 +227,7 @@ pub fn sign_in(id: &str, p: &dyn Probe) -> Result<SignInCommand, SetupError> {
     if !path.is_absolute() || !real.is_file() {
         return Err(SetupError::NotInstalled);
     }
-    Ok(SignInCommand { id: h.id.clone(), name: h.name.clone(), program: path, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir()? })
+    Ok(SignInCommand { id: h.id.clone(), name: h.name.clone(), program: path, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir("vajra-signin")? })
 }
 
 #[cfg(test)]

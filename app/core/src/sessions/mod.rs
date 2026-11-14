@@ -16,7 +16,7 @@ pub mod argv;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -26,6 +26,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::bus::{self, Bus};
 use crate::crew::redact::Redactor;
+use crate::providers::install::env::SetupEnv;
 use crate::logging::Logger;
 use crate::providers::errors::{self, Ident, ProviderError};
 
@@ -62,6 +63,8 @@ pub enum SessionError {
     ShuttingDown,
     Spawn(String),
     Io(String),
+    /// The ownership ledger could not record the process: it was killed, and the spawn refused.
+    Ledger(String),
 }
 
 impl std::fmt::Display for SessionError {
@@ -80,6 +83,7 @@ impl std::fmt::Display for SessionError {
             Self::ShuttingDown => f.write_str("app is quitting"),
             Self::Spawn(e) => write!(f, "spawn failed: {e}"),
             Self::Io(e) => write!(f, "pty i/o failed: {e}"),
+            Self::Ledger(e) => write!(f, "the process could not be recorded, so it was not started: {e}"),
         }
     }
 }
@@ -122,12 +126,17 @@ pub struct SpawnSpec {
     /// with the C5 redactor, before a line reaches the bus, spill or IPC.
     pub redact: Redactor,
     /// Variables added to `ENV_ALLOW` for this launch: only names in `EXTRA_ENV_ALLOW` (a Vajra-owned `CODEX_HOME` or
-    /// `CLAUDE_CONFIG_DIR`, and the per-ticket `TMPDIR`), never a key. Any other name refuses the spawn.
+    /// `CLAUDE_CONFIG_DIR`, the per-ticket `TMPDIR` and a Claude worker's build caches under it), never a key. Any
+    /// other name refuses the spawn.
     pub extra_env: Vec<(&'static str, OsString)>,
 }
 
-/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8).
-pub const EXTRA_ENV_ALLOW: [&str; 3] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"];
+/// The bus stream prefix reserved for one-click installs (`Supervisor::spawn_setup`).
+pub const SETUP_STREAM: &str = "setup-";
+
+/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8): a Claude run lead's pinned `MCP_TOOL_TIMEOUT` (16.5, 6d2),
+/// and a Claude worker's build caches, `adapter::profiles::CLAUDE_CACHE_ENV` (the last three).
+pub const EXTRA_ENV_ALLOW: [&str; 7] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "MCP_TOOL_TIMEOUT", "GOCACHE", "GOTMPDIR", "npm_config_cache"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitInfo {
@@ -276,6 +285,10 @@ pub struct Supervisor {
     closing: AtomicBool,
     /// Where a worker's failed exit is reported (H9). Unset: nothing is reported.
     errors: Mutex<Option<ErrorSink>>,
+    /// The ownership ledger every spawn is recorded in (6d2d); none in tests that do not set one.
+    owned: Mutex<Option<Arc<crate::owned::Ledger>>>,
+    /// Set when this app may start no agents at all (another instance holds the data folder): why.
+    refuse_all: Mutex<Option<String>>,
 }
 
 /// Receives the `provider_error` event of a worker that died. The app installs one that tells the lead and the DG.
@@ -285,6 +298,16 @@ pub type ErrorSink = Arc<dyn Fn(&ProviderError) + Send + Sync>;
 struct ExitHooks {
     log: Option<Arc<Logger>>,
     report: Option<(ProviderTag, ErrorSink)>,
+    /// The ownership record to forget once the process is reaped.
+    owned: Option<(Arc<crate::owned::Ledger>, u32, u64)>,
+}
+
+/// What a spawned process is, for its ownership record (6d2d): its kind, and its run and ticket.
+#[derive(Debug, Clone, Default)]
+pub struct OwnedAs {
+    pub kind: Option<crate::owned::Kind>,
+    pub run: Option<String>,
+    pub ticket: Option<String>,
 }
 
 /// Who a spawned worker is, for its `provider_error` event. Owned by the session for its whole life: nothing here can be
@@ -309,7 +332,20 @@ impl Supervisor {
             sessions: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
             errors: Mutex::new(None),
+            owned: Mutex::new(None),
+            refuse_all: Mutex::new(None),
         }
+    }
+
+    /// From now on every spawn is refused with `why`: this app must start no agent (6d2d: another instance owns the
+    /// data folder, its ledger and its crash reconcile).
+    pub fn refuse_spawns(&self, why: &str) {
+        *lock(&self.refuse_all) = Some(why.to_string());
+    }
+
+    /// The ownership ledger every spawn is recorded in from now on (6d2d). Without one (tests), nothing is recorded.
+    pub fn set_ledger(&self, ledger: Arc<crate::owned::Ledger>) {
+        *lock(&self.owned) = Some(ledger);
     }
 
     pub fn set_error_sink(&self, sink: ErrorSink) {
@@ -345,6 +381,45 @@ impl Supervisor {
 
     /// `spawn` for a provider worker: a failed exit is reported as a `provider_error` against `tag`.
     pub fn spawn_tagged(&self, id: &str, spec: SpawnSpec, tag: Option<ProviderTag>) -> Result<(), SessionError> {
+        self.spawn_owned(id, spec, tag, OwnedAs::default())
+    }
+
+    /// `spawn_tagged`, recording the process in the ownership ledger as `who` (a lead unless it says otherwise, with
+    /// the session id as its run) before this returns, and forgetting it when it is reaped. A record that cannot be
+    /// written kills the process and refuses the spawn: no lead or worker runs that a crash would lose track of.
+    pub fn spawn_owned(&self, id: &str, spec: SpawnSpec, tag: Option<ProviderTag>, who: OwnedAs) -> Result<(), SessionError> {
+        if let Some(why) = lock(&self.refuse_all).clone() {
+            return Err(SessionError::Ledger(why));
+        }
+        if id.starts_with(SETUP_STREAM) {
+            return Err(SessionError::InvalidId);
+        }
+        if !extra_env_ok(&spec.extra_env) {
+            return Err(SessionError::BadEnv);
+        }
+        let mut env = user_env();
+        env.extend(spec.extra_env.iter().cloned());
+        self.start(id, &spec, &env, tag, Some(who))
+    }
+
+    /// A one-click install (ADR-17, bhishma condition 8) on bus stream `setup-<id>`: exactly the Setup env profile,
+    /// never `user_env`, and the profile's proxy value and login are redacted from every line. Only `setup-` streams.
+    pub fn spawn_setup(&self, id: &str, argv: Vec<String>, cwd: &Path, env: &SetupEnv, redact: Redactor) -> Result<(), SessionError> {
+        if !id.starts_with(SETUP_STREAM) {
+            return Err(SessionError::InvalidId);
+        }
+        let mut r = crate::providers::install::env::redactor(env);
+        r.absorb(&redact);
+        let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: 24, cols: 100, redact: r, extra_env: Vec::new() };
+        // Not an agent: no ownership record and no agent mark, so its env is exactly the Setup profile and the crash
+        // reconcile never kills an install midway.
+        self.start(id, &spec, env.vars(), None, None)
+    }
+
+    /// `who`: an agent, recorded in the ownership ledger and given its mark; `None` for a one-click install.
+    fn start(
+        &self, id: &str, spec: &SpawnSpec, env: &[(&'static str, OsString)], tag: Option<ProviderTag>, who: Option<OwnedAs>,
+    ) -> Result<(), SessionError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(SessionError::ShuttingDown);
         }
@@ -357,15 +432,23 @@ impl Supervisor {
         if spec.argv.iter().any(|a| a.contains('\0')) {
             return Err(SessionError::NulInArgv);
         }
-        if !extra_env_ok(&spec.extra_env) {
-            return Err(SessionError::BadEnv);
-        }
         if !spec.cwd.is_dir() {
             return Err(SessionError::BadCwd);
         }
         if spec.rows == 0 || spec.cols == 0 {
             return Err(SessionError::InvalidSize);
         }
+        // A one-click install (`who` None) is not an agent: never recorded, never marked.
+        let (ledger, who) = match who {
+            Some(w) => (lock(&self.owned).clone(), w),
+            None => (None, OwnedAs::default()),
+        };
+        // The agent's mark (`owned::Owner::mark`): only a process started here carries it, so the crash reconcile can
+        // prove a record's process is ours from the process itself.
+        let mark = match &ledger {
+            Some(_) => Some(crate::control::nonce::random_hex(16).map_err(|e| SessionError::Ledger(format!("its mark could not be made: {e}")))?),
+            None => None,
+        };
         let mut sessions = lock(&self.sessions);
         if let Some(old) = sessions.get(id) {
             if lock(&old.exit).is_none() {
@@ -387,11 +470,11 @@ impl Supervisor {
         // would start a shell, and we never call it.
         let mut cmd = CommandBuilder::from_argv(spec.argv.iter().map(OsString::from).collect());
         cmd.env_clear();
-        for (k, v) in user_env() {
+        for (k, v) in env {
             cmd.env(k, v);
         }
-        for (k, v) in &spec.extra_env {
-            cmd.env(k, v);
+        if let Some(m) = &mark {
+            cmd.env(crate::owned::AGENT_MARK, m);
         }
         cmd.cwd(&spec.cwd);
 
@@ -402,6 +485,43 @@ impl Supervisor {
         // Drop our slave fd so the reader sees EOF when the child is gone.
         drop(pair.slave);
         let pid = child.process_id().unwrap_or(0);
+        let owned = match ledger {
+            Some(l) => {
+                let refuse = |mut child: Box<dyn Child + Send + Sync>, e: String| {
+                    // The whole group, in case it already forked. SAFETY: kill has no memory preconditions; the pid
+                    // is our unreaped child's, so it is not reused yet.
+                    if pid > 1 {
+                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(SessionError::Ledger(e))
+                };
+                let Some(stamp) = crate::procid::start_stamp(pid).filter(|_| pid > 1) else {
+                    return refuse(child, "its start time could not be read".into());
+                };
+                let o = crate::owned::Owner {
+                    pid,
+                    stamp,
+                    cwd: spec.cwd.clone(),
+                    kind: who.kind.unwrap_or(crate::owned::Kind::Lead),
+                    run: Some(who.run.unwrap_or_else(|| id.to_string())),
+                    ticket: who.ticket,
+                    tries: 0,
+                    mark,
+                };
+                if let Err(e) = l.record(o) {
+                    return refuse(child, e.to_string());
+                }
+                Some((l, pid, stamp))
+            }
+            None => None,
+        };
+        let forget = |o: &Option<(Arc<crate::owned::Ledger>, u32, u64)>| {
+            if let Some((l, p, s)) = o {
+                let _ = l.forget(*p, *s);
+            }
+        };
         let reader = pair
             .master
             .try_clone_reader()
@@ -416,6 +536,7 @@ impl Supervisor {
                 let mut child = child;
                 let _ = child.kill();
                 let _ = child.wait();
+                forget(&owned);
                 return Err(e);
             }
         };
@@ -438,10 +559,17 @@ impl Supervisor {
             let stream = id.to_string();
             let redact = spec.redact.clone();
             let report = tag.and_then(|t| lock(&self.errors).clone().map(|sink| (t, sink)));
-            std::thread::Builder::new()
-                .name(format!("pty-{id}"))
-                .spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, ExitHooks { log, report }))
-                .map_err(|e| SessionError::Io(e.to_string()))?
+            let hooks = ExitHooks { log, report, owned: owned.clone() };
+            match std::thread::Builder::new().name(format!("pty-{id}")).spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, hooks)) {
+                Ok(h) => h,
+                Err(e) => {
+                    // The child moved into the closure that never ran: end its group by its leader's pid.
+                    // SAFETY: kill has no memory preconditions; the pid is our unreaped child's.
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    forget(&owned);
+                    return Err(SessionError::Io(e.to_string()));
+                }
+            }
         };
         *lock(&session.reader) = Some(handle);
         sessions.insert(id.to_string(), session);
@@ -640,7 +768,7 @@ fn read_loop(
     session: &Session,
     exit: ExitHooks,
 ) {
-    let ExitHooks { log, report } = exit;
+    let ExitHooks { log, report, owned } = exit;
     let log = log.as_deref();
     let mut tail: VecDeque<String> = VecDeque::with_capacity(errors::TAIL_LINES);
     let mut pending: Vec<u8> = Vec::new();
@@ -691,6 +819,10 @@ fn read_loop(
                 let failed = (info.code != 0 || info.signal.is_some()) && !session.stop_asked.load(Ordering::SeqCst);
                 let (code, signal) = (info.code, info.signal.clone());
                 *lock(&session.tail) = tail.iter().cloned().collect();
+                // Reaped: the pid is free for reuse from here on, so its record goes now.
+                if let Some((l, p, s)) = &owned {
+                    let _ = l.forget(*p, *s);
+                }
                 *exit = Some(info);
                 session.exited.notify_all();
                 drop(exit);

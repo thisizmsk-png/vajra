@@ -69,6 +69,14 @@ impl Pinned {
         Ok(me)
     }
 
+    /// Is there an entry `name` in this folder (of any type, a link counted as itself, never followed)?
+    pub fn exists(&self, name: &str) -> bool {
+        let Ok(n) = cstr(name) else { return false };
+        // SAFETY: valid descriptor and NUL-terminated name; `st` is written by the call before it is read.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        unsafe { libc::fstatat(self.0.as_raw_fd(), n.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) == 0 }
+    }
+
     /// Entry names (UTF-8, no `.` or `..`), read from the held descriptor.
     pub fn names(&self) -> io::Result<Vec<String>> {
         crate::control::fsx::DirHandle::from_file(File::from(self.0.try_clone()?)).names()
@@ -84,6 +92,26 @@ impl Pinned {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
         }
         Ok(f)
+    }
+
+    /// Like `read`, and the file must have exactly one link (checked on the open file): a hard link would let a name
+    /// here reach a file kept somewhere else.
+    pub fn read_single_link(&self, name: &str, cap: u64) -> io::Result<Vec<u8>> {
+        use std::os::unix::fs::MetadataExt;
+        let f = self.openat(name, libc::O_RDONLY, 0)?;
+        let m = f.metadata()?;
+        if m.nlink() != 1 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "file has more than one link"));
+        }
+        if m.len() > cap {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
+        }
+        let mut buf = Vec::new();
+        f.take(cap + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > cap {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
+        }
+        Ok(buf)
     }
 
     /// The whole file, which must be at most `cap` bytes.

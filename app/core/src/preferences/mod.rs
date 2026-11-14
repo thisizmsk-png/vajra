@@ -159,6 +159,39 @@ impl Default for Shortcuts {
         }
     }
 }
+/// When the app pings you about something new in the Needs-you queue (the attention budget). It only decides whether a
+/// notice is shown now, later or not at all: it cannot start, approve or dismiss anything, and every item stays in the
+/// queue whatever it says. Global only: one person, one budget across every project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ping {
+    /// At most this many pings in any hour (1..=30); the rest wait and leave as one.
+    pub per_hour: u8,
+    /// Arrivals this close together are told as one ping (0..=10 minutes; 0 pings at once).
+    pub batch_minutes: u8,
+    /// Plans to approve and runs the Director-General proposes.
+    pub decisions: bool,
+    /// Questions a worker asks.
+    pub questions: bool,
+    /// Tasks that are blocked or failed a check the worker could not fix.
+    pub blocked: bool,
+}
+impl Default for Ping {
+    fn default() -> Self {
+        Self {
+            per_hour: 6,
+            batch_minutes: 2,
+            decisions: true,
+            questions: true,
+            blocked: true,
+        }
+    }
+}
+impl Ping {
+    fn valid(&self) -> bool {
+        (1..=30).contains(&self.per_hour) && self.batch_minutes <= 10
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Preferences {
@@ -177,6 +210,8 @@ pub struct Preferences {
     /// Close a finished worker on its own when nothing would be lost (clean worktree, nothing unpushed).
     pub auto_close_finished: bool,
     pub shortcuts: Shortcuts,
+    /// The ping rule; a file written before it existed reads as the default.
+    pub ping: Ping,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -193,6 +228,7 @@ impl Default for Preferences {
             rounds: 2,
             auto_close_finished: true,
             shortcuts: Shortcuts::default(),
+            ping: Ping::default(),
         }
     }
 }
@@ -212,10 +248,12 @@ pub struct Patch {
     pub rounds: Option<u8>,
     pub auto_close_finished: Option<bool>,
     pub shortcuts: Option<Shortcuts>,
+    /// Global only: a project override of it is refused (`global_only`).
+    pub ping: Option<Ping>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inherit: Vec<String>,
 }
-const FIELDS: [&str; 12] = [
+const FIELDS: [&str; 13] = [
     "theme",
     "editor",
     "shell",
@@ -228,6 +266,7 @@ const FIELDS: [&str; 12] = [
     "rounds",
     "auto_close_finished",
     "shortcuts",
+    "ping",
 ];
 #[derive(Debug, Clone, Copy)]
 pub struct Error(&'static str);
@@ -262,6 +301,7 @@ impl Preferences {
         }
         if !(1..=16).contains(&self.workers)
             || !(1..=3).contains(&self.rounds)
+            || !self.ping.valid()
             || self.model.len() > 80
             || !self
                 .model
@@ -312,6 +352,9 @@ impl Preferences {
         }
         if let Some(v) = &p.shortcuts {
             self.shortcuts = v.clone();
+        }
+        if let Some(v) = &p.ping {
+            self.ping = v.clone();
         }
     }
 }
@@ -391,7 +434,7 @@ impl Document {
         }
         self.global.validate()?;
         for (id, p) in &self.overrides {
-            if !valid_project_id(id) || !p.inherit.is_empty() {
+            if !valid_project_id(id) || !p.inherit.is_empty() || p.ping.is_some() {
                 return Err(bad());
             }
             let mut effective = self.global.clone();
@@ -418,7 +461,7 @@ impl Store {
     pub fn read(&self, project: Option<&str>) -> Result<View, Error> {
         Self::scope(project)?;
         let dir = self.directory()?;
-        lock_file(&dir, false)?;
+        let _held = lock_file(&dir, false)?;
         Ok(Self::load(&dir)?.view(project))
     }
     pub fn update(
@@ -429,12 +472,16 @@ impl Store {
         reset: bool,
     ) -> Result<View, Error> {
         Self::scope(project)?;
+        // One attention budget for the person, not one per project.
+        if project.is_some() && (patch.ping.is_some() || patch.inherit.iter().any(|f| f == "ping")) {
+            return Err(Error("global_only"));
+        }
         // Only the roles this write brings are checked, so an old key already on disk never blocks an unrelated write.
         if let Some(a) = &patch.agents {
             a.check_role_keys()?;
         }
         let dir = self.directory()?;
-        lock_file(&dir, true)?;
+        let _held = lock_file(&dir, true)?;
         let mut doc = Self::load(&dir)?;
         if doc.rev != expect_rev {
             return Err(Error("revision_conflict"));
@@ -589,7 +636,19 @@ impl Store {
         dir.sync_all().map_err(|_| Error("outcome_unknown"))
     }
 }
-fn lock_file(dir: &File, exclusive: bool) -> Result<(), Error> {
+/// A held preferences lock, released by `LOCK_UN` when dropped. Closing our descriptor is not enough: a flock belongs
+/// to the open file, and a child the app forks meanwhile (git, a worker, the Lead) holds a copy of the descriptor
+/// until it execs, so the lock would outlive the call and the next one would see `preferences_busy`. `LOCK_UN`
+/// releases it for every copy at once.
+#[must_use]
+struct Held<'a>(&'a File);
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor is borrowed for the guard's whole life; LOCK_UN never blocks.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+fn lock_file(dir: &File, exclusive: bool) -> Result<Held<'_>, Error> {
     // SAFETY: descriptor stays alive until the operation finishes; LOCK_NB prevents an unbounded UI wait.
     if unsafe {
         libc::flock(
@@ -602,7 +661,7 @@ fn lock_file(dir: &File, exclusive: bool) -> Result<(), Error> {
         )
     } == 0
     {
-        Ok(())
+        Ok(Held(dir))
     } else {
         Err(Error("preferences_busy"))
     }

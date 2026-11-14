@@ -98,10 +98,15 @@ pub(super) struct Active {
 
 /// Everything the Lead needs that is not the run itself.
 pub(super) struct LeadState {
-    /// The absolute claude binary, resolved once at startup. Never a PATH lookup at ask time.
+    /// The absolute claude binary, resolved once, at first use (`bin()`): the app does not wait for the user PATH to
+    /// open its window. Never a PATH lookup at ask time after that.
     bin: Mutex<Option<PathBuf>>,
-    /// The environment the Lead (and the self-test) runs with: `HOME`, `PATH`, `LANG`, `TERM`, `USER`, `SHELL`.
+    bin_once: std::sync::Once,
+    /// The environment the Lead (and the self-test) runs with: `HOME`, `PATH`, `LANG`, `TERM`, `USER`, `SHELL`. Built
+    /// once, at first use (`env()`), for the same reason.
     env: Mutex<Vec<(&'static str, OsString)>>,
+    env_once: std::sync::Once,
+    home: PathBuf,
     /// The running ask per project id. Taking the entry is the "one ask in flight per Director-General" lock, and the
     /// map's size is the app-wide turn count (`orchestrator::MAX_TURNS`).
     pub(super) active: Arc<Mutex<HashMap<String, Active>>>,
@@ -121,10 +126,12 @@ pub(super) struct LeadState {
 
 impl LeadState {
     pub(super) fn new(home: &Path) -> Self {
-        let path_dirs = crate::vajra::preflight::path_dirs();
         Self {
-            bin: Mutex::new(resolve_claude(home, &path_dirs)),
-            env: Mutex::new(user_env()),
+            bin: Mutex::new(None),
+            bin_once: std::sync::Once::new(),
+            env: Mutex::new(Vec::new()),
+            env_once: std::sync::Once::new(),
+            home: home.to_path_buf(),
             active: Arc::new(Mutex::new(HashMap::new())),
             proven: Mutex::new(HashSet::new()),
             closing: AtomicBool::new(false),
@@ -138,13 +145,33 @@ impl LeadState {
         }
     }
 
+    /// Was a `claude` binary found (the resume check's "is the provider installed")? Resolves it like `bin` does.
+    pub(super) fn claude_found(&self) -> bool {
+        self.bin().is_some()
+    }
+
+    /// The claude binary. The first call reads the user PATH (and so waits for its first resolution); later calls
+    /// return the same answer.
+    fn bin(&self) -> Option<PathBuf> {
+        self.bin_once.call_once(|| *lock(&self.bin) = resolve_claude(&self.home, &crate::vajra::preflight::path_dirs()));
+        lock(&self.bin).clone()
+    }
+
+    /// The Lead's environment. Built at the first call, like `bin`.
+    fn env(&self) -> Vec<(&'static str, OsString)> {
+        self.env_once.call_once(|| *lock(&self.env) = user_env());
+        lock(&self.env).clone()
+    }
+
     #[cfg(test)]
     pub(super) fn set_bin(&self, p: Option<PathBuf>) {
+        self.bin_once.call_once(|| {});
         *lock(&self.bin) = p;
     }
 
     #[cfg(test)]
     pub(super) fn set_env(&self, e: Vec<(&'static str, OsString)>) {
+        self.env_once.call_once(|| {});
         *lock(&self.env) = e;
     }
 
@@ -298,7 +325,7 @@ impl App {
     fn orchestrator_status(&self, orch: &Orchestrator) -> Res {
         let off = status_off;
         let busy = lock(&self.lead.active).get(&orch.id).map(|a| a.ask_id.clone());
-        if lock(&self.lead.bin).is_none() {
+        if self.lead.bin().is_none() {
             return off("claude not found".into());
         }
         // ADR-15 2.1 states, each with its reason in words.
@@ -390,7 +417,7 @@ impl App {
         self.data_dir_guarded()?;
         let target = self.lead_target(run_id)?;
         let orch = self.orchestrator_for_run(&target.run_id, &target.cwd)?;
-        let bin = lock(&self.lead.bin).clone().ok_or(LeadError::ClaudeNotFound)?;
+        let bin = self.lead.bin().ok_or(LeadError::ClaudeNotFound)?;
         let ask_id = lead::new_ulid(SystemTime::now())?;
         // The nonce of every session of this run, plus every live one, is redacted from the text.
         let red = self.project_redactor(&target, &orch);
@@ -1205,7 +1232,7 @@ impl App {
         if !orch.root.is_dir() {
             return Err(LeadError::Invalid("cwd: the project's folder is gone".into()));
         }
-        let env = lock(&self.lead.env).clone();
+        let env = self.lead.env();
         self.guard_preconditions(&env)?;
         // Same environment for the version probe, the self-test and the ask, with the CLI's own directory on PATH.
         let env = cli_env(env, bin);
@@ -1260,20 +1287,25 @@ impl App {
         let ledger = {
             let (svc, run_id, session_id, lead_sid, ask_id) = (svc.clone(), t.run_id.clone(), t.session_id.clone(), lead_sid.clone(), ask_id.to_string());
             let (project, generation) = (orch.id.clone(), orch.generation);
-            move |state: AskState, text: Option<&str>, reason: Option<&str>| {
+            move |state: AskState, text: Option<&str>, reason: Option<&str>, tokens: Option<&serde_json::Value>| {
                 lock(&svc)
-                    .record_ask(&AskRecord { ask_id: &ask_id, run_id: &run_id, session_id: &session_id, lead_session_id: &lead_sid, state, text, reason, project: Some((&project, generation)) })
+                    .record_ask(&AskRecord { ask_id: &ask_id, run_id: &run_id, session_id: &session_id, lead_session_id: &lead_sid, state, text, reason, project: Some((&project, generation)), tokens })
                     .map_err(|e| LeadError::Io(e.code().to_string()))
             }
         };
         // The last check before the process: the self-test can take minutes, and the project may be archived meanwhile.
         self.active_project(&orch.id)?;
         // Record first, spawn second: if the ledger cannot take the line, the Lead is never started.
-        ledger(AskState::Queued, Some(framed.text()), None)?;
+        ledger(AskState::Queued, Some(framed.text()), None, None)?;
         let child = match lead_run::spawn(&argv, &orch.root, &env, framed, handle) {
-            Ok(c) => c,
+            Ok(c) => {
+                // Its `--mcp` server is a Service client: the harness becomes a recorded root before it can make a tool
+                // call. One that could not be recorded has its calls refused, never admitted.
+                self.run_leads.allow_service(c.id());
+                c
+            }
             Err(e) => {
-                let _ = ledger(AskState::Failed, None, Some(e.code()));
+                let _ = ledger(AskState::Failed, None, Some(e.code()), None);
                 return Err(e);
             }
         };
@@ -1297,7 +1329,7 @@ impl App {
             let on_init: Box<dyn FnMut(&InitInfo) + Send> = Box::new(move |_| {
                 // The turn passed the tool and mode check: the ask is delivered. A new conversation's session is
                 // remembered only now, so a turn that never started leaves no id behind to `--resume`.
-                let _ = ledger_init(AskState::Delivered, None, None);
+                let _ = ledger_init(AskState::Delivered, None, None, None);
                 if first && fsx::write_atomic(&sid_dir, orchestrator::SESSION_FILE, sid_text.as_bytes()).is_err() {
                     if let Some(l) = &log {
                         let _ = l.log("lead_index_failed", &[]);
@@ -1307,14 +1339,17 @@ impl App {
             let mut sink = StreamSink { bus: bus.clone(), stream: stream.clone(), red, on_init };
             let end = lead_run::drive(child, &handle, limits, &mut sink);
             match &end {
-                Ok(Done { is_error: false, .. }) => {
-                    let _ = ledger(AskState::Done, None, None);
+                Ok(Done { is_error: false, tokens, .. }) => {
+                    let receipt = tokens.map(|t| t.to_json());
+                    let _ = ledger(AskState::Done, None, None, receipt.as_ref());
                 }
-                Ok(_) => {
-                    let _ = ledger(AskState::Failed, None, Some("lead_error"));
+                Ok(Done { tokens, .. }) => {
+                    // An erroring turn still spent tokens (often the most): record them so a goal's sum is the real bill.
+                    let receipt = tokens.map(|t| t.to_json());
+                    let _ = ledger(AskState::Failed, None, Some("lead_error"), receipt.as_ref());
                 }
                 Err(e) => {
-                    let _ = ledger(AskState::Failed, None, Some(e.code()));
+                    let _ = ledger(AskState::Failed, None, Some(e.code()), None);
                     sink.push("error", e.code());
                 }
             }
@@ -1406,6 +1441,7 @@ impl App {
                 "VAJRA_DESKTOP_DATA": self.data.to_string_lossy(),
                 crate::control::mcp::PROJECT_ENV: project,
                 crate::control::mcp::GEN_ENV: generation.to_string(),
+                crate::control::mcp::SEATS_ENV: if self.seat_env.route_for(project) { "1" } else { "0" },
             },
         }}});
         let mcp = mcp.to_string();
@@ -1533,7 +1569,7 @@ fn cli_env(mut env: Vec<(&'static str, OsString)>, bin: &Path) -> Vec<(&'static 
 
 /// `claude --version` under the Lead's own environment, asked of the executable on every ask. Never cached by path: a
 /// CLI updated in place must get its own self-test, because deny-rule semantics depend on the version.
-fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Result<String, LeadError> {
+pub(super) fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Result<String, LeadError> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let bad = || LeadError::GuardMissing("claude --version failed".into());

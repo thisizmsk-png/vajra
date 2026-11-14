@@ -211,7 +211,9 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     window.location.hash = "#/run?slug=camp";
     setTransport(fakeIpc({ evidence_list: new Error("x"), run_overview: overview() }).transport);
     render(<Run />);
-    expect(await screen.findByRole("alert")).toBeTruthy();
+    // The proof (no `run_proof` in this fake) is its own alert; the evidence error is this one.
+    expect(await screen.findByText(new RegExp(S.run.failed))).toBeTruthy();
+    expect(screen.getAllByRole("alert").length).toBeGreaterThan(0);
   });
 
   it("asks for a campaign when none is chosen", async () => {

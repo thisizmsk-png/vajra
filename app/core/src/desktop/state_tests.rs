@@ -661,7 +661,6 @@ fn queued_runtime<'a>(t: &Tmp, app: &'a App) -> &'a crate::desktop::workers::Wor
         clock: None,
         redact: Redactor::default(),
         steer: None,
-        claude_unverified_ok: false,
     })
     .unwrap()
 }
@@ -867,9 +866,18 @@ fn a_running_core_worker_is_paused_while_the_core_holds_its_repo_and_resumed_aft
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "base"]);
     let base = git(&["rev-parse", "HEAD"]);
+    // The repo's guard hooks, installed in `home` as the app installs them (as the workers rig does): the dispatch
+    // check hashes the installed guard into the flag shape, so without them no build matches the proven pair.
+    let hooks = crate::adapter::profiles::claude_worker_hooks_dir(&home);
+    fs::create_dir_all(&hooks).unwrap();
+    for e in fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks")).unwrap().flatten() {
+        if e.file_type().unwrap().is_file() {
+            fs::copy(e.path(), hooks.join(e.file_name())).unwrap();
+        }
+    }
     // A Claude worker that starts as one and then just runs.
     let bin = t.0.join("claude-fake");
-    fs::write(&bin, "#!/bin/sh\necho '{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake-1\",\"permissionMode\":\"dontAsk\",\"tools\":[\"Read\",\"Edit\",\"Write\",\"Bash\",\"Grep\",\"Glob\"]}'\nexec sleep 600\n").unwrap();
+    fs::write(&bin, "#!/bin/sh\n[ \"$1\" = --version ] && { echo '2.1.296 (Claude Code)'; exit 0; }\necho '{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake-1\",\"permissionMode\":\"dontAsk\",\"tools\":[\"Read\",\"Edit\",\"Write\",\"Bash\",\"Grep\",\"Glob\"]}'\nexec sleep 600\n").unwrap();
     fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let rt = app
         .worker_runtime(|| crate::desktop::workers::Config {
@@ -885,7 +893,6 @@ fn a_running_core_worker_is_paused_while_the_core_holds_its_repo_and_resumed_aft
             clock: None,
             redact: Redactor::default(),
             steer: None,
-            claude_unverified_ok: true,
         })
         .unwrap();
     let gw = rt.gitw().clone();
