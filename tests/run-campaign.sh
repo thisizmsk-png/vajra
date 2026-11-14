@@ -395,6 +395,22 @@ OG
   ( cd "$RC" && OC close ) >/dev/null 2>&1
 fi
 
+# --- create claims its folder exclusively (PR 261 review, plan #217 L2) ---
+# A copy that plants an entry at the campaign's name right after the existence check, so the race is deterministic:
+# a folder holding a file, or a link to a folder elsewhere. create must refuse both and leave them untouched.
+RACE_SCRIPT="$WORK/race-campaign.sh"
+awk '{print} /^  \[ -e "\$DIR" \] && die "campaign already exists/ {print "  eval \"$VAJRA_TEST_PLANT\""}' "$SCRIPT" > "$RACE_SCRIPT"
+grep -q 'VAJRA_TEST_PLANT' "$RACE_SCRIPT"; check "race: the plant copy was built" $?
+RC_() { VAJRA_TEST_PLANT="$1" "$BASH_BIN" "$RACE_SCRIPT" create "$2" --feature "f1|one"; }
+OUT="$(RC_ 'mkdir "$DIR"; printf planted > "$DIR/keep"' race-dir 2>&1)"; RCODE=$?
+[ "$RCODE" -ne 0 ] && printf '%s' "$OUT" | grep -qF "campaign already exists: race-dir"; check "race: a folder planted before the claim is refused as existing" $?
+[ "$(ls -A "$CD/race-dir")" = "keep" ] && [ "$(cat "$CD/race-dir/keep")" = "planted" ]; check "race: the planted folder is left exactly as it was" $?
+mkdir "$WORK/race-elsewhere"
+OUT="$(RC_ "ln -s '$WORK/race-elsewhere' \"\$DIR\"" race-link 2>&1)"; RCODE=$?
+[ "$RCODE" -ne 0 ] && printf '%s' "$OUT" | grep -qF "campaign already exists: race-link"; check "race: a link planted before the claim is refused as existing" $?
+[ -L "$CD/race-link" ] && [ -z "$(ls -A "$WORK/race-elsewhere")" ]; check "race: nothing is written through the planted link" $?
+RC_ 'true' race-none >/dev/null 2>&1 && [ -f "$CD/race-none/state.sig" ] && [ -d "$CD/race-none/checkpoints" ]; check "race: with nothing planted the copy creates normally" $?
+
 # --- lock owner and unlock --if-stale (6h-e) ---
 C create lk --feature "f1|one" >/dev/null 2>&1; check "lock: create a campaign" $?
 LD="$CD/lk"

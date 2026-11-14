@@ -2440,6 +2440,11 @@ impl App {
         if !features.get("features").is_some_and(Value::is_array) {
             return bad(self);
         }
+        // The digest covers only the file contents, so an intact signed campaign copied into another campaign's folder
+        // keeps a valid signature. The slug it carries must be the one asked for, as the script's verify requires.
+        if campaign.get("slug").and_then(Value::as_str) != Some(slug) {
+            return bad(self);
+        }
         let sig: Vec<u8> = h.sig.iter().copied().filter(|b| !matches!(b, b' ' | b'\r' | b'\n')).collect();
         if sig.len() != 64 || !sig.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
             return bad(self);

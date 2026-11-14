@@ -312,7 +312,15 @@ cmd_create() {
   DIR="${ROOT}/${SLUG}"
   [ -e "$DIR" ] && die "campaign already exists: $SLUG"
   load_key
-  mkdir -p "$DIR/checkpoints" || die "cannot create $DIR"
+  # Plan #217 L2: the check above is only a fast path. The claim is this one mkdir with no -p: it creates the folder
+  # or fails, and it never follows a link at the name, so a folder, file or link planted at any moment before it
+  # (another process racing this create) is refused and left as it is. Nothing is written until the claim succeeds.
+  mkdir -p "$ROOT" || die "cannot create $ROOT"
+  if ! mkdir "$DIR" 2>/dev/null; then
+    { [ -e "$DIR" ] || [ -L "$DIR" ]; } && die "campaign already exists: $SLUG"
+    die "cannot create $DIR"
+  fi
+  mkdir "$DIR/checkpoints" || die "cannot create $DIR/checkpoints"
   lock "$DIR"
   local t; t="$(now)"
   jqw "$DIR/features.json" -n --argjson f "$feats" '{features: $f}'

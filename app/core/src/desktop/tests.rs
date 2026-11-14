@@ -2261,6 +2261,28 @@ fn read_report_refuses_a_report_edited_after_it_was_signed() {
     assert!(r.get("text").is_none());
 }
 
+/// PR 261 review: the digest covers only the file contents, so an intact signed campaign and report copied into another
+/// campaign's folder keep a valid signature. The held read must refuse it because the slug inside isn't the one asked
+/// for, and its failure must not be settled back to ok.
+#[test]
+fn read_report_refuses_an_intact_campaign_copied_into_another_folder() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let (from, to) = (camp_file(&t, ""), t.home().join(".claude/vajra/campaigns/real2"));
+    fs::create_dir(&to).unwrap();
+    for name in ["campaign.json", "features.json", "progress.md", "state.sig", "report.md"] {
+        fs::copy(from.join(name), to.join(name)).unwrap();
+    }
+    let app = t.app();
+    let r = app.read_report("real2").unwrap();
+    assert_eq!(r["integrity"], "integrity_failed", "{r}");
+    assert!(r.get("text").is_none(), "{r}");
+    let badges = with_badges(&app, false);
+    let copied = badges["campaigns"].as_array().unwrap().iter().find(|c| c["slug"] == "real2").cloned();
+    assert_eq!(copied.map(|c| c["integrity"].clone()), Some(json!("failed")), "{badges}");
+    assert_eq!(app.read_report("real1").unwrap()["integrity"], "ok", "the original still reads");
+}
+
 #[test]
 fn nul_in_report_breaks_hash() {
     let Some((t, run)) = real_script_home() else { return };
