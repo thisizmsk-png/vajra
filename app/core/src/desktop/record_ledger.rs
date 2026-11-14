@@ -71,6 +71,11 @@ pub struct Ledger {
 }
 
 /// Standard base64 (the alphabet the bridge allows), decoded. `None`: not base64.
+#[cfg(test)]
+pub(crate) fn unbase64_for_tests(s: &str) -> Option<Vec<u8>> {
+    unbase64(s)
+}
+
 fn unbase64(s: &str) -> Option<Vec<u8>> {
     let val = |c: u8| match c {
         b'A'..=b'Z' => Some(c - b'A'),
@@ -151,6 +156,19 @@ impl Ledger {
                 let st = if *status == CloseStatus::Done { "done" } else { "abandoned" };
                 self.status = st.into();
                 self.progress.push(format!("closed: {st}"));
+            }
+            Request::CampaignArchiveEvidence { slug, .. } => {
+                // The script's `append_progress "evidence archived: ${out#evidence archived for "$SLUG": }"`, through
+                // its `clean_line` (tab and newlines to spaces, other controls dropped, the first 500 characters).
+                let out = stdout.trim_end_matches('\n');
+                let rest = out.strip_prefix(&format!("evidence archived for {slug}: ")).unwrap_or(out);
+                let line: String = format!("evidence archived: {rest}")
+                    .chars()
+                    .map(|c| if matches!(c, '\r' | '\n' | '\t') { ' ' } else { c })
+                    .filter(|c| !c.is_ascii_control())
+                    .take(500)
+                    .collect();
+                self.progress.push(line);
             }
             Request::CampaignReport { base64, .. } => {
                 // The bridge refused anything but base64 before the script ran, so this decodes; if not, never matches.

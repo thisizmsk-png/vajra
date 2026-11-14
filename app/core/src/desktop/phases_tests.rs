@@ -50,7 +50,7 @@ impl Fake {
 
 impl Checks for Fake {
     fn start(&self, kind: CheckKind, n: u32, spec: TaskSpec, seat: WorkerSeat, at: &str) -> Result<String, String> {
-        assert_eq!((spec.from.as_str(), at), ("head1", "head1"), "a check starts fresh at the integration commit");
+        assert!(spec.from == at && (at == "head1" || at == FULL_HEAD), "a check starts fresh at the integration commit");
         assert!(spec.deps.is_empty() && spec.globs.is_empty());
         if let Some(Ans::NoStart) = crate::lock(&self.script).get(&(k(kind), n)) {
             return Err("capped".into());
@@ -104,7 +104,7 @@ fn task(id: &str, criteria: &[&str]) -> PlanTask {
 fn round(security: bool) -> RoundInput {
     RoundInput {
         run: "run1".into(), round: 1, head: "head1".into(), base: "base1".into(), criteria: vec![crit("ac-1"), crit("ac-2")],
-        tasks: vec![task("t1", &["ac-1"]), task("t2", &["ac-2"])], security, security_writers: vec![seat("w1", "backend", "codex")],
+        tasks: vec![task("t1", &["ac-1"]), task("t2", &["ac-2"])], security, security_writers: vec![seat("w1", "backend", "codex")], closes: Vec::new(),
     }
 }
 
@@ -482,4 +482,80 @@ fn the_approvals_section_lists_each_protected_action() {
     let a = ProtectedAction { action: "deploy".into(), why: "ship it\nnow".into() };
     let s = approvals_section(&[a]).unwrap();
     assert_eq!(s, "Waiting for your approval\n- deploy: ship it now\nVajra didn't do these. To get a deploy plan, ask for one separately.\n");
+}
+
+// ---------------------------------------------------------------- the delivery phase (6i)
+
+const FULL_HEAD: &str = "1111111111111111111111111111111111111111";
+
+/// Delivery steps that all pass and record the list they ran and the seat it was for.
+#[derive(Default)]
+struct Steps6i {
+    ran: Mutex<Vec<crate::desktop::evidence_approval::Ask>>,
+}
+
+impl crate::desktop::delivery::Steps for Steps6i {
+    fn tree(&self, _: &RoundInput) -> Result<crate::desktop::delivery::Tree, String> {
+        Ok(crate::desktop::delivery::Tree { worktree: "/wt/e".into(), tmp: "/wt/t".into(), git_common: "/repo/.git".into(), base: "/wt/e/data/walkthroughs".into() })
+    }
+    fn approve(&self, _: &crate::desktop::evidence_approval::Ask, _: &dyn RunLife) -> Result<(), String> {
+        Ok(())
+    }
+    fn run(&self, ask: crate::desktop::evidence_approval::Ask, _: bool, _: &crate::desktop::delivery::Tree) -> Result<(Option<String>, crate::adapter::evidence_runner::RunOutcome), String> {
+        crate::lock(&self.ran).push(ask);
+        Ok((None, crate::adapter::evidence_runner::RunOutcome::Ran { passed: true, sha256: "3".repeat(64) }))
+    }
+    fn sign(&self, _: &str, _: &str, _: &crate::desktop::delivery::Tree) -> crate::adapter::evidence_runner::SignOutcome {
+        crate::adapter::evidence_runner::SignOutcome::Signed
+    }
+    fn check(&self, _: &std::path::Path, _: &str, _: &crate::desktop::delivery::Tree) -> Result<(), String> {
+        Ok(())
+    }
+    fn write(&self, _: &crate::vajra::bridge::Request) -> Result<(), String> {
+        Ok(())
+    }
+    fn verify(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn remove(&self, _: &crate::desktop::delivery::Tree) {}
+}
+
+fn delivering(fake: &Arc<Fake>, steps: &Arc<Steps6i>) -> CoreGate {
+    let cfg = crate::desktop::delivery::DeliveryConfig { run: "20261114-0900".into(), slug: "deliver-20261114-0900".into(), trust: crate::desktop::proof::Trust::Guarded };
+    let d = crate::desktop::delivery::Delivery::new(cfg, steps.clone());
+    gate(fake, seats()).with_delivery(Arc::new(d))
+}
+
+fn full_round() -> RoundInput {
+    let close = |id: &str| crate::desktop::runproto::TaskClose { id: format!("20261114-0900.{id}"), commit: "a".repeat(40), branch: format!("vajra/20261114-0900/task-{id}-r1"), changed: vec![] };
+    RoundInput { head: FULL_HEAD.into(), closes: vec![close("t1"), close("t2")], ..round(false) }
+}
+
+#[test]
+fn a_passed_round_runs_the_delivery_on_the_verification_the_gate_passed_with_the_verifiers_seat() {
+    let f = Arc::new(Fake::default());
+    f.on(CheckKind::Verify, 0, green()).on(CheckKind::Review, 0, approve());
+    let steps = Arc::new(Steps6i::default());
+    let RoundVerdict::Checked(x) = delivering(&f, &steps).check(&full_round(), &Life::default()) else { panic!() };
+    assert!(x.passed);
+    let d = x.delivered.expect("a passed round runs the delivery");
+    assert!(d.verified, "{d:?}");
+    let ran = crate::lock(&steps.ran).clone();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(ran[0].commands, ["make ac1", "make ac2", "make test"], "the gate's verification, in criteria order, then the suite");
+    assert_eq!((ran[0].seat.as_str(), ran[0].commit.as_str()), ("v1", FULL_HEAD));
+    assert_eq!(crate::lock(&f.discarded).len(), 2, "the check worktrees go before the evidence runs");
+}
+
+#[test]
+fn a_failed_or_rejected_round_never_runs_the_delivery() {
+    for (verify, review_ans) in [(verification(vec![result("make ac1", "ac-1", "fail"), result("make ac2", "ac-2", "pass")]), approve()), (green(), review("reject", json!([])))] {
+        let f = Arc::new(Fake::default());
+        f.on(CheckKind::Verify, 0, verify).on(CheckKind::Review, 0, review_ans);
+        let steps = Arc::new(Steps6i::default());
+        let RoundVerdict::Checked(x) = delivering(&f, &steps).check(&full_round(), &Life::default()) else { panic!() };
+        assert!(!x.passed);
+        assert_eq!(x.delivered, None);
+        assert!(crate::lock(&steps.ran).is_empty(), "no evidence ran");
+    }
 }

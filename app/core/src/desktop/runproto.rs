@@ -128,13 +128,15 @@ pub struct Tick {
     pub replayed: bool,
     /// The ticket's worktree once it has one (the task graph's `claim --worktree`).
     pub worktree: Option<PathBuf>,
+    /// The files its commit changed (a task's close on the evidence names them, 6i).
+    pub files: Vec<String>,
 }
 
 impl From<TicketView> for Tick {
     fn from(v: TicketView) -> Self {
         Tick {
             id: v.id, state: v.state, outcome: v.outcome, reason: v.reason, commit: v.commit, attempt: v.attempt, elapsed_s: v.elapsed_s,
-            queue_position: v.queue_position, replayed: false, worktree: v.worktree,
+            queue_position: v.queue_position, replayed: false, worktree: v.worktree, files: v.files,
         }
     }
 }
@@ -228,7 +230,8 @@ pub enum RoundVerdict {
 /// The round ticket's result (16.5a): `{passed, failing, blocking, feedback, rejected}`, plus who ran each check.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct RoundResult {
-    /// The gate passed. Until 6i adds the delivery phase the run then ends `not_verified`.
+    /// The gate passed. The run is then `verified` only when `delivered` says so; with no delivery phase it ends
+    /// `not_verified`.
     pub passed: bool,
     pub failing: Vec<String>,
     pub blocking: Vec<Value>,
@@ -240,6 +243,29 @@ pub struct RoundResult {
     pub checks: Vec<Value>,
     /// The round can't be checked at all (no seat for a phase): the run ends `not_verified` with this reason.
     pub end: Option<String>,
+    /// After a pass: the delivery phase's end (6i, `delivery.rs`). `None` when the gate has no delivery phase.
+    pub delivered: Option<Delivered>,
+}
+
+/// How the delivery phase ended (6i). `verified` only when every step passed: the evidence ran, was signed and checked,
+/// every task closed on it, every criterion passed, the archive, close and report were written and the record verified.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Delivered {
+    pub verified: bool,
+    /// Plain words for the run card: what was delivered, or the step that failed and why.
+    pub reason: String,
+    /// Each step that ran, in order: `{step, ok}` (and `why` when it failed).
+    pub steps: Vec<Value>,
+}
+
+/// A task as its close on the evidence needs it: the commit its last ticket made, that ticket's branch and its files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskClose {
+    /// The task graph's id (`<run>.<task>`).
+    pub id: String,
+    pub commit: String,
+    pub branch: String,
+    pub changed: Vec<String>,
 }
 
 /// One integrated round, as the gate needs it.
@@ -256,6 +282,8 @@ pub struct RoundInput {
     pub security: bool,
     /// The seats that ran this run's security tasks (the security reviewer is preferred on another harness, N15).
     pub security_writers: Vec<WorkerSeat>,
+    /// Every task's close, in plan order (6i). A task with no usable commit is missing, and the delivery refuses.
+    pub closes: Vec<TaskClose>,
 }
 
 /// The round's checks, run by the core on a clean integration (16.5a): `phases::CoreGate`.
@@ -1554,9 +1582,21 @@ impl RunProtocol {
                 }
             }
         }
+        // Each task's close on the evidence (6i): the commit its last ticket made, on the branch the core's git writer
+        // made for that ticket, with the files it changed.
+        let closes = order
+            .iter()
+            .filter_map(|id| st.task(id))
+            .filter_map(|t| {
+                let (tr, tk, _) = t.tickets.last()?;
+                let commit = self.result(st, t)?;
+                let changed = self.0.workers.view(tk).map(|v| v.files).unwrap_or_default();
+                Some(TaskClose { id: self.tid(&t.spec.id), commit, branch: format!("vajra/{}/task-{}-r{tr}", self.0.cfg.run, t.spec.id), changed })
+            })
+            .collect();
         RoundInput {
             run: self.0.cfg.run.clone(), round: r, head, base: self.0.cfg.base.clone(), criteria: st.criteria.clone(), tasks, security: st.security,
-            security_writers,
+            security_writers, closes,
         }
     }
 
@@ -1597,7 +1637,13 @@ impl RunProtocol {
                         Self::finalize(&mut st, RunStatus::Rejected, format!("a review rejected the approach in round {r}"));
                     } else if x.passed {
                         round.checks = Checks::Passed;
-                        Self::finalize(&mut st, RunStatus::NotVerified, format!("the gate passed in round {r}; this version of Vajra doesn't run the evidence check yet"));
+                        // Verified only from the delivery phase's own answer, every step passed (6i). Anything else,
+                        // including no delivery phase at all, is not verified with its reason.
+                        match x.delivered {
+                            Some(d) if d.verified => Self::finalize(&mut st, RunStatus::Verified, d.reason),
+                            Some(d) => Self::finalize(&mut st, RunStatus::NotVerified, d.reason),
+                            None => Self::finalize(&mut st, RunStatus::NotVerified, format!("the gate passed in round {r}, but this run has no evidence check")),
+                        }
                     } else {
                         self.round_failed(&mut st, r, x.feedback);
                     }

@@ -21,7 +21,7 @@ impl Workers for Held {
         let id = format!("{}.{}.r{}", spec.run, spec.task, spec.round);
         let t = Tick {
             id: id.clone(), state: TState::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, replayed: false,
-            worktree: None,
+            worktree: None, files: Vec::new(),
         };
         crate::lock(&self.0).insert(id.clone(), t);
         Ok(id)

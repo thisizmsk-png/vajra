@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use super::delivery::Delivery;
 use super::plan::{Criterion, PlanTask, one_line};
 use super::runproto::{ProtectedAction, RoundGate, RoundInput, RoundResult, RoundVerdict, RunLife, data};
 use super::verify::{self, Review, Verification};
@@ -218,6 +219,8 @@ pub struct GateConfig {
 pub struct CoreGate {
     cfg: GateConfig,
     checks: Arc<dyn Checks>,
+    /// The delivery phase after a pass (6i). Without one, a passed round ends `not_verified`.
+    delivery: Option<Arc<Delivery>>,
 }
 
 /// One check of the round, as it runs.
@@ -241,7 +244,13 @@ enum Parsed {
 
 impl CoreGate {
     pub fn new(cfg: GateConfig, checks: Arc<dyn Checks>) -> Self {
-        CoreGate { cfg, checks }
+        CoreGate { cfg, checks, delivery: None }
+    }
+
+    /// The gate with its delivery phase: a passed round then runs the evidence ticket and the record's delivery.
+    pub fn with_delivery(mut self, delivery: Arc<Delivery>) -> Self {
+        self.delivery = Some(delivery);
+        self
     }
 
     fn spec(&self, round: &RoundInput, brief: &str) -> TaskSpec {
@@ -324,6 +333,8 @@ impl CoreGate {
             Ok(p) => p,
             Err(why) => return RoundResult { end: Some(why), ..RoundResult::default() },
         };
+        let verifier = picked.verifier.clone();
+        let mut passed_on: Option<Verification> = None;
         let job = |kind, seat: WorkerSeat, brief, lens, shared| Job { kind, seat, brief, lens, shared, tickets: Vec::new(), answer: Err(String::new()), stopped: false };
         let review = |lens| review_brief(&round.base, &round.head, lens, &round.criteria, &round.tasks);
         let mut jobs = vec![
@@ -370,13 +381,21 @@ impl CoreGate {
             } else {
                 let g = verify::gate(&v, &problems, &round.criteria, &round.tasks, &reviews);
                 let blocking = g.blocking.iter().map(|b| json!(b)).collect();
+                if g.passed {
+                    passed_on = Some(v);
+                }
                 RoundResult { passed: g.passed, failing: g.failing, blocking, feedback: g.feedback, ..RoundResult::default() }
             }
         };
         for t in jobs.iter().flat_map(|j| &j.tickets).filter(|t| !t.is_empty()) {
             self.checks.discard(t);
         }
-        RoundResult { checks, ..result }
+        // The delivery phase runs on the verification the gate passed, with the verifier's seat (6i).
+        let delivered = match (&self.delivery, passed_on) {
+            (Some(d), Some(v)) => Some(d.deliver(round, &v, &verifier, life)),
+            _ => None,
+        };
+        RoundResult { checks, delivered, ..result }
     }
 }
 

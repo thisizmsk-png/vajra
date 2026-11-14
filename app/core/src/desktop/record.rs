@@ -472,14 +472,38 @@ impl CoreRecord {
         crate::lock(&self.w.ledger).check(rb)
     }
 
-    /// A task's close or the run's report now, through the ledger (6i calls these when a task's evidence is green and
-    /// when the run's report is written). Call after `flush`, so the queued events ran first. Anything else, or
-    /// another campaign, is refused.
+    /// One of the delivery's writes now, through the ledger, with its outcome (6i): a task's close on the green evidence,
+    /// the evidence archive, a criterion's pass, the approval's progress line, the delivered checkpoint, the done close
+    /// and the report. Call after `flush`, so the queued events ran first. Anything else, or another campaign, is
+    /// refused. A failed write is never retried here: the delivery ends not verified with its reason.
     pub fn write(&self, req: &Request) -> Result<(), String> {
-        if !matches!(req, Request::TasksClose { slug, .. } | Request::CampaignReport { slug, .. } if *slug == self.w.cfg.slug) {
-            return Err("not a task close or report on this run's record".into());
+        let ours = |slug: &String| *slug == self.w.cfg.slug;
+        let delivery = match req {
+            Request::TasksClose { slug, .. }
+            | Request::CampaignReport { slug, .. }
+            | Request::CampaignArchiveEvidence { slug, .. }
+            | Request::CampaignPass { slug, .. }
+            | Request::CampaignProgress { slug, .. }
+            | Request::CampaignCheckpoint { slug, .. } => ours(slug),
+            Request::CampaignClose { slug, status: CloseStatus::Done } => ours(slug),
+            _ => false,
+        };
+        if !delivery {
+            return Err("not one of the delivery's writes on this run's record".into());
         }
         self.w.call(req).map(|_| ()).map_err(|f| f.why().to_string())
+    }
+
+    /// `CampaignVerify` on this run's record, then the ledger check: the signature holds and every entry is the core's.
+    /// Call after every write. `Err`: why the record can't back a Verified.
+    pub fn verify_now(&self) -> Result<(), String> {
+        self.flush();
+        match self.w.bridge.run(&Request::CampaignVerify { slug: self.w.cfg.slug.clone() }) {
+            Ok(o) if o.exit() == Some(0) => {}
+            Ok(o) => return Err(format!("the record's signature check failed: {}", first_line(&o))),
+            Err(e) => return Err(format!("the record's signature check didn't run: {e}")),
+        }
+        self.w.verify_record()
     }
 }
 

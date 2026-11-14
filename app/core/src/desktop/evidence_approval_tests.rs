@@ -496,6 +496,52 @@ fn a_bad_ask_is_refused_before_anything_is_written() {
     assert_eq!(app.evidence_approval(RUN).unwrap()["state"], "none");
 }
 
+// ---------------------------------------------------------------- the evidence ticket's wait (6i)
+
+/// The ticket asks and waits on its own thread; the person answers through the dialog's own act while it waits.
+fn wait_with(answer: Option<bool>, live_for: usize) -> (Result<(), String>, Value) {
+    let t = Tmp::new();
+    let app = t.app();
+    let desk = app.approval_desk();
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    // At most about 10 s of polling whatever the case, so a broken answer fails the test rather than hanging it.
+    let live = || polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < live_for.min(2000);
+    let (got, answered) = std::thread::scope(|s| {
+        let h = s.spawn(|| desk.await_answer(&ask(), &live, Duration::from_millis(5)));
+        let answered = answer.map(|approve| {
+            let sha = loop {
+                if let Some(sha) = app.evidence_approval(RUN).unwrap()["sha256"].as_str() {
+                    break sha.to_string();
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            };
+            app.act_answer_evidence_approval(&env("ticket-wait-01"), RUN, &sha, approve)
+        });
+        (h.join().unwrap(), answered)
+    });
+    if let Some(r) = answered {
+        assert_eq!(r["receipt"]["state"], "done", "the dialog's answer: {r}");
+    }
+    (got, app.evidence_approval(RUN).unwrap())
+}
+
+#[test]
+fn the_ticket_waits_for_the_persons_answer_in_the_dialog_and_only_an_approve_lets_it_run() {
+    let (got, state) = wait_with(Some(true), usize::MAX);
+    assert_eq!(got, Ok(()));
+    assert_eq!(state["state"], "approved", "approved, not yet used: the run uses it once");
+    let (got, state) = wait_with(Some(false), usize::MAX);
+    assert_eq!(got, Err("you declined the check commands".into()));
+    assert_eq!(state["state"], "declined");
+}
+
+#[test]
+fn a_run_that_ends_while_the_ticket_waits_voids_the_ask() {
+    let (got, state) = wait_with(None, 3);
+    assert_eq!(got, Err("the run ended before you answered".into()));
+    assert_eq!(state["state"], "void", "nothing can answer or use it after the run ended");
+}
+
 // bhishma L1 on PR 247: the runner uses up the approval and runs exactly the approved strings, with the network
 // taken from the profile it really launches with. A fake runner records what it was handed; nothing is executed.
 

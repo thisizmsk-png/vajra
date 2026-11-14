@@ -41,6 +41,9 @@ pub enum Request {
     CampaignClose { slug: String, status: CloseStatus },
     /// `check` is the FNV-1a 32 of `base64` (`vajra-deliver.js` `fnv()`); the core recomputes it before spawning.
     CampaignReport { slug: String, bytes: usize, check: String, base64: String },
+    /// `archive-evidence <slug> <dir> <head> <setup-json>` (E7): the signed bundle in `dir` and the setup commands that
+    /// ran before it, kept in the campaign once a task closed on it (6i).
+    CampaignArchiveEvidence { slug: String, dir: PathBuf, head: String, setup: Vec<String> },
     /// `unlock <slug> --if-stale` (6h-e): the lock card's Repair.
     CampaignUnlockStale { slug: String },
     TasksAdd { slug: String, id: String, title: String, owner: String, deps: Vec<String>, files: Vec<String>, acceptance: Vec<String>, branch: String },

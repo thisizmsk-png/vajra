@@ -183,6 +183,12 @@ fn the_six_i_variants_build_the_workflows_argv() {
     let (_, a, _) = plan_of(Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: fnv32(b64), base64: b64.into() });
     assert_eq!(a, v(&["report", "--campaign", SLUG, "--bytes", "9", "--check", &fnv32(b64), "--base64", b64]));
     assert_eq!(plan_of(Request::CampaignUnlockStale { slug: SLUG.into() }).1, v(&["unlock", SLUG, "--if-stale"]));
+    // The archive: the workflow's `archive-evidence <campaign> <dir> <head> <setup JSON>`, the setup list as JSON.
+    let dir = format!("/wt/data/walkthroughs/{SLUG}");
+    let h40 = "a".repeat(40);
+    let (p, a, cwd) = plan_of(Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: dir.clone().into(), head: h40.clone(), setup: v(&["npm ci", "say \"hi\""]) });
+    assert_eq!((p.as_str(), a, cwd), ("vajra-campaign.sh", v(&["archive-evidence", SLUG, &dir, &h40, r#"["npm ci","say \"hi\""]"#]), Some(t.0.join("cwd"))));
+    assert_eq!(plan_of(Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: dir.clone().into(), head: h40.clone(), setup: vec![] }).1.last().unwrap(), "[]");
     let h = "a".repeat(40);
     let (_, a, cwd) = plan_of(Request::TasksClose {
         slug: SLUG.into(),
@@ -238,6 +244,15 @@ fn every_variant_refuses_a_value_outside_its_regex_or_cap_and_spawns_nothing() {
         Request::CampaignCheckpoint { slug: SLUG.into(), label: "--campaign".into() },
         Request::CampaignClose { slug: "".into(), status: CloseStatus::Done },
         Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: "00000000".into(), base64: "IyByZXBvcnQK".into() },
+        // The archive: a folder named for another campaign, a short head, a relative folder, a sixth or overlong or
+        // blank or multi-line setup command.
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: "/wt/data/walkthroughs/other".into(), head: "a".repeat(40), setup: vec![] },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/data/walkthroughs/{SLUG}").into(), head: "a".repeat(12), setup: vec![] },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("data/walkthroughs/{SLUG}").into(), head: "a".repeat(40), setup: vec![] },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: v(&["a", "b", "c", "d", "e", "f"]) },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec!["x".repeat(1001)] },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec![String::new()] },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec!["npm ci\nrm -rf .".into()] },
         Request::CampaignReport { slug: SLUG.into(), bytes: 0, check: fnv32("IyByZXBvcnQK"), base64: "IyByZXBvcnQK".into() },
         Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: fnv32("not base64!"), base64: "not base64!".into() },
         Request::CampaignUnlockStale { slug: "a/b".into() },
@@ -1075,6 +1090,34 @@ fn ledger_and_back() -> (Ledger, ReadBack) {
         tasks: serde_json::json!({"tasks": [task]}),
     };
     (l, back)
+}
+
+#[test]
+fn an_archive_is_the_scripts_progress_line_in_the_ledger_and_any_other_line_is_caught() {
+    let (mut l, mut back) = ledger_and_back();
+    let req = Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec![] };
+    l.applied(&req, &format!("evidence archived for {SLUG}: {SLUG} ({RUN}.t1)\n"), None);
+    back.progress += &format!("- 2026-11-12T12:02:00Z evidence archived: {SLUG} ({RUN}.t1)\n");
+    assert_eq!(l.check(&back), Ok(()));
+    let (mut l2, mut back2) = ledger_and_back();
+    l2.applied(&req, &format!("evidence archived for {SLUG}: {SLUG} ({RUN}.t1)\n"), None);
+    back2.progress += &format!("- 2026-11-12T12:02:00Z evidence archived: {SLUG} ({RUN}.t2)\n");
+    assert!(l2.check(&back2).unwrap_err().contains("progress line 3"));
+}
+
+#[test]
+fn the_record_takes_only_the_deliverys_writes_on_its_own_campaign() {
+    let t = Tmp::new();
+    let r = t.record(false);
+    for req in [
+        Request::CampaignClose { slug: SLUG.into(), status: CloseStatus::Abandoned },
+        Request::TasksAdd { slug: SLUG.into(), id: "t1".into(), title: "t".into(), owner: "bhima".into(), deps: vec![], files: v(&["src/"]), acceptance: vec![], branch: "b".into() },
+        Request::CampaignPass { slug: "deliver-other".into(), feature: "ac-1".into(), evidence: "e".into() },
+        Request::CampaignVerify { slug: SLUG.into() },
+    ] {
+        assert_eq!(r.write(&req), Err("not one of the delivery's writes on this run's record".into()), "{req:?}");
+    }
+    assert!(t.calls().is_empty(), "nothing ran");
 }
 
 /// codex on #190: a read-back with one task replaced by a copy of another has the right length and only known ids, but

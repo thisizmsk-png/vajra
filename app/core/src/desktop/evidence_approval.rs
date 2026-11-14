@@ -20,8 +20,9 @@
 //! The record is `<data>/control/lead/<run>/approval.json`, the core's own (private dir, atomic writes); it is what the
 //! UI shows.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -29,6 +30,7 @@ use serde_json::{json, Value};
 use super::{fail, invalid, App, Res};
 use crate::adapter::evidence_runner::{self as runner, EvidenceRun, Profile, RunOutcome};
 use crate::control::{audit, fsx, sha256::hex_digest};
+use crate::vajra::bridge::Bridge;
 
 /// `evidence_hold_max_s`: how long an ask waits for its answer, and how long an approval stays usable.
 pub const HOLD_MAX: Duration = Duration::from_secs(24 * 60 * 60);
@@ -73,6 +75,17 @@ pub(crate) struct Held {
     answer: Option<bool>,
     /// Set when this run's evidence ticket used it: kept (not removed) so the proof can require it (Opus on #226).
     consumed: bool,
+}
+
+/// The app's approvals, as a handle the evidence ticket can hold on its round thread (6i): the same held answers
+/// (`App::approvals`, shared, never copied), the app's data dir for the record and its home for the audit log. The
+/// app's own dialog and proof go through `App`, which hands out this handle.
+#[derive(Clone)]
+pub struct ApprovalDesk {
+    data: PathBuf,
+    home: PathBuf,
+    bridge: Bridge,
+    approvals: Arc<Mutex<HashMap<String, Held>>>,
 }
 
 /// A character that can make a command show differently from what runs (Opus on #226): any control character but tab
@@ -138,7 +151,7 @@ fn default_ignorable(c: char) -> bool {
 }
 
 impl Ask {
-    fn check(&self) -> Result<(), String> {
+    pub(crate) fn check(&self) -> Result<(), String> {
         if !crate::ids::valid_run_id(&self.run_id) {
             return Err("not a run id".into());
         }
@@ -206,6 +219,91 @@ fn expired(asked_at: u64, now: SystemTime) -> bool {
 }
 
 impl App {
+    /// The handle the evidence ticket uses: it shares this app's held answers.
+    pub fn approval_desk(&self) -> ApprovalDesk {
+        ApprovalDesk { data: self.data.clone(), home: self.home.clone(), bridge: self.bridge.clone(), approvals: Arc::clone(&self.approvals) }
+    }
+
+    /// The run's approval, for the UI (`ApprovalDesk::evidence_approval`).
+    pub fn evidence_approval(&self, run_id: &str) -> Res {
+        self.approval_desk().evidence_approval(run_id)
+    }
+
+    /// Approve or decline: a person's click in the app only.
+    pub fn act_answer_evidence_approval(&self, env: &super::Envelope, run_id: &str, sha: &str, approve: bool) -> Value {
+        let action = if approve { "approve_evidence" } else { "decline_evidence" };
+        let target = format!("evidence:{run_id}");
+        let desk = self.approval_desk();
+        self.act(env, crate::control::receipt::Caller::Ui, true, action, &target, None::<u64>, || desk.answer_evidence_approval(run_id, sha, approve, SystemTime::now()))
+    }
+
+    pub(crate) fn evidence_approval_consumed(&self, run_id: &str) -> Option<String> {
+        self.approval_desk().evidence_approval_consumed(run_id)
+    }
+
+    pub(crate) fn evidence_approval_unheld(&self, run_id: &str) -> bool {
+        self.approval_desk().evidence_approval_unheld(run_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_evidence_approval(&self, ask: &Ask, now: SystemTime) -> Result<String, String> {
+        self.approval_desk().request_evidence_approval(ask, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn void_evidence_approval(&self, run_id: &str, why: &str) -> Result<(), String> {
+        self.approval_desk().void_evidence_approval(run_id, why)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn consume_evidence_approval(&self, ask: &Ask, now: SystemTime) -> Result<String, String> {
+        self.approval_desk().consume_evidence_approval(ask, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_approved_evidence_with<F>(&self, ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime, exec: F) -> Result<(String, RunOutcome), String>
+    where
+        F: FnOnce(&Profile, &EvidenceRun) -> RunOutcome,
+    {
+        self.approval_desk().run_approved_evidence_with(ask, profile, run, now, exec)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn answer_evidence_approval_at(&self, run_id: &str, sha: &str, approve: bool, now: SystemTime) -> Res {
+        self.approval_desk().answer_evidence_approval(run_id, sha, approve, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evidence_approval_read_at(&self, run_id: &str, now: SystemTime) -> Res {
+        self.approval_desk().evidence_approval_at(run_id, now)
+    }
+}
+
+impl ApprovalDesk {
+    /// The evidence ticket's ask and wait (6i): asks for exactly `ask`, then waits for the person's answer while `live`
+    /// says the run goes on. `Ok` only once they approved this list. A decline, no answer within the hold, a void or
+    /// another list is `Err` with the reason; so is the run's end, which voids the ask first.
+    pub(crate) fn await_answer(&self, ask: &Ask, live: &dyn Fn() -> bool, poll: Duration) -> Result<(), String> {
+        let asked = self.request_evidence_approval(ask, SystemTime::now())?;
+        loop {
+            if !live() {
+                let _ = self.void_evidence_approval(&ask.run_id, "the run ended");
+                return Err("the run ended before you answered".into());
+            }
+            let state = self.evidence_approval_at(&ask.run_id, SystemTime::now()).map_err(|e| e["reason"].as_str().unwrap_or("the approval can't be read").to_string())?;
+            if state["sha256"].as_str() != Some(asked.as_str()) {
+                return Err("the approval is for another list".into());
+            }
+            match state["state"].as_str() {
+                Some("approved") => return Ok(()),
+                Some("pending") => std::thread::sleep(poll),
+                Some("declined") => return Err("you declined the check commands".into()),
+                Some("expired") => return Err(format!("no answer came within {} hours", HOLD_MAX.as_secs() / 3600)),
+                _ => return Err("the approval was voided".into()),
+            }
+        }
+    }
+
     fn approval_path(&self, run_id: &str) -> PathBuf {
         self.data.join("control/lead").join(run_id).join(FILE)
     }
@@ -253,7 +351,6 @@ impl App {
 
     /// The core asks (after the gate passes). Any earlier ask of this run, answered or not, is void: a redo or a new
     /// round asks again, and only the newest list can be approved. Returns the list's sha256.
-    #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
     pub(crate) fn request_evidence_approval(&self, ask: &Ask, now: SystemTime) -> Result<String, String> {
         ask.check()?;
         let _g = crate::lock(&LOCK);
@@ -267,7 +364,6 @@ impl App {
     }
 
     /// Void the run's approval (a redo, a new round, the run ended): it can never be consumed.
-    #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
     pub(crate) fn void_evidence_approval(&self, run_id: &str, why: &str) -> Result<(), String> {
         let _g = crate::lock(&LOCK);
         // A consumed approval stays consumed (in memory too, as in the file); anything else is dropped.
@@ -287,7 +383,7 @@ impl App {
 
     /// The human's answer. `sha` is the list the dialog showed: an answer to an older list is refused. Only an ask this
     /// app made and still holds can be answered.
-    fn answer_evidence_approval(&self, run_id: &str, sha: &str, approve: bool, now: SystemTime) -> Res {
+    pub(crate) fn answer_evidence_approval(&self, run_id: &str, sha: &str, approve: bool, now: SystemTime) -> Res {
         if !crate::ids::valid_run_id(run_id) {
             return Err(invalid("run_id", "not a run id"));
         }
@@ -330,7 +426,6 @@ impl App {
 
     /// The evidence ticket uses the approval: only an answer a person gave in this app's lifetime, for exactly `ask`,
     /// within the hold, with the file agreeing, once. Anything else is refused (and voids it).
-    #[allow(dead_code)] // the evidence ticket (runproto, after the run-protocol stack lands) is its first caller
     pub(crate) fn consume_evidence_approval(&self, ask: &Ask, now: SystemTime) -> Result<String, String> {
         ask.check()?;
         let _g = crate::lock(&LOCK);
@@ -380,16 +475,12 @@ impl App {
     /// be used by a run with it on. The approval is then used up for that exact ask, and the commands that run are
     /// `ask.commands`, the very strings the approval's sha covers: `run.commands` is ignored, and nothing is re-read
     /// from a file or an agent between the check and the run. Any refusal runs nothing. Returns the approval's sha
-    /// (for the signed progress line) and the run's outcome.
-    // The evidence ticket (spec PR 6i) is its first production caller. Until then only the tests and the dialog's
-    // end-to-end test call it, so the allow stays (bhishma L3 on c5765e0, kept by vajra-1's decision C).
-    #[allow(dead_code)]
+    /// (for the signed progress line) and the run's outcome. Its caller is the evidence ticket (`delivery`, 6i).
     pub(crate) fn run_approved_evidence(&self, ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime) -> Result<(String, RunOutcome), String> {
         self.run_approved_evidence_with(ask, profile, run, now, runner::run)
     }
 
     /// `run_approved_evidence` with the runner passed in, so tests see exactly what would run.
-    #[allow(dead_code)] // as above
     pub(crate) fn run_approved_evidence_with<F>(&self, mut ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime, exec: F) -> Result<(String, RunOutcome), String>
     where
         F: FnOnce(&Profile, &EvidenceRun) -> RunOutcome,
@@ -448,7 +539,7 @@ impl App {
         self.evidence_approval_at(run_id, SystemTime::now())
     }
 
-    fn evidence_approval_at(&self, run_id: &str, now: SystemTime) -> Res {
+    pub(crate) fn evidence_approval_at(&self, run_id: &str, now: SystemTime) -> Res {
         if !crate::ids::valid_run_id(run_id) {
             return Err(invalid("run_id", "not a run id"));
         }
@@ -499,23 +590,6 @@ impl App {
             return false;
         }
         self.read_approval(run_id).ok().flatten().is_some_and(|r| r["state"] == "consumed")
-    }
-
-    /// Approve or decline: a person's click in the app only.
-    pub fn act_answer_evidence_approval(&self, env: &super::Envelope, run_id: &str, sha: &str, approve: bool) -> Value {
-        let action = if approve { "approve_evidence" } else { "decline_evidence" };
-        let target = format!("evidence:{run_id}");
-        self.act(env, crate::control::receipt::Caller::Ui, true, action, &target, None::<u64>, || self.answer_evidence_approval(run_id, sha, approve, SystemTime::now()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn answer_evidence_approval_at(&self, run_id: &str, sha: &str, approve: bool, now: SystemTime) -> Res {
-        self.answer_evidence_approval(run_id, sha, approve, now)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn evidence_approval_read_at(&self, run_id: &str, now: SystemTime) -> Res {
-        self.evidence_approval_at(run_id, now)
     }
 }
 

@@ -100,7 +100,7 @@ impl Workers for FakeWorkers {
         let wt = self.fast.load(Ordering::SeqCst).then(|| PathBuf::from(format!("/wt/{id}")));
         let t = Tick {
             id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, replayed: false,
-            worktree: wt,
+            worktree: wt, files: Vec::new(),
         };
         b.insert(id.clone(), (t, spec, seat));
         Ok(id)
@@ -1253,7 +1253,36 @@ fn result(passed: bool, rejected: bool) -> RoundResult {
     RoundResult {
         passed, rejected, failing: vec![], blocking: vec![], feedback: BTreeMap::new(), end: None,
         checks: vec![json!({"kind": "security_review", "slot": "w9", "harness": "codex", "account": "codex", "shared_with_writer": false})],
+        delivered: None,
     }
+}
+
+/// A passed round, and what its delivery phase answered (6i).
+fn delivered_round(d: Option<Delivered>) -> Rig {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Checked(RoundResult { delivered: d, ..result(true, false) }));
+    r.await_round(1);
+    r
+}
+
+#[test]
+fn a_passed_gate_is_verified_only_when_its_delivery_says_every_step_passed() {
+    let ok = Delivered { verified: true, reason: "round 1 passed and its evidence was checked".into(), steps: vec![json!({"step": "verify", "ok": true})] };
+    let r = delivered_round(Some(ok));
+    assert_eq!(r.status(), Some(RunStatus::Verified));
+    assert_eq!(r.p.card().reason.as_deref(), Some("round 1 passed and its evidence was checked"));
+    // A delivery that stopped at a step is not verified, with that step's reason; the gate's pass alone never counts.
+    let bad = Delivered { verified: false, reason: "Signing the evidence: Vajra's signing key isn't usable".into(), steps: vec![] };
+    let r = delivered_round(Some(bad));
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert_eq!(r.p.card().reason.as_deref(), Some("Signing the evidence: Vajra's signing key isn't usable"));
+    // The tasks the gate saw carry each one's close: the task graph id, its commit and the branch its ticket ran on.
+    let i = r.gate.inputs.lock().unwrap()[0].clone();
+    assert_eq!(i.closes.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["r1.t1", "r1.t2", "r1.t3"]);
+    assert!(i.closes.iter().all(|c| c.branch == format!("vajra/r1/task-{}-r1", c.id.trim_start_matches("r1.")) && !c.commit.is_empty()), "{:?}", i.closes);
 }
 
 #[test]
@@ -1404,7 +1433,7 @@ fn a_rejected_round_ends_the_run_rejected() {
 }
 
 #[test]
-fn a_passed_gate_is_still_not_verified_until_the_delivery_phase() {
+fn a_passed_gate_with_no_delivery_phase_is_not_verified() {
     let r = rig();
     r.p.plan_tasks(plan1()).unwrap();
     r.round_done(&["t1", "t2", "t3"]);
@@ -1414,7 +1443,7 @@ fn a_passed_gate_is_still_not_verified_until_the_delivery_phase() {
     assert_eq!(rt.outcome.as_deref(), Some("passed"));
     assert_eq!(rt.result.as_ref().unwrap()["passed"], true);
     assert_eq!(r.status(), Some(RunStatus::NotVerified));
-    assert!(r.p.card().reason.unwrap().contains("the gate passed"));
+    assert_eq!(r.p.card().reason.as_deref(), Some("the gate passed in round 1, but this run has no evidence check"));
     assert_eq!(r.p.card().checks[0]["harness"], "codex", "the card names who ran each check");
 }
 

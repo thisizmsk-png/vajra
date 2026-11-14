@@ -63,6 +63,9 @@ const MAX_FEATURES: usize = 64;
 const MAX_FILES: usize = 64;
 const MAX_DEPS: usize = 64;
 const MAX_CHANGED: usize = 200;
+/// `archive-evidence --setup`: at most this many commands, each at most this many characters.
+pub const MAX_SETUP: usize = 5;
+pub const SETUP_MAX: usize = 1000;
 
 fn bad(what: &str, v: &str) -> BridgeError {
     let shown: String = v.chars().take(40).filter(|c| !c.is_control()).collect();
@@ -242,6 +245,18 @@ impl Bridge {
                 campaign(vec![s("report"), s("--campaign"), slug(sl)?, s("--bytes"), bytes.to_string(), s("--check"), check.clone(), s("--base64"), base64.clone()])
             }
             Request::CampaignUnlockStale { slug: sl } => campaign(vec![s("unlock"), slug(sl)?, s("--if-stale")]),
+            Request::CampaignArchiveEvidence { slug: sl, dir, head, setup } => {
+                // `vajra_tasks.py`'s own limits: at most 5 setup commands, each 1 to 1000 characters.
+                if setup.len() > MAX_SETUP || setup.iter().any(|c| c.is_empty() || c.chars().count() > SETUP_MAX || c.chars().any(char::is_control)) {
+                    return Err(BridgeError::Invalid(format!("an archive takes at most {MAX_SETUP} setup commands, each 1 to {SETUP_MAX} characters on one line")));
+                }
+                let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if name != sl.as_str() {
+                    return Err(BridgeError::Invalid("the evidence folder must be named for the campaign".into()));
+                }
+                let setup = serde_json::to_string(setup).map_err(|_| BridgeError::Invalid("the setup commands can't be encoded".into()))?;
+                campaign(vec![s("archive-evidence"), slug(sl)?, abs(dir)?, sha(head, true)?, setup])
+            }
             Request::TasksAdd { slug: sl, id, title, owner, deps, files, acceptance, branch: br } => {
                 let mut argv = vec![s("add"), ident(id)?, s("--title"), text(title, TITLE_MAX, true)?, s("--owner"), agent(owner)?];
                 if !deps.is_empty() {
@@ -329,6 +344,7 @@ impl Request {
                 | Request::CampaignClose { .. }
                 | Request::CampaignReport { .. }
                 | Request::CampaignUnlockStale { .. }
+                | Request::CampaignArchiveEvidence { .. }
                 | Request::TasksAdd { .. }
                 | Request::TasksDep { .. }
                 | Request::TasksValidate { .. }
