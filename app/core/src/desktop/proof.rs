@@ -184,7 +184,7 @@ pub fn label(i: &Input) -> (Label, String) {
     };
     match own.max(signed_trust(i.slug, i.goal)) {
         Trust::Guarded => (Label::Verified, "Every criterion passed on the delivered commit.".into()),
-        Trust::GuardedByApproval if i.approval_consumed => (Label::VerifiedApproved, "Every criterion passed. You approved the check commands for this run.".into()),
+        Trust::GuardedByApproval if i.approval_consumed => (Label::VerifiedApproved, "Every criterion passed. You approved the check commands for this run. They ran on the approved commit's tracked and untracked files; ignored files, such as dependencies and build output, weren't checked against it.".into()),
         Trust::GuardedByApproval if i.approval_unheld => (Label::NotVerified, RESTART_REASON.into()),
         Trust::GuardedByApproval => (Label::NotVerified, "The check commands were not approved for this run.".into()),
         Trust::OutsideGuard => (Label::EvidenceUnguarded, "Every criterion passed, but the evidence ran outside the guard.".into()),

@@ -304,9 +304,30 @@ thread_local! {
 /// day folders of `codex_home/sessions` created at or after `since` (less a 2 s clock skew), newest first, at most
 /// `MAX_LEAD_FILES`. The walk holds each folder by its descriptor and refuses links, as `rollout_file` does.
 pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> Vec<String> {
+    lead_rollouts(codex_home, since).files
+}
+
+/// What one pass of the plain Lead's read-back found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LeadRollouts {
+    /// The text of the newest `MAX_LEAD_FILES` session files created since the launch, newest first.
+    pub files: Vec<String>,
+    /// How many session files were created since the launch in all: more than `files.len()` when the cap cut some.
+    pub created: usize,
+    /// The sessions folder was there to look in (`codex_home/sessions`, opened with no link). When it isn't, a Lead's
+    /// session file is landing somewhere the core doesn't look.
+    pub sessions_seen: bool,
+}
+
+/// The cap on one pass's files (`MAX_LEAD_FILES`), for the read-back's fail-closed rule.
+pub const LEAD_FILES_CAP: usize = MAX_LEAD_FILES;
+
+/// `codex_rollouts_since`, with the count of every file created since the launch and whether the sessions folder was
+/// there (#241 bhishma L1 and L2).
+pub fn lead_rollouts(codex_home: &Path, since: std::time::SystemTime) -> LeadRollouts {
     let floor = since.checked_sub(Duration::from_secs(2)).unwrap_or(since);
-    let Ok(home) = fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(codex_home) else { return Vec::new() };
-    let Some(sessions) = sub_dir(&home, "sessions") else { return Vec::new() };
+    let Ok(home) = fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(codex_home) else { return LeadRollouts::default() };
+    let Some(sessions) = sub_dir(&home, "sessions") else { return LeadRollouts::default() };
     // Year, month, day: the newest two names at each level, so a day that crosses a month or year is still seen.
     let newest = |dir: &File| {
         let mut n = entry_names(dir);
@@ -331,6 +352,7 @@ pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> 
     // just for its metadata here and kept open (at most `MAX_LEAD_FILES` at a time) for the read, so the file read is the
     // one whose metadata was judged.
     let mut picked: Vec<(std::time::SystemTime, File)> = Vec::new();
+    let mut created = 0usize;
     for (_, day) in days.iter().take(2) {
         for n in entry_names(day).into_iter().filter(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
             let Ok(name) = CString::new(n) else { continue };
@@ -340,6 +362,7 @@ pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> 
             if !meta.is_file() || born < floor {
                 continue;
             }
+            created += 1;
             if picked.len() == MAX_LEAD_FILES {
                 // Full: keep the newest. The oldest is replaced only by a newer one (its file closes as it is dropped).
                 let Some((i, _)) = picked.iter().enumerate().min_by_key(|(_, p)| p.0) else { continue };
@@ -353,7 +376,7 @@ pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> 
         }
     }
     picked.sort_by_key(|p| std::cmp::Reverse(p.0));
-    picked
+    let files = picked
         .into_iter()
         .filter_map(|(_, file)| {
             #[cfg(test)]
@@ -361,7 +384,8 @@ pub fn codex_rollouts_since(codex_home: &Path, since: std::time::SystemTime) -> 
             let mut text = String::new();
             file.take(MAX_READ).read_to_string(&mut text).ok().map(|_| text)
         })
-        .collect()
+        .collect();
+    LeadRollouts { files, created, sessions_seen: true }
 }
 
 /// A Codex session's final answer, from its own session file: `last_agent_message` of the last `task_complete` event.

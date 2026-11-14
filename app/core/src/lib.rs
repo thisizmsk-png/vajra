@@ -3,6 +3,9 @@
 // has to go through `spawnlock` (clippy.toml).
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
+// New with the MSRV raise to 1.88; one cleanup PR after batch-4 applies let-chains and removes this.
+#![allow(clippy::collapsible_if, clippy::chunks_exact_to_as_chunks)]
+
 pub mod adapter;
 pub mod ids;
 pub mod lifecycle_report;

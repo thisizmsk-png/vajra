@@ -20,13 +20,14 @@
 //! The record is `<data>/control/lead/<run>/approval.json`, the core's own (private dir, atomic writes); it is what the
 //! UI shows.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
 use super::{fail, invalid, App, Res};
+use crate::adapter::evidence_runner::{self as runner, EvidenceRun, Profile, RunOutcome};
 use crate::control::{audit, fsx, sha256::hex_digest};
 
 /// `evidence_hold_max_s`: how long an ask waits for its answer, and how long an approval stays usable.
@@ -35,6 +36,8 @@ const FILE: &str = "approval.json";
 /// At most this many commands, each at most this long (the list is shown whole, so it must fit on screen).
 const MAX_COMMANDS: usize = 64;
 const MAX_COMMAND: usize = 4096;
+/// The longest the check that the worktree is exactly the approved commit may take (its tree is computed with git).
+const TREE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// File read-modify-writes run under this lock, so a consume can't race an answer.
 static LOCK: Mutex<()> = Mutex::new(());
@@ -59,6 +62,11 @@ pub struct Ask {
     /// The runner's network setting for these commands (the verifier seat's, `Profile::network`): shown with the list
     /// and bound into its sha, so an approval given with the network off can't be used by a run with it on (PR 247).
     pub network: bool,
+    /// The run's repository: its git common dir, set by the core from the run's own record when it asks (codex P1 on
+    /// #249). Compared in memory when the approval is used, and with the run's git common dir before anything runs, so
+    /// an approval asked for one repository can't run its commands in another at the same commit. Not in the sha or
+    /// the dialog's record: the in-memory hold is what binds it.
+    pub repo: PathBuf,
 }
 
 /// An ask this app made, and a person's answer to it (held in memory only).
@@ -79,7 +87,35 @@ pub(crate) struct Held {
 /// these, so none can reach the dialog. Also the line and paragraph separators U+2028 and U+2029 (bhishma on #226):
 /// they are neither, but a renderer breaks the line at them, so one command could show as two.
 fn hides_text(c: char) -> bool {
-    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') || default_ignorable(c)
+    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') || default_ignorable(c) || hides_or_overlays(c)
+}
+
+/// bhishma L2 on PR 247: what a renderer may draw as nothing, as a private glyph, or over its neighbour (Unicode
+/// 16.0). Every format character (Cf) that isn't default-ignorable; all private use (Co); the noncharacters; and the
+/// combining marks that overlay or enclose the character before them (canonical combining class 1, and Me). And every
+/// code point unassigned in the Unicode data the core is built with (Cn, bhishma L1 on the wiring): one assigned later
+/// might draw as nothing.
+fn hides_or_overlays(c: char) -> bool {
+    use icu_properties::{props::GeneralCategory, CodePointMapData};
+    let u = c as u32;
+    CodePointMapData::<GeneralCategory>::new().get(c) == GeneralCategory::Unassigned
+        || (u & 0xFFFE) == 0xFFFE
+        || matches!(
+            c,
+            // Cf, not default-ignorable
+            '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}' | '\u{08E2}'
+                | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}'
+                // Co
+                | '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+                // noncharacters (and U+nFFFE, U+nFFFF above)
+                | '\u{FDD0}'..='\u{FDEF}'
+                // overlay marks (ccc 1)
+                | '\u{0334}'..='\u{0338}' | '\u{1CD4}' | '\u{1CE2}'..='\u{1CE8}' | '\u{20D2}'..='\u{20D3}'
+                | '\u{20D8}'..='\u{20DA}' | '\u{20E5}'..='\u{20E6}' | '\u{20EA}'..='\u{20EB}' | '\u{10A39}'
+                | '\u{16AF0}'..='\u{16AF4}' | '\u{1BC9E}' | '\u{1D167}'..='\u{1D169}'
+                // enclosing marks (Me)
+                | '\u{0488}'..='\u{0489}' | '\u{1ABE}' | '\u{20DD}'..='\u{20E0}' | '\u{20E2}'..='\u{20E4}' | '\u{A670}'..='\u{A672}'
+        )
 }
 
 /// Unicode's Default_Ignorable_Code_Point property, in full (Unicode 16.0 DerivedCoreProperties.txt).
@@ -116,6 +152,9 @@ impl Ask {
         }
         if self.seat.is_empty() || self.account.is_empty() || [&self.seat, &self.account].iter().any(|s| s.chars().any(hides_text)) {
             return Err("the evidence seat and account are required, as plain text".into());
+        }
+        if !self.repo.is_absolute() {
+            return Err("the run's repository is required, as an absolute path".into());
         }
         if self.commands.is_empty() || self.commands.len() > MAX_COMMANDS {
             return Err(format!("1 to {MAX_COMMANDS} commands"));
@@ -325,7 +364,7 @@ impl App {
             return Err(format!("the approval is {}", if held.answer == Some(false) { "declined" } else { "not answered" }));
         }
         if held.ask != *ask || held.sha != sha {
-            return refuse("the commands, commit, round or seat changed after approval");
+            return refuse("the commands, commit, round, seat or repository changed after approval");
         }
         if expired(held.asked_at, now) {
             return refuse("the approval is older than the hold");
@@ -342,6 +381,108 @@ impl App {
             h.consumed = true;
         }
         Ok(sha)
+    }
+
+    /// Runs a `guarded_by_approval` run's check commands, only as approved (bhishma L1 on PR 247). The ask's network
+    /// is set from `profile`, the one the runner really launches with, so an approval given with the network off can't
+    /// be used by a run with it on. The approval is then used up for that exact ask, and the commands that run are
+    /// `ask.commands`, the very strings the approval's sha covers: `run.commands` is ignored, and nothing is re-read
+    /// from a file or an agent between the check and the run. Any refusal runs nothing. Returns the approval's sha
+    /// (for the signed progress line) and the run's outcome.
+    // The evidence ticket (spec PR 6i) is its first production caller. Until then only the tests and the dialog's
+    // end-to-end test call it, so the allow stays (bhishma L3 on c5765e0, kept by vajra-1's decision C).
+    #[allow(dead_code)]
+    pub(crate) fn run_approved_evidence(&self, ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime) -> Result<(String, RunOutcome), String> {
+        self.run_approved_evidence_with(ask, profile, run, now, runner::run)
+    }
+
+    /// `run_approved_evidence` with the runner passed in, so tests see exactly what would run.
+    #[allow(dead_code)] // as above
+    pub(crate) fn run_approved_evidence_with<F>(&self, mut ask: Ask, profile: &Profile, run: &EvidenceRun, now: SystemTime, exec: F) -> Result<(String, RunOutcome), String>
+    where
+        F: FnOnce(&Profile, &EvidenceRun) -> RunOutcome,
+    {
+        ask.network = profile.network;
+        // Where the commands run must be what was approved (bhishma M1 on the wiring), checked before the approval is
+        // used, so a mismatch runs nothing and leaves it unused: the slug is this run's; the worktree is exactly
+        // ask.commit, its HEAD and every file (`at_approved_commit`).
+        if super::proof_app::run_of(run.slug) != Some(ask.run_id.as_str()) {
+            return Err("the evidence folder belongs to another run".into());
+        }
+        // The repository is the one the approval was asked for (codex P1 on #249): the held ask's `repo` must equal
+        // `ask.repo` (`consume_evidence_approval`), and that must be the run's git common dir, which the worktree is
+        // then proved to belong to (`at_approved_commit`). A clone at the same commit is a different folder.
+        let same = matches!((std::fs::canonicalize(&ask.repo), std::fs::canonicalize(run.git_common)), (Ok(a), Ok(b)) if a == b);
+        if !same {
+            return Err("the run's repository isn't the one the approval was asked for".into());
+        }
+        let at_commit = || self.at_approved_commit(&profile.worktree, run.git_common, run.base, run.slug, &ask.commit, &ask.commands).map(Some);
+        at_commit()?;
+        let sha = self.consume_evidence_approval(&ask, now)?;
+        // Checked again by the runner immediately before it spawns (bhishma L1 on 07a0ee4): a change made after the check
+        // above, by anything outside the sandbox, runs nothing. That check's account of the ignored files goes into the
+        // signed bundle (bhishma M2 on 7c09e27).
+        let approved = EvidenceRun { commands: &ask.commands, at_spawn: Some(runner::AtSpawn(&at_commit)), ..run.clone() };
+        Ok((sha, exec(profile, &approved)))
+    }
+
+    /// The worktree's files are the approved `commit`'s (bhishma M1 on the wiring, L1 on 07a0ee4, M1 to M3 on
+    /// 7c09e27). What is bound, and what isn't:
+    /// - **HEAD** is `commit`, read through the pinned walk in the run's git common dir `common` (which proves that dir
+    ///   is its own).
+    /// - **Every tracked and untracked file** matches: the worktree's tree equals `commit`'s. The worktree's tree is
+    ///   the one `vajra-verify-work.sh` records as `git.worktreeTree` (the bridge's `tree_id`: the repository's config
+    ///   read once, no filter, hook or fsmonitor ever run). `commit`'s tree is read from `common` alone, with replace
+    ///   objects off, from a commit object whose own hash is `commit` (`Bridge::commit_tree`), so neither a planted
+    ///   `.git` nor `refs/replace` can choose it. A dirty worktree is refused rather than run and labelled: the person
+    ///   approved the commands for that commit.
+    /// - **The walkthrough folder** `base` is left out of the tree, as verify-work does, so inside the worktree it must
+    ///   hold nothing but this run's empty `slug` folder (`runner::base_is_clear`); a commit with files there is refused.
+    /// - **Ignored files are not bound.** The ignore rules keep installed dependencies, build output and `.env` files
+    ///   out of the tree. Their listing's count and hash are returned for the signed bundle, and an ignored file a test
+    ///   runner would collect (`bridge::TEST_LIKE`) is refused.
+    ///
+    /// Returns the bundle's `core` field: the bound tree and the ignored listing.
+    #[allow(clippy::too_many_arguments)]
+    fn at_approved_commit(&self, worktree: &Path, common: &Path, base: &Path, slug: &str, commit: &str, commands: &[String]) -> Result<Value, String> {
+        let head = runner::worktree_head(worktree, common).map_err(String::from)?;
+        if head != commit {
+            return Err("the worktree isn't at the approved commit".into());
+        }
+        runner::base_is_clear(base, worktree, slug).map_err(String::from)?;
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = TREE_TIMEOUT;
+        let want = bridge.commit_tree(common, commit).ok_or("the approved commit's tree can't be read from the repository's own git folder")?;
+        // The tree records a submodule as its commit alone, and neither the tree nor the ignored listing looks inside
+        // its folder, so a file planted there would run unseen (owner review on #256). Refused, not labelled.
+        let links = bridge.gitlinks(common, &want).ok_or("the approved commit's submodules can't be listed from the repository's own git folder")?;
+        if let Some(first) = links.first() {
+            let more = if links.len() > 1 { format!(" and {} more", links.len() - 1) } else { String::new() };
+            return Err(format!(
+                "the approved commit has a submodule ({}{more}); files inside a submodule's folder can't be compared with the approved commit, so the checks don't run in a repository with submodules",
+                super::plan::one_line(first, 200)
+            ));
+        }
+        if let Ok(rel) = base.strip_prefix(worktree) {
+            let rel = rel.to_str().ok_or("the walkthrough folder's name isn't plain text")?;
+            if !rel.is_empty() && bridge.tree_has(common, &want, rel) != Some(false) {
+                return Err("the approved commit has files in the walkthrough folder, so its tree can't be compared".into());
+            }
+        }
+        let base_str = base.to_string_lossy();
+        let snap = bridge.worktree_snapshot(worktree, &[base_str.as_ref()], commands).ok_or("the worktree's files couldn't be read as one tree (the repository's config defines a filter, or git took too long)")?;
+        if snap.tree != want {
+            return Err("the worktree has changes that aren't in the approved commit".into());
+        }
+        if let Some(t) = snap.test_like.first() {
+            let more = if snap.test_like.len() > 1 { format!(" and {} more", snap.test_like.len() - 1) } else { String::new() };
+            return Err(format!("an ignored file a test runner would collect is in the worktree ({}{more}), and it isn't part of the approved commit", super::plan::one_line(t, 200)));
+        }
+        Ok(json!({
+            "approvedTree": want,
+            "bound": "tracked and untracked files; ignored files are not bound",
+            "ignored": {"count": snap.ignored.len(), "sha256": snap.ignored_sha256, "listing": "git ls-files --others --ignored --exclude-standard --directory"},
+        }))
     }
 
     /// The run's approval, for the UI: the state, and while pending the exact list to show. A pending or approved
