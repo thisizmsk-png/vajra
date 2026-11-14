@@ -205,11 +205,19 @@ describe("welcome: behaviour that has no drawing", () => {
     expect(screen.queryByRole("heading", { name: W.title })).toBeNull();
   });
 
-  it("ticking 'also add the others' adds them too; unticked adds only the pick", async () => {
+  it("'also add the others' starts unticked and adds only the pick", async () => {
+    boot();
+    expect((await screen.findByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getAllByRole("radio")[0]);
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "project_add")).toHaveLength(1));
+    expect(f.calls.find((c) => c.cmd === "project_add")?.args).toMatchObject({ path: REPOS[0].root });
+  });
+
+  it("ticking 'also add the others' adds them too", async () => {
     boot();
     fireEvent.click(await screen.findByRole("checkbox"));
     fireEvent.click(screen.getAllByRole("radio")[0]);
-    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "project_add")).toHaveLength(1));
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "project_add")).toHaveLength(4));
   });
 });
 

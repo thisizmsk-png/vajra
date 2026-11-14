@@ -29,7 +29,7 @@ export interface FolderProps {
 }
 
 export function FolderBody({ repos, picked, onUse, busy, error, onLookAgain }: FolderProps) {
-  const [also, setAlso] = useState(true);
+  const [also, setAlso] = useState(false);
   const [path, setPath] = useState("");
   const [pickFail, setPickFail] = useState(false);
   const choose = async () => {
