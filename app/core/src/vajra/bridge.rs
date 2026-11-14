@@ -448,6 +448,10 @@ impl Bridge {
                         let py = i == 0;
                         if py {
                             r.py_config |= runner;
+                            if runner {
+                                r.py_text.push_str(&text);
+                                r.py_text.push('\n');
+                            }
                         } else {
                             r.js_config |= runner;
                         }
@@ -490,7 +494,11 @@ impl Bridge {
                     // bhishma M1 on cd9525a: decided by the runners the approved commands could start (pytest, jest
                     // and the rest run with no config at all, and the marker files can be planted), never by a
                     // config alone. A command Vajra can't place keeps both folders in.
-                    let venv = has("pyvenv.cfg") && !runners.js && !runners.unknown && !rules.js_config;
+                    // Codex P1 on #256: nor when pytest is told to collect there, by a flag, a path into the folder
+                    // or a tracked config that names it.
+                    let named = runners.py_paths.iter().any(|p| p == name || p.starts_with(&format!("{name}/")) || p == entry || p.starts_with(&format!("{entry}/")));
+                    let configured = rules.py_text.contains("collect-in-virtualenv") || (!name.is_empty() && rules.py_text.contains(name));
+                    let venv = has("pyvenv.cfg") && !runners.js && !runners.unknown && !rules.js_config && !runners.py_open && !named && !configured;
                     let cargo = name == "target" && has("CACHEDIR.TAG") && !runners.python && !runners.js && !runners.unknown && !rules.py_config && !rules.js_config;
                     if venv || cargo {
                         skip.push(format!(":(exclude,literal){entry}"));
@@ -607,10 +615,17 @@ const MAX_CONFIGS: usize = 200;
 pub const GO_SKIP: [&str; 4] = ["**/.*/**", "**/_*/**", "**/testdata/**", "**/vendor/**"];
 
 /// Which test runners the approved commands could start (bhishma M1 on cd9525a).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Runners {
     /// pytest itself: `pytest`, `py.test` or `python -m pytest`.
     pub python: bool,
+    /// A pytest command has an argument that could make it collect inside a virtualenv (codex P1 on #256): any flag
+    /// but the harmless ones in `PY_SAFE_FLAGS` (so `--collect-in-virtualenv`, `-c`, `--rootdir`, `-p` and the rest),
+    /// or a path that is absolute, climbs with `..` or has a glob. Drops every virtualenv skip.
+    pub py_open: bool,
+    /// The relative paths pytest commands name (a test id's `::` part dropped): a virtualenv one of them is in, or
+    /// is, isn't skipped.
+    pub py_paths: Vec<String>,
     /// jest, vitest or mocha itself.
     pub js: bool,
     /// Anything else that isn't a known non-runner. A launcher (tox, nox, uv, poetry, npm, npx, pnpm, yarn, bun), a
@@ -619,6 +634,36 @@ pub struct Runners {
 }
 
 const PY_RUNNERS: [&str; 2] = ["pytest", "py.test"];
+/// pytest flags that change only output or when it stops, never what it collects. `-k` and `-m` take an expression
+/// as the next word.
+const PY_SAFE_FLAGS: [&str; 20] = [
+    "-q", "-qq", "-v", "-vv", "-vvv", "-x", "-s", "-l", "-ra", "-rA", "-rf", "-rs", "-rN", "--no-header", "--strict-markers", "--exitfirst",
+    "--quiet", "--verbose", "-k", "-m",
+];
+/// pytest `--name=value` flags that are as harmless as `PY_SAFE_FLAGS`.
+const PY_SAFE_VALUED: [&str; 4] = ["--tb=", "--color=", "--maxfail=", "--durations="];
+
+/// Places one pytest command's arguments into `r` (codex P1 on #256): anything not known harmless opens the
+/// virtualenvs.
+fn pytest_args(r: &mut Runners, args: &[&str]) {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if *a == "-k" || *a == "-m" {
+            it.next();
+        } else if a.starts_with('-') {
+            if !PY_SAFE_FLAGS.contains(a) && !PY_SAFE_VALUED.iter().any(|p| a.starts_with(p)) {
+                r.py_open = true;
+            }
+        } else {
+            let path = a.split("::").next().unwrap_or(a).trim_start_matches("./").trim_end_matches('/');
+            if path.starts_with('/') || path.split('/').any(|s| s == "..") || path.contains(['*', '?', '[', '{', '~', '\'', '"', '\\']) {
+                r.py_open = true;
+            } else if !path.is_empty() && path != "." {
+                r.py_paths.push(path.to_string());
+            }
+        }
+    }
+}
 const JS_RUNNERS: [&str; 3] = ["jest", "vitest", "mocha"];
 /// Commands that start no Python or JS test runner: the Rust and Go toolchains and plain file tools. Not `make` or
 /// `git`, which run whatever a Makefile or an alias says.
@@ -641,11 +686,15 @@ pub fn runners_of(commands: &[String]) -> Runners {
             let rest: Vec<&str> = words.collect();
             if PY_RUNNERS.contains(&prog) {
                 r.python = true;
+                pytest_args(&mut r, &rest);
             } else if JS_RUNNERS.contains(&prog) {
                 r.js = true;
             } else if prog.starts_with("python") {
                 match rest.as_slice() {
-                    ["-m", "pytest" | "py.test", ..] => r.python = true,
+                    ["-m", "pytest" | "py.test", args @ ..] => {
+                        r.python = true;
+                        pytest_args(&mut r, args);
+                    }
                     _ => r.unknown = true,
                 }
             } else if !OTHER_TOOLS.contains(&prog) {
@@ -657,8 +706,11 @@ pub fn runners_of(commands: &[String]) -> Runners {
 }
 
 /// What the tracked runner configs say, for `worktree_snapshot`'s test-like check (bhishma M2b on 93dc4ab).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SkipRules {
+    /// The tracked pytest configs' text, joined (each capped by the read): a virtualenv whose name is in it (a
+    /// `testpaths` or `addopts` entry) isn't skipped, nor any when it says `collect-in-virtualenv` (codex P1 on #256).
+    pub py_text: String,
     /// A tracked config replaces a runner's default skips (pytest `norecursedirs`; jest `testPathIgnorePatterns`,
     /// `roots`, `testMatch` or `testRegex`; vitest `exclude`; mocha `spec`): no folder is left out.
     pub overridden: bool,
@@ -675,7 +727,7 @@ pub struct SkipRules {
 }
 
 impl SkipRules {
-    const NONE: SkipRules = SkipRules { overridden: true, py_config: true, js_config: true, py_custom: true, js_custom: true };
+    const NONE: SkipRules = SkipRules { py_text: String::new(), overridden: true, py_config: true, js_config: true, py_custom: true, js_custom: true };
 }
 
 /// The tracked config files each runner reads; the keys in them that replace its default skips; and the keys that
@@ -1138,5 +1190,16 @@ mod runners_tests {
             assert!(of(&[unknown]).unknown, "{unknown} could start anything");
         }
         assert!(is(of(&[]), false, false, false));
+    }
+
+    #[test]
+    fn pytest_arguments_that_could_reach_a_virtualenv_open_it_and_its_paths_are_kept() {
+        // Codex P1 on #256.
+        for open in ["pytest --collect-in-virtualenv", "pytest -c x.ini", "pytest --rootdir=.", "pytest /abs", "pytest ../up", "pytest 'a*'", "python -m pytest -p x"] {
+            assert!(of(&[open]).py_open, "{open}");
+        }
+        let r = of(&["pytest -q -x --tb=short -k 'smoke' -m slow ./tests/ unit/test_a.py::test_b", "python3 -m pytest -ra ."]);
+        assert!(!r.py_open);
+        assert_eq!(r.py_paths, ["tests", "unit/test_a.py"]);
     }
 }
