@@ -1283,6 +1283,58 @@ file_case BLOCK "M1: unreadable lead dir: any deliver- folder" Write "$VS/campai
 file_case ALLOW "M1: unreadable lead dir: another campaign"   Write "$VS/campaigns/login-flow/progress.md"
 chmod 700 "$ALT/control/lead"; unset VAJRA_DESKTOP_DATA
 
+# Plan #217 L1 (a): the M1 rule reached through a symlink planted outside the folder. The guard resolves each link
+# (canon), so a link in the project to the core folder, to a file in it, or to the campaigns folder above it is the
+# core folder itself. Reads through a link stay allowed.
+ln -s "$CF" "$PROJ/corelink"; ln -s "$CF/campaign.json" "$PROJ/camplink"; ln -s "$VS/campaigns" "$PROJ/campslink"
+mkdir -p "$PROJ/deep/er"; ln -s ../../corelink "$PROJ/deep/er/rel"   # a relative link to a link
+file_case BLOCK "L1 link: Write via a dir link to the core folder"   Write "$PROJ/corelink/progress.md"
+file_case BLOCK "L1 link: Write via a file link to campaign.json"    Write "$PROJ/camplink"
+file_case BLOCK "L1 link: Write via a link to campaigns, core slug"  Write "$PROJ/campslink/$C0/state.sig"
+file_case BLOCK "L1 link: Edit via a relative link to a link"        Edit "$PROJ/deep/er/rel/features.json"
+bash_case BLOCK "L1 link: redirect via the dir link"                 "echo x > corelink/progress.md"
+bash_case BLOCK "L1 link: redirect via the file link"                "printf x > camplink"
+bash_case BLOCK "L1 link: cp onto the file link"                     "cp /tmp/c.json camplink"
+bash_case BLOCK "L1 link: touch a .lock via the campaigns link"      "touch campslink/$C0/.lock"
+bash_case BLOCK "L1 link: cd into the dir link, then redirect"       "cd corelink && echo x > report.md"
+bash_case BLOCK "L1 link: cwd is the relative link"                  "echo x > progress.md" "$PROJ/deep/er/rel"
+bash_case BLOCK "L1 link: python writes via the dir link"            "python3 -c 'open(\"corelink/report.md\",\"w\").write(\"x\")'"
+bash_case BLOCK "L1 link: ln -sf a new link over the file link's target" "ln -sf /tmp/evil.json corelink/campaign.json"
+file_case ALLOW "L1 link: Read via the dir link"                     Read "$PROJ/corelink/campaign.json"
+bash_case ALLOW "L1 link: cat via the file link"                     "cat camplink"
+file_case ALLOW "L1 link: a link to a CLI campaign stays writable"   Write "$PROJ/campslink/deliver-20261112-0930/progress.md"
+rm -f "$PROJ/corelink" "$PROJ/camplink" "$PROJ/campslink" "$PROJ/deep/er/rel"; rm -rf "$PROJ/deep"
+
+# Plan #217 L1 (b): the M1 rule reached through a non-ASCII lookalike name. APFS is case-insensitive under Unicode
+# folding, so U+017F LONG S names the same entry as s and U+212A KELVIN SIGN the same as k: "campaign<long s>" IS the
+# campaigns folder, and a resumed core slug with an s or k is reached by its lookalike. The guard's ambiguity rule
+# refuses any non-ASCII write name under a folder that holds a protected path, so every such spelling is blocked,
+# and so is a lookalike that is really another folder (fail closed). Outside protected areas non-ASCII stays allowed.
+LS=$'\xc5\xbf'; KS=$'\xe2\x84\xaa'; CYE=$'\xd0\xb5'   # U+017F, U+212A, U+0435 CYRILLIC SMALL LETTER IE
+mkdir -p "$LEAD/20261112-1905"
+echo '{"schema":"vajra.run_seats/1","run_id":"20261112-1905","evidence_trust":"guarded","campaign_slug":"kb-sync"}' > "$LEAD/20261112-1905/seats.json"
+mkdir -p "$VS/campaigns/kb-sync"
+if [ "$(uname)" = Darwin ]; then
+  # The route is real on this disk, not only in principle: the folded spellings open the core folders.
+  [ -d "$VS/campaign${LS}/$C0" ] && [ -d "$VS/campaigns/${KS}b-${LS}ync" ]
+  judge ALLOW "L1 uni: APFS folds long s and Kelvin onto the core folders" "$?"
+fi
+file_case BLOCK "L1 uni: Write via campaign<long s> to a core slug"  Write "$VS/campaign${LS}/$C0/progress.md"
+file_case BLOCK "L1 uni: Write to a Kelvin-k lookalike core slug"    Write "$VS/campaigns/${KS}b-sync/campaign.json"
+file_case BLOCK "L1 uni: Write to a long-s lookalike core slug"      Write "$VS/campaigns/kb-${LS}ync/state.sig"
+file_case BLOCK "L1 uni: Write, tilde path, long s"                  Write "~/.claude/vajra/campaign${LS}/$C0/report.md"
+file_case BLOCK "L1 uni: Write to a Cyrillic-e lookalike (another folder; fail closed)" Write "$VS/campaigns/d${CYE}liver-20261112-1900/progress.md"
+bash_case BLOCK "L1 uni: redirect via campaign<long s>"              "echo x > ~/.claude/vajra/campaign${LS}/$C0/state.sig"
+bash_case BLOCK "L1 uni: redirect to a Kelvin-k core slug"           "echo x > \"$VS/campaigns/${KS}b-sync/progress.md\""
+bash_case BLOCK "L1 uni: touch a .lock in a long-s core slug"        "touch \"$VS/campaigns/kb-${LS}ync/.lock\""
+bash_case BLOCK "L1 uni: cd via campaign<long s>, then redirect"     "cd \"$VS/campaign${LS}/$C0\" && echo x > progress.md"
+bash_case BLOCK "L1 uni: cwd is campaigns, lookalike relative name"  "echo x > ${KS}b-sync/report.md" "$VS/campaigns"
+bash_case BLOCK "L1 uni: python writes via campaign<long s>"         "python3 -c 'open(\"$VS/campaign${LS}/$C0/report.md\",\"w\").write(\"x\")'"
+file_case BLOCK "L1 uni: the ASCII core slug kb-sync itself"         Write "$VS/campaigns/kb-sync/progress.md"
+file_case ALLOW "L1 uni: Read via campaign<long s>"                  Read "$VS/campaign${LS}/$C0/campaign.json"
+file_case ALLOW "L1 uni: a non-ASCII name in the project is fine"    Write "$PROJ/${KS}b-${LS}ync.md"
+rm -rf "$LEAD/20261112-1905" "$VS/campaigns/kb-sync"
+
 # --- Latency ---------------------------------------------------------------
 LAT_JSON="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit -m \"wip\" && npm test -- --watch=false 2>&1 | tail -n 20"}}')"
 RUNS=40
