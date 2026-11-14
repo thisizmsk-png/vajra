@@ -90,8 +90,9 @@ impl DirHandle {
     /// Every entry name as bytes (no `.` or `..`), UTF-8 or not: for a check that must see everything there.
     pub fn raw_names(&self) -> io::Result<Vec<Vec<u8>>> {
         use std::os::fd::AsRawFd;
-        // SAFETY: dup gives fdopendir its own descriptor to own; the DIR is closed before returning.
-        let fd = unsafe { libc::dup(self.0.as_raw_fd()) };
+        // SAFETY: the copy gives fdopendir its own descriptor to own; the DIR is closed before returning. Close-on-exec
+        // atomically (F_DUPFD_CLOEXEC, not dup): no child another thread starts can inherit the copy.
+        let fd = unsafe { libc::fcntl(self.0.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }

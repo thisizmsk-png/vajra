@@ -8,4 +8,5 @@ disallowed-methods = [
     { path = "portable_pty::SlavePty::spawn_command", reason = "use crate::spawnlock::spawn_pty" },
     { path = "portable_pty::PtySystem::openpty", reason = "use crate::spawnlock::openpty" },
     { path = "libc::pipe", reason = "use crate::spawnlock::cloexec_pipe" },
+    { path = "libc::dup", reason = "use libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0): the copy is close-on-exec atomically" },
 ]

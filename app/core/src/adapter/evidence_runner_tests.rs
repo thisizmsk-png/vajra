@@ -615,6 +615,24 @@ fn a_network_seat_resolves_and_fetches_over_https_under_deny_default() {
     assert!(!t.run(&t.profile(false), get, &[]).status.success());
 }
 
+/// bhishma L2 on 6dfca73, pinned as it is: a loopback bind works with either seat, and Seatbelt can't refuse a bind
+/// on every address (its `localhost` matches every address of the Mac). If this starts failing on the second assert,
+/// Seatbelt has narrowed `localhost`: the bind rule now keeps servers on loopback, so update the profile's comment.
+#[test]
+fn binds_work_on_loopback_and_seatbelt_cannot_keep_them_there() {
+    if !macos() || !have("python3") {
+        return eprintln!("skipped: sandbox-exec or python3");
+    }
+    let bind = |addr: &str| format!("python3 -c \"import socket; s=socket.socket(); s.bind(('{addr}', 0)); s.listen(1)\"");
+    let t = Tmp::new("bindall");
+    for network in [true, false] {
+        let p = t.fresh(network, &format!("run-{network}"));
+        p.prepare().unwrap();
+        assert!(t.run(&p, &bind("127.0.0.1"), &[]).status.success(), "loopback bind, network={network}");
+        assert!(t.run(&p, &bind("0.0.0.0"), &[]).status.success(), "Seatbelt now refuses an every-address bind (network={network}): update the profile's comment");
+    }
+}
+
 /// M1: launchd starts no job for a sandboxed caller. The job would only run `/usr/bin/true`, and is removed either way.
 #[test]
 fn launchd_starts_no_job_for_a_command() {
@@ -1147,8 +1165,10 @@ fn a_run_sees_a_clean_worktree_as_clean_in_git() {
     assert!(matches!(go(&t2, &evidence_run(&script2, &base2, &["true".to_string()], &t2.0.join("none.git"), &home2)), RunOutcome::Ran { passed: true, .. }));
 }
 
+const REPOINTED: &str = "the worktree's .git file doesn't name this worktree's own folder in the repository, so the run's git would read another repository";
+
 /// The index the core copies comes only from the run's repository (bhishma F1 on b04316cb): a worktree whose `.git`
-/// file points elsewhere still gets its own admin folder's index, a worktree of another repository is refused, and an
+/// file points elsewhere is refused (M1), a worktree of another repository is refused, and an
 /// index that is a hard link to a file kept elsewhere is refused.
 #[test]
 fn the_copied_index_is_only_ever_the_run_repositorys_own() {
@@ -1180,9 +1200,12 @@ fn the_copied_index_is_only_ever_the_run_repositorys_own() {
     let real_dotgit = fs::read_to_string(t.0.join("work/.git")).unwrap();
     fs::write(t.0.join("work/.git"), format!("gitdir: {}\n", elsewhere.display())).unwrap();
     let cmds = vec!["! grep -q PLANTED-INDEX \"$GIT_INDEX_FILE\" && test -s \"$GIT_INDEX_FILE\"".to_string()];
+    // Since bhishma M1 on 8ca4e0a a .git pointing anywhere but its own admin folder refuses the run outright, so the
+    // planted index is never copied, nor read by the run's git.
     let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
-    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "the planted index was copied: {out:?}");
+    assert_eq!(out, RunOutcome::Failed(REPOINTED.into()), "the planted gitdir was used");
     fs::write(t.0.join("work/.git"), real_dotgit).unwrap();
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Ran { passed: true, .. }), "the real index wasn't copied");
     // The run's repository isn't the worktree's: refused, nothing runs.
     let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &other.join(".git"), &home));
     assert_eq!(out, RunOutcome::Failed("the worktree's git folder isn't the run's repository".into()));
@@ -1210,6 +1233,264 @@ fn the_copied_index_is_only_ever_the_run_repositorys_own() {
     let start = std::time::Instant::now();
     assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), not_plain, "a FIFO index");
     assert!(start.elapsed() < Duration::from_secs(5), "a FIFO index stalled the run");
+}
+
+/// A linked worktree `work` of a fresh repo `repo` under `t`, one committed file. Returns (repo, worktree).
+fn linked_worktree(t: &Tmp) -> (PathBuf, PathBuf) {
+    let git = |dir: &Path, args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(dir).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", t.home()).output().unwrap();
+    let repo = t.0.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    assert!(git(&repo, &["init", "-q", "-b", "main"]).status.success());
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
+    assert!(git(&repo, &["add", "a.txt"]).status.success());
+    assert!(git(&repo, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "a"]).status.success());
+    let _ = fs::remove_dir_all(t.0.join("work"));
+    assert!(git(&repo, &["worktree", "add", "-q", t.0.join("work").to_str().unwrap()]).status.success());
+    (repo, t.0.join("work"))
+}
+
+/// Plan #214 L1: a filter driver set in the repository's own config (picked by a hostile `.gitattributes` in the
+/// worktree) refuses the run before any command, whether it's in the common config, the worktree's own config, or
+/// pulled in through an include. The control shows the filter is real: outside the runner, `git add` runs it.
+#[test]
+fn a_repo_configured_filter_driver_or_include_refuses_the_run() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("filterdrv");
+    let (repo, work) = linked_worktree(&t);
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    let marker = t.0.join("filter-ran");
+    let filter = t.0.join("evil-filter.sh");
+    fs::write(&filter, format!("#!/bin/sh\ntouch '{}'\nprintf constant\n", marker.display())).unwrap();
+    fs::set_permissions(&filter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    fs::write(work.join(".gitattributes"), "* filter=evil\n").unwrap();
+    fs::write(work.join("a.txt"), "changed\n").unwrap();
+    let gitc = |args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(&work).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", &home).output().unwrap();
+    // The refusal names the key and the way out (bhishma L2 on 8ca4e0a).
+    let refused = |key: &str| RunOutcome::Failed(format!("the repository's own git config sets {key}, which could change what this run records or start a program inside it. Move it to your global git config, or run the check outside Vajra. A repository that uses git-crypt or a repository-local git-lfs install isn't supported for evidence runs yet."));
+    let cmds = vec!["true".to_string()];
+    let clean_config = fs::read(common.join("config")).unwrap();
+    // In the common config. The control: outside the runner, `git add` runs it.
+    assert!(gitc(&["config", "filter.evil.clean", filter.to_str().unwrap()]).status.success());
+    assert!(gitc(&["add", "-A"]).status.success());
+    assert!(marker.exists(), "control: the filter should run outside the runner");
+    assert!(gitc(&["reset", "-q"]).status.success());
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused("filter.evil.clean"), "a common-config filter");
+    // smudge and process, and (L4) the keys that redirect what git adds or start a diff program.
+    for (key, val) in [
+        ("filter.evil.smudge", filter.to_str().unwrap()),
+        ("filter.evil.process", filter.to_str().unwrap()),
+        ("core.worktree", "/tmp"),
+        ("core.attributesFile", "/tmp/attrs"),
+        ("diff.external", filter.to_str().unwrap()),
+        ("diff.evil.textconv", filter.to_str().unwrap()),
+        ("diff.evil.command", filter.to_str().unwrap()),
+    ] {
+        fs::write(common.join("config"), &clean_config).unwrap();
+        assert!(gitc(&["config", key, val]).status.success(), "{key}");
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused(&key.to_lowercase()), "{key}");
+    }
+    // codex P1 on #251: an empty subsection name. `[filter ""]` is picked by a `filter=` attribute with no value. The
+    // control shows plain git runs it; the runner refuses it (and the same for an empty diff driver).
+    let _ = fs::remove_file(&marker);
+    fs::write(work.join(".gitattributes"), "* filter=\n").unwrap();
+    let mut c = clean_config.clone();
+    c.extend_from_slice(format!("[filter \"\"]\n\tclean = {}\n", filter.display()).as_bytes());
+    fs::write(common.join("config"), c).unwrap();
+    assert!(gitc(&["add", "-A"]).status.success());
+    assert!(marker.exists(), "control: an empty-named filter runs outside the runner");
+    assert!(gitc(&["reset", "-q"]).status.success());
+    let _ = fs::remove_file(&marker);
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused("filter..clean"), "an empty-named filter");
+    assert!(!marker.exists(), "the runner refused before any git ran the filter");
+    for key in ["filter..smudge", "filter..process", "diff..textconv", "diff..command"] {
+        let (section, name) = key.split_once("..").unwrap();
+        let mut c = clean_config.clone();
+        c.extend_from_slice(format!("[{section} \"\"]\n\t{name} = {}\n", filter.display()).as_bytes());
+        fs::write(common.join("config"), c).unwrap();
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused(key), "{key}");
+    }
+    fs::write(work.join(".gitattributes"), "* filter=evil\n").unwrap();
+    // In the worktree's own config (config.worktree in its admin folder).
+    fs::write(common.join("config"), &clean_config).unwrap();
+    fs::write(common.join("worktrees/work/config.worktree"), format!("[filter \"evil\"]\n\tclean = {}\n", filter.display())).unwrap();
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused("filter.evil.clean"), "a worktree-config filter");
+    fs::remove_file(common.join("worktrees/work/config.worktree")).unwrap();
+    // Through an include: the included file could be written by a check mid-run, so any include refuses.
+    for (inc, key) in [("[include]\n\tpath = /dev/null\n", "include.path"), ("[includeIf \"gitdir:/\"]\n\tpath = /dev/null\n", "includeif.gitdir:/.path")] {
+        let mut c = clean_config.clone();
+        c.extend_from_slice(inc.as_bytes());
+        fs::write(common.join("config"), c).unwrap();
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), refused(key), "{inc}");
+    }
+    // A config git can't parse isn't proven clean.
+    let mut c = clean_config.clone();
+    c.extend_from_slice(b"[broken\n");
+    fs::write(common.join("config"), c).unwrap();
+    assert_eq!(
+        go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)),
+        RunOutcome::Failed("the repository's git config couldn't be read as git config, so the run can't prove it starts no program".into()),
+        "an unparsable config"
+    );
+    // Back to a clean config: the same worktree, `.gitattributes` and all, runs (an attribute naming no configured
+    // driver does nothing).
+    fs::write(common.join("config"), &clean_config).unwrap();
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Ran { passed: true, .. }));
+}
+
+/// bhishma M1 on 8ca4e0a: the worktree's `.git` rewritten to name a gitdir planted inside the worktree refuses the
+/// run, so the run's git never loads the planted config. The plant is a copy of the real admin folder whose commondir
+/// leads to a planted common dir: the real config plus a filter, the real objects through a link. The control shows
+/// the plant works on plain git: `git add` there runs the filter. A relative `.git` line naming the real admin folder
+/// (git's `worktree.useRelativePaths`) still runs.
+#[test]
+fn a_dot_git_repointed_at_a_planted_gitdir_refuses_the_run() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("plantgitdir");
+    let (repo, work) = linked_worktree(&t);
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    let admin = common.join("worktrees/work");
+    let marker = t.0.join("planted-filter-ran");
+    let filter = t.0.join("planted-filter.sh");
+    fs::write(&filter, format!("#!/bin/sh\ntouch '{}'\nprintf constant\n", marker.display())).unwrap();
+    fs::set_permissions(&filter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // The plant, inside the worktree: an admin folder (HEAD, index, gitdir) and a common dir (HEAD, refs, the real
+    // config plus a filter, the real objects through a link).
+    let (plant, plant_common) = (work.join(".hidden-gitdir"), work.join(".hidden-common"));
+    fs::create_dir_all(&plant).unwrap();
+    for f in ["HEAD", "index", "gitdir"] {
+        fs::copy(admin.join(f), plant.join(f)).unwrap();
+    }
+    fs::create_dir_all(plant_common.join("refs/heads")).unwrap();
+    fs::copy(common.join("HEAD"), plant_common.join("HEAD")).unwrap();
+    fs::copy(common.join("refs/heads/main"), plant_common.join("refs/heads/main")).unwrap();
+    let mut cfg = fs::read(common.join("config")).unwrap();
+    cfg.extend_from_slice(format!("[filter \"evil\"]\n\tclean = {}\n", filter.display()).as_bytes());
+    fs::write(plant_common.join("config"), cfg).unwrap();
+    std::os::unix::fs::symlink(common.join("objects"), plant_common.join("objects")).unwrap();
+    fs::write(plant.join("commondir"), format!("{}\n", plant_common.display())).unwrap();
+    fs::write(work.join(".gitattributes"), "* filter=evil\n").unwrap();
+    fs::write(work.join("a.txt"), "changed\n").unwrap();
+    let real_dotgit = fs::read(work.join(".git")).unwrap();
+    fs::write(work.join(".git"), format!("gitdir: {}\n", plant.display())).unwrap();
+    // The control: plain git, through the rewritten .git, loads the planted config and runs the filter.
+    let gitc = |args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(&work).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", &home).output().unwrap();
+    assert!(gitc(&["add", "a.txt"]).status.success());
+    assert!(marker.exists(), "control: the planted gitdir's filter should run under plain git");
+    fs::remove_file(&marker).unwrap();
+    // The run: refused before any command, and nothing ran the filter.
+    let cmds = vec!["git add -A".to_string()];
+    assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Failed(REPOINTED.into()));
+    assert!(!marker.exists(), "the planted filter ran inside a run");
+    // A gitdir line with a trailing second line, or no prefix, is refused the same way.
+    for bad in [format!("gitdir: {}\nextra\n", admin.display()), format!("{}\n", admin.display())] {
+        fs::write(work.join(".git"), bad).unwrap();
+        assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Failed(_)));
+    }
+    // The real line, and the relative form of it, run.
+    fs::remove_dir_all(&plant).unwrap();
+    fs::remove_dir_all(&plant_common).unwrap();
+    fs::remove_file(work.join(".gitattributes")).unwrap();
+    let ok = vec!["true".to_string()];
+    fs::write(work.join(".git"), &real_dotgit).unwrap();
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &ok, &common, &home)), RunOutcome::Ran { passed: true, .. }));
+    fs::write(work.join(".git"), "gitdir: ../repo/.git/worktrees/work\n").unwrap();
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &ok, &common, &home)), RunOutcome::Ran { passed: true, .. }), "a relative gitdir line");
+}
+
+/// bhishma M1 on e84cc21: a relative `.git` line that steps through a name inside the worktree is refused before any
+/// command runs, even when that name is, right now, a link to the real admin folder. A check command could re-point the
+/// link mid-run at a planted admin folder, and the run's later git would follow it. The line is worked out as text, so
+/// `gitdir: hop`, and a line stepping into a worktree folder and back out with `..`, never match the admin folder.
+#[test]
+fn a_relative_dot_git_line_through_a_worktree_link_refuses_the_run() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("dotgithop");
+    let (repo, work) = linked_worktree(&t);
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    let admin = common.join("worktrees/work");
+    // The hop: a link in the worktree to the real admin folder, so today it resolves to exactly that folder.
+    std::os::unix::fs::symlink(&admin, work.join("hop")).unwrap();
+    assert_eq!(work.join("hop").canonicalize().unwrap(), admin.canonicalize().unwrap(), "the link names the real admin folder");
+    let marker = t.0.join("a-command-ran");
+    let cmds = vec![format!("touch '{}'", marker.display())];
+    fs::create_dir_all(work.join("sub")).unwrap();
+    for line in ["gitdir: hop\n", "gitdir: ./hop\n", "gitdir: sub/../hop\n", "gitdir: sub/../../repo/.git/worktrees/work\n", "gitdir: ../work/hop\n"] {
+        fs::write(work.join(".git"), line).unwrap();
+        assert_eq!(go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home)), RunOutcome::Failed(REPOINTED.into()), "{line:?}");
+        assert!(!marker.exists(), "no command ran for {line:?}");
+    }
+    // The form git writes (`..` steps out, then names) still runs.
+    fs::write(work.join(".git"), "gitdir: ../repo/.git/worktrees/work\n").unwrap();
+    let ok = vec!["true".to_string()];
+    assert!(matches!(go(&t, &evidence_run(&script, &walk_base, &ok, &common, &home)), RunOutcome::Ran { passed: true, .. }));
+}
+
+#[test]
+fn a_gitdir_line_is_worked_out_as_text_with_parent_steps_only_before_names() {
+    let wt = std::env::temp_dir().canonicalize().unwrap().join("vajra-er-gitdir-line");
+    fs::create_dir_all(&wt).unwrap();
+    let parent = wt.parent().unwrap().to_path_buf();
+    let f = |l: &str| super::gitdir_line_target(&wt, Path::new(l));
+    assert_eq!(f("../repo/.git/worktrees/w"), Some(parent.join("repo/.git/worktrees/w")));
+    assert_eq!(f("/abs/repo/.git/worktrees/w"), Some(PathBuf::from("/abs/repo/.git/worktrees/w")));
+    for bad in ["hop", "./x", "a/../../x", "../a/../b", "..", "", "/abs/../x", "/abs/./x", "../x/.", "../x/./y"] {
+        assert_eq!(f(bad), None, "{bad:?}");
+    }
+    // An unresolved worktree path is refused for a relative line: folding text over a link is not where git goes.
+    let link = wt.parent().unwrap().join("vajra-er-gitdir-line-link");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(&wt, &link).unwrap();
+    assert_eq!(super::gitdir_line_target(&link, Path::new("../repo/x")), None);
+    fs::remove_file(&link).unwrap();
+    fs::remove_dir_all(&wt).unwrap();
+}
+
+/// Plan #214 L1: every git in the run has fsmonitor and hooks off, whatever the repository's config says, and no
+/// command can rewrite the worktree's `.git` to point the run's git at a repo of its own. The control shows the
+/// fsmonitor hook is real: outside the runner, `git status` runs it.
+#[test]
+fn a_run_s_git_ignores_the_repos_fsmonitor_and_hooks_and_can_t_repoint_dot_git() {
+    if !macos() || !have("git") {
+        return eprintln!("skipped: sandbox-exec or git");
+    }
+    let t = Tmp::new("fsmon");
+    let (repo, work) = linked_worktree(&t);
+    let (script, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), t.home(), repo.join(".git"));
+    let walk_base = t.0.join("tmp/walkthroughs");
+    fs::create_dir_all(&walk_base).unwrap();
+    // The hook writes into the worktree, which a run may write, so a hook that ran inside would leave the marker.
+    let marker = work.join("fsmon-ran");
+    let hook = t.0.join("fsmon-hook.sh");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display())).unwrap();
+    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let gitc = |args: &[&str]| Command::new("/usr/bin/git").args(args).current_dir(&work).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", &home).output().unwrap();
+    assert!(gitc(&["config", "core.fsmonitor", hook.to_str().unwrap()]).status.success());
+    assert!(gitc(&["config", "core.hooksPath", t.0.join("hooks").to_str().unwrap()]).status.success());
+    assert!(gitc(&["status", "--porcelain"]).status.success());
+    assert!(marker.exists(), "control: the fsmonitor hook should run outside the runner");
+    fs::remove_file(&marker).unwrap();
+    let dotgit = fs::read(work.join(".git")).unwrap();
+    let cmds = vec![
+        "test \"$(git config core.fsmonitor)\" = false && test \"$(git config core.hooksPath)\" = /dev/null".to_string(),
+        "git status --porcelain >/dev/null && git add -A && test ! -e fsmon-ran".to_string(),
+        "! sh -c 'echo gitdir: /tmp > .git' 2>/dev/null".to_string(),
+    ];
+    let out = go(&t, &evidence_run(&script, &walk_base, &cmds, &common, &home));
+    assert!(matches!(out, RunOutcome::Ran { passed: true, .. }), "{out:?}");
+    assert!(!marker.exists(), "the fsmonitor hook ran inside a run");
+    assert_eq!(fs::read(work.join(".git")).unwrap(), dotgit, "a command rewrote the worktree's .git");
 }
 
 /// L2: a run's tmp must not exist yet, so nothing an earlier run left behind can have prepared it.

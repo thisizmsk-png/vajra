@@ -190,8 +190,9 @@ fn sub_dir(parent: &File, name: &str) -> Option<File> {
 
 /// The entry names of a held directory, read through its descriptor (not its path), at most `MAX_ENTRIES`.
 fn entry_names(dir: &File) -> Vec<String> {
-    // SAFETY: dup of a valid descriptor; on success `fdopendir` owns the copy and `closedir` closes it.
-    let fd = unsafe { libc::dup(dir.as_raw_fd()) };
+    // SAFETY: a copy of a valid descriptor; on success `fdopendir` owns it and `closedir` closes it. Close-on-exec
+    // atomically (F_DUPFD_CLOEXEC, not dup): no child another thread starts can inherit the copy.
+    let fd = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if fd < 0 {
         return Vec::new();
     }
