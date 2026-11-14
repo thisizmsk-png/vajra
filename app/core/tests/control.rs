@@ -272,7 +272,7 @@ fn nonce_absent_everywhere() {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let input = [
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inspect_worker","arguments":{"worker":AID}}}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_workers","arguments":{}}}),
@@ -405,7 +405,7 @@ fn socket_peer_uid_rejects_other_uid() {
     assert_eq!(socket::peer_uid(&a).unwrap(), me);
     drop(b);
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, me));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), me));
     let reply: Value = serde_json::from_str(&sock_request(&ok_path, br#"{"tool":"list_workers","args":{}}"#)).unwrap();
     assert!(reply["ok"]["workers"].is_array(), "{reply}");
 
@@ -413,7 +413,7 @@ fn socket_peer_uid_rejects_other_uid() {
     let other_path = short_sock();
     let listener = socket::bind(&other_path).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, me + 1));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), me + 1));
     let reply: Value = serde_json::from_str(&sock_request(&other_path, br#"{"tool":"list_workers","args":{}}"#)).unwrap();
     assert_eq!(reply["error"], "peer_uid", "{reply}");
 
@@ -703,7 +703,7 @@ fn a_core_stop_is_settled_when_its_ticket_ends_and_stays_settled_after_reopening
         assert_eq!(st["state"], "queued");
         s.tick();
         assert_eq!(last(&id)["state"], "queued", "the watcher has no stop file to wait for: it leaves a core stop alone");
-        s.core_ticket_ended("T1");
+        s.core_ticket_ended("T1", None);
         let done = last(&id);
         assert_eq!(done["state"], "done", "{done}");
         assert_eq!(done["outcome"], "stopped", "{done}");
@@ -735,6 +735,73 @@ fn a_core_stop_is_settled_when_its_ticket_ends_and_stays_settled_after_reopening
     assert_eq!(last(&id)["state"], "done");
 }
 
+/// #177 review (2): a second app starts no control watcher and binds no Lead socket. The first app's socket is left in
+/// place (the same inode, still accepting), and the shared ledger is not ticked. The app holding the locks does serve.
+#[test]
+fn a_second_app_serves_no_control_socket_and_ticks_nothing() {
+    use std::os::unix::fs::MetadataExt as _;
+    use vajra_desktop::desktop::App;
+    // Short paths: a Unix socket path must fit in about 104 bytes.
+    let d = PathBuf::from(format!("/tmp/vsc-{}-{}", std::process::id(), uniq()));
+    let _ = fs::remove_dir_all(&d);
+    let (data, home) = (d.join("d"), d.join("h"));
+    fs::create_dir_all(&home).unwrap();
+    let first = App::open(&data, &home).unwrap();
+    let w = first.serve_control().expect("the app holding the locks serves");
+    let sock = vajra_desktop::control::socket_path(&data);
+    let ino = fs::symlink_metadata(&sock).unwrap().ino();
+    // A pending core stop in the shared ledger: the first app's live action.
+    {
+        let mut c = first.control.lock().unwrap();
+        c.start_session(SID, RUN).unwrap();
+        c.set_core_workers(Arc::new(FakeCore));
+        c.stop_worker(Actor::Human, "core:T1", None).unwrap();
+    }
+    drop(w);
+    let path = data.join("control/ledger.jsonl");
+    let before = fs::read(&path).unwrap();
+    let second = App::open(&data, &home).unwrap();
+    assert!(second.other_instance());
+    assert!(second.serve_control().is_none(), "a second app starts no watcher");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(fs::symlink_metadata(&sock).unwrap().ino(), ino, "the first app's socket is not replaced");
+    assert!(UnixStream::connect(&sock).is_ok(), "and still accepts");
+    assert_eq!(fs::read(&path).unwrap(), before, "nothing ticked the shared ledger");
+    drop(second);
+    drop(first);
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// #177 review: a second app on the same data folder (a dev build beside the installed one) settles nothing in the
+/// shared control ledger. The first app's pending core stop is its live action: the second app's open leaves the
+/// ledger byte for byte as it was. Only the next app that holds the folder, after the first is gone, settles it.
+#[test]
+fn a_second_app_leaves_the_first_apps_pending_core_stop_unsettled() {
+    use vajra_desktop::desktop::App;
+    let h = Home::new();
+    let first = App::open(&h.data(), &h.home).unwrap();
+    assert!(!first.other_instance());
+    // The first app's live stop of a core worker, recorded in the shared ledger and not yet ended.
+    let stop = {
+        let mut s = h.service();
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        s.stop_worker(Actor::Human, "core:T1", None).unwrap()["action_id"].as_str().unwrap().to_string()
+    };
+    let path = h.data().join("control/ledger.jsonl");
+    let before = fs::read(&path).unwrap();
+    let second = App::open(&h.data(), &h.home).unwrap();
+    assert!(second.other_instance());
+    drop(second);
+    assert_eq!(fs::read(&path).unwrap(), before, "a second app writes nothing to the shared control ledger");
+    // The first app ends without seeing the ticket end; the next sole app settles the leftover at open.
+    drop(first);
+    let next = App::open(&h.data(), &h.home).unwrap();
+    assert!(!next.other_instance());
+    let r = h.ledger().into_iter().rev().find(|r| r["action_id"] == stop.as_str()).unwrap();
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("app_restarted")), "{r}");
+}
+
 /// #151 review: two Stops of one core worker before its ticket ends (a second human click, or a confirmed
 /// Director-General stop) are both settled by the one ticket-ended callback; neither is left queued, now or after reopen.
 #[test]
@@ -752,7 +819,7 @@ fn every_stop_of_a_core_worker_is_settled_when_its_ticket_ends() {
         for id in &ids {
             assert_eq!(last(id)["state"], "queued");
         }
-        s.core_ticket_ended("T1");
+        s.core_ticket_ended("T1", None);
         for id in &ids {
             let r = last(id);
             assert_eq!((r["state"].as_str(), r["outcome"].as_str()), (Some("done"), Some("stopped")), "{r}");
@@ -823,11 +890,102 @@ fn a_claude_core_worker_takes_message_and_redirect_through_the_real_hook() {
 
     // A ticket that ends takes nothing more: what it didn't take expires.
     let late = s.message_worker(Actor::Human, "core:T1", "too late").unwrap();
-    s.core_ticket_ended("T1");
+    s.core_ticket_ended("T1", None);
     let lid = late["action_id"].as_str().unwrap();
     assert_eq!(h.ledger().iter().rev().find(|r| r["action_id"] == lid).unwrap()["state"], "not_delivered");
     let r = run_hook(&hook, &h.home, &top(CSID, "Bash"));
     assert!(!r.stdout.contains("too late"), "{}", r.stdout);
+}
+
+fn last_state(h: &Home, id: &str) -> String {
+    h.ledger().iter().rev().find(|r| r["action_id"] == id).unwrap()["state"].as_str().unwrap().to_string()
+}
+
+/// 6c-3 pruning: an ended core worker's control dir goes once its unclaimed messages have expired (written to the
+/// ledger first); its channel is closed; its nonce is still redacted, because its output may still be shown.
+#[test]
+fn an_ended_core_workers_dir_is_removed_and_its_nonce_still_redacted() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    s.set_core_workers(Arc::new(FakeCore));
+    let nonce = s.open_core_session(CSID).unwrap();
+    let dir = h.data().join("control").join(CSID);
+    let id = s.message_worker(Actor::Human, "core:T1", "hi").unwrap()["action_id"].as_str().unwrap().to_string();
+    s.core_ticket_ended("T1", Some(CSID));
+    assert_eq!(last_state(&h, &id), "not_delivered", "expired in the ledger before its dir went");
+    assert!(!dir.exists(), "the ended worker's dir is removed");
+    assert!(h.session_dir().is_dir(), "the run's own dir stays");
+    assert_ne!(s.redactor().redact(format!("x {nonce}")), format!("x {nonce}"), "still redacted");
+    assert_eq!(s.message_worker(Actor::Human, "core:T1", "late").unwrap_err().code(), "not_supported_by_harness");
+    s.tick();
+    assert!(!dir.exists(), "a tick resurrects nothing");
+}
+
+/// 6c-3 pruning: a message the worker's hook already claimed keeps the dir until its ack is read, then the dir goes.
+#[test]
+fn a_claimed_message_keeps_the_dir_until_its_ack_is_read() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    s.set_core_workers(Arc::new(FakeCore));
+    s.open_core_session(CSID).unwrap();
+    let hook = real_hook(&h.home.join("hooks"));
+    let dir = h.data().join("control").join(CSID);
+    let id = s.message_worker(Actor::Human, "core:T1", "use the kit").unwrap()["action_id"].as_str().unwrap().to_string();
+    let top = json!({"session_id": CSID, "hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": h.wt("one"), "tool_input": {"command": "ls"}, "tool_response": {"stdout": "ok"}});
+    let r = run_hook(&hook, &h.home, &top);
+    assert!(r.stdout.contains("use the kit"), "{}", r.stdout);
+    s.core_ticket_ended("T1", Some(CSID));
+    assert!(dir.is_dir(), "its ack is still to be read there");
+    s.tick();
+    assert_eq!(last_state(&h, &id), "delivered");
+    assert!(!dir.exists(), "gone once nothing settles through it");
+}
+
+/// 6c-3 pruning at start: only a stale session dir goes. A live session's, a kept one's (a run that may be resumed),
+/// a non-session name, a link and a file with a session name are each left alone, and the link's target is untouched.
+#[test]
+fn start_up_prune_removes_only_stale_session_dirs() {
+    let h = Home::new();
+    let control = h.data().join("control");
+    let (stale, kept, linked, filed) = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444");
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    for d in [stale, kept, "lead/r1"] {
+        fs::create_dir_all(control.join(d).join("queue")).unwrap();
+    }
+    let outside = h.home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("keepme"), "x").unwrap();
+    std::os::unix::fs::symlink(&outside, control.join(linked)).unwrap();
+    fs::write(control.join(filed), "x").unwrap();
+    let keep: std::collections::HashSet<String> = [kept.to_string()].into();
+    assert_eq!(s.prune_control_dirs(&keep), 1);
+    assert!(!control.join(stale).exists());
+    for p in [control.join(kept), control.join(SID), control.join("lead/r1"), outside.join("keepme"), control.join(filed), control.join("ledger.jsonl")] {
+        assert!(p.exists(), "{}", p.display());
+    }
+    assert!(control.join(linked).symlink_metadata().unwrap().file_type().is_symlink());
+}
+
+/// 6c-3 pruning: the retired nonces the redactor keeps are capped (4096, oldest out).
+#[test]
+fn retired_nonces_are_capped_oldest_out() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.set_core_workers(Arc::new(FakeCore));
+    let sid = |i: usize| format!("{i:08x}-0000-4000-8000-000000000000");
+    let first = s.open_core_session(&sid(0)).unwrap();
+    s.core_ticket_ended("T1", Some(&sid(0)));
+    let mut last = String::new();
+    for i in 1..=4096 {
+        last = s.open_core_session(&sid(i)).unwrap();
+        s.core_ticket_ended("T1", Some(&sid(i)));
+    }
+    assert_eq!(s.redactor().redact(format!("x {first}")), format!("x {first}"), "the oldest aged out");
+    assert_ne!(s.redactor().redact(format!("x {last}")), format!("x {last}"));
+    assert!(files_under(&h.data().join("control")).iter().all(|p| !p.to_string_lossy().contains("-0000-4000-8000-")), "every ended dir went");
 }
 
 fn payload_for(sid: &str, event: &str, tool: &str, agent_id: &str, cwd: &str) -> Value {
@@ -1001,7 +1159,7 @@ fn mcp_session(h: &Home, lines: &[Value]) -> Vec<Value> {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let input: String = lines.iter().map(|v| format!("{v}\n")).collect();
     let mut out = Vec::new();
     mcp::serve(Cursor::new(input), &mut out, &mut SocketClient::new(&sock)).unwrap();
@@ -1173,7 +1331,7 @@ fn lead_mcp_calls_are_bound_to_the_run_being_asked_about() {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let finished_run = "20261104-0900";
     let call = |bound: Option<&str>, tool: &str, args: Value| -> Value {
         let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}}));
@@ -1224,7 +1382,7 @@ fn director_general_mcp_calls_are_bound_to_project_and_generation() {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let call = |c: &mut SocketClient, tool: &str| -> Value {
         let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":{}}}));
         let mut out = Vec::new();

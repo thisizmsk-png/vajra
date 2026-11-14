@@ -346,7 +346,7 @@ const ASK: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const LEAD_SID: &str = "1a8fad5b-d9cb-469f-a165-70867728950f";
 
 fn ask(s: &mut Service, state: AskState, text: Option<&str>, reason: Option<&str>) {
-    s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state, text, reason, project: None }).unwrap();
+    s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state, text, reason, project: None, tokens: None }).unwrap();
 }
 
 fn ledger_of(dir: &Path) -> Vec<Value> {
@@ -424,7 +424,7 @@ fn ask_records_survive_a_restart_without_becoming_pending() {
 fn a_ledger_failure_is_an_error_not_a_silent_skip() {
     let (mut s, dir) = svc();
     s.ledger.break_for_test();
-    let r = s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state: AskState::Queued, text: Some("x"), reason: None, project: None });
+    let r = s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state: AskState::Queued, text: Some("x"), reason: None, project: None, tokens: None });
     assert!(r.is_err(), "the caller must not spawn the Lead for an ask the ledger never recorded");
     let _ = fs::remove_dir_all(&dir);
 }

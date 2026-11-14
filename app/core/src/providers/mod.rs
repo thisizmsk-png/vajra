@@ -9,6 +9,7 @@ pub mod detect;
 pub mod effective;
 pub mod errors;
 pub mod launch;
+pub mod install;
 pub mod setup;
 pub mod keychain;
 pub mod usage;

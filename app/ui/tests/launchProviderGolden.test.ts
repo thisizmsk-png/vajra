@@ -13,7 +13,7 @@ describe("the core's worker provider object", () => {
     expect(p).not.toBeNull();
     expect([p?.account, p?.label, p?.family, p?.model, p?.billing, p?.error]).toEqual(["openrouter", "OpenRouter", "vendor", "vendor/model-a", "gateway", null]);
     expect(p?.requested?.model).toBe("vendor/model-a");
-    expect(p && workerLine(p)).toBe("vendor/model-a · OpenRouter");
+    expect(p && workerLine(p)).toBe("vendor/model-a via OpenRouter");
     expect(p && ranOn(p)).toBeNull();
   });
   it("shows 'ran on' when the effective model differs from the request", () => {

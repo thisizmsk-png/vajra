@@ -139,7 +139,7 @@ describe("ProviderIcon", () => {
     expect(beside.getAttribute("role")).toBeNull();
     const alone = tile(<ProviderIcon family="deepseek" via="openrouter" named />);
     expect(alone.getAttribute("role")).toBe("img");
-    expect(alone.getAttribute("aria-label")).toBe("DeepSeek · OpenRouter");
+    expect(alone.getAttribute("aria-label")).toBe("DeepSeek via OpenRouter");
     expect(alone.getAttribute("aria-hidden")).toBeNull();
     expect(tile(<ProviderIcon family="claude" named />).getAttribute("aria-label")).toBe("Claude Code");
   });

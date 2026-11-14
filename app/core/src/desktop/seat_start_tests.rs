@@ -234,23 +234,26 @@ fn overrides_change_only_account_model_effort_and_network_and_are_checked_again(
 
 #[test]
 fn the_evidence_seat_is_always_the_verifier_and_the_trust_and_slug_follow_its_harness() {
-    for (verifier, others, approve, trust, og) in [
-        ("claude", "codex", false, "guarded", false),
-        ("codex", "claude", false, "outside_guard", true),
-        ("codex", "codex", false, "outside_guard", true),
-        ("codex", "claude", true, "guarded_by_approval", false),
-        ("claude", "claude", true, "guarded", false),
+    for (lead, verifier, others, approve, trust, og) in [
+        ("claude", "claude", "codex", false, "guarded", false),
+        // bhishma #216 H1: a Codex Lead's run is never guarded, whatever the verifier.
+        ("codex", "claude", "codex", false, "outside_guard", true),
+        ("codex", "claude", "claude", true, "guarded_by_approval", false),
+        ("claude", "codex", "claude", false, "outside_guard", true),
+        ("codex", "codex", "codex", false, "outside_guard", true),
+        ("claude", "codex", "claude", true, "guarded_by_approval", false),
+        ("claude", "claude", "claude", true, "guarded", false),
     ] {
         let t = Tmp::new();
         let (app, pid) = app_for(&t, true);
-        propose(&app, &pid, json!({"lead": {"account": others}, "workers": [w("w1", "backend", others), w("w2", "verifier", verifier), w("w3", "reviewer", others)]})).unwrap();
+        propose(&app, &pid, json!({"lead": {"account": lead}, "workers": [w("w1", "backend", others), w("w2", "verifier", verifier), w("w3", "reviewer", others)]})).unwrap();
         let (id, sha) = open_one(&app);
         let seen = RefCell::new(Vec::new());
         let r = app.start_proposal_inner(&id, &sha, StartOptions { overrides: vec![], approve_checker: approve }, starter(&seen)).unwrap();
         let run = r["run"]["run_id"].as_str().unwrap();
         let slug = if og { format!("deliver-{run}-og") } else { format!("deliver-{run}") };
         for v in [&r, &seats_file(&t, run)] {
-            assert_eq!((v["evidence_seat"].as_str(), v["evidence_trust"].as_str(), v["campaign_slug"].as_str()), (Some("w2"), Some(trust), Some(slug.as_str())), "{verifier}/{others}/{approve}");
+            assert_eq!((v["evidence_seat"].as_str(), v["evidence_trust"].as_str(), v["campaign_slug"].as_str()), (Some("w2"), Some(trust), Some(slug.as_str())), "{lead}/{verifier}/{others}/{approve}");
         }
     }
 }
@@ -339,11 +342,38 @@ fn the_inbox_card_shows_the_seats_the_warnings_and_the_label_the_run_will_get() 
     assert_eq!(c["evidence"]["approval_offer"], APPROVAL_OFFER);
     let seats = c["seats"].as_array().unwrap();
     let by = |s: &str| seats.iter().find(|x| x["seat"] == s).unwrap();
+    // Owner 2026-11-13: a Codex seat runs with the user's own settings and the card never claims the key is out of reach.
     assert_eq!(by("w1")["disclosures"][0], CODEX_WARNING);
+    assert!(c["evidence"]["cause"].is_null(), "a Claude lead: the verifier's own note says why");
     assert_eq!(by("lead")["disclosures"][0], CLAUDE_NOTE);
     assert_eq!((by("w1")["limits"]["message"].as_bool(), by("w1")["limits"]["stop"].as_str()), (Some(false), Some("terminate")));
     assert!(seats.iter().any(|s| s["role"] == "security_reviewer"), "added for the security ask");
     assert!(it["proposal_sha256"].as_str().is_some());
+}
+
+/// Owner 2026-11-13 ("keep my extras, no key claim") and bhishma #216 H1: a Codex verifier or a Codex lead is never
+/// guarded, and no Codex note says it can't read the key.
+#[test]
+fn a_codex_verifier_or_lead_is_never_guarded_and_no_codex_note_claims_the_key() {
+    let p = |lead: &str| {
+        let seats: Seats = serde_json::from_value(json!({
+            "lead": {"account": lead, "model": null, "effort": null, "source": "role_default"},
+            "workers": [{"slot": "w1", "role": "verifier", "task": "t1", "account": "codex", "model": null, "effort": null, "network": false, "security": false, "why": "x", "source": "role_default"}],
+            "max_in_flight": 1
+        })).unwrap();
+        seats
+    };
+    assert_eq!(evidence_of(&p("claude"), false, "r")["evidence_trust"], "outside_guard", "a Codex verifier");
+    assert_eq!(evidence_of(&p("claude"), true, "r")["evidence_trust"], "guarded_by_approval");
+    assert_eq!(evidence_of(&p("codex"), false, "r")["evidence_trust"], "outside_guard", "a Codex lead's run is never guarded");
+    assert_eq!(outside_cause(&p("codex")), Some(CODEX_LEAD_CAUSE));
+    assert_eq!(outside_cause(&p("claude")), None);
+    for note in [CODEX_WARNING.to_string(), codex_lead_note(), OUTSIDE_GUARD_WHY.to_string()] {
+        assert!(!note.contains("can't read") && !note.contains("out of reach") && !note.contains("kept from"), "no key claim: {note}");
+    }
+    assert!(CODEX_WARNING.contains("isn't guarded against reading Vajra's signing key"), "{CODEX_WARNING}");
+    // bhishma #216 F1: the switch limits only the sandbox, never web search or the user's Codex tools.
+    assert!(CODEX_WARNING.contains("Its sandbox's internet follows this seat's switch. Web search and your Codex tools (MCP, hooks, notify) aren't limited by it."), "{CODEX_WARNING}");
 }
 
 #[test]
@@ -356,5 +386,17 @@ fn a_network_seat_says_so_on_the_card() {
     let items = app.inbox().unwrap();
     let it = items["items"].as_array().unwrap().iter().find(|i| i["kind"] == "run_proposal").unwrap();
     let w1 = it["seats_card"]["seats"].as_array().unwrap().iter().find(|s| s["seat"] == "w1").unwrap().clone();
-    assert!(w1["disclosures"].as_array().unwrap().iter().any(|d| d == NETWORK_NOTE), "{w1}");
+    // A Claude seat's sandbox allows loopback only, so its card says there's no internet, never "Internet on" (#212).
+    let d = w1["disclosures"].as_array().unwrap();
+    assert!(d.iter().any(|d| d == CLAUDE_NO_NETWORK_NOTE), "{w1}");
+    assert!(!d.iter().any(|d| d == NETWORK_NOTE), "{w1}");
+}
+
+#[test]
+fn only_a_codex_network_seat_says_internet_on() {
+    assert_eq!(network_note(Some(Engine::Codex), true), Some(NETWORK_NOTE));
+    assert_eq!(network_note(Some(Engine::Claude), true), Some(CLAUDE_NO_NETWORK_NOTE));
+    for h in [Some(Engine::Codex), Some(Engine::Claude), None] {
+        assert_eq!(network_note(h, false), None);
+    }
 }
