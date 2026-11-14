@@ -1622,8 +1622,10 @@ impl RunProtocol {
         if st.status.is_none() {
             match v {
                 RoundVerdict::Passed => {
+                    // The legacy answer carries no delivery, so it is never verified (bhishma L2 on e7d83d2): the same
+                    // as a typed pass with no delivery phase.
                     st.rounds.entry(r).or_default().checks = Checks::Passed;
-                    Self::finalize(&mut st, RunStatus::Verified, format!("round {r} passed"));
+                    Self::finalize(&mut st, RunStatus::NotVerified, format!("the gate passed in round {r}, but this run has no evidence check"));
                 }
                 RoundVerdict::Failed { feedback } => self.round_failed(&mut st, r, feedback),
                 RoundVerdict::Checked(x) => {

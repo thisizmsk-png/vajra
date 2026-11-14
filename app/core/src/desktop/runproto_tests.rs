@@ -754,7 +754,7 @@ fn a_green_round_ends_verified_without_finish_run_and_nothing_overrides_it() {
     r.round_done(&["t1", "t2", "t3"]);
     let tk = r.p.integrate(1).unwrap();
     assert_eq!(tk, "r1.round.r1");
-    r.gate.answer(RoundVerdict::Passed);
+    r.gate.answer(verified());
     assert_eq!(r.await_round(1).outcome.as_deref(), Some("passed"));
     assert_eq!(r.status(), Some(RunStatus::Verified));
     assert_eq!(code(r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() })).0, RUN_DELIVERED);
@@ -1268,6 +1268,25 @@ fn delivered_round(d: Option<Delivered>) -> Rig {
     r
 }
 
+/// The gate's answer for a passed round whose delivery verified every step (6i).
+fn verified() -> RoundVerdict {
+    let ok = Delivered { verified: true, reason: "round 1 passed".into(), steps: vec![] };
+    RoundVerdict::Checked(RoundResult { delivered: Some(ok), ..result(true, false) })
+}
+
+#[test]
+fn the_legacy_passed_answer_is_not_verified_because_it_carries_no_delivery() {
+    // bhishma L2 on e7d83d2: no gate sends it today, but if one did, a pass with no evidence must not read verified.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Passed);
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("passed"), "the gate's checks did pass");
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert_eq!(r.p.card().reason.as_deref(), Some("the gate passed in round 1, but this run has no evidence check"));
+}
+
 #[test]
 fn a_passed_gate_is_verified_only_when_its_delivery_says_every_step_passed() {
     let ok = Delivered { verified: true, reason: "round 1 passed and its evidence was checked".into(), steps: vec![json!({"step": "verify", "ok": true})] };
@@ -1516,7 +1535,7 @@ fn a_verified_run_logs_its_events_in_order_and_its_last_anchor_is_signed() {
     r.p.plan_tasks(plan1()).unwrap();
     r.round_done(&["t1", "t3", "t2"]);
     r.p.integrate(1).unwrap();
-    r.gate.answer(RoundVerdict::Passed);
+    r.gate.answer(verified());
     let _ = r.await_round(1);
     r.p.flush_record();
     let k = kinds(&log);
