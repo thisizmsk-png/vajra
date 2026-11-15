@@ -119,6 +119,9 @@ pub const CLAUDE_WORKER_PROVEN: &[(&str, &str)] = &[
     // claude 2.1.296, S4 PASS, every check ok, including the data-dir run with the OS sandbox's key-read and data-write
     // refusals. The shape covers the flag file, the argv and the repo's guard scripts' bytes.
     ("2.1.296 (Claude Code)", "3006ecb90e00e8de3b6a5acdf8f0492949f969ae697a4606a09a9df843831425"),
+    // The owner's S4 rerun on the credential-deny tree (#272, ao/vajra-99/worker-credential-denies 0f8b90d1,
+    // 2026-11-15): claude 2.1.296, S4 PASS, with the fixed credential read-deny list in the flag (codex M1).
+    ("2.1.296 (Claude Code)", "60403eac7d2c1a9ccbedfc14d1255910d425949c2825b16bdfeb679debcb1e7a"),
 ];
 
 /// Canary A: a build not on `CLAUDE_WORKER_PROVEN` whose self-test on this Mac failed, timed out or could not run (no
