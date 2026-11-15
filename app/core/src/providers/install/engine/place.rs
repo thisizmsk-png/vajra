@@ -307,10 +307,14 @@ impl Place {
         }
         let at_target = self.skills.stat_at(SKILL).map_err(|_| Unsafe::Io)?;
         match &j.previous {
-            // The folder step already finished (a rollback whose record step failed, then repeated): the old copy is
-            // back at the target and the new copy is gone from both work-area names (bhishma MUST-2 on #213).
-            Some((prev, pd, pi))
-                if at_target.is_some_and(|s| (s.dev, s.ino) == (*pd, *pi)) && id_of(&self.work, prev)? != Some((*sd, *si)) => {}
+            // A rollback already put the old copy back at the target (bhishma MUST-2, Codex P2 on #213): a crash right
+            // after its swap leaves the new copy under the previous name, so only that is removed; a failed record step
+            // leaves nothing to move. Either way the rest (cleanup, record, journal) is finished below.
+            Some((prev, pd, pi)) if at_target.is_some_and(|s| (s.dev, s.ino) == (*pd, *pi)) => {
+                if id_of(&self.work, prev)? == Some((*sd, *si)) {
+                    self.work.remove_tree(prev).map_err(|_| Unsafe::Io)?;
+                }
+            }
             Some((prev, pd, pi)) => {
                 // The old copy, under its own name or still under the staging name.
                 let old = if id_of(&self.work, prev)? == Some((*pd, *pi)) {
@@ -322,6 +326,10 @@ impl Place {
                 };
                 if at_target.is_some_and(|s| (s.dev, s.ino) == (*sd, *si)) {
                     self.work.rename(old, &self.skills, SKILL, Rename::Swap).map_err(|_| Unsafe::Io)?;
+                    #[cfg(test)]
+                    if FAULT_AFTER_ROLLBACK_SWAP.with(|f| f.replace(false)) {
+                        return Err(Unsafe::Io);
+                    }
                     // `old` now holds the new copy: remove it only if it is the journal's staged copy.
                     if id_of(&self.work, old)? == Some((*sd, *si)) {
                         self.work.remove_tree(old).map_err(|_| Unsafe::Io)?;
@@ -457,6 +465,8 @@ thread_local! {
     pub static FAULT_COMMIT_STEP: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     /// Test only: make the next `roll_back` fail after its folder step, before it restores the record.
     pub static FAULT_RECORD_RESTORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test only: make the next `roll_back` stop right after it swapped the old copy back, as a crash would.
+    pub static FAULT_AFTER_ROLLBACK_SWAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A crash point inside a commit (test builds only; always Ok otherwise).

@@ -693,3 +693,24 @@ fn a_failed_signature_restore_keeps_the_journal_until_the_signature_is_back() {
     assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.2");
     assert!(!interrupted(&w.data));
 }
+
+/// Codex P2 on #213: a crash right after a rollback's own swap, with the old copy back at the target and the new copy
+/// under the previous name. The next consented run finishes that rollback (instead of target_changed) and installs.
+#[test]
+fn a_crash_right_after_the_rollback_swap_is_finished_by_the_next_run() {
+    let mut w = World::new("rb-swap", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    w.bundle("#!/bin/bash\nexit 3\n", "0.6.3");
+    place::FAULT_AFTER_ROLLBACK_SWAP.with(|f| f.set(true));
+    let d = w.run(&w.plan());
+    assert_eq!((d.report.outcome, d.report.reason), (Outcome::Broken, Some("rollback_failed")), "{:?}", d.report);
+    assert!(interrupted(&w.data), "the journal stays for recovery");
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.2", "the old copy is back");
+    w.bundle(GOOD, "0.6.3");
+    let p = w.plan();
+    assert!(matches!(p.plan.pin, Pin::Engine { case: "update", .. }), "{:?}", p.plan.pin);
+    assert_eq!(w.run(&p).report.outcome, Outcome::Installed);
+    assert!(!interrupted(&w.data));
+    let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
+    assert!(place.strays().is_empty(), "{:?}", place.strays());
+}
