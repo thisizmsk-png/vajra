@@ -545,22 +545,53 @@ fn a_crash_right_after_the_first_journal_write_is_recovered() {
     assert!(place.strays().is_empty(), "{:?}", place.strays());
 }
 
-/// Codex P2 on #213: commit writes the new record, then its cleanup of the previous copy fails. The rollback puts the
-/// old record back too, so the restored copy is still the app's own and the next plan offers an update, not a manual.
+/// bhishma MUST-1 on #213 (and Codex P2): a crash at each step of commit, after the install was verified. The journal
+/// is Committed, so runs stay off, the plan sees the app's own new copy (a Repair, not a user copy), and the next
+/// consented run rolls forward: the new copy, its workflows and its record stay, and the journal is cleared.
 #[test]
-fn a_failed_commit_cleanup_restores_the_old_record() {
-    let mut w = World::new("p2-record", GOOD, "0.6.2");
+fn a_crash_at_each_commit_step_rolls_forward_on_the_next_run() {
+    use crate::providers::launch::engine_ready;
+    for step in 1..=3u8 {
+        let mut w = World::new(&format!("must1-{step}"), GOOD, "0.6.2");
+        assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+        w.bundle(GOOD, "0.6.3");
+        place::FAULT_COMMIT_STEP.with(|f| f.set(step));
+        let d = w.run(&w.plan());
+        assert_eq!((d.report.outcome, d.report.reason), (Outcome::Failed, Some("io")), "step {step}: {:?}", d.report);
+        assert!(interrupted(&w.data), "step {step}: the Committed journal stays");
+        assert_eq!(engine_ready(&w.home, &w.data, &w.marks()).unwrap_err().code, "engine_broken", "step {step}");
+        assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.3", "step {step}: the verified copy is kept");
+        let p = w.plan();
+        assert!(matches!(p.plan.pin, Pin::Engine { case: "repair", .. }), "step {step}: {:?}", p.plan.pin);
+        assert_eq!(w.run(&p).report.outcome, Outcome::Installed, "step {step}");
+        assert!(!interrupted(&w.data), "step {step}");
+        assert!(engine_ready(&w.home, &w.data, &w.marks()).is_ok(), "step {step}");
+        assert_eq!(std::fs::read_to_string(w.home.join(".claude/workflows/vajra-deliver.js")).unwrap(), "// deliver 0.6.3", "step {step}");
+        let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
+        assert_eq!(place.record().map(|r| r.version).as_deref(), Some("0.6.3"), "step {step}");
+        assert!(place.strays().is_empty(), "step {step}: {:?}", place.strays());
+    }
+}
+
+/// bhishma MUST-2 on #213: an update's rollback puts the old copy back, then its record step fails. The next consented
+/// run sees the folder step as done, finishes the rollback, and installs.
+#[test]
+fn a_failed_record_restore_is_finished_by_the_next_run() {
+    let mut w = World::new("must2", GOOD, "0.6.2");
     assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
-    let record = std::fs::read(w.data.join(place::RECORD)).unwrap();
-    w.bundle(GOOD, "0.6.3");
-    place::FAULT_COMMIT_CLEANUP.with(|f| f.set(true));
+    w.bundle("#!/bin/bash\nexit 3\n", "0.6.3");
+    place::FAULT_RECORD_RESTORE.with(|f| f.set(true));
     let d = w.run(&w.plan());
-    assert_eq!((d.report.outcome, d.report.reason), (Outcome::RolledBack, Some("io")), "{:?}", d.report);
-    assert_eq!(std::fs::read(w.data.join(place::RECORD)).unwrap(), record, "the old record is back");
-    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.2");
+    assert_eq!((d.report.outcome, d.report.reason), (Outcome::Broken, Some("rollback_failed")), "{:?}", d.report);
+    assert!(interrupted(&w.data), "the journal stays for recovery");
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.2", "the folder step finished");
+    w.bundle(GOOD, "0.6.3");
     let p = w.plan();
     assert!(matches!(p.plan.pin, Pin::Engine { case: "update", .. }), "{:?}", p.plan.pin);
     assert_eq!(w.run(&p).report.outcome, Outcome::Installed);
+    assert!(!interrupted(&w.data));
+    assert_eq!(w.marks().any(ID), None);
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.3");
 }
 
 /// bhishma L2: an existing key that the installer replaces (a new file, or the same file rewritten) marks Broken.

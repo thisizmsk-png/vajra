@@ -74,6 +74,9 @@ pub struct Journal {
     /// after a crash puts them back too (not just the folder). None until they are saved.
     #[serde(default)]
     pub before: Option<Before>,
+    /// The record commit wrote for the new copy, saved with the Committed phase so recovery can finish the commit.
+    #[serde(default)]
+    pub commit: Option<Record>,
 }
 
 /// The ownership record before an install (None: there was none).
@@ -98,6 +101,8 @@ pub enum Phase {
     Staged,
     /// The new copy is in place; the previous one (if any) is in the work area.
     Swapped,
+    /// Verified and recorded: only the previous copy's cleanup is left. Recovery rolls forward, never back.
+    Committed,
 }
 
 /// The held directories an install works in: `~/.claude`, `skills/` and the work area.
@@ -248,7 +253,7 @@ impl Place {
         let (sd, si) = self.identity(&self.work, staged)?;
         match found {
             Found::Absent => {
-                let j = Journal { phase: Phase::Staged, previous: None, staged: (staged.to_string(), sd, si), prior: Some(Prior { record: self.record() }), before: None };
+                let j = Journal { phase: Phase::Staged, previous: None, staged: (staged.to_string(), sd, si), prior: Some(Prior { record: self.record() }), before: None, commit: None };
                 self.write_data(JOURNAL, &j)?;
                 self.work.rename(staged, &self.skills, SKILL, Rename::Exclusive).map_err(|e| if e.raw_os_error() == Some(libc::EEXIST) { Unsafe::TargetChanged } else { Unsafe::Io })?;
                 let j = Journal { phase: Phase::Swapped, ..j };
@@ -261,7 +266,7 @@ impl Place {
                     return Err(Unsafe::TargetChanged);
                 }
                 let prev = format!("previous-{}", random_hex());
-                let j = Journal { phase: Phase::Staged, previous: Some((prev.clone(), *dev, *ino)), staged: (staged.to_string(), sd, si), prior: Some(Prior { record: self.record() }), before: None };
+                let j = Journal { phase: Phase::Staged, previous: Some((prev.clone(), *dev, *ino)), staged: (staged.to_string(), sd, si), prior: Some(Prior { record: self.record() }), before: None, commit: None };
                 self.write_data(JOURNAL, &j)?;
                 #[cfg(test)]
                 if FAULT_AFTER_JOURNAL.with(|f| f.replace(false)) {
@@ -302,6 +307,10 @@ impl Place {
         }
         let at_target = self.skills.stat_at(SKILL).map_err(|_| Unsafe::Io)?;
         match &j.previous {
+            // The folder step already finished (a rollback whose record step failed, then repeated): the old copy is
+            // back at the target and the new copy is gone from both work-area names (bhishma MUST-2 on #213).
+            Some((prev, pd, pi))
+                if at_target.is_some_and(|s| (s.dev, s.ino) == (*pd, *pi)) && id_of(&self.work, prev)? != Some((*sd, *si)) => {}
             Some((prev, pd, pi)) => {
                 // The old copy, under its own name or still under the staging name.
                 let old = if id_of(&self.work, prev)? == Some((*pd, *pi)) {
@@ -336,6 +345,10 @@ impl Place {
         if self.work.stat_at(staged).map_err(|_| Unsafe::Io)?.is_some_and(|s| (s.dev, s.ino) == (*sd, *si)) {
             let _ = self.work.remove_tree(staged);
         }
+        #[cfg(test)]
+        if FAULT_RECORD_RESTORE.with(|f| f.replace(false)) {
+            return Err(Unsafe::Io);
+        }
         // The record goes back to what it was, so the restored copy is still recognised as the app's own.
         match &j.prior {
             Some(Prior { record: Some(r) }) => self.write_data(RECORD, r)?,
@@ -359,42 +372,70 @@ impl Place {
 
     /// After a verified install: record it, and deal with the previous copy. It is deleted only if it is byte for
     /// byte its own manifest (plus the marker); otherwise it is kept as `backup-<UTC>` and its name returned (C5).
+    ///
+    /// The journal moves to Committed (with the new record) before the record is written, so from then on the install
+    /// only rolls forward: a crash or an error in the record write or the cleanup is finished by `recover`, never
+    /// undone (bhishma MUST-1 on #213). An error here before that journal write leaves it Swapped, for the caller's undo.
     pub fn commit(&self, j: &Journal, version: &str, tgz_sha256: &str) -> Result<Option<String>, Unsafe> {
         let (dev, ino) = self.identity(&self.skills, SKILL)?;
-        // The hash of the manifest the app just installed, and the one it recorded for the previous copy.
-        let old_manifest = self.record().and_then(|r| r.manifest_sha256);
-        let manifest_sha256 = self.skills.open_dir(SKILL).ok().and_then(|d| d.read(super::pack::MANIFEST, 16 << 20).ok()).map(|b| sha256_hex(&b));
-        self.write_data(RECORD, &Record { version: version.to_string(), tgz_sha256: tgz_sha256.to_string(), dev, ino, manifest_sha256 })?;
-        let mut kept = None;
-        #[cfg(test)]
-        if FAULT_COMMIT_CLEANUP.with(|f| f.replace(false)) {
-            return Err(Unsafe::Io);
+        if (dev, ino) != (j.staged.1, j.staged.2) {
+            return Err(Unsafe::TargetChanged);
         }
+        let manifest_sha256 = self.skills.open_dir(SKILL).ok().and_then(|d| d.read(super::pack::MANIFEST, 16 << 20).ok()).map(|b| sha256_hex(&b));
+        let record = Record { version: version.to_string(), tgz_sha256: tgz_sha256.to_string(), dev, ino, manifest_sha256 };
+        let j = Journal { phase: Phase::Committed, commit: Some(record), ..j.clone() };
+        self.write_data(JOURNAL, &j)?;
+        self.finish(&j)
+    }
+
+    /// Whether the journal on disk is Committed: the install is verified and only rolls forward from here.
+    pub fn committed(&self) -> bool {
+        self.journal().is_some_and(|j| j.phase == Phase::Committed)
+    }
+
+    /// The rest of a commit, repeatable: write the new record, deal with the previous copy, clear the journal. Only the
+    /// record write can fail (the journal then stays Committed). Deleted only if the previous copy is byte for byte
+    /// what the app installed (its manifest is the one the old record named, and every file matches it); otherwise,
+    /// or if deleting it fails, it is kept as `backup-<UTC>` and its name returned (C5, bhishma L1).
+    fn finish(&self, j: &Journal) -> Result<Option<String>, Unsafe> {
+        let record = j.commit.as_ref().ok_or(Unsafe::Io)?;
+        let old_manifest = j.prior.as_ref().and_then(|p| p.record.as_ref()).and_then(|r| r.manifest_sha256.clone());
+        commit_fault(1)?;
+        self.write_data(RECORD, record)?;
+        commit_fault(2)?;
+        let mut kept = None;
         if let Some((prev, pd, pi)) = &j.previous {
-            if self.work.stat_at(prev).map_err(|_| Unsafe::Io)?.is_some_and(|s| (s.dev, s.ino) == (*pd, *pi)) {
-                let d = self.work.open_dir(prev).map_err(|_| Unsafe::Io)?;
-                // Deleted only if it is byte for byte what the app installed: its manifest is the one the app recorded
-                // and every file matches that manifest. Otherwise it is kept as a backup (bhishma L1).
-                let own_manifest = d.read(super::pack::MANIFEST, 16 << 20).ok().map(|b| sha256_hex(&b));
-                if old_manifest.is_some() && own_manifest == old_manifest && unmodified(&d) {
-                    self.work.remove_tree(prev).map_err(|_| Unsafe::Io)?;
-                } else {
+            if self.work.stat_at(prev).ok().flatten().is_some_and(|s| (s.dev, s.ino) == (*pd, *pi)) {
+                let deletable = self.work.open_dir(prev).is_ok_and(|d| {
+                    let own = d.read(super::pack::MANIFEST, 16 << 20).ok().map(|b| sha256_hex(&b));
+                    old_manifest.is_some() && own == old_manifest && unmodified(&d)
+                });
+                if !(deletable && self.work.remove_tree(prev).is_ok()) {
                     let name = format!("backup-{}", utc_stamp());
-                    self.work.rename(prev, &self.work, &name, Rename::Exclusive).map_err(|_| Unsafe::Io)?;
-                    kept = Some(name);
+                    if self.work.rename(prev, &self.work, &name, Rename::Exclusive).is_ok() {
+                        kept = Some(name);
+                    }
                 }
             }
         }
+        commit_fault(3)?;
         self.clear_journal();
         Ok(kept)
     }
 
     /// Recover from a crash, under consent: only what the journal names, with those identities. A swapped install
-    /// is rolled back (it was never verified); a staged one just loses its staging folder. Folders in the work area
-    /// that the journal doesn't name are left alone.
+    /// is rolled back (it was never verified); a staged one just loses its staging folder; a committed one is finished
+    /// (its new copy must still be at the target). Folders in the work area that the journal doesn't name are left alone.
     pub fn recover(&self) -> Result<bool, Unsafe> {
         let Some(j) = self.journal() else { return Ok(false) };
-        self.roll_back(&j)?;
+        if j.phase == Phase::Committed {
+            if self.identity(&self.skills, SKILL)? != (j.staged.1, j.staged.2) {
+                return Err(Unsafe::TargetChanged);
+            }
+            self.finish(&j)?;
+        } else {
+            self.roll_back(&j)?;
+        }
         Ok(true)
     }
 
@@ -411,8 +452,21 @@ thread_local! {
     pub static FAULT_AFTER_SWAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test only: make the next update's `swap_in` stop right after its first journal write, before any rename.
     pub static FAULT_AFTER_JOURNAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Test only: make the next `commit` fail after it wrote the new record, before it cleans up the previous copy.
-    pub static FAULT_COMMIT_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test only: make the next commit stop at step N (1: Committed journal written, before the record; 2: record
+    /// written, before the cleanup; 3: cleanup done, before the journal clear), as a crash would. 0 is off.
+    pub static FAULT_COMMIT_STEP: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// Test only: make the next `roll_back` fail after its folder step, before it restores the record.
+    pub static FAULT_RECORD_RESTORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A crash point inside a commit (test builds only; always Ok otherwise).
+fn commit_fault(_step: u8) -> Result<(), Unsafe> {
+    #[cfg(test)]
+    if FAULT_COMMIT_STEP.with(|f| f.get()) == _step {
+        FAULT_COMMIT_STEP.with(|f| f.set(0));
+        return Err(Unsafe::Io);
+    }
+    Ok(())
 }
 
 /// The plan's read-only view of the same folders: any that don't exist yet are None, and nothing is created.
@@ -434,6 +488,13 @@ impl PlanView {
             let at = skills.stat_at(SKILL).ok().flatten();
             let (_, sd, si) = &j.staged;
             let target_is_staged = at.is_some_and(|s| (s.dev, s.ino) == (*sd, *si));
+            // Committed: recovery finishes the commit, so the new copy is the app's own at its new version (MUST-1).
+            if j.phase == Phase::Committed {
+                return match &j.commit {
+                    Some(r) if target_is_staged && (r.dev, r.ino) == (*sd, *si) => Found::Ours { version: r.version.clone(), dev: *sd, ino: *si },
+                    _ => Found::UserCopy,
+                };
+            }
             // A crash right after the first journal write of an update leaves the old copy at the target, untouched.
             let target_is_previous = matches!((&j.previous, at), (Some((_, pd, pi)), Some(s)) if (s.dev, s.ino) == (*pd, *pi));
             return match (&j.previous, at) {

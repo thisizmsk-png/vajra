@@ -353,7 +353,9 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
     // A crash left a journal: recover under this consent first (C6). What the install changed outside the folder (the
     // workflows and the signature) goes back first, from the journal; both steps can be repeated, and the journal is
     // removed only once the folder is back too.
-    let pending = place.journal();
+    // A Committed journal rolls forward instead: the new copy was verified with the new workflows and signature, which
+    // stay (bhishma MUST-1 on #213).
+    let pending = place.journal().filter(|j| j.phase != place::Phase::Committed);
     if let Some(b) = pending.as_ref().and_then(|j| j.before.as_ref()) {
         let back = place.workflows_dir(m.uid).is_ok_and(|wf| workflows::restore(&wf, &workflows::Snapshot(b.workflows.clone())).is_ok());
         restore_sig(m.home, &SigState { sig: b.sig.clone(), flag: b.flag });
@@ -488,6 +490,9 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
             let _ = ctx.marks.clear(ID);
             done(Report { version: Some(prep.engine.version.clone()), ..Report::new(Outcome::Installed, None, exit) }, backup)
         }
+        // Once the journal is Committed the verified install is kept: the next consented run finishes it, and the
+        // pending journal keeps runs off meanwhile. Before that, nothing was recorded, so it is undone.
+        Err(_) if place.committed() => fail("io"),
         Err(_) => undo("io", exit),
     }
 }
