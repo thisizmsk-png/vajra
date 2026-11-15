@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-15T08:20:43Z",
+  "generated": "2026-11-15T13:51:16Z",
   "version": "0.6.2",
   "files": {
     ".github/workflows/ci.yml": "5de6e2f57792023584aa014a2019794e4f2714b7753e36cd0912aa168702e5a8",
@@ -132,7 +132,7 @@
     "config/pricing.json": "4ce7dbae8575dadac552d2556f3c523de8b92425815efd7f0e28bf1b423a714c",
     "config/sandbox.json": "dc8d54b9830a578c03ec788634f86da32bdb5336156d592316a08b8d98ad90ea",
     "config/security-contracts.json": "76c2ad40d2f7b8b5cd8b5b9f1bb4608a437a195bd5d8048e6cb9ff61aab31456",
-    "config/skills.json": "4166cdd33d126cdf8bf1994f14751728727c64a068c67c39b4bbc5ea0021e288",
+    "config/skills.json": "f1655cffc77df482f24eeee6159cbc6caf4da793fee866dc61d62f5e2f8de244",
     "config/steering.json": "95846731d31f0a11cfbdad0eb3cbe6951e38701ffb8dd9beb1afe37307b92899",
     "docs/architecture/ARCHITECTURE.md": "fa194fda8a7f7a38fc3155be2a8834510ad4380a3b3277e2eab78de0ed3fe48e",
     "docs/commands/atman.md": "b6839c6d560eafd59effb58998e4a39b0c238e5cf0ac5c93a17351ddd07323ff",

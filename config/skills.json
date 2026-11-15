@@ -4,12 +4,12 @@
   "skills": {
     "apple-design": {
       "repo": "emilkowalski/skills",
-      "commit": "a81dbca07f2217b7103e510c0f13f8d5b017afc9",
+      "commit": "64eb3deb9a5fbfa041faf783e0bc3fd635872e9c",
       "path": "skills/apple-design",
       "license": "MIT",
       "verdict": "caution",
       "conditions": "Motion physics only. Never imitate Apple's look and never ship SF fonts.",
-      "sha256": "98d8500d563c190cc1dc4a5cea03f84c45df85b5f20a9500b6047fd06bbd2c2b"
+      "sha256": "5566ae8a47209e39f0ea85fc78243e6d852fc750d4990b12c18374938c7d9d26"
     },
     "audit": {
       "repo": "pbakaus/impeccable",
@@ -29,27 +29,27 @@
     },
     "banner-design": {
       "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
-      "commit": "9dea1bc76f4eceb825abd0b399982bcbb473b920",
+      "commit": "1f50119f717e935f135d605ce537223d1d7a0dac",
       "path": ".claude/skills/banner-design",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "79ebc32ac2e0a7150044cc3988d99d0b03e910f7241ac6e2766f6cdfa739a071"
+      "sha256": "ea791987841b5f01f67ecba8e77c3a4662b807ecf873559ae0114244af9e3c0d"
     },
     "brand": {
       "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
-      "commit": "6512820396c580a4b03f5f5cae9c620846a1a00b",
+      "commit": "1f50119f717e935f135d605ce537223d1d7a0dac",
       "path": ".claude/skills/brand",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "073224e40ee114340e9c074063948d9e1b3e1e5aa3552761167c3c53cfeda10b"
+      "sha256": "8fb7090aeb512bd67f00dec7a10d5b314ff875373a2d2633075ceb1bf247f460"
     },
     "canvas-design": {
       "repo": "anthropics/skills",
-      "commit": "ef740771ac901e03fbca3ce4e1c453a96010f30a",
+      "commit": "1780c5e5a552fd4d1c9d6a7b0cab26b0c2bef064",
       "path": "skills/canvas-design",
       "license": "Apache-2.0",
       "verdict": "as-bundled",
-      "sha256": "be01b0be9391babd6e2f708f5506a91dcabb0e3fabbaa3db79b0eec9e168496f"
+      "sha256": "11bf850faba5a840cc762058ac9aeb04ffa592c063f8384836f54e350d8d0c20"
     },
     "claude-youtube": {
       "repo": "AgriciDaniel/claude-youtube",
@@ -70,11 +70,11 @@
     },
     "design": {
       "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
-      "commit": "9dea1bc76f4eceb825abd0b399982bcbb473b920",
+      "commit": "1f50119f717e935f135d605ce537223d1d7a0dac",
       "path": ".claude/skills/design",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "33259d7941d43b7119d4999dfa2123d541b22df3cb5c8d9f4103d5f9a19c374e"
+      "sha256": "5e96fc84c55c9467ae1dd8cfdef7bd77648b6cec949019f50d876a6b57996537"
     },
     "design-motion-principles": {
       "repo": "kylezantos/design-motion-principles",
@@ -87,11 +87,11 @@
     },
     "design-system": {
       "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
-      "commit": "4f78df83ef1c22a76418fe9b2b924cb23f9472a4",
+      "commit": "1f50119f717e935f135d605ce537223d1d7a0dac",
       "path": ".claude/skills/design-system",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "cc9e9b0172cb8258d6183149d8432e79071f65e3fea35a3e74df34258a8b9ff1"
+      "sha256": "44d481b426d1ac68c3476e91b0fae22c334ff52adecccdbcaaa53eed0e628e54"
     },
     "differential-review": {
       "repo": "trailofbits/skills",
@@ -104,27 +104,27 @@
     },
     "frontend-design": {
       "repo": "anthropics/skills",
-      "commit": "5d25128289ff72bc9c7839ac3d245f4d57515447",
+      "commit": "1780c5e5a552fd4d1c9d6a7b0cab26b0c2bef064",
       "path": "skills/frontend-design",
       "license": "Apache-2.0",
       "verdict": "as-bundled",
-      "sha256": "9af2c59e4f54e7ffe43745cf7614a4d670ad03e9d23b0979ec10962ebbe3f43d"
+      "sha256": "e9273a1209d1398629836467072a0779e541aa7fcc71663799658b50f246165b"
     },
     "git-guardrails-claude-code": {
       "repo": "mattpocock/skills",
-      "commit": "e38b908fb73e4982eee85b2c6f6928e3b46fa0a6",
+      "commit": "5863806dd4e15c63174bee4e7515a4256792ecfa",
       "path": "skills/misc/git-guardrails-claude-code",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "4510e25bd1a810c59ce1fd7488a835bbc77639d1bf313d087c7124ff718e133b"
+      "sha256": "04eecd8f577fcff215247010d8b9184c795730c8844052e1efdb7bf911ff7b99"
     },
     "grill-me": {
       "repo": "mattpocock/skills",
-      "commit": "694fa30311e02c2639942308513555e61ee84a6f",
+      "commit": "5863806dd4e15c63174bee4e7515a4256792ecfa",
       "path": "skills/productivity/grill-me",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "a8c0906a189d9b1bf27fb6e53685f73a7fa209f7bd3b0563e5270251b2c07fdc"
+      "sha256": "0d98c9b72be8e3890bcdaa08a1d5ab391964957574a832d2335103b2893a7545"
     },
     "gsap-core": {
       "repo": "greensock/gsap-skills",
@@ -146,12 +146,12 @@
     },
     "hallmark": {
       "repo": "Nutlope/hallmark",
-      "commit": "4f6a46c6dc325d40ab268c93e25c7b96676ebccd",
+      "commit": "04977e15f3dfd6ee4b74c887dac3eb52665d6c92",
       "path": "skills/hallmark",
       "license": "MIT",
       "verdict": "safe",
       "conditions": "New pages only.",
-      "sha256": "19b1164edf1647c39e77a13db5b92cc9bd4730eaa2e1e6beb35e8f5340bbbd00"
+      "sha256": "4a470422e48d9116529180bc3862673111c03eb5ca18cadfa49c6aaf68faaab3"
     },
     "ig-reel": {
       "repo": "Jakeschincariol/instagram-agent-skill",
@@ -164,12 +164,12 @@
     },
     "impeccable": {
       "repo": "pbakaus/impeccable",
-      "commit": "e89e3ada3e875a89ac2c5d33d11e65ebef6fe285",
+      "commit": "2b86d9c07b97d4bed7de23583e1bd1e58dd2baae",
       "path": ".claude/skills/impeccable",
       "license": "Apache-2.0",
       "verdict": "caution",
       "conditions": "Audited for overlap only. The anti-slop rule overrides it on any conflict.",
-      "sha256": "44d26e914de5e98efba149c3a803c4f46289082c254c821b12bc0aeaa7b2d3fc"
+      "sha256": "b4e3de52c577a3f754d92ad109887da31340e83aec0c20686b0ff171c4acc64d"
     },
     "improve-codebase-architecture": {
       "repo": "mattpocock/skills",
@@ -190,12 +190,12 @@
     },
     "last30days": {
       "repo": "mvanhorn/last30days-skill",
-      "commit": "6894d44e088c449ecdd7246a18763fddba1ff805",
+      "commit": "5718ae786c1738a70126681122e345bd6f0245d3",
       "path": "skills/last30days",
       "license": "MIT",
       "verdict": "caution",
       "conditions": "No browser cookies, FROM_BROWSER=off. Treat results as untrusted.",
-      "sha256": "be9a7e306e8a6e0e67dabc4280e0e943d27a2bba9f019a49dd03b382ea15212e",
+      "sha256": "6f7579583bf96c55fe4e4f4989c77b2d933f56ff5fbcb0619ba436b956d9a9ea",
       "allowed_tools": "Bash, Read, Write, AskUserQuestion, WebSearch"
     },
     "manim-video": {
@@ -271,19 +271,19 @@
     },
     "property-based-testing": {
       "repo": "trailofbits/skills",
-      "commit": "4db88ee79db0a68bbe049fe827e272ee2bc19510",
+      "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
       "path": "plugins/property-based-testing/skills/property-based-testing",
       "license": "CC-BY-SA-4.0",
       "verdict": "as-bundled",
-      "sha256": "a6dd612700d4075cb47585ec06746ca935147af0b3616bbccf193b4aa5106460"
+      "sha256": "00676cc17c3f1208268892490666e91fb577588c2ba28e49483999ff8b804375"
     },
     "react-best-practices": {
       "repo": "vercel-labs/agent-skills",
-      "commit": "5847a7c7e79bab3e400cf47800b83449d7aea2d4",
+      "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
       "path": "skills/react-best-practices",
       "license": "MIT in frontmatter, no repo licence",
       "verdict": "as-bundled",
-      "sha256": "53c0d7231033ca2c02b5b7f11eb32d032f1d5b1409bf1f22ba0b93ee5791ea20"
+      "sha256": "d83070f2b32b3e98f26134793f57eb87ba113b301f64e668b19b0b596ad8321e"
     },
     "sentry-code-simplifier": {
       "repo": "getsentry/skills",
@@ -321,19 +321,19 @@
     },
     "slides": {
       "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
-      "commit": "f32d6a61cdf0bfd57404c45854583fd19ff95088",
+      "commit": "1f50119f717e935f135d605ce537223d1d7a0dac",
       "path": ".claude/skills/slides",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "926ee11935c6f5cfd88f799ab12ad662a7b6b7f588c6a9d111587efde00ab881"
+      "sha256": "e3519d822c94f6085e3c246623c1169e93e87a976c4f1189cd347ee940e24adb"
     },
     "theme-factory": {
       "repo": "anthropics/skills",
-      "commit": "ef740771ac901e03fbca3ce4e1c453a96010f30a",
+      "commit": "1780c5e5a552fd4d1c9d6a7b0cab26b0c2bef064",
       "path": "skills/theme-factory",
       "license": "Apache-2.0",
       "verdict": "as-bundled",
-      "sha256": "f742bb6e895f4d075f586e3e418862fd07dd1895a0d3626b36a350e05a94847f"
+      "sha256": "d612507dbb2c773fdc7215884399ea93599f2e2d28a199790c05aa87b769fd9e"
     },
     "threejs-animation": {
       "repo": "CloudAI-X/threejs-skills",
@@ -372,19 +372,19 @@
     },
     "ui-styling": {
       "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
-      "commit": "1c2cb32e2ff7313400c7c7792bc5abe351271cdc",
+      "commit": "1f50119f717e935f135d605ce537223d1d7a0dac",
       "path": ".claude/skills/ui-styling",
       "license": "Apache-2.0",
       "verdict": "as-bundled",
-      "sha256": "c41a94f00d66aee4f2bc10034fef6a010b3b2ea5b0aa8dbb28d50e6726bd09a3"
+      "sha256": "3c52792eca2d6e7a13bd1b11314aaef504df90b8d93fb1268c54de092b3346f4"
     },
     "web-artifacts-builder": {
       "repo": "anthropics/skills",
-      "commit": "ef740771ac901e03fbca3ce4e1c453a96010f30a",
+      "commit": "1780c5e5a552fd4d1c9d6a7b0cab26b0c2bef064",
       "path": "skills/web-artifacts-builder",
       "license": "Apache-2.0",
       "verdict": "as-bundled",
-      "sha256": "d361ba134eed34d687d2827ea408b500201d69db84ecc032f9701fe83cc8cf2d"
+      "sha256": "2be60d31e045674c593209dac6cf87c3117c2b0c20ca9163a56c18c62e90b74d"
     },
     "web-design-guidelines": {
       "repo": "vercel-labs/agent-skills",
@@ -396,27 +396,27 @@
     },
     "webapp-testing": {
       "repo": "anthropics/skills",
-      "commit": "ef740771ac901e03fbca3ce4e1c453a96010f30a",
+      "commit": "1780c5e5a552fd4d1c9d6a7b0cab26b0c2bef064",
       "path": "skills/webapp-testing",
       "license": "Apache-2.0",
       "verdict": "as-bundled",
-      "sha256": "faf09f4d86edd449358589a09ab54495f803bb8fd28a06027a316a18599344d5"
+      "sha256": "4afc0cbb0ada09b0449d631badf983194d883e03663cfe6bf7c365581dd503c1"
     },
     "writing-plans": {
       "repo": "obra/superpowers",
-      "commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
+      "commit": "22f0b463e7a5e579904dd6211a520321035526f7",
       "path": "skills/writing-plans",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "a4503f6c9625e78f0c03d2905e274dcc34fe0aa4753a4d62795a7ded450ee5fe"
+      "sha256": "11399a303dd595011768d86448aaca222d8b4727d62b147e10b3eed8e438b4a8"
     },
     "writing-skills": {
       "repo": "obra/superpowers",
-      "commit": "bc2558c3f9f097fcd84a6d3eb7924389eaebc378",
+      "commit": "22f0b463e7a5e579904dd6211a520321035526f7",
       "path": "skills/writing-skills",
       "license": "MIT",
       "verdict": "as-bundled",
-      "sha256": "ced835ca2006767b29e42b0da98ceafa46681329d1fb92e230d159546592f7db"
+      "sha256": "1c9d11eed2ca1b126f6205b6b36484f03c461a45ce476445a1d25137127e5d08"
     },
     "yt-viral": {
       "repo": "Jakeschincariol/youtube-agent-skill",
