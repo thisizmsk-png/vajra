@@ -56,15 +56,16 @@ fn a_hidden_flood_sends_nothing_and_shows_only_the_newest_tail_once_with_what_wa
 #[test]
 fn a_hidden_pane_is_not_held_to_the_visible_rate_and_a_realistic_producer_is_not_held_at_all() {
     let f = Fixture::new("hid-speed");
-    let t = Terminals::with(Limits { max_rate: 1 << 20, ..Limits::default() }, f.env()); // a visible pane is held to 1 MiB/s
+    let t = Terminals::with(Limits { max_rate: 512 << 10, ..Limits::default() }, f.env()); // a visible pane is held to 512 KiB/s
     let (info, out) = open_root(&t, &f);
     out.until("$", 5);
     t.set_visible(info.id, false, false).unwrap();
     // About 4 MiB/s for a second (8 pieces of 512 KiB, 125 ms apart), far above a real build log: not held at the default
-    // 32 MiB/s, where holding it to the visible 1 MiB/s would take 4 s.
+    // 32 MiB/s, where holding it to the visible 512 KiB/s would take about 8 s. Unheld it takes about 1.2 s; the 4 s budget
+    // leaves room for a loaded CI runner (2.8 s seen) while a real hold still fails by seconds.
     let t0 = Instant::now();
     run_hidden(&t, &f, info.id, "i=0; while [ $i -lt 8 ]; do head -c 524288 /dev/zero | tr '\\0' x; sleep 0.125; i=$((i+1)); done");
-    assert!(t0.elapsed() < Duration::from_millis(2500), "a 4 MiB/s producer took {:?}", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_secs(4), "a 4 MiB/s producer took {:?}", t0.elapsed());
 }
 
 #[test]
