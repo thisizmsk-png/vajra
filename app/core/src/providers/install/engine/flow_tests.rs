@@ -714,3 +714,36 @@ fn a_crash_right_after_the_rollback_swap_is_finished_by_the_next_run() {
     let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
     assert!(place.strays().is_empty(), "{:?}", place.strays());
 }
+
+/// Codex P2 on #213: a FIFO (or a link) planted as the install lock never hangs the probe that Set up and check 6
+/// run, even with the gate closed. The probe returns within a bound and fails closed (an install counts as running).
+#[test]
+fn a_fifo_planted_as_the_lock_is_refused_without_hanging() {
+    let w = World::new("fifo-lock", GOOD, "0.6.2");
+    let work = w.home.join(".claude").join(place::WORK);
+    std::fs::create_dir_all(&work).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let lock = work.join("lock");
+    let c = std::ffi::CString::new(lock.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid path string.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let home = w.home.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(installing(&home)).unwrap());
+    let busy = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the probe must not block on a FIFO");
+    assert!(busy, "a special file as the lock fails closed");
+    // The install itself refuses it too, without hanging.
+    let p = w.plan();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        s.spawn(|| tx.send(w.run(&p).report.outcome).unwrap());
+        let out = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the install must not block on a FIFO");
+        assert_eq!(out, Outcome::Failed);
+    });
+    std::fs::remove_file(&lock).unwrap();
+    std::os::unix::fs::symlink(w.home.join("elsewhere"), &lock).unwrap();
+    assert!(installing(&w.home), "a link as the lock fails closed");
+    std::fs::remove_file(&lock).unwrap();
+    assert!(!installing(&w.home), "no lock, no install");
+}

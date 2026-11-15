@@ -292,11 +292,15 @@ fn lock(place: &Place) -> Result<std::fs::File, &'static str> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let name = std::ffi::CString::new("lock").expect("no NUL");
     // SAFETY: a valid dir fd and name; O_NOFOLLOW so a planted link isn't followed.
-    let fd = unsafe { libc::openat(place.work.raw(), name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+    // O_NONBLOCK: a FIFO planted as the lock can't hang the open; anything but a regular file is refused.
+    let fd = unsafe { libc::openat(place.work.raw(), name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK, 0o600) };
     if fd < 0 {
         return Err("io");
     }
     let f = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    if !f.metadata().is_ok_and(|m| m.file_type().is_file()) {
+        return Err("io");
+    }
     // SAFETY: a valid fd.
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err("setup_running");
@@ -306,11 +310,20 @@ fn lock(place: &Place) -> Result<std::fs::File, &'static str> {
 
 /// Whether an engine install holds the install lock right now (C8: check 6 refuses with `engine_installing`). Read
 /// only: the lock file is opened without `O_CREAT` and probed with a shared, non-blocking `flock`, so nothing is
-/// created and a run is never delayed.
+/// created and a run is never delayed. The open is non-blocking too, so a FIFO planted there can't hang Set up or
+/// check 6 (Codex P2 on #213). Only a missing lock means no install; a link, a special file or one that can't be
+/// opened counts as an install running (fail closed).
 pub fn installing(home: &Path) -> bool {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
-    let Ok(f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(home.join(".claude").join(place::WORK).join("lock")) else { return false };
+    let f = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(home.join(".claude").join(place::WORK).join("lock")) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    if !f.metadata().is_ok_and(|m| m.file_type().is_file()) {
+        return true;
+    }
     // SAFETY: a valid fd; a shared lock taken here is released when `f` is closed at the end of this function.
     unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) != 0 }
 }
