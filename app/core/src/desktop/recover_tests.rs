@@ -503,6 +503,25 @@ fn a_survivor_whose_record_cannot_be_written_back_is_reported_unrecorded() {
     assert_eq!(lost.keep_survivor(&Owner { tries: MAX_TRIES - 1, ..o }), Ended::GivenUp);
 }
 
+/// On a first run the plan save makes the runs and run folders itself (syncing each parent, #275 review) and the plan
+/// reads back exactly; a later save replaces it whole, with no temp file left behind.
+#[test]
+fn a_first_runs_plan_is_saved_into_folders_it_makes_and_reads_back_whole() {
+    let t = Tmp::new("firstplan");
+    let data = t.data();
+    std::fs::create_dir_all(&data).unwrap();
+    assert!(!data.join("runs").exists());
+    let plan = serde_json::json!({"v": 1, "run": RUN, "round": 1, "tasks": [{"task": {"id": "t1"}, "seat_pick": null}]});
+    record_plan(&data, RUN, &plan).unwrap();
+    let file = data.join("runs").join(RUN).join(PLAN_FILE);
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(), plan);
+    let next = serde_json::json!({"v": 1, "run": RUN, "round": 2, "tasks": []});
+    record_plan(&data, RUN, &next).unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(), next);
+    let names: Vec<_> = std::fs::read_dir(data.join("runs").join(RUN)).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [std::ffi::OsString::from(PLAN_FILE)], "only the plan file is left");
+}
+
 #[test]
 fn a_run_folder_swapped_for_a_link_is_never_written_through() {
     let t = Tmp::new("swap");

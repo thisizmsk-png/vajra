@@ -699,6 +699,15 @@ fn the_stuck_lead_question_comes_only_after_a_failed_round_and_kills_nothing() {
     assert_eq!(r.p.card().questions, [Question::StuckLead]);
     assert!(r.w.kills.lock().unwrap().is_empty() && r.status().is_none(), "the core never kills for this");
     r.p.keep_going();
+    // A human seat pick while the lead is quiet is not lead activity (#275): the question still comes on time.
+    r.clock.advance(899);
+    assert!(r.p.pick_seat("t1", "w1").is_ok());
+    r.p.tick();
+    assert!(r.p.card().questions.is_empty());
+    r.clock.advance(1);
+    r.p.tick();
+    assert_eq!(r.p.card().questions, [Question::StuckLead], "the pick pushed the stuck-lead question back");
+    r.p.keep_going();
     assert!(r.p.card().questions.is_empty());
     r.clock.advance(899);
     r.p.tick();
@@ -1775,4 +1784,101 @@ fn a_check_ticket_asked_for_after_the_run_ended_never_starts() {
 fn the_runs_writer_limit_is_handed_to_the_runtime() {
     let r = rig();
     assert_eq!(*crate::lock(&r.w.limits), [("r1".to_string(), 4)]);
+}
+
+// ---------------------------------------------------------------- the plan store (codex L1 on #176)
+
+/// A plan store that keeps every plan written to it, and fails while `fail` is set (an injected disk error).
+#[derive(Default)]
+struct Kept {
+    plans: Mutex<Vec<Value>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+fn kept(r: Rig) -> (Rig, Arc<Kept>) {
+    let k = Arc::new(Kept::default());
+    let s = k.clone();
+    let store: PlanStore = Arc::new(move |plan: &Value| {
+        if s.fail.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected: no space left on device"));
+        }
+        crate::lock(&s.plans).push(plan.clone());
+        Ok(())
+    });
+    let Rig { p, w, gate, clock } = r;
+    (Rig { p: p.with_plan_store(store), w, gate, clock }, k)
+}
+
+#[test]
+fn an_accepted_plan_is_saved_before_plan_tasks_acknowledges_it() {
+    let (r, k) = kept(rig());
+    assert!(crate::lock(&k.plans).is_empty(), "nothing is saved before a plan is accepted");
+    r.p.plan_tasks(plan1()).unwrap();
+    // The saved plan is the accepted one, whole, by the time the lead hears it was accepted.
+    assert_eq!(crate::lock(&k.plans).last(), Some(&r.p.plan_record()));
+    assert_eq!(crate::lock(&k.plans).last().unwrap()["round"], 1);
+}
+
+#[test]
+fn a_plan_that_cannot_be_saved_is_refused_and_ends_the_run_before_dispatch() {
+    let (r, k) = kept(rig_with("tidy the export", default_seats(), Limits::default(), false));
+    k.fail.store(true, Ordering::SeqCst);
+    let mut p = plan1();
+    p.tasks[2].touches_security = true;
+    let (c, why) = code(r.p.plan_tasks(p));
+    assert_eq!(c, RECORD_FAILED, "{why}");
+    assert!(why.contains("no space left"), "{why}");
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    // Nothing went out for the unsaved plan: no seat question, no ticket.
+    assert!(r.p.card().questions.is_empty(), "{:?}", r.p.card().questions);
+    assert!(r.p.dispatch_worker("t1").is_err());
+    assert!(crate::lock(&r.w.tickets).is_empty());
+    // The ended run takes no seat pick, so the refused plan is never written by one.
+    k.fail.store(false, Ordering::SeqCst);
+    assert!(r.p.pick_seat("t3", "w1").is_err());
+    assert!(crate::lock(&k.plans).is_empty(), "the refused plan was saved");
+}
+
+#[test]
+fn a_seat_pick_that_cannot_be_saved_is_undone_and_the_question_stays() {
+    let (r, k) = kept(rig_with("tidy the export", default_seats(), Limits::default(), false));
+    let mut p = plan1();
+    p.tasks[2].touches_security = true;
+    r.p.plan_tasks(p).unwrap();
+    k.fail.store(true, Ordering::SeqCst);
+    let (c, why) = code(r.p.pick_seat("t3", "w1"));
+    assert_eq!(c, RECORD_FAILED, "{why}");
+    assert_eq!(r.p.card().questions, [Question::PickSeat { task: "t3".into(), role: "backend".into() }]);
+    assert_eq!(r.p.dispatch_worker("t3").unwrap(), Dispatched::Held { task: "t3".into() });
+    assert_eq!(r.p.plan_record()["tasks"][2]["seat_pick"], Value::Null);
+    // Saved, the same pick counts, and the saved plan carries it.
+    k.fail.store(false, Ordering::SeqCst);
+    r.p.pick_seat("t3", "w1").unwrap();
+    assert_eq!(crate::lock(&k.plans).last().unwrap()["tasks"][2]["seat_pick"], "w1");
+    assert!(matches!(r.p.dispatch_worker("t3").unwrap(), Dispatched::Ticket { .. }));
+}
+
+#[test]
+fn a_security_flag_the_diff_raised_is_saved_or_the_rounds_checks_never_start() {
+    let seats = vec![seat("w1", "backend", false), seat("w3", "frontend", false)];
+    // Saved: the kept plan carries the flag the diff raised.
+    let (r, k) = kept(rig_with("tidy the export", seats.clone(), Limits::default(), false));
+    crate::lock(&r.w.paths).insert(1, Some(vec!["src/auth/session.rs".into()]));
+    r.p.plan_tasks(plan1()).unwrap();
+    assert_eq!(crate::lock(&k.plans).last().unwrap()["security"], false);
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    assert_eq!(crate::lock(&k.plans).last().unwrap()["security"], true);
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(1);
+    // Unsaved: the run ends and the gate never sees the round.
+    let (r, k) = kept(rig_with("tidy the export", seats, Limits::default(), false));
+    crate::lock(&r.w.paths).insert(1, Some(vec!["src/auth/session.rs".into()]));
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    k.fail.store(true, Ordering::SeqCst);
+    r.p.integrate(1).unwrap();
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert!(r.p.card().reason.as_deref().is_some_and(|w| w.contains("couldn't be saved")), "{:?}", r.p.card().reason);
+    assert!(r.gate.inputs.lock().unwrap().is_empty(), "the round's checks started");
 }
