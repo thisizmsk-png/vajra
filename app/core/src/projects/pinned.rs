@@ -82,6 +82,11 @@ impl Pinned {
         crate::control::fsx::DirHandle::from_file(File::from(self.0.try_clone()?)).names()
     }
 
+    /// Every entry name as bytes, UTF-8 or not (no `.` or `..`).
+    pub fn raw_names(&self) -> io::Result<Vec<Vec<u8>>> {
+        crate::control::fsx::DirHandle::from_file(File::from(self.0.try_clone()?)).raw_names()
+    }
+
     fn openat(&self, name: &str, flags: libc::c_int, mode: libc::mode_t) -> io::Result<File> {
         let n = cstr(name)?;
         // SAFETY: the directory descriptor and name are valid; the result is owned immediately.

@@ -295,12 +295,24 @@ fn workers_are_discovered_from_the_session_subagents_dir() {
 }
 
 #[test]
-fn missing_claude_dir_is_an_error_not_a_panic() {
+fn missing_claude_dir_is_a_first_launch_not_an_error() {
     let t = Tmp::new();
     fs::remove_dir_all(t.home().join(".claude")).unwrap();
     let app = t.app();
-    assert_eq!(code(&app.list_campaigns().unwrap_err()), "claude_dir_missing");
+    assert!(app.list_campaigns().is_ok());
+    let pre = app.preflight().unwrap();
+    assert_eq!(pre["start_enabled"], false, "nothing is installed, so Start stays off");
+    assert!(t.home().join(".claude").is_dir());
+}
+
+#[test]
+fn a_dangling_claude_link_stays_an_error() {
+    let t = Tmp::new();
+    fs::remove_dir_all(t.home().join(".claude")).unwrap();
+    std::os::unix::fs::symlink(t.home().join("nowhere"), t.home().join(".claude")).unwrap();
+    let app = t.app();
     assert_eq!(code(&app.preflight().unwrap_err()), "claude_dir_missing");
+    assert!(!t.home().join("nowhere").exists());
 }
 
 fn rss_kb() -> u64 {
@@ -659,6 +671,88 @@ fn inspect_returns_the_newest_output_once_more_than_16_kib_is_retained() {
     assert!(lines.iter().any(|l| l.contains("FINAL-UNIQUE-QUESTION")), "the newest line is returned: {lines:?}");
     assert!(!lines.iter().any(|l| l.contains("older line 0000")), "and not the oldest retained output");
     app.sup.kill(&stream).unwrap();
+}
+
+/// Plan #217 L2: run ids are predictable minutes, so an agent can make a future run's campaign folder first. Whatever
+/// form it takes (a folder with planted files, a link to another folder, a dangling link, a plain file, a case
+/// variant, or the outside-guard `-og` name), that id is never issued: the run moves to the next minute and the
+/// planted entry is left as it was. The start checks again just before the launch, for one that appears after the pick.
+#[test]
+fn a_campaign_folder_made_before_a_run_never_becomes_that_runs() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let camps = t.home().join(".claude/vajra/campaigns");
+    fs::create_dir_all(&camps).unwrap();
+    let elsewhere = t.0.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let base = 1_793_881_800; // 2026-11-05 12:30:00 UTC
+    type Plant = Box<dyn Fn(&Path)>;
+    let cases: Vec<(&str, &str, Plant)> = vec![
+        ("a folder with planted files", "", Box::new(|p: &Path| {
+            fs::create_dir_all(p.join("checkpoints")).unwrap();
+            fs::write(p.join("campaign.json"), "{}").unwrap();
+            fs::write(p.join("state.sig"), "x").unwrap();
+        })),
+        ("a link to another folder", "", Box::new({ let e = elsewhere.clone(); move |p: &Path| symlink(&e, p).unwrap() })),
+        ("a dangling link", "", Box::new(|p: &Path| symlink("/nonexistent/vajra-217", p).unwrap())),
+        ("a plain file", "", Box::new(|p: &Path| fs::write(p, "x").unwrap())),
+        ("the -og name", "-og", Box::new(|p: &Path| fs::create_dir_all(p).unwrap())),
+    ];
+    for (i, (what, suffix, plant)) in cases.iter().enumerate() {
+        let now = base + 600 * i as u64;
+        let taken = ids::run_id_at(now);
+        let planted = camps.join(format!("deliver-{taken}{suffix}"));
+        plant(&planted);
+        let (t2, id) = app.fresh_run_id(now).unwrap();
+        assert_ne!(id, taken, "{what}: the planted id is never issued");
+        assert_eq!((t2, id.as_str()), (now + 60, ids::run_id_at(now + 60).as_str()), "{what}: the next minute");
+        assert!(planted.symlink_metadata().is_ok(), "{what}: left as it was");
+    }
+    // A case variant names the same entry on this disk (case-insensitive), so it holds the id too.
+    let now = base + 6000;
+    let taken = ids::run_id_at(now);
+    fs::create_dir_all(camps.join(format!("DELIVER-{taken}"))).unwrap();
+    if camps.join(format!("deliver-{taken}")).symlink_metadata().is_ok() {
+        assert_ne!(app.fresh_run_id(now).unwrap().1, taken, "a case variant holds the id");
+    }
+    // One that appears after the pick: the start refuses the id rather than launch into it.
+    let now = base + 7200;
+    let (t3, id) = app.fresh_run_id(now).unwrap();
+    fs::create_dir_all(camps.join(format!("deliver-{id}"))).unwrap();
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    git_in(&cwd, &["init", "-q"]);
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let e = app.start_run_as(input, cwd.to_str().unwrap(), Some((t3, id.clone()))).unwrap_err();
+    assert_eq!(code(&e), "run_id_taken", "{e}");
+    assert!(lock(&app.runs).values().all(|r| r.run_id != id), "nothing launched under it");
+}
+
+/// The finding asked about (plan #217 follow-up, read-only): the Claude launch argv rebuilds its run id from a minute,
+/// not from the id string. `start_run_as` passes it the minute `fresh_run_id` picked (one tuple with the id), never
+/// the clock. So when the pick skips to a later minute (a taken one), or the clock rolls over between the pick and the
+/// launch, the argv still carries the picked id, which is the id the core records and names its campaign after. This
+/// builds the argv exactly as `start_run_as` does and fails if the two ever differ.
+#[test]
+fn the_claude_launch_argv_carries_the_run_id_the_core_picked() {
+    let t = Tmp::new();
+    let app = t.app();
+    let camps = t.home().join(".claude/vajra/campaigns");
+    fs::create_dir_all(&camps).unwrap();
+    let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC: one second before the minute rolls over
+    fs::create_dir_all(camps.join(format!("deliver-{}", ids::run_id_at(now)))).unwrap();
+    let (minute, run_id) = app.fresh_run_id(now).unwrap();
+    assert_eq!(run_id, "20261105-1231", "the pick skipped the taken minute");
+    let campaign = format!("deliver-{run_id}");
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let argv = argv::build_run_argv_at(&input, &"a".repeat(32), minute, sid).unwrap();
+    assert_eq!(argv[..3], ["claude", "--session-id", sid]);
+    let json: Value = serde_json::from_str(argv[3].strip_prefix("/vajra-deliver ").unwrap()).unwrap();
+    assert_eq!(json["run_id"], run_id.as_str(), "the argv's run id is the picked one, not the clock's");
+    assert_eq!(format!("deliver-{}", json["run_id"].as_str().unwrap()), campaign, "and names the same campaign");
+    assert!(json.get("campaign").is_none(), "a fresh run lets the workflow name it deliver-<run_id>");
 }
 
 #[test]
@@ -2024,19 +2118,27 @@ fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered
     assert!(lock(&app.worktree_state).values().all(|(_, st)| st.is_none()));
 }
 
+/// The promise is the product's own: one `evidence_list` call is bounded by `EVIDENCE_BUDGET`, and a big untracked tree
+/// is still read inside it, so the answer is `stale` (the tree id was computed in time), not `unverified` (it ran out).
+/// The test measures that number, not a tighter one of its own: alone the call takes about 0.4 s, but in the parallel
+/// suite the wall clock also counts the CPU the other tests take, which a fixed 3 s limit kept missing at 3.0 to 3.2 s.
 #[test]
 fn a_big_untracked_tree_does_not_blow_the_budget() {
     if !have_jq() { eprintln!("skipped: no jq"); return; }
     let t = Tmp::new();
     let (app, slug, repo) = verified_repo(&t);
+    assert_eq!(app.evidence_budget, EVIDENCE_BUDGET, "measured against the product's budget");
     let big = repo.join("node_modules_like");
     fs::create_dir_all(&big).unwrap();
     for i in 0..3000 {
         fs::write(big.join(format!("f{i}.js")), b"x").unwrap();
     }
+    lock(&app.worktree_state).clear();
     let start = std::time::Instant::now();
-    assert_eq!(status_of(&app, &slug), "stale");
-    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+    let r = app.evidence_list(&slug).unwrap();
+    let took = start.elapsed();
+    assert_eq!(r["rows"][0]["status"], "stale", "the tree was read inside the budget: {r}");
+    assert!(took < EVIDENCE_BUDGET, "{took:?}");
 }
 
 fn detail_fixture(t: &Tmp, nonce: Option<&str>) -> (App, String, std::path::PathBuf) {
@@ -2177,6 +2279,28 @@ fn read_report_refuses_a_report_edited_after_it_was_signed() {
     let r = t.app().read_report("real1").unwrap();
     assert_eq!(r["integrity"], "integrity_failed", "{r}");
     assert!(r.get("text").is_none());
+}
+
+/// PR 261 review: the digest covers only the file contents, so an intact signed campaign and report copied into another
+/// campaign's folder keep a valid signature. The held read must refuse it because the slug inside isn't the one asked
+/// for, and its failure must not be settled back to ok.
+#[test]
+fn read_report_refuses_an_intact_campaign_copied_into_another_folder() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let (from, to) = (camp_file(&t, ""), t.home().join(".claude/vajra/campaigns/real2"));
+    fs::create_dir(&to).unwrap();
+    for name in ["campaign.json", "features.json", "progress.md", "state.sig", "report.md"] {
+        fs::copy(from.join(name), to.join(name)).unwrap();
+    }
+    let app = t.app();
+    let r = app.read_report("real2").unwrap();
+    assert_eq!(r["integrity"], "integrity_failed", "{r}");
+    assert!(r.get("text").is_none(), "{r}");
+    let badges = with_badges(&app, false);
+    let copied = badges["campaigns"].as_array().unwrap().iter().find(|c| c["slug"] == "real2").cloned();
+    assert_eq!(copied.map(|c| c["integrity"].clone()), Some(json!("failed")), "{badges}");
+    assert_eq!(app.read_report("real1").unwrap()["integrity"], "ok", "the original still reads");
 }
 
 #[test]
@@ -3473,7 +3597,8 @@ fn a_core_run_whose_lead_fails_to_launch_is_recorded_ended_not_left_for_the_cras
     let r = repos(&t, &["one"]);
     let p = app.launch_project(&r[0]).unwrap().1.id;
     let run = "20261112-0940";
-    let seats = json!({"seats": [{"seat": "lead", "account": "codex"}, {"slot": "w1", "role": "backend", "account": "codex"}]});
+    let seats = json!({"seats": [{"seat": "lead", "account": "codex"}, {"slot": "w1", "role": "backend", "account": "codex"}],
+        "evidence_trust": "outside_guard", "campaign_slug": format!("deliver-{run}-og")});
     app.record_run_seats(run, &seats).unwrap();
     let runs = t.0.join("data/runs");
     fs::create_dir_all(runs.join(run)).unwrap();
@@ -3489,6 +3614,33 @@ fn a_core_run_whose_lead_fails_to_launch_is_recorded_ended_not_left_for_the_cras
     let left = super::recover::reconcile(&t.0.join("data"), &crate::owned::Ledger::new(crate::owned::ledger_path(&t.0.join("data"))));
     assert!(left.runs.is_empty(), "the reconcile has nothing to call app_restarted: {:?}", left.runs);
     assert_eq!(app.active_run_count(), 0, "nothing was left counted in the caps");
+}
+
+/// 6i: Start builds the run's gate with its delivery phase from `seats.json`'s evidence trust and campaign. A seats
+/// file without them can't be delivered, so the run never starts: refused before any lead launches, and recorded
+/// ended rather than left for the crash reconcile.
+#[test]
+fn a_core_run_whose_seats_name_no_evidence_trust_never_starts() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    let p = app.launch_project(&r[0]).unwrap().1.id;
+    for (run, extra) in [("20261112-0941", json!({"campaign_slug": "deliver-20261112-0941"})), ("20261112-0942", json!({"evidence_trust": "guarded"}))] {
+        let mut seats = json!({"seats": [{"seat": "lead", "account": "codex"}, {"slot": "w1", "role": "backend", "account": "codex"}]});
+        seats.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        app.record_run_seats(run, &seats).unwrap();
+        let input = crate::sessions::argv::RunInput {
+            ask: "x".into(), max_rounds: 1, base: "0123456789abcdef0123456789abcdef01234567".into(), max_in_flight: 1, campaign: None, provider: None,
+        };
+        let e = app.start_lead_run(&p, input, r[0].to_str().unwrap(), run).unwrap_err();
+        assert_eq!(code(&e), "io", "{e}");
+        assert!(e["detail"].as_str().unwrap().contains("name no"), "{e}");
+        let runs = t.0.join("data/runs");
+        let ended: Value = serde_json::from_slice(&fs::read(runs.join(run).join("ended.json")).expect("closed")).unwrap();
+        assert_eq!(ended["status"], "lead_lost");
+        assert!(!runs.join(run).join("lead").exists(), "no lead was launched");
+    }
+    assert_eq!(app.active_run_count(), 0);
 }
 
 /// #175 review: a core run (a seated proposal's, under its lead) counts in the run caps beside classic runs. A second
@@ -5843,9 +5995,11 @@ fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
     let d = t.0.join("fakebin-codex-lead");
     fs::create_dir_all(&d).unwrap();
     let argv_log = t.0.join("lead-argv");
+    // The argv is written to a temp name and renamed into place, so the log appears whole or not at all. Under full-suite
+    // load a test that saw `> file` create the file could read it before `printf` filled it (the flake: an argv of "-c").
     let body = format!(
-        "#!/bin/sh\ncase \"$1\" in --version) echo '0.166.0 (fake)';; login) echo 'Logged in';; *) printf '%s\\n' \"$@\" > '{}'; exec sleep 30;; esac\n",
-        argv_log.display()
+        "#!/bin/sh\ncase \"$1\" in --version) echo '0.166.0 (fake)';; login) echo 'Logged in';; *) printf '%s\\n' \"$@\" > '{log}.part' && mv '{log}.part' '{log}'; exec sleep 30;; esac\n",
+        log = argv_log.display()
     );
     fs::write(d.join("codex"), body).unwrap();
     fs::set_permissions(d.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -5854,13 +6008,12 @@ fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
     let r = app.start_run(input, &t.0.join("repo").to_string_lossy()).unwrap();
     let stream = r["stream"].as_str().unwrap().to_string();
     let c = lock(&app.lead_checks).get(&stream).cloned().expect("a Codex Lead registers its first-turn read-back");
-    for _ in 0..100 {
-        if argv_log.is_file() {
-            break;
-        }
+    // A deadline, not a fixed count of short sleeps: a loaded machine can take seconds to exec the fake.
+    let t0 = std::time::Instant::now();
+    while !argv_log.is_file() && t0.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let argv = fs::read_to_string(&argv_log).unwrap();
+    let argv = fs::read_to_string(&argv_log).unwrap_or_else(|e| panic!("the fake codex never wrote its argv within 20 s: {e}"));
     assert!(argv.contains(&format!("\"{}\"=\"none\"", c.marker.display())), "the marker is a deny entry of the launch: {argv}");
     assert!(!argv.lines().any(|l| l == "-s" || l == "--sandbox" || l.starts_with("--sandbox=")), "{argv}");
     assert!(c.want.deny.contains(&c.marker) && c.codex_home == t.home().join(".codex") && !c.want.network);
@@ -5900,10 +6053,8 @@ fn a_codex_lead_a_sandbox_flag_beat_is_ended_fail_closed() {
     assert!(lock(&app.lead_checks).contains_key(&stream));
     lead_rollout(&t, &c, "flag", r#"{"type":"danger-full-access"}"#, "null");
     app.check_codex_leads();
-    for _ in 0..100 {
-        if !app.sup.is_running(&stream).unwrap_or(false) {
-            break;
-        }
+    let t0 = std::time::Instant::now();
+    while app.sup.is_running(&stream).unwrap_or(false) && t0.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!app.sup.is_running(&stream).unwrap(), "the Lead is ended");
@@ -5919,10 +6070,85 @@ fn a_codex_lead_whose_profile_shows_runs_on() {
     let t = Tmp::new();
     let (app, stream, c) = codex_lead(&t);
     lead_rollout(&t, &c, "ours", r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#, &lead_entries(&c));
-    app.check_codex_leads();
-    assert!(app.sup.is_running(&stream).unwrap(), "the profile is in force");
-    assert!(!lock(&app.lead_checks).contains_key(&stream), "decided once");
+    // #241 re-check L2: Applied, then `LEAD_RECHECKS` more passes before the check is dropped.
+    for _ in 0..=crate::desktop::LEAD_RECHECKS {
+        app.check_codex_leads();
+        assert!(app.sup.is_running(&stream).unwrap(), "the profile is in force");
+    }
+    assert!(!lock(&app.lead_checks).contains_key(&stream), "decided after its re-checks");
     app.sup.kill(&stream).unwrap();
+}
+
+/// Wait up to 20 s for the Lead on `stream` to end; true if it did.
+fn lead_ended(app: &App, stream: &str) -> bool {
+    let t0 = std::time::Instant::now();
+    while app.sup.is_running(stream).unwrap_or(false) && t0.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    !app.sup.is_running(stream).unwrap_or(false)
+}
+
+const LEAD_SANDBOX: &str = r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#;
+
+/// #241 re-check L2: after Applied, an unmarked first turn in the project that shows up on a re-check pass ends the Lead
+/// (a forged marked file can't buy the real unmarked one time once it lands).
+#[test]
+fn a_codex_lead_an_unmarked_turn_after_applied_ends_it() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    lead_rollout(&t, &c, "ours", LEAD_SANDBOX, &lead_entries(&c));
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap() && lock(&app.lead_checks).contains_key(&stream), "Applied, still re-checking");
+    lead_rollout(&t, &c, "late", r#"{"type":"danger-full-access"}"#, "null");
+    app.check_codex_leads();
+    assert!(lead_ended(&app, &stream), "an unmarked turn after Applied ends the Lead");
+}
+
+/// #241 re-check L2: after Applied, the marked file vanishing ends the Lead.
+#[test]
+fn a_codex_lead_whose_marked_file_vanishes_after_applied_is_ended() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    lead_rollout(&t, &c, "ours", LEAD_SANDBOX, &lead_entries(&c));
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap());
+    fs::remove_file(t.home().join(".codex/sessions/2026/11/13/rollout-2026-11-13T16-38-01-ours.jsonl")).unwrap();
+    app.check_codex_leads();
+    assert!(lead_ended(&app, &stream), "the marked file vanished");
+}
+
+/// #241 re-check L1: more session files since the launch than one pass reads ends the Lead, even with a passing marked
+/// file among the newest: seventeen files of other folders (skipped kinds) plus the Lead's own.
+#[test]
+fn a_codex_lead_whose_window_overflows_the_file_cap_is_ended() {
+    let t = Tmp::new();
+    let (app, stream, c) = codex_lead(&t);
+    let day = t.home().join(".codex/sessions/2026/11/13");
+    fs::create_dir_all(&day).unwrap();
+    for i in 0..=crate::providers::effective::LEAD_FILES_CAP {
+        fs::write(day.join(format!("rollout-2026-11-13T16-30-{i:02}-other{i:02}.jsonl")), "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/elsewhere\"}}\n").unwrap();
+    }
+    lead_rollout(&t, &c, "ours", LEAD_SANDBOX, &lead_entries(&c));
+    app.check_codex_leads();
+    assert!(lead_ended(&app, &stream), "a cap overflow fails closed");
+}
+
+/// #241 L2: no sessions folder in the Codex home at all: before `LEAD_NO_SESSIONS_WAIT` the Lead waits; past it, it is
+/// ended with the reason, instead of running unchecked for the full `LEAD_PROOF_WAIT`.
+#[test]
+fn a_codex_lead_whose_sessions_land_elsewhere_is_ended_after_a_minute() {
+    let t = Tmp::new();
+    let (app, stream, _c) = codex_lead(&t);
+    let _ = fs::remove_dir_all(t.home().join(".codex/sessions"));
+    app.check_codex_leads();
+    assert!(app.sup.is_running(&stream).unwrap(), "inside the first minute the Lead waits");
+    let back = std::time::SystemTime::now() - crate::desktop::LEAD_NO_SESSIONS_WAIT - Duration::from_secs(1);
+    lock(&app.lead_checks).get_mut(&stream).unwrap().since = back;
+    let sub = app.bus.subscribe();
+    app.check_codex_leads();
+    assert!(lead_ended(&app, &stream), "past a minute with no sessions folder, the Lead ends");
+    let said = collect_changes(&sub, Duration::from_secs(1)).map(|p| p.to_string()).unwrap_or_default();
+    assert!(said.contains(&stream), "the end is pushed on the Lead's own stream: {said}");
 }
 
 /// The marker shows but a Vajra dir is readable: ended with the check's reason.
@@ -5933,10 +6159,8 @@ fn a_codex_lead_with_a_readable_vajra_dir_is_ended() {
     let open = lead_entries(&c).replacen(r#""access":"deny""#, r#""access":"read""#, 1);
     lead_rollout(&t, &c, "open", r#"{"type":"workspace-write","network_access":false,"exclude_tmpdir_env_var":true,"exclude_slash_tmp":true}"#, &open);
     app.check_codex_leads();
-    for _ in 0..100 {
-        if !app.sup.is_running(&stream).unwrap_or(false) {
-            break;
-        }
+    let t0 = std::time::Instant::now();
+    while app.sup.is_running(&stream).unwrap_or(false) && t0.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!app.sup.is_running(&stream).unwrap(), "a readable Vajra dir ends the Lead");

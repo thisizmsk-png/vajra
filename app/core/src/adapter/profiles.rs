@@ -90,7 +90,7 @@ const CODEX_WORKER_USER: &[&str] = &["login", "hooks", "plugins", "apps", "mcp_s
 const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
     Always { setting: "settings", how: "`--settings <data>/profiles/claude-worker-<session>.json`, fresh per launch and hash-checked before spawn (Read and Edit deny rules, guard hooks, disableAllHooks:false)" },
-    Always { setting: "sandbox", how: "Claude Code's OS sandbox on every Bash call: writes only in the worktree and ticket tmp, the key folder and data dir unreadable, no unsandboxed retry, loopback only, the launch refused if the sandbox can't start" },
+    Always { setting: "sandbox", how: "Claude Code's OS sandbox on every Bash call: writes only in the worktree and ticket tmp, the key folder, data dir and credential files (SSH, cloud CLIs, package tokens, git and gh stores, GPG) unreadable, no unsandboxed retry, loopback only, the launch refused if the sandbox can't start" },
     Always { setting: "setting sources", how: "`--setting-sources \"\"`: no user, project or local settings file loads, so none can widen the sandbox and a hook a worker writes in its worktree never runs" },
     Always { setting: "caches", how: "`GOCACHE`, `GOTMPDIR` and `npm_config_cache` under the ticket tmp" },
     Always { setting: "permissions", how: "`--permission-mode dontAsk`, no bypass flag" },
@@ -98,10 +98,10 @@ const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "model", how: "`--model` when the seat names one" },
 ];
 
-/// Login and CLAUDE.md stay the user's: neither is a settings file. The default model and the model-routing env vars
-/// carry over into the flag file (`CLAUDE_CARRY_ENV`); the user's MCP servers and every other setting don't load under
-/// `--setting-sources ""`.
-const CLAUDE_WORKER_USER: &[&str] = &["login", "CLAUDE.md", "history", "default model", "model-routing env"];
+/// Login and CLAUDE.md stay the user's: neither is a settings file. The default model, the model-routing env vars
+/// (`CLAUDE_CARRY_ENV`) and the sandbox read denies carry over into the flag file; the user's MCP servers and every
+/// other setting don't load under `--setting-sources ""`.
+const CLAUDE_WORKER_USER: &[&str] = &["login", "CLAUDE.md", "history", "default model", "model-routing env", "sandbox read denies"];
 
 /// Spike S4 (does `-p` keep the flag file's hooks, does `--tools` hold against a user `Bash(*)` allow, is
 /// `disableAllHooks:false` honoured, does `--setting-sources user` keep the worktree's project-settings hook from
@@ -119,6 +119,9 @@ pub const CLAUDE_WORKER_PROVEN: &[(&str, &str)] = &[
     // claude 2.1.296, S4 PASS, every check ok, including the data-dir run with the OS sandbox's key-read and data-write
     // refusals. The shape covers the flag file, the argv and the repo's guard scripts' bytes.
     ("2.1.296 (Claude Code)", "3006ecb90e00e8de3b6a5acdf8f0492949f969ae697a4606a09a9df843831425"),
+    // The owner's S4 rerun on the credential-deny tree (#272, ao/vajra-99/worker-credential-denies 0f8b90d1,
+    // 2026-11-15): claude 2.1.296, S4 PASS, with the fixed credential read-deny list in the flag (codex M1).
+    ("2.1.296 (Claude Code)", "60403eac7d2c1a9ccbedfc14d1255910d425949c2825b16bdfeb679debcb1e7a"),
 ];
 
 /// Canary A: a build not on `CLAUDE_WORKER_PROVEN` whose self-test on this Mac failed, timed out or could not run (no
@@ -460,15 +463,29 @@ pub fn codex_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInp
 /// `sandbox_workspace_write.*` overrides, which a permission profile replaces. S12 (codex 0.166, live): `--sandbox X`,
 /// `-s X` and `--sandbox=X` each beat a per-launch profile (the session ran with `danger-full-access` and read a denied
 /// file), so every form goes, and `-sX` too (bhishma #216 L1). The prompt after `--` is never touched.
+///
+/// #241 L3: also every other flag that would widen or replace the profile, though no Vajra argv carries one today:
+/// `--full-auto`, `--dangerously-bypass-approvals-and-sandbox` and its `--yolo` alias, the profile-select flag
+/// (`--profile X`, `-p X`, `--profile=X`, `-pX`: it would load a profile of the user's config over Vajra's), and the
+/// sandbox overrides in every config spelling (`-c K=V`, `--config K=V`, `--config=K=V`, `-cK=V`). Codex-only: this runs
+/// on a Codex argv, where `-p` is the profile flag (Claude's `-p` is never passed through here).
 pub fn drop_sandbox_flag(a: &mut Vec<String>) {
+    let sandbox_key = |v: &str| v.starts_with("sandbox_workspace_write.") || v.starts_with("sandbox_mode=");
     let mut i = 0;
     while i < a.len() && a[i] != "--" {
         let x = a[i].as_str();
-        if x == "--sandbox" || x == "-s" {
+        if matches!(x, "--sandbox" | "-s" | "--profile" | "-p") {
             a.drain(i..(i + 2).min(a.len()));
-        } else if x.starts_with("--sandbox=") || (x.starts_with("-s") && !x.starts_with("--")) {
+        } else if matches!(x, "--full-auto" | "--dangerously-bypass-approvals-and-sandbox" | "--yolo")
+            || x.starts_with("--sandbox=")
+            || x.starts_with("--profile=")
+            || (x.starts_with("-s") && !x.starts_with("--"))
+            || (x.starts_with("-p") && !x.starts_with("--"))
+            || x.strip_prefix("--config=").is_some_and(sandbox_key)
+            || (x.starts_with("-c") && !x.starts_with("--") && x.len() > 2 && sandbox_key(&x[2..]))
+        {
             a.remove(i);
-        } else if x == "-c" && a.get(i + 1).is_some_and(|v| v.starts_with("sandbox_workspace_write.") || v.starts_with("sandbox_mode=")) {
+        } else if matches!(x, "-c" | "--config") && a.get(i + 1).is_some_and(|v| sandbox_key(v)) {
             a.drain(i..i + 2);
         } else {
             i += 1;
@@ -902,7 +919,8 @@ const HOOKS_JSON: &str = include_str!("../../../../hooks/hooks.json");
 /// Plus Claude Code's OS sandbox (Seatbelt on macOS) around every Bash call, so a command that never names a protected
 /// path still can't read the signing key or touch the data dir (the vajra-70 spike: a name-free read, write and symlink
 /// read were each refused). Writable: the worktree (Claude Code's own default) and the ticket tmp. Refused to read and
-/// write: the key folder and the data dir. No unsandboxed retry, no excluded commands, no network domains (loopback
+/// write: the key folder and the data dir. Refused to read: the credential table (`SANDBOX_CREDENTIAL_HOME`, #212 codex
+/// M1), in given and realpath forms. No unsandboxed retry, no excluded commands, no network domains (loopback
 /// only), and `failIfUnavailable`, so a machine without the sandbox refuses the launch. The worker launches with
 /// `--setting-sources ""`, so no user or project file can merge an `allowRead`, `allowWrite` or `excludedCommands`
 /// entry into these lists (the spike showed both reopen it); the scalars are pinned as well.
@@ -944,14 +962,20 @@ pub const CLAUDE_CARRY_NEVER: &[&str] =
 /// A carried-over value is a short single-line string.
 const CARRY_MAX: usize = 512;
 
-/// What a Claude worker keeps from the user's own `settings.json`: the default model and the `CLAUDE_CARRY_ENV`
-/// entries of its `env` block, nothing else (no permission, sandbox, hook, `apiKeyHelper` or MCP key, no unnamed env
-/// var). Built from the file's text by `claude_carry_over`.
+/// What a Claude worker keeps from the user's own `settings.json`: the default model, the `CLAUDE_CARRY_ENV` entries of
+/// its `env` block, and its sandbox read denies (`sandbox.filesystem.denyRead`, #212 codex M1: owner rule, the user's
+/// CLI settings stay with ours on top), nothing else (no permission, allow list, other sandbox key, hook,
+/// `apiKeyHelper` or MCP key, no unnamed env var). Built from the file's text by `claude_carry_over`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CarryOver {
     pub model: Option<String>,
     pub env: Vec<(&'static str, String)>,
+    /// The user's own `denyRead` entries as written; `claude_worker_flag_with` resolves each against HOME.
+    pub deny_read: Vec<String>,
 }
+
+/// At most this many of the user's `denyRead` entries carry over.
+pub const CARRY_DENY_MAX: usize = 128;
 
 fn carry_value(v: &Value) -> Option<String> {
     let s = v.as_str()?;
@@ -960,6 +984,7 @@ fn carry_value(v: &Value) -> Option<String> {
 
 /// The carry-over from the text of the user's `~/.claude/settings.json`. A file that is missing, not JSON or not an
 /// object carries nothing, and a value that is not a short single-line string is dropped: this never refuses a launch.
+/// A `denyRead` entry with a quote or backslash is dropped too, so no entry can change how the sandbox reads the list.
 pub fn claude_carry_over(settings: Option<&str>) -> CarryOver {
     let Some(v) = settings.and_then(|t| serde_json::from_str::<Value>(t).ok()) else { return CarryOver::default() };
     let model = v.get("model").and_then(carry_value);
@@ -967,7 +992,48 @@ pub fn claude_carry_over(settings: Option<&str>) -> CarryOver {
         Some(e) => CLAUDE_CARRY_ENV.iter().filter_map(|k| e.get(*k).and_then(carry_value).map(|s| (*k, s))).collect(),
         None => Vec::new(),
     };
-    CarryOver { model, env }
+    let mut deny_read: Vec<String> = Vec::new();
+    for s in v.pointer("/sandbox/filesystem/denyRead").and_then(Value::as_array).into_iter().flatten().filter_map(carry_value) {
+        if !s.contains(['"', '\\']) && !deny_read.contains(&s) && deny_read.len() < CARRY_DENY_MAX {
+            deny_read.push(s);
+        }
+    }
+    CarryOver { model, env, deny_read }
+}
+
+/// One of the user's `denyRead` entries as absolute paths: `~` and `~/...` under `home`, `//...` (the permission-rule
+/// spelling) as `/...`, an absolute path as is, and anything else relative to `~/.claude`, where the user's settings
+/// file lives. A `~name/...` entry names another user's home and is dropped. A plain path gets its realpath beside its
+/// given form when that exists and differs; an entry holding glob syntax is passed on in its given form only.
+fn user_deny_forms(home: &Path, entry: &str) -> Vec<String> {
+    let home_s = home.to_string_lossy();
+    let home_s = home_s.trim_end_matches('/');
+    let abs = if entry == "~" {
+        home_s.to_string()
+    } else if let Some(rest) = entry.strip_prefix("~/") {
+        format!("{home_s}/{rest}")
+    } else if entry.starts_with('~') {
+        return Vec::new();
+    } else if let Some(rest) = entry.strip_prefix("//") {
+        format!("/{rest}")
+    } else if entry.starts_with('/') {
+        entry.to_string()
+    } else {
+        format!("{home_s}/.claude/{}", entry.strip_prefix("./").unwrap_or(entry))
+    };
+    // Every form here is absolute, so trimming the separators off the filesystem root leaves it empty: keep the root
+    // itself, a user deny of the whole filesystem, rather than dropping it (#272 review).
+    let trimmed = abs.trim_end_matches('/');
+    let given = if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() };
+    let mut out = vec![given.clone()];
+    if !given.contains(['*', '?', '[', ']', '{', '}']) {
+        if let Some(real) = std::fs::canonicalize(&given).ok().and_then(|r| r.to_str().map(|s| s.trim_end_matches('/').to_string())) {
+            if !real.is_empty() && real != given && !real.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+                out.push(real);
+            }
+        }
+    }
+    out
 }
 
 /// The user's `~/.claude/settings.json` read the way the provider check reads it (each step opened without following a
@@ -978,14 +1044,25 @@ pub fn read_claude_carry_over(home: &Path) -> CarryOver {
     claude_carry_over(text.as_deref())
 }
 
-/// `claude_worker_flag` plus the user's carry-over, as `model` and `env`. The template (an empty carry-over) is what
-/// `claude_worker_flag_shape` hashes, so the proven shape never depends on a user's settings; the carried keys can't
-/// reach the sandbox, the permissions or the hooks.
+/// `claude_worker_flag` plus the user's carry-over, as `model`, `env` and extra `sandbox.filesystem.denyRead` entries
+/// after Vajra's own. The template (an empty carry-over) is what `claude_worker_flag_shape` hashes, so the proven shape
+/// never depends on a user's settings; the carried keys can't reach the permissions, the hooks or any sandbox list but
+/// `denyRead`, and an added read deny only narrows what a Bash call can read.
 pub fn claude_worker_flag_with(home: &Path, work: &Path, repos: &[PathBuf], data: &Path, ticket_tmp: &Path, carry: &CarryOver) -> Result<String, String> {
     let roots: Vec<PathBuf> = std::iter::once(work.to_path_buf()).chain(repos.iter().cloned()).collect();
     let mut deny = crate::control::lead_settings::deny_rules_for(home, &roots, data, &[]).map_err(|e| e.to_string())?;
     deny.extend(crate::control::lead_settings::worker_edit_rules(home, data).map_err(|e| e.to_string())?);
     let locked = crate::control::lead_settings::sandbox_locked_dirs(home, data).map_err(|e| e.to_string())?;
+    // Reads are refused for the locked folders and the credential table (#212 codex M1), then the user's own read
+    // denies on top; writes only for the locked folders (the sandbox leaves HOME read-only already).
+    let mut deny_read = crate::control::lead_settings::sandbox_read_denied(home, data).map_err(|e| e.to_string())?;
+    for entry in &carry.deny_read {
+        for form in user_deny_forms(home, entry) {
+            if !deny_read.contains(&form) {
+                deny_read.push(form);
+            }
+        }
+    }
     let tmp = match ticket_tmp.to_str() {
         Some(s) if ticket_tmp.is_absolute() && !s.contains(['\n', '\r', '\0']) => s.trim_end_matches('/').to_string(),
         _ => return Err("the ticket tmp is not a plain absolute path".into()),
@@ -1027,7 +1104,7 @@ pub fn claude_worker_flag_with(home: &Path, work: &Path, repos: &[PathBuf], data
                 "disabled": false,
                 "allowRead": [],
                 "allowWrite": [tmp],
-                "denyRead": locked,
+                "denyRead": deny_read,
                 "denyWrite": locked,
             },
         },
@@ -1430,16 +1507,54 @@ pub fn check_codex_lead_applied(rollout: &str, lead_dir: &Path, deny: &[PathBuf]
 
 /// bhishma L1 on #174, shared by both Codex lead read-backs: a `read` entry inside a denied dir, or of a dir that holds
 /// one (other than `/`), reopens what the profile shut, unless it is one of `allowed`.
+///
+/// Plan #175 L1: paths are compared as given **and** in canonical form (`canonical_form`) on both sides, so a read entry
+/// spelled through a link (`/var` for `/private/var`) or with `..` still counts as inside a denied dir, and an allowed
+/// entry matches only if it is the lead dir itself in either form.
 fn check_no_read_reopens(tc: &Value, deny: &[PathBuf], allowed: &[PathBuf]) -> Result<(), NotApplied> {
     let entries = tc.pointer("/payload/file_system_sandbox_policy/entries").and_then(Value::as_array).cloned().unwrap_or_default();
+    let deny_c: Vec<PathBuf> = deny.iter().map(|d| canonical_form(d)).collect();
+    let allowed_c: Vec<PathBuf> = allowed.iter().map(|a| canonical_form(a)).collect();
+    let root = Path::new("/");
+    let inside = |p: &Path, ds: &[PathBuf]| ds.iter().any(|d| p.starts_with(d) || (d.starts_with(p) && p != root));
     for e in entries.iter().filter(|e| e["access"] == "read") {
         let Some(p) = e.pointer("/path/path").and_then(Value::as_str).map(Path::new) else { continue };
-        let reopens = deny.iter().any(|d| p.starts_with(d) || (d.starts_with(p) && p != Path::new("/")));
-        if reopens && !allowed.iter().any(|a| a == p) {
+        let pc = canonical_form(p);
+        let reopens = inside(p, deny) || inside(&pc, &deny_c);
+        // Allowed only as the lead dir: as written (no `..` to slip past) or by its canonical form.
+        let is_allowed = allowed.iter().any(|a| a == p && !has_dot_dot(p)) || allowed_c.contains(&pc);
+        if reopens && !is_allowed {
             return Err(NotApplied(format!("{} is readable inside a Vajra dir", p.display())));
         }
     }
     Ok(())
+}
+
+fn has_dot_dot(p: &Path) -> bool {
+    p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+/// The path the OS would resolve `p` to, for a path that may not exist yet: the longest existing ancestor through
+/// `canonicalize` (links resolved, `..` after a link handled by the OS), then the missing rest lexically (`.` dropped,
+/// `..` removes one name). A relative path is returned as given (the read-back's entries are absolute).
+fn canonical_form(p: &Path) -> PathBuf {
+    use std::path::Component;
+    if !p.is_absolute() {
+        return p.to_path_buf();
+    }
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    let (Some(parent), Some(last)) = (p.parent(), p.components().next_back()) else { return p.to_path_buf() };
+    let mut base = canonical_form(parent);
+    match last {
+        Component::ParentDir => {
+            base.pop();
+        }
+        Component::Normal(n) => base.push(n),
+        _ => {}
+    }
+    base
 }
 
 /// Check a Claude run lead's `system`/`init` event: `dontAsk`, every tool in `claude_lead_tools()` (an MCP tool of any

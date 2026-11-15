@@ -198,6 +198,24 @@ fn every_form_of_the_sandbox_flag_is_dropped_but_never_the_prompt() {
     assert_eq!(b, ["codex", "--", "--sandbox"]);
 }
 
+/// #241 L3: the stripper also drops every other flag that would widen or replace the profile, in each spelling, and
+/// still keeps the shell's own `-c <script>`, an unrelated `-c` config, and anything after `--`.
+#[test]
+fn every_profile_widening_flag_is_dropped_in_every_spelling() {
+    let mut a: Vec<String> = [
+        "/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--yolo",
+        "--profile", "theirs", "-p", "theirs", "--profile=theirs", "-ptheirs",
+        "--config", "sandbox_mode=\"danger-full-access\"", "--config=sandbox_mode=\"danger-full-access\"",
+        "-csandbox_mode=\"danger-full-access\"", "-csandbox_workspace_write.network_access=true",
+        "-c", "model=\"x\"", "--config", "approval_policy=\"never\"", "--", "--yolo -p x",
+    ]
+    .map(String::from)
+    .into();
+    drop_sandbox_flag(&mut a);
+    let want: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "-c", "model=\"x\"", "--config", "approval_policy=\"never\"", "--", "--yolo -p x"].map(String::from).into();
+    assert_eq!(a, want);
+}
+
 #[test]
 fn worker_builders_refuse_bad_inputs() {
     let mut l = launch(RoleKind::Worker, false);
@@ -336,7 +354,10 @@ fn the_flag_file_turns_the_os_sandbox_on_around_the_key_folder_and_data_dir() {
     assert_eq!(fs["allowRead"], json!([]));
     assert_eq!(fs["allowWrite"], json!([tmp.to_str().unwrap()]));
     let locked = crate::control::lead_settings::sandbox_locked_dirs(&home, &data).unwrap();
-    assert_eq!(fs["denyRead"], json!(locked));
+    // #212 codex M1: reads are refused for the locked folders, then the credential table; writes for the locked only.
+    let read_denied = crate::control::lead_settings::sandbox_read_denied(&home, &data).unwrap();
+    assert_eq!(fs["denyRead"], json!(read_denied));
+    assert_eq!(read_denied[..locked.len()], locked[..], "the locked folders come first");
     assert_eq!(fs["denyWrite"], json!(locked));
     for base in [home.join(".claude/vajra"), home.canonicalize().unwrap().join(".claude/vajra"), data.clone(), data.canonicalize().unwrap()] {
         assert!(locked.contains(&base.to_str().unwrap().to_string()), "{} missing from {locked:?}", base.display());
@@ -355,6 +376,126 @@ fn the_flag_file_turns_the_os_sandbox_on_around_the_key_folder_and_data_dir() {
         assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &bad).is_err(), "{}", bad.display());
     }
     assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).is_ok(), "a plain ticket tmp still works");
+}
+
+/// #212 codex M1: the worker sandbox refuses reads of a fixed credential table under HOME in the given form and, for a
+/// credential folder that is a link elsewhere, at its target too. Stand-in files in a temp HOME only.
+#[test]
+fn the_worker_sandbox_refuses_reads_of_every_credential_path_given_and_real() {
+    use crate::control::lead_settings::{sandbox_read_denied, SANDBOX_CREDENTIAL_HOME};
+    for want in [
+        ".ssh", ".aws", ".config/gcloud", ".azure", ".kube", ".docker/config.json", ".npmrc", ".pypirc", ".cargo/credentials",
+        ".cargo/credentials.toml", ".config/gh", ".git-credentials", ".config/git/credentials", ".netrc", ".gnupg",
+        ".gemini", ".claude/settings.json", ".claude/settings.local.json",
+    ] {
+        assert!(SANDBOX_CREDENTIAL_HOME.contains(&want), "{want} missing from the credential table");
+    }
+    let d = tmpdir("cred-table");
+    let (home, work, repo, data, tmp, elsewhere) = (d.join("home"), d.join("work"), d.join("repo"), d.join("data"), d.join("tmp"), d.join("elsewhere-ssh"));
+    for p in [&home, &work, &repo, &data, &tmp, &elsewhere, &home.join(".aws")] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    std::fs::write(elsewhere.join("id_ed25519"), "stand-in ssh key\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, home.join(".ssh")).unwrap();
+    std::fs::write(home.join(".aws/credentials"), "stand-in aws\n").unwrap();
+    let v: Value = serde_json::from_str(&claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).unwrap()).unwrap();
+    let deny: Vec<String> = serde_json::from_value(v["sandbox"]["filesystem"]["denyRead"].clone()).unwrap();
+    assert_eq!(deny, sandbox_read_denied(&home, &data).unwrap());
+    let has = |p: &Path| deny.contains(&p.to_str().unwrap().to_string());
+    for rel in SANDBOX_CREDENTIAL_HOME {
+        assert!(has(&home.join(rel)), "{rel} not denied in its given form");
+    }
+    // `tmpdir` lives under /var on macOS, a link to /private/var: the realpath forms are emitted as well.
+    let real_home = home.canonicalize().unwrap();
+    assert!(has(&real_home.join(".aws")), "the realpath of an existing credential folder");
+    assert!(has(&elsewhere.canonicalize().unwrap()), "a linked .ssh is refused at its target");
+    let mut uniq = deny.clone();
+    uniq.dedup();
+    assert_eq!(uniq.len(), deny.len(), "no duplicates");
+    // Writes stay the locked folders only.
+    assert_eq!(v["sandbox"]["filesystem"]["denyWrite"], json!(crate::control::lead_settings::sandbox_locked_dirs(&home, &data).unwrap()));
+    // A credential link whose target is not a plain path refuses the launch (fails closed), never drops the entry.
+    let odd = d.join("odd*dir");
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::remove_dir_all(home.join(".aws")).unwrap();
+    std::os::unix::fs::symlink(&odd, home.join(".aws")).unwrap();
+    assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).is_err());
+}
+
+/// #272 review: a user deny of the whole filesystem, in any spelling, stays a deny of the root; it is never trimmed to
+/// nothing and dropped, which would leave the worker with only Vajra's own denies.
+#[test]
+fn a_users_deny_of_the_filesystem_root_carries_over() {
+    let d = tmpdir("carry-root");
+    let (home, work, repo, data, tmp) = (d.join("home"), d.join("work"), d.join("repo"), d.join("data"), d.join("tmp"));
+    for p in [&home, &work, &repo, &data, &tmp] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    let ours: Vec<String> = serde_json::from_value(
+        serde_json::from_str::<Value>(&claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).unwrap()).unwrap()["sandbox"]["filesystem"]["denyRead"].clone(),
+    )
+    .unwrap();
+    for root in ["/", "//", "///"] {
+        let c = claude_carry_over(Some(&json!({"sandbox": {"filesystem": {"denyRead": [root]}}}).to_string()));
+        assert_eq!(c.deny_read, vec![root.to_string()]);
+        let v: Value = serde_json::from_str(&claude_worker_flag_with(&home, &work, std::slice::from_ref(&repo), &data, &tmp, &c).unwrap()).unwrap();
+        let all: Vec<String> = serde_json::from_value(v["sandbox"]["filesystem"]["denyRead"].clone()).unwrap();
+        assert_eq!(all[..ours.len()], ours[..], "{root}: ours first");
+        assert_eq!(all[ours.len()..], ["/".to_string()][..], "{root}: the root is kept as one deny");
+    }
+}
+
+/// Owner rule (keep users' CLI settings with ours on top), #212 codex M1: the user's own `sandbox.filesystem.denyRead`
+/// entries are added after Vajra's; nothing else from their sandbox, permissions or hooks reaches the flag.
+#[test]
+fn the_users_sandbox_read_denies_carry_over_on_top_and_nothing_else_does() {
+    let d = tmpdir("carry-deny");
+    let (home, work, repo, data, tmp) = (d.join("home"), d.join("work"), d.join("repo"), d.join("data"), d.join("tmp"));
+    for p in [&home, &work, &repo, &data, &tmp, &d.join("secrets-real")] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    std::os::unix::fs::symlink(d.join("secrets-real"), d.join("secrets-link")).unwrap();
+    let link = d.join("secrets-link");
+    let settings = json!({
+        "sandbox": {
+            "enabled": false, "allowUnsandboxedCommands": true, "excludedCommands": ["*"],
+            "filesystem": {
+                "allowRead": ["~/.claude/vajra"], "allowWrite": ["/"], "denyWrite": ["~/x"],
+                "denyRead": ["~/.vault-token", "~/.config/op/**", format!("/{}", link.display()), link.to_str().unwrap(), "rel/file",
+                             "~", "~other/.ssh", "bad\"quote", "back\\slash", "line\nbreak", "", 7, "~/.vault-token"],
+            },
+            "network": {"allowedDomains": ["*"], "allowAllUnixSockets": true},
+        },
+        "permissions": {"allow": ["Bash(*)"], "deny": ["WebFetch"], "defaultMode": "bypassPermissions"},
+        "hooks": {"PreToolUse": []},
+    });
+    let c = claude_carry_over(Some(&settings.to_string()));
+    let link_s = link.to_str().unwrap().to_string();
+    assert_eq!(c.deny_read, vec!["~/.vault-token".to_string(), "~/.config/op/**".into(), format!("/{link_s}"), link_s.clone(), "rel/file".into(), "~".into(), "~other/.ssh".into()],
+        "strings only, deduped, no quote, backslash or control character");
+    let base: Value = serde_json::from_str(&claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).unwrap()).unwrap();
+    let mut with: Value = serde_json::from_str(&claude_worker_flag_with(&home, &work, std::slice::from_ref(&repo), &data, &tmp, &c).unwrap()).unwrap();
+    let ours: Vec<String> = serde_json::from_value(base["sandbox"]["filesystem"]["denyRead"].clone()).unwrap();
+    let all: Vec<String> = serde_json::from_value(with["sandbox"]["filesystem"]["denyRead"].clone()).unwrap();
+    assert_eq!(all[..ours.len()], ours[..], "ours first, unchanged");
+    let h = home.to_str().unwrap();
+    let real = d.join("secrets-real").canonicalize().unwrap().to_str().unwrap().to_string();
+    let real_home = home.canonicalize().unwrap().to_str().unwrap().to_string();
+    let mut want = vec![format!("{h}/.vault-token"), format!("{h}/.config/op/**"), link_s.clone(), real, format!("{h}/.claude/rel/file"), h.to_string()];
+    if real_home != h {
+        want.push(real_home);
+    }
+    assert_eq!(all[ours.len()..], want[..],
+        "~ and // resolved, a link's target added, a relative entry under ~/.claude, a bare ~ kept as all of HOME; `~other` dropped");
+    // Everything but denyRead is the template's, byte for byte.
+    with["sandbox"]["filesystem"]["denyRead"] = base["sandbox"]["filesystem"]["denyRead"].clone();
+    assert_eq!(with, base);
+    // The proven shape never depends on the user's settings.
+    let shape = claude_worker_flag_shape(&repo_hooks()).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/settings.json"), settings.to_string()).unwrap();
+    assert_eq!(read_claude_carry_over(&home), c);
+    assert_eq!(claude_worker_flag_shape(&repo_hooks()).unwrap(), shape);
 }
 
 /// Sandbox B: the user's default model and named model-routing env vars carry over into the flag file; no permission,
@@ -1397,6 +1538,39 @@ fn the_codex_lead_read_back_fails_unless_every_vajra_dir_shows_denied() {
     let old = v.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
     assert!(check_codex_lead_applied(&old, wt, deny()).is_err(), "no file-system policy can't show the dirs are denied");
     assert!(check_codex_lead_applied(&ok, wt, &[]).is_err(), "nothing to check is never a pass");
+}
+
+/// Plan #175 L1: the read-entry check compares canonical forms on both sides. A deny dir spelled through a link, and a
+/// read entry spelled through a link or with `..`, still meet; the lead dir itself stays readable in either spelling.
+#[test]
+fn the_lead_read_entry_check_compares_canonical_forms_of_the_deny_dirs() {
+    let t = std::env::temp_dir().join(format!("vajra-canon-{}-{:?}", std::process::id(), std::thread::current().id()));
+    let _ = std::fs::remove_dir_all(&t);
+    let real = t.join("real");
+    std::fs::create_dir_all(real.join("data/control/lead/run1")).unwrap();
+    std::os::unix::fs::symlink(&real, t.join("alias")).unwrap();
+    let real = real.canonicalize().unwrap();
+    let alias = t.join("alias");
+    let tc = |p: &Path| json!({"payload": {"file_system_sandbox_policy": {"entries": [{"access": "read", "path": {"type": "path", "path": p.to_str().unwrap()}}]}}});
+    let lead = real.join("data/control/lead/run1");
+    let allowed = std::slice::from_ref(&lead);
+    // The deny dir spelled through the link; the entry in the real form.
+    let deny_alias = vec![alias.join("data")];
+    assert!(check_no_read_reopens(&tc(&real.join("data/control")), &deny_alias, allowed).is_err(), "a real-path entry inside a deny dir spelled through a link");
+    // The deny dir real; entries through the link, and with `..`.
+    let deny = vec![real.join("data")];
+    assert!(check_no_read_reopens(&tc(&alias.join("data/control")), &deny, allowed).is_err(), "an entry through a link");
+    assert!(check_no_read_reopens(&tc(&real.join("elsewhere/../data/control")), &deny, allowed).is_err(), "an entry with ..");
+    // A `..` spelling that only looks like the lead dir is not the lead dir.
+    assert!(check_no_read_reopens(&tc(&lead.join("../run1/..")), &deny, allowed).is_err(), "a .. spelling of the lead's parent");
+    // The lead dir, as written or through the link, stays allowed; an entry outside every deny dir is fine.
+    assert!(check_no_read_reopens(&tc(&lead), &deny, allowed).is_ok());
+    assert!(check_no_read_reopens(&tc(&alias.join("data/control/lead/run1")), &deny_alias, allowed).is_ok(), "the lead dir through the link");
+    assert!(check_no_read_reopens(&tc(&real.join("other")), &deny, allowed).is_ok());
+    assert!(check_no_read_reopens(&tc(Path::new("/")), &deny, allowed).is_ok(), "the root entry is exempt");
+    // An entry that doesn't exist yet is still placed by its existing ancestor.
+    assert!(check_no_read_reopens(&tc(&alias.join("data/not-yet")), &deny, allowed).is_err(), "a missing entry under a linked deny dir");
+    let _ = std::fs::remove_dir_all(&t);
 }
 
 fn lead_init(tools: &[String], servers: &[&str], mode: &str) -> String {

@@ -38,7 +38,7 @@ export function UsageMeters({ account, usage }: { account: Account; usage: Usage
             <div className="v-usage__head">
               <span>{name}</span>
               <span className="v-num">{meterText(w)}</span>
-              {hot && <Badge status="warning">{C.used(p ?? 0)}</Badge>}
+              {hot && <Badge status="warning">{C.nearLimit}</Badge>}
             </div>
             {p !== null && (
               <div className="v-usage__bar" role="meter" aria-label={`${account.label} ${name}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={p} aria-valuetext={meterText(w)}>

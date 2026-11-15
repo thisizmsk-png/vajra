@@ -1,0 +1,22 @@
+# cargo-deny for the desktop core (plan #184 L1). CI runs `cargo deny check advisories` here: it fails on any crate in
+# Cargo.lock with a RustSec security advisory, an unsound or unmaintained notice, or that is yanked. Each ignore below is
+# one upstream item with no fix reachable from our side, by id with its reason; drop it when tauri updates past it. A new
+# advisory, or one of these ids on a crate it was not ignored for, still fails the job.
+
+[graph]
+# Only the platforms the app is built for, so an advisory for a crate that is never built for them is not reported.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0429", reason = "glib 0.18 via gtk via tauri and wry; no fix reachable from our side (needs glib 0.20); Linux GTK only, the shipped app is macOS" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error via glib-macros via glib via tauri (Linux GTK only); unmaintained, no fix reachable from our side" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property via urlpattern via tauri-utils; unmaintained, no fix reachable from our side" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range via urlpattern via tauri-utils; unmaintained, no fix reachable from our side" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common via urlpattern via tauri-utils; unmaintained, no fix reachable from our side" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident via urlpattern via tauri-utils; unmaintained, no fix reachable from our side" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version via urlpattern via tauri-utils; unmaintained, no fix reachable from our side" },
+]

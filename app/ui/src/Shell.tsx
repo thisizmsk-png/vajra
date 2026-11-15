@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Icon, Kbd, ariaShortcut } from "../components/ui/base";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { PaletteHost, usePaletteOpener } from "./palette";
+import { api } from "./ipc";
 import { toHash, useRoute } from "./router";
 import type { Screen } from "./router";
 import { REGISTRY } from "./screens/registry";
@@ -14,6 +15,9 @@ import type { Current } from "./projects/current";
 import { ProjectTabs, stateText } from "./shell/ProjectTabs";
 import { ProjectColumn } from "./shell/ProjectColumn";
 import { FindRepos } from "./shell/FindRepos";
+
+// Only a first launch needs the welcome, so it is its own chunk: the idle shell never loads it.
+const Welcome = lazy(() => import("./welcome/Welcome").then((m) => ({ default: m.Welcome })));
 import { ViewTabs, inboxBadge } from "./shell/ViewTabs";
 import type { WorkerTab } from "./shell/ViewTabs";
 import { Inspector } from "./shell/Inspector";
@@ -107,7 +111,17 @@ function Frame() {
   // Add project opens the launcher for a new folder and puts the cursor in its Repository folder field. On a first run
   // the launcher is already on screen, so without the focus the button did nothing you could see.
   const [adding, setAdding] = useState(false);
-  const addProject = () => { go("orch", { new: "1" }, null); setAdding(true); };
+  // It opens the system folder picker first. A pick fills the Repository folder field; cancelling leaves everything as it
+  // was; a picker that cannot open falls back to the launcher with the cursor in the field.
+  const pickCount = useRef(0);
+  const addProject = () => {
+    api.chooseFolder(S.folder.title).then(
+      (picked) => {
+        if (typeof picked === "string" && picked) { go("orch", { new: "1", repo: picked, pick: `${Date.now()}-${++pickCount.current}` }, null); setAdding(true); }
+      },
+      () => { go("orch", { new: "1" }, null); setAdding(true); },
+    );
+  };
   const onLauncher = route.screen === "orch" && !!route.params.new;
   useEffect(() => {
     if (!adding || !onLauncher) return;
@@ -117,8 +131,17 @@ function Frame() {
 
   const goProject = (id: string) => go(PORTABLE.has(route.screen) ? route.screen : "orch", route.screen === "settings" ? route.params : {}, id);
   const openSettings = (params: Record<string, string> = {}) => go("settings", params, pid);
-  const showColumn = !!project && !compact;
-  const inspectable = !!project && INSPECTED.has(route.screen);
+  // First launch: the welcome checklist stands in for the empty launcher until the first run starts. It is decided once,
+  // when the project list first answers, so adding the first project inside it does not end it. Settings and the
+  // launcher ("Add project") still open normally on top.
+  const [welcome, setWelcome] = useState<boolean | null>(null);
+  useEffect(() => { if (welcome === null && P.state === "ok") setWelcome(P.projects.length === 0); }, [welcome, P.state, P.projects.length]);
+  // The first render after the list answers already knows; waiting for the effect would flash the launcher first.
+  const welcoming = (welcome ?? (P.state === "ok" && P.projects.length === 0)) && (route.screen === "orch" || route.screen === "launch") && !route.params.new;
+  // A first launch has no remembered project: until the list answers, show neither screen rather than flash the launcher.
+  const deciding = welcome === null && P.state === "loading" && !remembered && (route.screen === "orch" || route.screen === "launch") && !route.params.new;
+  const showColumn = !!project && !compact && !welcoming;
+  const inspectable = !!project && INSPECTED.has(route.screen) && !welcoming;
   const showInspector = inspectable && inspector;
   const reviewParams: Record<string, string> = current.focus ? { slug: current.focus } : {};
 
@@ -175,9 +198,9 @@ function Frame() {
               <ProjectTabs projects={P.projects} summaries={P.summaries} current={pid} view={route.screen} onAdd={addProject} />
             ) : (
               <>
-                <span className="v-tb__empty">{P.state === "error" ? S.frame.loadFailed : P.state === "ok" ? S.frame.noProjects : ""}</span>
+                <span className="v-tb__empty">{P.state === "error" ? S.frame.loadFailed : P.state === "ok" ? (welcoming ? S.welcome.windowTitle : S.frame.noProjects) : ""}</span>
                 {P.state === "error" && <button type="button" className="v-sb-btn" onClick={P.reload}>{S.states.retry}</button>}
-                {P.state === "ok" && <FindRepos onAdded={P.reload} />}
+                {P.state === "ok" && !welcoming && <FindRepos onAdded={P.reload} />}
                 <button type="button" className="v-tb__add" onClick={addProject}><Icon name="plus" size={12} />{S.frame.addProject}</button>
               </>
             )}
@@ -190,14 +213,16 @@ function Frame() {
               onSession={(s) => go("review", { slug: s }, pid)} />
           )}
           <div className="v-center">
-            {project && route.screen !== "settings" && (
+            {project && route.screen !== "settings" && !welcoming && (
               <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} waiting={inboxBadge(P.inbox, P.inboxCount, P.inboxCampaignCount)} onClose={closeTab}
                 inspector={inspectable ? inspector : null} onInspector={() => setInspector((x) => !x)} />
             )}
             <div className="v-work">
               <main className="v-shell__main" id="v-main" tabIndex={-1} ref={main}>
                 <ErrorBoundary resetKey={`${pid}|${toHash(route.screen, route.params)}`}>
-                  <Screen key={route.screen === "orch" ? pid ?? "new" : undefined} />
+                  {deciding ? null : welcoming
+                    ? <Suspense fallback={null}><Welcome onAdded={P.reload} onStarted={() => setWelcome(false)} /></Suspense>
+                    : <Screen key={route.screen === "orch" ? pid ?? "new" : undefined} />}
                 </ErrorBoundary>
               </main>
               {showInspector && project && <Inspector project={project} focus={focusCampaign} crew={crew} worker={workerRow} />}

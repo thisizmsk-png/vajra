@@ -8,7 +8,9 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::App;
-use super::record::{self, CoreRecord, RECORD_TIMEOUT, RecordConfig, RunRecord};
+use super::record::{self, CoreRecord, RECORD_TIMEOUT, RecordConfig};
+#[cfg(test)]
+use super::record::RunRecord;
 use crate::control::fsx;
 use crate::vajra::bridge::Bridge;
 
@@ -152,8 +154,13 @@ pub(super) fn record_bridge(bridge: &Bridge, data: &Path) -> std::io::Result<Bri
 impl App {
     /// A run's record, bound to the campaign its `seats.json` names (copied from the original run on a resume, never
     /// recomputed). `resumed`: this run continues one the core started.
-    #[allow(dead_code)] // 6d2c's Start builds it for a core run
+    #[cfg(test)]
     pub(super) fn run_record(&self, run_id: &str, resumed: bool) -> Result<Arc<dyn RunRecord>, String> {
+        self.core_record(run_id, resumed).map(|r| r as Arc<dyn RunRecord>)
+    }
+
+    /// `run_record` as the concrete record: the delivery (6i) writes through it and verifies it.
+    pub(super) fn core_record(&self, run_id: &str, resumed: bool) -> Result<Arc<CoreRecord>, String> {
         let seats = self.read_run_seats(run_id).map_err(|e| format!("the run's seats can't be read: {e}"))?.ok_or("the run has no seats")?;
         let (slug, trust) = (seats["campaign_slug"].as_str(), seats["evidence_trust"].as_str());
         let (Some(slug), Some(trust)) = (slug, trust) else { return Err("the run's seats name no campaign".into()) };

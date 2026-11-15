@@ -86,7 +86,8 @@ function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermM
 
 // ---- response shapes (the JSON the core returns) --------------------------------------------------------------------
 /** `action`: a one-click fix the core offers (today only `install_dev_tools`), with its label and what to do after. */
-export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string; action?: "install_dev_tools"; action_label?: string; action_note?: string };
+/** `checked: false` is a check that could not be made (shown as "Not run", never as a pass); `advisory` rows do not stop Start. */
+export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string; advisory?: boolean; checked?: boolean; action?: "install_dev_tools"; action_label?: string; action_note?: string };
 export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
 export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;
@@ -105,7 +106,8 @@ export type TermInfo = { id: number; cwd: string; root: string; rows: number; co
 export type TermDiag = { id: number; pid: number; cwd: string; root: string; alive: boolean; in_worktree: boolean };
 export type RunDiag = { stream: string; pid: number };
 /** A shell an earlier session recorded, checked at launch by pid and start time. Only `owned` can be ended. */
-export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused"; members?: number };
+/** `unproven`: the pid is still held but can't be checked yet; the core keeps the record and never signals on it. */
+export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused" | "unproven"; members?: number };
 export type Lifecycle = { terminals: TermDiag[]; runs: RunDiag[]; found: Found[]; close_keeps: { terminals: number; runs: number }; quit_ends: { terminals: number; runs: number }; archive_leaves: number[] };
 /** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
 export type TermMsg =

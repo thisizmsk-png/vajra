@@ -229,16 +229,17 @@ describe("Shell B frame (FG-03)", () => {
     expect(window.location.hash).toMatch(/\/settings$/);
   });
 
-  it("with no projects yet: no column, the launcher, and Add project", async () => {
+  it("with no projects yet: no column, the welcome checklist, and Add project", async () => {
     boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] } });
-    expect(await screen.findByRole("heading", { name: S.home.start })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: S.welcome.title })).toBeTruthy();
     expect(screen.getByRole("button", { name: S.frame.addProject })).toBeTruthy();
     expect(screen.queryByRole("complementary", { name: /project$/ })).toBeNull();
   });
 
   it("offers to add repositories found on this Mac, and adds only the ones picked", async () => {
     const found = [{ root: "/src/alpha", name: "alpha", worktrees: 2 }, { root: "/src/beta", name: "beta", worktrees: 0 }];
-    boot("", {
+    // The header offer shows where the welcome does not: on the launcher that Add project opens.
+    boot("#/orch?new=1", {
       list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] },
       project_discover: { found, truncated: false },
       project_add: { outcome: "created", project: {} },
@@ -255,7 +256,7 @@ describe("Shell B frame (FG-03)", () => {
   it("keeps the sheet and the failure notice when the reload fills the project list after a mixed batch", async () => {
     const found = [{ root: "/src/alpha", name: "alpha", worktrees: 0 }, { root: "/src/beta", name: "beta", worktrees: 0 }];
     let listed = false;
-    boot("", {
+    boot("#/orch?new=1", {
       list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] },
       project_discover: { found, truncated: false },
       project_list: () => ({ projects: listed ? [{ id: "p_alpha", name: "alpha", root: "/src/alpha", rev: 1 }] : [], skipped: 0, truncated: false }),
@@ -271,30 +272,72 @@ describe("Shell B frame (FG-03)", () => {
   });
 
   it("shows no offer when nothing is found", async () => {
-    boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, project_discover: { found: [], truncated: false } });
+    boot("#/orch?new=1", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, project_discover: { found: [], truncated: false } });
     await screen.findByRole("heading", { name: S.home.start });
     await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "project_discover")).toBe(true));
     expect(screen.queryByRole("button", { name: /found here/ })).toBeNull();
   });
 
-  it("with no projects yet, Add project puts the cursor in the Repository folder field", async () => {
-    boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] } });
-    await screen.findByRole("heading", { name: S.home.start });
-    const repo = screen.getByLabelText(S.home.repo);
-    expect(document.activeElement).not.toBe(repo);
+  const EMPTY = { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] } };
+
+  // With no projects the welcome checklist is the first screen; Add project leaves it for the launcher.
+  it("on the welcome, Add project opens the folder picker and leaves the welcome for the launcher", async () => {
+    boot("", { ...EMPTY, "plugin:dialog|open": "/Users/me/code/app" });
+    await screen.findByRole("heading", { name: S.welcome.title });
+    expect(screen.queryByLabelText(S.home.repo)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe("/Users/me/code/app"));
+    expect(screen.queryByRole("heading", { name: S.welcome.title })).toBeNull();
+  });
+
+  it("on the launcher with no projects, Add project opens the folder picker; a pick fills the Repository folder field and focuses it", async () => {
+    boot("#/orch?new=1", { ...EMPTY, "plugin:dialog|open": "/Users/me/code/app" });
+    await screen.findByRole("heading", { name: S.home.start });
+    expect(document.activeElement).not.toBe(screen.getByLabelText(S.home.repo));
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe("/Users/me/code/app"));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
-    // Pressed again from the same place, it still lands there.
-    (document.activeElement as HTMLElement).blur();
+    expect(ipc.calls.some((c) => c.cmd === "plugin:dialog|open")).toBe(true);
+  });
+
+  it("cancelling the picker leaves everything as it was", async () => {
+    boot("#/orch?new=1", { ...EMPTY, "plugin:dialog|open": null });
+    await screen.findByRole("heading", { name: S.home.start });
+    fireEvent.change(screen.getByLabelText(S.home.repo), { target: { value: "/typed/path" } });
+    const hash = window.location.hash;
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "plugin:dialog|open")).toBe(true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe("/typed/path");
+    expect(window.location.hash).toBe(hash);
+  });
+
+  it("when the picker cannot open, Add project still puts the cursor in the Repository folder field", async () => {
+    boot("#/orch?new=1", { ...EMPTY, "plugin:dialog|open": () => { throw { error: "unavailable" }; } });
+    await screen.findByRole("heading", { name: S.home.start });
     fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
   });
 
-  it("from inside a project, Add project opens the launcher with the cursor in the Repository folder field", async () => {
-    boot();
+  it("picking the same folder again after the field was edited applies it again, and keeps the other fields", async () => {
+    boot("#/orch?new=1", { ...EMPTY, "plugin:dialog|open": "/Users/me/code/a" });
+    await screen.findByRole("heading", { name: S.home.start });
+    const field = () => screen.getByLabelText(S.home.repo) as HTMLInputElement;
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(field().value).toBe("/Users/me/code/a"));
+    fireEvent.change(field(), { target: { value: "/Users/me/code/b" } });
+    fireEvent.change(screen.getByLabelText(S.home.ask), { target: { value: "keep this ask" } });
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(field().value).toBe("/Users/me/code/a"));
+    expect((screen.getByLabelText(S.home.ask) as HTMLTextAreaElement).value).toBe("keep this ask");
+  });
+
+  it("from inside a project, a picked folder opens the launcher with it in the Repository folder field", async () => {
+    boot("", { "plugin:dialog|open": "/Users/me/code/other" });
     await screen.findByRole("navigation", { name: S.frame.projects });
     fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
     await waitFor(() => expect(window.location.hash).toContain("new=1"));
+    await waitFor(() => expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe("/Users/me/code/other"));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
   });
 

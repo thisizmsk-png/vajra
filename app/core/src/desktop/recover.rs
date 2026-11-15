@@ -45,6 +45,9 @@ pub struct Reconciled {
     pub reused: usize,
     /// Survivors whose record could not be written back to the ledger: the next start cannot try them again.
     pub unrecorded: usize,
+    /// Records whose pid is still held but that can't be proven ours or gone (#248 L1): never signalled, kept for the
+    /// next start.
+    pub not_proven: usize,
     /// Worker tickets written `app_crashed`.
     pub tickets: usize,
     /// Core runs written ended `lead_lost`/`app_restarted`.
@@ -110,6 +113,7 @@ pub fn reconcile(data: &Path, ledger: &Ledger) -> Reconciled {
                 out.survived += 1;
                 out.unrecorded += 1;
             }
+            Ended::NotProven => out.not_proven += 1,
         }
         if ended == Ended::Reused {
             continue;
