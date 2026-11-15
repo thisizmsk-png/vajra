@@ -130,6 +130,61 @@ pub fn sandbox_locked_dirs(home: &Path, data: &Path) -> Result<Vec<String>, Lead
     Ok(out)
 }
 
+/// Credential files and folders under `$HOME` a Claude worker's OS sandbox refuses to read (#212 codex M1): SSH, the
+/// cloud CLIs, kube and docker config, package-manager tokens, the gh and git credential stores, netrc, GPG, the
+/// Keychains and other agent CLIs' sign-ins. The worker starts with `--setting-sources ""`, so a deny list the user
+/// keeps in their own settings never loads; without this table a repo's test program run through Bash could read any of
+/// these and print it into the transcript, since the Read deny rules bind the file tools only.
+pub const SANDBOX_CREDENTIAL_HOME: [&str; 29] = [
+    ".ssh",
+    ".aws",
+    ".config/gcloud",
+    ".azure",
+    ".kube",
+    ".docker/config.json",
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".pypirc",
+    ".config/pip",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".gem/credentials",
+    ".config/gh",
+    ".config/hub",
+    ".git-credentials",
+    ".config/git/credentials",
+    ".netrc",
+    ".gnupg",
+    ".pgpass",
+    ".terraform.d/credentials.tfrc.json",
+    "Library/Keychains",
+    ".codex",
+    ".gemini",
+    ".claude/.credentials.json",
+    ".claude.json",
+    // The user's Claude settings can hold tokens in their `env` block; `HOME_RULES` already denies them to the file
+    // tools, so Bash is refused too (#212 bhishma M-2). Plain paths: the guard hook runs outside the OS sandbox.
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+];
+
+/// What a Claude worker's OS sandbox refuses to read: `sandbox_locked_dirs`, then every `SANDBOX_CREDENTIAL_HOME`
+/// entry, each in its given form and (when it exists and differs) its realpath, so a credential folder that is a link
+/// elsewhere is refused at its target too. Seatbelt checks the path a process opens after resolving links, and a
+/// realpath that is not plain is refused like any base (the launch fails closed).
+pub fn sandbox_read_denied(home: &Path, data: &Path) -> Result<Vec<String>, LeadError> {
+    let mut out = sandbox_locked_dirs(home, data)?;
+    for rel in SANDBOX_CREDENTIAL_HOME {
+        for form in forms(&home.join(rel), "a credential path")? {
+            if !out.contains(&form) {
+                out.push(form);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Every deny rule for this machine, deduped, in table order. A base that is not a plain absolute path is refused
 /// (`lead_guard_missing`). When a base differs from its realpath (macOS `/var` → `/private/var`, a symlinked HOME
 /// or repo) both forms are emitted: the spike did not show the twin is needed, but emitting it costs nothing.

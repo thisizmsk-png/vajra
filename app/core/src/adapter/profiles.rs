@@ -90,7 +90,7 @@ const CODEX_WORKER_USER: &[&str] = &["login", "hooks", "plugins", "apps", "mcp_s
 const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
     Always { setting: "settings", how: "`--settings <data>/profiles/claude-worker-<session>.json`, fresh per launch and hash-checked before spawn (Read and Edit deny rules, guard hooks, disableAllHooks:false)" },
-    Always { setting: "sandbox", how: "Claude Code's OS sandbox on every Bash call: writes only in the worktree and ticket tmp, the key folder and data dir unreadable, no unsandboxed retry, loopback only, the launch refused if the sandbox can't start" },
+    Always { setting: "sandbox", how: "Claude Code's OS sandbox on every Bash call: writes only in the worktree and ticket tmp, the key folder, data dir and credential files (SSH, cloud CLIs, package tokens, git and gh stores, GPG) unreadable, no unsandboxed retry, loopback only, the launch refused if the sandbox can't start" },
     Always { setting: "setting sources", how: "`--setting-sources \"\"`: no user, project or local settings file loads, so none can widen the sandbox and a hook a worker writes in its worktree never runs" },
     Always { setting: "caches", how: "`GOCACHE`, `GOTMPDIR` and `npm_config_cache` under the ticket tmp" },
     Always { setting: "permissions", how: "`--permission-mode dontAsk`, no bypass flag" },
@@ -98,10 +98,10 @@ const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "model", how: "`--model` when the seat names one" },
 ];
 
-/// Login and CLAUDE.md stay the user's: neither is a settings file. The default model and the model-routing env vars
-/// carry over into the flag file (`CLAUDE_CARRY_ENV`); the user's MCP servers and every other setting don't load under
-/// `--setting-sources ""`.
-const CLAUDE_WORKER_USER: &[&str] = &["login", "CLAUDE.md", "history", "default model", "model-routing env"];
+/// Login and CLAUDE.md stay the user's: neither is a settings file. The default model, the model-routing env vars
+/// (`CLAUDE_CARRY_ENV`) and the sandbox read denies carry over into the flag file; the user's MCP servers and every
+/// other setting don't load under `--setting-sources ""`.
+const CLAUDE_WORKER_USER: &[&str] = &["login", "CLAUDE.md", "history", "default model", "model-routing env", "sandbox read denies"];
 
 /// Spike S4 (does `-p` keep the flag file's hooks, does `--tools` hold against a user `Bash(*)` allow, is
 /// `disableAllHooks:false` honoured, does `--setting-sources user` keep the worktree's project-settings hook from
@@ -916,7 +916,8 @@ const HOOKS_JSON: &str = include_str!("../../../../hooks/hooks.json");
 /// Plus Claude Code's OS sandbox (Seatbelt on macOS) around every Bash call, so a command that never names a protected
 /// path still can't read the signing key or touch the data dir (the vajra-70 spike: a name-free read, write and symlink
 /// read were each refused). Writable: the worktree (Claude Code's own default) and the ticket tmp. Refused to read and
-/// write: the key folder and the data dir. No unsandboxed retry, no excluded commands, no network domains (loopback
+/// write: the key folder and the data dir. Refused to read: the credential table (`SANDBOX_CREDENTIAL_HOME`, #212 codex
+/// M1), in given and realpath forms. No unsandboxed retry, no excluded commands, no network domains (loopback
 /// only), and `failIfUnavailable`, so a machine without the sandbox refuses the launch. The worker launches with
 /// `--setting-sources ""`, so no user or project file can merge an `allowRead`, `allowWrite` or `excludedCommands`
 /// entry into these lists (the spike showed both reopen it); the scalars are pinned as well.
@@ -958,14 +959,20 @@ pub const CLAUDE_CARRY_NEVER: &[&str] =
 /// A carried-over value is a short single-line string.
 const CARRY_MAX: usize = 512;
 
-/// What a Claude worker keeps from the user's own `settings.json`: the default model and the `CLAUDE_CARRY_ENV`
-/// entries of its `env` block, nothing else (no permission, sandbox, hook, `apiKeyHelper` or MCP key, no unnamed env
-/// var). Built from the file's text by `claude_carry_over`.
+/// What a Claude worker keeps from the user's own `settings.json`: the default model, the `CLAUDE_CARRY_ENV` entries of
+/// its `env` block, and its sandbox read denies (`sandbox.filesystem.denyRead`, #212 codex M1: owner rule, the user's
+/// CLI settings stay with ours on top), nothing else (no permission, allow list, other sandbox key, hook,
+/// `apiKeyHelper` or MCP key, no unnamed env var). Built from the file's text by `claude_carry_over`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CarryOver {
     pub model: Option<String>,
     pub env: Vec<(&'static str, String)>,
+    /// The user's own `denyRead` entries as written; `claude_worker_flag_with` resolves each against HOME.
+    pub deny_read: Vec<String>,
 }
+
+/// At most this many of the user's `denyRead` entries carry over.
+pub const CARRY_DENY_MAX: usize = 128;
 
 fn carry_value(v: &Value) -> Option<String> {
     let s = v.as_str()?;
@@ -974,6 +981,7 @@ fn carry_value(v: &Value) -> Option<String> {
 
 /// The carry-over from the text of the user's `~/.claude/settings.json`. A file that is missing, not JSON or not an
 /// object carries nothing, and a value that is not a short single-line string is dropped: this never refuses a launch.
+/// A `denyRead` entry with a quote or backslash is dropped too, so no entry can change how the sandbox reads the list.
 pub fn claude_carry_over(settings: Option<&str>) -> CarryOver {
     let Some(v) = settings.and_then(|t| serde_json::from_str::<Value>(t).ok()) else { return CarryOver::default() };
     let model = v.get("model").and_then(carry_value);
@@ -981,7 +989,48 @@ pub fn claude_carry_over(settings: Option<&str>) -> CarryOver {
         Some(e) => CLAUDE_CARRY_ENV.iter().filter_map(|k| e.get(*k).and_then(carry_value).map(|s| (*k, s))).collect(),
         None => Vec::new(),
     };
-    CarryOver { model, env }
+    let mut deny_read: Vec<String> = Vec::new();
+    for s in v.pointer("/sandbox/filesystem/denyRead").and_then(Value::as_array).into_iter().flatten().filter_map(carry_value) {
+        if !s.contains(['"', '\\']) && !deny_read.contains(&s) && deny_read.len() < CARRY_DENY_MAX {
+            deny_read.push(s);
+        }
+    }
+    CarryOver { model, env, deny_read }
+}
+
+/// One of the user's `denyRead` entries as absolute paths: `~` and `~/...` under `home`, `//...` (the permission-rule
+/// spelling) as `/...`, an absolute path as is, and anything else relative to `~/.claude`, where the user's settings
+/// file lives. A `~name/...` entry names another user's home and is dropped. A plain path gets its realpath beside its
+/// given form when that exists and differs; an entry holding glob syntax is passed on in its given form only.
+fn user_deny_forms(home: &Path, entry: &str) -> Vec<String> {
+    let home_s = home.to_string_lossy();
+    let home_s = home_s.trim_end_matches('/');
+    let abs = if entry == "~" {
+        home_s.to_string()
+    } else if let Some(rest) = entry.strip_prefix("~/") {
+        format!("{home_s}/{rest}")
+    } else if entry.starts_with('~') {
+        return Vec::new();
+    } else if let Some(rest) = entry.strip_prefix("//") {
+        format!("/{rest}")
+    } else if entry.starts_with('/') {
+        entry.to_string()
+    } else {
+        format!("{home_s}/.claude/{}", entry.strip_prefix("./").unwrap_or(entry))
+    };
+    let given = abs.trim_end_matches('/').to_string();
+    if given.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![given.clone()];
+    if !given.contains(['*', '?', '[', ']', '{', '}']) {
+        if let Some(real) = std::fs::canonicalize(&given).ok().and_then(|r| r.to_str().map(|s| s.trim_end_matches('/').to_string())) {
+            if !real.is_empty() && real != given && !real.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+                out.push(real);
+            }
+        }
+    }
+    out
 }
 
 /// The user's `~/.claude/settings.json` read the way the provider check reads it (each step opened without following a
@@ -992,14 +1041,25 @@ pub fn read_claude_carry_over(home: &Path) -> CarryOver {
     claude_carry_over(text.as_deref())
 }
 
-/// `claude_worker_flag` plus the user's carry-over, as `model` and `env`. The template (an empty carry-over) is what
-/// `claude_worker_flag_shape` hashes, so the proven shape never depends on a user's settings; the carried keys can't
-/// reach the sandbox, the permissions or the hooks.
+/// `claude_worker_flag` plus the user's carry-over, as `model`, `env` and extra `sandbox.filesystem.denyRead` entries
+/// after Vajra's own. The template (an empty carry-over) is what `claude_worker_flag_shape` hashes, so the proven shape
+/// never depends on a user's settings; the carried keys can't reach the permissions, the hooks or any sandbox list but
+/// `denyRead`, and an added read deny only narrows what a Bash call can read.
 pub fn claude_worker_flag_with(home: &Path, work: &Path, repos: &[PathBuf], data: &Path, ticket_tmp: &Path, carry: &CarryOver) -> Result<String, String> {
     let roots: Vec<PathBuf> = std::iter::once(work.to_path_buf()).chain(repos.iter().cloned()).collect();
     let mut deny = crate::control::lead_settings::deny_rules_for(home, &roots, data, &[]).map_err(|e| e.to_string())?;
     deny.extend(crate::control::lead_settings::worker_edit_rules(home, data).map_err(|e| e.to_string())?);
     let locked = crate::control::lead_settings::sandbox_locked_dirs(home, data).map_err(|e| e.to_string())?;
+    // Reads are refused for the locked folders and the credential table (#212 codex M1), then the user's own read
+    // denies on top; writes only for the locked folders (the sandbox leaves HOME read-only already).
+    let mut deny_read = crate::control::lead_settings::sandbox_read_denied(home, data).map_err(|e| e.to_string())?;
+    for entry in &carry.deny_read {
+        for form in user_deny_forms(home, entry) {
+            if !deny_read.contains(&form) {
+                deny_read.push(form);
+            }
+        }
+    }
     let tmp = match ticket_tmp.to_str() {
         Some(s) if ticket_tmp.is_absolute() && !s.contains(['\n', '\r', '\0']) => s.trim_end_matches('/').to_string(),
         _ => return Err("the ticket tmp is not a plain absolute path".into()),
@@ -1041,7 +1101,7 @@ pub fn claude_worker_flag_with(home: &Path, work: &Path, repos: &[PathBuf], data
                 "disabled": false,
                 "allowRead": [],
                 "allowWrite": [tmp],
-                "denyRead": locked,
+                "denyRead": deny_read,
                 "denyWrite": locked,
             },
         },

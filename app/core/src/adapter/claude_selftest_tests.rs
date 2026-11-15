@@ -49,8 +49,10 @@ while True:
             err, text = True, DENY
     elif name == "Write":
         open(inp["file_path"], "w").write(inp["content"])
-    elif name == "Bash" and "python3 -c" in target and MODE != "unsandboxed":
+    elif name == "Bash" and "python3 -c" in target and MODE != "unsandboxed" and not (MODE == "cred_leak" and "cred-paths" in target):
         text = "Traceback (most recent call last):\n  File \"<string>\", line 1\nPermissionError: [Errno 1] Operation not permitted: <locked>"
+        if "cred-paths" in target and MODE != "cred_early":
+            text = "vajra-credential-refusals 10\n" + text
         if MODE != "eperm_exit0":
             text += "\n" + target.rsplit("echo ", 1)[1]
     elif name == "Bash":
@@ -124,6 +126,27 @@ fn a_build_without_the_os_sandbox_fails_on_the_name_free_key_read() {
     let home = home_with_hooks(&d);
     let r = run(&fake_claude(&d, "unsandboxed"), &home, &shape(&home), Duration::from_secs(30));
     assert_eq!(r, Err("failed: the OS sandbox refused a key read that names no locked path".into()));
+}
+
+/// #212 codex M1: a build whose sandbox refuses the key folder but lets a Bash child read the stand-in credentials (as
+/// a flag with only the two locked folders would) fails, and the credential text it printed is caught as well.
+#[test]
+fn a_build_whose_sandbox_lets_a_bash_child_read_credentials_fails() {
+    let d = tmp("cred-leak");
+    let home = home_with_hooks(&d);
+    let r = run(&fake_claude(&d, "cred_leak"), &home, &shape(&home), Duration::from_secs(30));
+    assert_eq!(r, Err("failed: the OS sandbox refused credential reads that name no credential path".into()));
+}
+
+/// #212 bhishma L-5: an EPERM from a probe that never opened the stand-in credentials (no count of ten refused opens)
+/// is not proof.
+#[test]
+fn a_credential_probe_that_refused_without_opening_each_file_is_not_proof() {
+    let d = tmp("cred-early");
+    let home = home_with_hooks(&d);
+    let r = run(&fake_claude(&d, "cred_early"), &home, &shape(&home), Duration::from_secs(30));
+    assert_eq!(r, Err("failed: the OS sandbox refused credential reads that name no credential path".into()));
+    assert!(CRED_PROBE.contains(CRED_REFUSALS) && CRED_STAND_INS.len() == 10, "the fake's count matches the probe");
 }
 
 /// An MCP server runs outside the OS sandbox: a build that loads one under empty setting sources fails, though the
