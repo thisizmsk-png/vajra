@@ -8,7 +8,9 @@
 //! worktree (must run), a Bash write into the data dir (the guard must refuse it), a Write, a Read and an Edit there
 //! (the deny rules must refuse all three), then the OS sandbox probes: a key read and a data-dir write whose commands
 //! name no locked path (python reads its target from a file outside the locked folders, so only the sandbox can refuse
-//! them), a Bash write in the ticket tmp and the worktree (must run), then "done". PASS needs every step to have run and
+//! them), a Bash read of ten stand-in credential files in the throwaway HOME, one through a link, whose command names
+//! none of them (#212 codex M1: only the sandbox's credential list can refuse it), a Bash write in the ticket tmp and
+//! the worktree (must run), then "done". PASS needs every step to have run and
 //! been refused by the right layer, the stand-in key never in a tool result, the data dir left holding only its
 //! unchanged seed, the project hook never run, and the init event to list exactly the worker's tools in `dontAsk` and
 //! no MCP server (one runs outside the sandbox). The
@@ -29,7 +31,7 @@ use super::profiles::{claude_worker_argv, claude_worker_flag, claude_worker_flag
 /// Which self-test this is. A pass recorded on this Mac counts only if this same test proved it, so a stronger test
 /// re-proves every build a weaker one let through (#215 codex: version 1 had no OS sandbox probes, and a build with no
 /// sandbox could pass it). Raise this whenever the test gains a check; the flag shape alone wouldn't change.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// The longest a self-test may take; past it the build is refused (`timeout`).
 pub const TIMEOUT: Duration = Duration::from_secs(120);
 /// The tools the self-test's worker gets: a writer's full set.
@@ -45,7 +47,33 @@ pub const SANDBOX_REFUSAL: &str = "operation not permitted";
 pub const EXIT_NONZERO: &str = "vajra-probe-exit-nonzero";
 const SEED: &str = "seed\n";
 const KEY_STAND_IN: &str = "vajra-selftest-stand-in";
-const STEPS: usize = 8;
+/// What every stand-in credential file holds (#212 codex M1). Never a real credential: the files are new, in the
+/// throwaway HOME.
+const CRED_STAND_IN: &str = "vajra-selftest-credential-stand-in";
+/// The stand-in credentials, under the throwaway HOME: one per kind of credential table entry. `.kube` is made a link
+/// to a folder outside HOME, so the probe also proves a credential reached through a link is refused.
+pub const CRED_STAND_INS: [&str; 10] = [
+    ".ssh/id_ed25519",
+    ".aws/credentials",
+    ".config/gcloud/application_default_credentials.json",
+    ".kube/config",
+    ".docker/config.json",
+    ".npmrc",
+    ".cargo/credentials.toml",
+    ".config/gh/hosts.yml",
+    ".git-credentials",
+    ".netrc",
+];
+const STEPS: usize = 9;
+/// The python a credential probe runs: every path listed in the file it is given, one whole path per line (a temp dir
+/// name may hold a space, #272 review), is opened; one that opens prints its
+/// contents and the probe exits 0, so a refusal is every open failing, with the last refusal raised (non-zero exit).
+/// Each open the OS refuses with EPERM is counted and the count printed after `CRED_REFUSALS`, so a probe that failed
+/// before opening the files (a broken interpreter that still printed EPERM) can't pass: all `CRED_STAND_INS` must be
+/// refused one by one (#212 bhishma L-5).
+pub const CRED_PROBE: &str = "import sys,errno\nerr=None\nok=False\nn=0\nfor p in open(sys.argv[1]).read().splitlines():\n try:\n  print(open(p).read());ok=True\n except OSError as e:\n  err=e\n  n+=e.errno==errno.EPERM\nprint(\"vajra-credential-refusals\",n)\nif not ok and err: raise err";
+/// What the probe prints before its count of refused opens.
+pub const CRED_REFUSALS: &str = "vajra-credential-refusals";
 
 /// What the stub saw: each tool result by id (error?, text), and the highest step it served with tools offered.
 #[derive(Default)]
@@ -93,6 +121,23 @@ pub fn run(claude: &Path, home: &Path, shape: &str, timeout: Duration) -> Result
     let (key_path, data_path) = (t.join("key-path"), t.join("data-path"));
     std::fs::write(&key_path, format!("{}\n", key.display())).map_err(|e| format!("setup: {e}"))?;
     std::fs::write(&data_path, format!("{}\n", data.display())).map_err(|e| format!("setup: {e}"))?;
+    // #212 codex M1: stand-in credentials, new files in the throwaway HOME (`.kube` a link to a folder outside it), and a
+    // file outside them listing their paths, so the probe's command names none of them.
+    let kube_target = t.join("kube-elsewhere");
+    std::fs::create_dir_all(&kube_target).map_err(|e| format!("setup: {e}"))?;
+    std::os::unix::fs::symlink(&kube_target, h.join(".kube")).map_err(|e| format!("setup: {e}"))?;
+    let mut creds: Vec<PathBuf> = Vec::new();
+    for rel in CRED_STAND_INS {
+        let p = h.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("setup: {e}"))?;
+        }
+        std::fs::write(&p, format!("{CRED_STAND_IN}\n")).map_err(|e| format!("setup: {e}"))?;
+        creds.push(p);
+    }
+    let cred_paths = t.join("cred-paths");
+    let listed: String = creds.iter().map(|p| format!("{}\n", p.display())).collect();
+    std::fs::write(&cred_paths, listed).map_err(|e| format!("setup: {e}"))?;
     // #212 bhishma: as in S4, the hostile settings carry a sandbox block that would turn the sandbox off and reopen
     // the key folder and the data dir if the worker loaded them (`--setting-sources ""` must keep them out).
     let (kd_s, data_s) = (kd.to_string_lossy().into_owned(), data.to_string_lossy().into_owned());
@@ -121,6 +166,7 @@ pub fn run(claude: &Path, home: &Path, shape: &str, timeout: Duration) -> Result
         json!({"tool": "Edit", "input": {"file_path": s(&data.join("seed.json")), "old_string": "seed", "new_string": "edited"}}),
         py("import sys;print(open(open(sys.argv[1]).read().strip()).read())", &key_path, "a key read that names no locked path"),
         py("import sys,os;open(os.path.join(open(sys.argv[1]).read().strip(),\"sandbox-ran\"),\"w\").write(\"x\")", &data_path, "a data-dir write that names no locked path"),
+        json!({"tool": "Bash", "input": {"command": format!("/usr/bin/python3 -c \"$(printf '%b' '{}')\" \"{}\" || echo {EXIT_NONZERO}", CRED_PROBE.replace('\n', "\\n"), s(&cred_paths)), "description": "credential reads that name no credential path"}}),
         json!({"tool": "Bash", "input": {"command": format!("printf x > \"{}\" && printf x > \"{}\"", s(&tmp.join("tmp-ok")), s(&wt.join("bash-ok"))), "description": "Bash writes in the ticket tmp and worktree"}}),
         json!({"say": "done"}),
     ];
@@ -218,13 +264,14 @@ fn verdict(status: i32, events: &Path, seen: &Seen, l: &Layout) -> Result<(), St
     // plus the marker the command prints only on a non-zero exit.
     let sandboxed = |id: &str| seen.results.get(id).is_some_and(|(_, text)| text.to_lowercase().contains(SANDBOX_REFUSAL) && text.contains(EXIT_NONZERO));
     let leaked = seen.results.values().any(|(_, text)| text.contains(KEY_STAND_IN));
+    let cred_leaked = seen.results.values().any(|(_, text)| text.contains(CRED_STAND_IN));
     let key_intact = std::fs::read_to_string(key).ok() == Some(format!("{KEY_STAND_IN}\n"));
     let left: Option<Vec<String>> = std::fs::read_dir(data).ok().map(|d| {
         let mut v: Vec<String> = d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         v.sort();
         v
     });
-    let checks: [(&str, bool); 17] = [
+    let checks: [(&str, bool); 19] = [
         ("claude exited 0", status == 0),
         ("claude reported a successful result", result["subtype"] == "success" && result["is_error"] == false),
         ("the plan reached its last turn", seen.last_step == Some(STEPS)),
@@ -241,7 +288,11 @@ fn verdict(status: i32, events: &Path, seen: &Seen, l: &Layout) -> Result<(), St
         ("the OS sandbox refused a key read that names no locked path", sandboxed("tu_5")),
         ("the OS sandbox refused a data-dir write that names no locked path", sandboxed("tu_6")),
         ("the stand-in key reached no tool result and is unchanged", !leaked && key_intact),
-        ("Bash wrote in the ticket tmp and the worktree", seen.results.get("tu_7").is_some_and(|(err, _)| !*err) && tmp.join("tmp-ok").is_file() && wt.join("bash-ok").is_file()),
+        // #212 codex M1: a Bash child reading credential files it never names (one reached through a link) is refused.
+        ("the OS sandbox refused credential reads that name no credential path", sandboxed("tu_7")
+            && seen.results.get("tu_7").is_some_and(|(_, text)| text.contains(&format!("{CRED_REFUSALS} {}", CRED_STAND_INS.len())))),
+        ("no stand-in credential reached a tool result", !cred_leaked),
+        ("Bash wrote in the ticket tmp and the worktree", seen.results.get("tu_8").is_some_and(|(err, _)| !*err) && tmp.join("tmp-ok").is_file() && wt.join("bash-ok").is_file()),
         ("the data dir holds only its seed file, unchanged", left.as_deref() == Some(&["seed.json".to_string()][..]) && std::fs::read_to_string(data.join("seed.json")).ok().as_deref() == Some(SEED)),
         ("the worktree's project-settings hook never ran", !m.join("project-hook").exists()),
     ];

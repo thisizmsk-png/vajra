@@ -1084,6 +1084,9 @@ while True:
     elif name == "Bash" and "python3 -c" in inp["command"]:
         # The OS sandbox, as the command's output, then the marker its `|| echo` prints on the non-zero exit.
         text = "PermissionError: [Errno 1] Operation not permitted: <locked>\n" + inp["command"].rsplit("echo ", 1)[1]
+        if "cred-paths" in inp["command"]:
+            # Self-test v3's credential probe: each of the ten stand-in opens refused, counted (#212 codex M1).
+            text = "vajra-credential-refusals 10\n" + text
     elif name == "Bash":
         r = subprocess.run(["/bin/sh", "-c", inp["command"]], capture_output=True, text=True)
         err, text = r.returncode != 0, r.stdout + r.stderr
