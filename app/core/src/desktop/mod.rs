@@ -1170,9 +1170,10 @@ impl App {
         }
     }
 
+    /// Fails closed: with no terminal registry wired the engine cannot see user terminals, so it counts as in use.
     fn terminals_live(&self) -> bool {
         let live = lock(&self.terminals_live).clone();
-        live.is_some_and(|f| f())
+        live.is_none_or(|f| f())
     }
 
     /// Hand `f` the engine install's view of this app: the home, data and resources folders, the compiled-in pin, the

@@ -6172,7 +6172,7 @@ fn a_live_user_terminal_counts_as_the_engine_being_in_use() {
     let t = Tmp::new();
     let app = t.app();
     app.set_resources(t.home().join("res"));
-    assert!(!app.with_engine(|m| (m.busy)()).unwrap(), "no terminal registry wired means not busy");
+    assert!(app.with_engine(|m| (m.busy)()).unwrap(), "no terminal registry wired fails closed: the engine is in use");
     let live = Arc::new(AtomicBool::new(true));
     let l = live.clone();
     app.set_terminals_live(Arc::new(move || l.load(Ordering::SeqCst)));
