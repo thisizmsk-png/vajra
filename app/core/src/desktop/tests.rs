@@ -5823,9 +5823,11 @@ fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
     let d = t.0.join("fakebin-codex-lead");
     fs::create_dir_all(&d).unwrap();
     let argv_log = t.0.join("lead-argv");
+    // The argv is written to a temp name and renamed into place, so the log appears whole or not at all. Under full-suite
+    // load a test that saw `> file` create the file could read it before `printf` filled it (the flake: an argv of "-c").
     let body = format!(
-        "#!/bin/sh\ncase \"$1\" in --version) echo '0.166.0 (fake)';; login) echo 'Logged in';; *) printf '%s\\n' \"$@\" > '{}'; exec sleep 30;; esac\n",
-        argv_log.display()
+        "#!/bin/sh\ncase \"$1\" in --version) echo '0.166.0 (fake)';; login) echo 'Logged in';; *) printf '%s\\n' \"$@\" > '{log}.part' && mv '{log}.part' '{log}'; exec sleep 30;; esac\n",
+        log = argv_log.display()
     );
     fs::write(d.join("codex"), body).unwrap();
     fs::set_permissions(d.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -5834,13 +5836,12 @@ fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
     let r = app.start_run(input, &t.0.join("repo").to_string_lossy()).unwrap();
     let stream = r["stream"].as_str().unwrap().to_string();
     let c = lock(&app.lead_checks).get(&stream).cloned().expect("a Codex Lead registers its first-turn read-back");
-    for _ in 0..100 {
-        if argv_log.is_file() {
-            break;
-        }
+    // A deadline, not a fixed count of short sleeps: a loaded machine can take seconds to exec the fake.
+    let t0 = std::time::Instant::now();
+    while !argv_log.is_file() && t0.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let argv = fs::read_to_string(&argv_log).unwrap();
+    let argv = fs::read_to_string(&argv_log).unwrap_or_else(|e| panic!("the fake codex never wrote its argv within 20 s: {e}"));
     assert!(argv.contains(&format!("\"{}\"=\"none\"", c.marker.display())), "the marker is a deny entry of the launch: {argv}");
     assert!(!argv.lines().any(|l| l == "-s" || l == "--sandbox" || l.starts_with("--sandbox=")), "{argv}");
     assert!(c.want.deny.contains(&c.marker) && c.codex_home == t.home().join(".codex") && !c.want.network);
