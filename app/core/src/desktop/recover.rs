@@ -85,9 +85,12 @@ pub fn record_started(data: &Path, run: &str, project: &str, cwd: &Path, lead_ac
     write(data, run, CORE_FILE, &json!({"v": 1, "project": project, "cwd": cwd, "lead_account": lead_account}))
 }
 
-/// The accepted plan, as `RunProtocol::plan_record` gives it.
+/// The accepted plan, as `RunProtocol::plan_record` gives it. Durable when it returns `Ok`: a temp file, fsynced, then
+/// renamed over `plan.json`, then the run's folder fsynced. `RunProtocol` calls it as part of accepting a plan.
 pub fn record_plan(data: &Path, run: &str, plan: &Value) -> std::io::Result<()> {
-    write(data, run, PLAN_FILE, plan)
+    let d = run_dir(data, run, true)?;
+    d.write_atomic(PLAN_FILE, &serde_json::to_vec(plan).map_err(std::io::Error::other)?)?;
+    d.sync()
 }
 
 /// How the run ended. The first end recorded stays: a later one (a crash reconcile after a clean end) changes nothing.

@@ -187,4 +187,10 @@ impl Pinned {
         }
         res
     }
+
+    /// Flush the folder itself, so a rename done in it (`write_atomic`) survives a crash.
+    pub fn sync(&self) -> io::Result<()> {
+        // SAFETY: a valid descriptor of a folder this value owns.
+        cvt(unsafe { libc::fsync(self.0.as_raw_fd()) }).map(|_| ())
+    }
 }
