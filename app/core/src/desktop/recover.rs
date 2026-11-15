@@ -86,9 +86,17 @@ pub fn record_started(data: &Path, run: &str, project: &str, cwd: &Path, lead_ac
 }
 
 /// The accepted plan, as `RunProtocol::plan_record` gives it. Durable when it returns `Ok`: a temp file, fsynced, then
-/// renamed over `plan.json`, then the run's folder fsynced. `RunProtocol` calls it as part of accepting a plan.
+/// renamed over `plan.json`, then the run's folder fsynced, and each parent fsynced after its child is opened, so a
+/// run folder made earlier without a sync (a first run) can't be lost with the plan in it (#275 review).
+/// `RunProtocol` calls it as part of accepting a plan.
 pub fn record_plan(data: &Path, run: &str, plan: &Value) -> std::io::Result<()> {
-    let d = run_dir(data, run, true)?;
+    // `run_dir` checks the run id; the walk below repeats its steps, holding each parent to sync it.
+    drop(run_dir(data, run, true)?);
+    let top = Pinned::open(data, false)?;
+    let runs = top.child("runs", false)?;
+    top.sync()?;
+    let d = runs.child(run, false)?;
+    runs.sync()?;
     d.write_atomic(PLAN_FILE, &serde_json::to_vec(plan).map_err(std::io::Error::other)?)?;
     d.sync()
 }
