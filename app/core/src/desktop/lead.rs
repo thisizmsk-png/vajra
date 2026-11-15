@@ -1573,16 +1573,10 @@ pub(super) fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Re
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let bad = || LeadError::GuardMissing("claude --version failed".into());
-    let mut child = Command::new(bin)
-        .arg("--version")
-        .env_clear()
-        .envs(env.iter().map(|(k, v)| (*k, v)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(io)?;
+    let mut child = crate::spawnlock::spawn(
+        Command::new(bin).arg("--version").env_clear().envs(env.iter().map(|(k, v)| (*k, v))).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0),
+    )
+    .map_err(io)?;
     let pid = child.id();
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {

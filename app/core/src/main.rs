@@ -23,7 +23,7 @@ use vajra_desktop::desktop::{App, Envelope, Pace, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
-use vajra_desktop::owned::{Found, Ledger, Owner, Verdict};
+use vajra_desktop::owned::{Found, Ledger, Owner};
 use vajra_desktop::desktop::WorktreeTerminals;
 use vajra_desktop::terminal::{Event as TermEvent, Sink as TermSink, Terminals, UserPathEnv};
 
@@ -481,10 +481,10 @@ fn term_open(
 ) -> Res {
     let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
     // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
-    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        if own.record {
-            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
-        }
+    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid)
+        && own.record
+    {
+        let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
     }
     Ok(term_value(&i))
 }
@@ -528,10 +528,10 @@ fn setup_sign_in(
 ) -> Res {
     let cmd = app.setup_sign_in_command(&id)?;
     let i = terms.open_sign_in(&cmd, rows, cols, term_sink(on_event)).map_err(term_err)?;
-    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        if own.record {
-            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
-        }
+    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid)
+        && own.record
+    {
+        let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
     }
     Ok(term_value(&i))
 }
@@ -607,11 +607,12 @@ fn internal(e: serde_json::Error) -> serde_json::Value {
     serde_json::json!({"error": "internal", "detail": e.to_string()})
 }
 
-/// End leftover shells the human picked. Only records that reconciled as owned are eligible, and each is proven again
-/// (pid and start stamp) right before it is signalled; anything else is reported and left alone.
+/// End leftover shells the human picked. Records that reconciled as owned, or as held but unproven, are eligible, and
+/// each is proven again (pid and start stamp) right before it is signalled: an unproven one that still can't be proven
+/// answers `not_proven` and is kept. Anything else is reported and left alone.
 #[tauri::command(async)]
 fn recover_orphans(own: State<'_, Ownership>, pids: Vec<u32>) -> Res {
-    let picked: Vec<Found> = found_lock(&own).iter().filter(|f| pids.contains(&f.owner.pid) && matches!(f.verdict, Verdict::Owned { .. })).cloned().collect();
+    let picked: Vec<Found> = found_lock(&own).iter().filter(|f| pids.contains(&f.owner.pid) && f.verdict.keeps()).cloned().collect();
     let mut out = Vec::new();
     for f in &picked {
         let r = vajra_desktop::owned::recover(&f.owner);

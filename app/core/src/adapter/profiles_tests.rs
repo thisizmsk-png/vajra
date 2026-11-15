@@ -198,6 +198,24 @@ fn every_form_of_the_sandbox_flag_is_dropped_but_never_the_prompt() {
     assert_eq!(b, ["codex", "--", "--sandbox"]);
 }
 
+/// #241 L3: the stripper also drops every other flag that would widen or replace the profile, in each spelling, and
+/// still keeps the shell's own `-c <script>`, an unrelated `-c` config, and anything after `--`.
+#[test]
+fn every_profile_widening_flag_is_dropped_in_every_spelling() {
+    let mut a: Vec<String> = [
+        "/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--yolo",
+        "--profile", "theirs", "-p", "theirs", "--profile=theirs", "-ptheirs",
+        "--config", "sandbox_mode=\"danger-full-access\"", "--config=sandbox_mode=\"danger-full-access\"",
+        "-csandbox_mode=\"danger-full-access\"", "-csandbox_workspace_write.network_access=true",
+        "-c", "model=\"x\"", "--config", "approval_policy=\"never\"", "--", "--yolo -p x",
+    ]
+    .map(String::from)
+    .into();
+    drop_sandbox_flag(&mut a);
+    let want: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "-c", "model=\"x\"", "--config", "approval_policy=\"never\"", "--", "--yolo -p x"].map(String::from).into();
+    assert_eq!(a, want);
+}
+
 #[test]
 fn worker_builders_refuse_bad_inputs() {
     let mut l = launch(RoleKind::Worker, false);
@@ -1397,6 +1415,39 @@ fn the_codex_lead_read_back_fails_unless_every_vajra_dir_shows_denied() {
     let old = v.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
     assert!(check_codex_lead_applied(&old, wt, deny()).is_err(), "no file-system policy can't show the dirs are denied");
     assert!(check_codex_lead_applied(&ok, wt, &[]).is_err(), "nothing to check is never a pass");
+}
+
+/// Plan #175 L1: the read-entry check compares canonical forms on both sides. A deny dir spelled through a link, and a
+/// read entry spelled through a link or with `..`, still meet; the lead dir itself stays readable in either spelling.
+#[test]
+fn the_lead_read_entry_check_compares_canonical_forms_of_the_deny_dirs() {
+    let t = std::env::temp_dir().join(format!("vajra-canon-{}-{:?}", std::process::id(), std::thread::current().id()));
+    let _ = std::fs::remove_dir_all(&t);
+    let real = t.join("real");
+    std::fs::create_dir_all(real.join("data/control/lead/run1")).unwrap();
+    std::os::unix::fs::symlink(&real, t.join("alias")).unwrap();
+    let real = real.canonicalize().unwrap();
+    let alias = t.join("alias");
+    let tc = |p: &Path| json!({"payload": {"file_system_sandbox_policy": {"entries": [{"access": "read", "path": {"type": "path", "path": p.to_str().unwrap()}}]}}});
+    let lead = real.join("data/control/lead/run1");
+    let allowed = std::slice::from_ref(&lead);
+    // The deny dir spelled through the link; the entry in the real form.
+    let deny_alias = vec![alias.join("data")];
+    assert!(check_no_read_reopens(&tc(&real.join("data/control")), &deny_alias, allowed).is_err(), "a real-path entry inside a deny dir spelled through a link");
+    // The deny dir real; entries through the link, and with `..`.
+    let deny = vec![real.join("data")];
+    assert!(check_no_read_reopens(&tc(&alias.join("data/control")), &deny, allowed).is_err(), "an entry through a link");
+    assert!(check_no_read_reopens(&tc(&real.join("elsewhere/../data/control")), &deny, allowed).is_err(), "an entry with ..");
+    // A `..` spelling that only looks like the lead dir is not the lead dir.
+    assert!(check_no_read_reopens(&tc(&lead.join("../run1/..")), &deny, allowed).is_err(), "a .. spelling of the lead's parent");
+    // The lead dir, as written or through the link, stays allowed; an entry outside every deny dir is fine.
+    assert!(check_no_read_reopens(&tc(&lead), &deny, allowed).is_ok());
+    assert!(check_no_read_reopens(&tc(&alias.join("data/control/lead/run1")), &deny_alias, allowed).is_ok(), "the lead dir through the link");
+    assert!(check_no_read_reopens(&tc(&real.join("other")), &deny, allowed).is_ok());
+    assert!(check_no_read_reopens(&tc(Path::new("/")), &deny, allowed).is_ok(), "the root entry is exempt");
+    // An entry that doesn't exist yet is still placed by its existing ancestor.
+    assert!(check_no_read_reopens(&tc(&alias.join("data/not-yet")), &deny, allowed).is_err(), "a missing entry under a linked deny dir");
+    let _ = std::fs::remove_dir_all(&t);
 }
 
 fn lead_init(tools: &[String], servers: &[&str], mode: &str) -> String {

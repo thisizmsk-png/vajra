@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::bus::{self, Bus};
 use crate::crew::redact::Redactor;
@@ -405,6 +405,10 @@ impl Supervisor {
     /// A one-click install (ADR-17, bhishma condition 8) on bus stream `setup-<id>`: exactly the Setup env profile,
     /// never `user_env`, and the profile's proxy value and login are redacted from every line. Only `setup-` streams.
     pub fn spawn_setup(&self, id: &str, argv: Vec<String>, cwd: &Path, env: &SetupEnv, redact: Redactor) -> Result<(), SessionError> {
+        // A second instance starts nothing, an install included (#176 L2): the rule is the same for every spawn.
+        if let Some(why) = lock(&self.refuse_all).clone() {
+            return Err(SessionError::Ledger(why));
+        }
         if !id.starts_with(SETUP_STREAM) {
             return Err(SessionError::InvalidId);
         }
@@ -457,14 +461,13 @@ impl Supervisor {
             old.join_reader_if_done();
         }
 
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: spec.rows,
-                cols: spec.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| SessionError::Io(e.to_string()))?;
+        let pair = crate::spawnlock::openpty(PtySize {
+            rows: spec.rows,
+            cols: spec.cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(SessionError::Io)?;
 
         // CommandBuilder::from_argv runs argv directly; only new_default_prog
         // would start a shell, and we never call it.
@@ -478,10 +481,7 @@ impl Supervisor {
         }
         cmd.cwd(&spec.cwd);
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| SessionError::Spawn(e.to_string()))?;
+        let child = crate::spawnlock::spawn_pty(pair.slave.as_ref(), cmd).map_err(SessionError::Spawn)?;
         // Drop our slave fd so the reader sees EOF when the child is gone.
         drop(pair.slave);
         let pid = child.process_id().unwrap_or(0);
@@ -497,7 +497,8 @@ impl Supervisor {
                     let _ = child.wait();
                     Err(SessionError::Ledger(e))
                 };
-                let Some(stamp) = crate::procid::start_stamp(pid).filter(|_| pid > 1) else {
+                // Read as our own unreaped child: a fast `true` may already be a zombie here (see `child_stamp`).
+                let Some(stamp) = crate::procid::child_stamp(pid).filter(|_| pid > 1) else {
                     return refuse(child, "its start time could not be read".into());
                 };
                 let o = crate::owned::Owner {

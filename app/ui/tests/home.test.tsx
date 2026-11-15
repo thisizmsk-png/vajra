@@ -122,6 +122,19 @@ describe("Home", () => {
     expect(screen.queryByText("hooks registered")).toBeNull();
   });
 
+  it("shows a check that could not be made as Not run, never as Pass, and it does not stop a start", async () => {
+    const pre = { rows: [
+      { name: "git", ok: true, detail: "/usr/bin/git", fix: "" },
+      { name: "sandbox", ok: false, checked: false, advisory: true, detail: "Not checked: the engine self-check did not report on it.", fix: "/sandbox" },
+    ], start_enabled: true };
+    await open({ preflight: pre, list_campaigns: { campaigns: [] } });
+    const row = (await screen.findByText("OS sandbox")).closest("li")!;
+    expect(row.textContent).toContain(S.status.unknown);
+    expect(row.textContent).not.toContain(S.status.pass);
+    expect(row.textContent).toContain("Not checked");
+    expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).not.toBe("true");
+  });
+
   it("shows every check, and a failing one with its fix command; Start is disabled (AC-1.3.2)", async () => {
     await open({ preflight: rows(false), list_campaigns: { campaigns: [] } });
     expect(await screen.findByText("bash install.sh")).toBeTruthy();

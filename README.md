@@ -108,7 +108,7 @@ proof record per run. It sits on top of the install above, so do that first. The
 it from this repository.
 
 ```bash
-# needs: macOS, Rust 1.85+, Node.js 20, and the Vajra install above (Claude Code, git, jq, python3, openssl)
+# needs: macOS, Rust 1.88+, Node.js 20, and the Vajra install above (Claude Code, git, jq, python3, openssl)
 cd app/ui && npm ci
 cd ../core && ../ui/node_modules/.bin/tauri build --bundles app
 open "target/release/bundle/macos/Vajra Desktop.app"

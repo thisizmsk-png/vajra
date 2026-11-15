@@ -1182,6 +1182,25 @@ fn a_pair_an_older_self_test_recorded_is_tested_again_and_a_build_with_no_sandbo
     }
 }
 
+/// Plan #215 L1, option A: a list planted by a same-user agent passes every file check (this user's, 0600, one link)
+/// and holds a valid-looking pair for the current self-test, yet the self-test still runs, and a build with no OS
+/// sandbox is refused. Only a pass this app process saw counts.
+#[test]
+fn a_planted_private_list_with_a_valid_looking_pair_does_not_skip_the_self_test() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let r = canary_rig("canary-planted", true);
+    seed_pair(&r, Some(claude_selftest::VERSION));
+    let list = r.gw.data.join("control/claude-proven.json");
+    std::fs::set_permissions(&list, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let m = std::fs::symlink_metadata(&list).unwrap();
+    // SAFETY: getuid has no preconditions.
+    assert!(m.is_file() && m.nlink() == 1 && m.uid() == unsafe { libc::getuid() } && m.mode() & 0o777 == 0o600, "the plant passes every file check");
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    assert_eq!(selftests(&r), 1, "the planted pair skipped the self-test");
+    assert!(v.worktree.is_none() && !r.d.join("log").exists(), "the harness ran on a planted pair: {v:?}");
+}
+
 /// The same old pair for a build that does pass the current test: it is tested once more, then recorded with this
 /// test's number in place of the old entry.
 #[test]

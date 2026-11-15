@@ -1,5 +1,6 @@
 //! The worker guard keeps every writer except the app away from the Ask-the-Lead files
 //! (`<data>/control/lead/<run_id>/{settings,mcp}.json`). Runs the real `hooks/pre-tool-use.sh` in a temp HOME.
+#![allow(clippy::disallowed_methods)] // test code: the app's own spawns go through the spawn lock
 
 use std::io::Write;
 use std::path::PathBuf;

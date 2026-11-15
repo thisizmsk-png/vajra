@@ -15,7 +15,7 @@ use crate::lock;
 use crate::crew::redact::{redact_provider_text, Redactor};
 
 /// The run id a `deliver-<run>` or `deliver-<run>-og` campaign belongs to.
-fn run_of(slug: &str) -> Option<&str> {
+pub(super) fn run_of(slug: &str) -> Option<&str> {
     slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r)).filter(|r| crate::ids::valid_run_id(r))
 }
 

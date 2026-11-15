@@ -105,11 +105,23 @@ struct LeadCheck {
     marker: PathBuf,
     codex_home: PathBuf,
     since: std::time::SystemTime,
+    /// Passes still to run after the first `Applied` (#241 re-check L2): the check isn't dropped at once.
+    after_applied: Option<u8>,
 }
 
 /// How long a plain Codex Lead may run before its first turn is read back. It may wait on the user first (Codex asks
 /// whether to trust a new folder), so this is generous; past it, a Lead whose session file never showed is ended.
 pub const LEAD_PROOF_WAIT: Duration = Duration::from_secs(10 * 60);
+
+/// #241 L2: with no sessions folder in the Codex home at all, the Lead's session file is landing somewhere the core
+/// doesn't look (a layout change, or a sessions folder moved by the user's config). A minute is enough for Codex to have
+/// made the folder; past it, the Lead is ended with that reason instead of running unchecked for `LEAD_PROOF_WAIT`.
+pub const LEAD_NO_SESSIONS_WAIT: Duration = Duration::from_secs(60);
+
+/// #241 re-check L2: after `Applied`, the read-back keeps looking this many more passes (about a second each). Any
+/// unmarked first turn in the project, a cap overflow, or the marked file vanishing or failing, then ends the Lead.
+/// Narrows the race against a same-user process outside the sandbox; it is still a race, not a proof.
+pub const LEAD_RECHECKS: u8 = 5;
 
 /// A run session started (or resumed) by this app.
 #[derive(Clone, Debug)]
@@ -511,7 +523,13 @@ impl App {
         }
     }
 
+    /// On a Mac that has never run Claude Code `~/.claude` does not exist yet. That is a normal first launch, not an
+    /// error: the empty folder is made (the one Claude Code makes itself) and the checks then say what is not installed.
+    /// Only a truly absent path is created; a dangling link or a file stays an error.
     fn allow(&self) -> Result<Allowlist, Value> {
+        if matches!(std::fs::symlink_metadata(&self.claude), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+            std::fs::create_dir_all(&self.claude).map_err(|e| fail("claude_dir_missing", e))?;
+        }
         Allowlist::new(&self.claude, &self.data).map_err(|e| fail("claude_dir_missing", e))
     }
 
@@ -541,7 +559,7 @@ impl App {
         // reusing an id would keep that record's Lead session and approval-only marker for a different run.
         let recorded = |id: &str| self.data.join("control").join("lead").join(id).symlink_metadata().is_ok();
         // `deliver-{id}` is the workflow's default campaign name (`CAMPAIGN = RESUME || deliver-${RUN}` in workflows/vajra-deliver.js).
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id);
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id) || self.campaign_name_held(id);
         let pick = (0..120u64)
             .map(|k| now + 60 * k)
             .map(|t| (t, ids::run_id_at(t)))
@@ -549,6 +567,23 @@ impl App {
             .ok_or_else(|| fail("run_id_exhausted", "no unused run id in the next 120 minutes; check runs.jsonl"))?;
         lock(&self.issued).insert(pick.1.clone());
         Ok(pick)
+    }
+
+    /// Plan #217 L2: is either campaign name a run under `id` would get (`deliver-<id>`, or `deliver-<id>-og` for an
+    /// outside-guard run) already present in the campaigns folder, in any form? Read without following a link
+    /// (`symlink_metadata`), so a plain file, a dangling link, a link to anywhere and a folder with planted files all
+    /// count, and so does a case variant (the disk is case-insensitive). Run ids are predictable minutes, so an agent can
+    /// make a future run's folder before the run exists; such an id is never issued, and the workflow only ever creates
+    /// its campaign folder fresh (its init refuses one that exists). The core never creates the folder itself: the
+    /// workflow's init must be the one to. An unreadable campaigns folder counts as held (fail closed).
+    fn campaign_name_held(&self, id: &str) -> bool {
+        let Ok(allow) = self.allow() else { return true };
+        let dir = allow.campaigns_dir();
+        let held = |name: String| match dir.join(name).symlink_metadata() {
+            Ok(_) => true,
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        };
+        held(format!("deliver-{id}")) || held(format!("deliver-{id}-og"))
     }
 
     // ---------------------------------------------------------------- start
@@ -613,13 +648,14 @@ impl App {
         if self.workers.install_action().is_none() {
             return Err(fail("not_needed", "git is already installed"));
         }
-        let child = std::process::Command::new("/usr/bin/xcode-select")
-            .arg("--install")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| fail("spawn_failed", e))?;
+        let child = crate::spawnlock::spawn(
+            std::process::Command::new("/usr/bin/xcode-select")
+                .arg("--install")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .map_err(|e| fail("spawn_failed", e))?;
         // It returns once the dialog is up; reaped off the caller.
         std::thread::spawn(move || {
             let mut child = child;
@@ -834,18 +870,49 @@ impl App {
                 lock(&self.lead_checks).remove(&stream);
                 continue;
             }
-            let found = crate::providers::effective::codex_rollouts_since(&c.codex_home, c.since);
-            let verdict = match codex_lead_verdict(&found, &c.want, &c.marker) {
-                LeadVerdict::Pending if c.since.elapsed().is_ok_and(|e| e >= LEAD_PROOF_WAIT) => {
-                    LeadVerdict::NotApplied("the Lead's Codex session file never showed its first turn, so its Vajra profile can't be shown in force".into())
+            use crate::providers::effective::{LEAD_FILES_CAP, lead_rollouts};
+            let found = lead_rollouts(&c.codex_home, c.since);
+            let waited = |d: Duration| c.since.elapsed().is_ok_and(|e| e >= d);
+            let verdict = if found.created > LEAD_FILES_CAP {
+                // #241 re-check L1: fail closed. A Lead launch has no reason to see this many new Codex sessions in its
+                // read-back window, and judging only the newest would let a flood push the Lead's real file out of view.
+                LeadVerdict::NotApplied(format!("more than {LEAD_FILES_CAP} Codex sessions started since the Lead did, so its own session can't be picked out to check its Vajra profile"))
+            } else {
+                match codex_lead_verdict(&found.files, &c.want, &c.marker) {
+                    // After Applied, a pass that no longer finds the marked file means it vanished or changed.
+                    LeadVerdict::Pending if c.after_applied.is_some() => {
+                        LeadVerdict::NotApplied("the Lead's Codex session file vanished or changed right after its Vajra profile was shown in force".into())
+                    }
+                    LeadVerdict::Pending if !found.sessions_seen && waited(LEAD_NO_SESSIONS_WAIT) => LeadVerdict::NotApplied(
+                        "Codex keeps its session files somewhere Vajra doesn't look (no sessions folder in the Codex home), so the Lead's Vajra profile can't be shown in force".into(),
+                    ),
+                    LeadVerdict::Pending if waited(LEAD_PROOF_WAIT) => {
+                        LeadVerdict::NotApplied("the Lead's Codex session file never showed its first turn, so its Vajra profile can't be shown in force".into())
+                    }
+                    v => v,
                 }
-                v => v,
             };
             match verdict {
                 LeadVerdict::Pending => {}
                 LeadVerdict::Applied => {
-                    lock(&self.lead_checks).remove(&stream);
-                    self.note("lead_profile_applied", &[]);
+                    let mut checks = lock(&self.lead_checks);
+                    match c.after_applied {
+                        None => {
+                            if let Some(e) = checks.get_mut(&stream) {
+                                e.after_applied = Some(LEAD_RECHECKS);
+                            }
+                            drop(checks);
+                            self.note("lead_profile_applied", &[]);
+                        }
+                        Some(0) | Some(1) => {
+                            checks.remove(&stream);
+                        }
+                        Some(n) => {
+                            if let Some(e) = checks.get_mut(&stream) {
+                                e.after_applied = Some(n - 1);
+                            }
+                        }
+                    }
                 }
                 LeadVerdict::NotApplied(why) => {
                     lock(&self.lead_checks).remove(&stream);
@@ -1253,6 +1320,11 @@ impl App {
             Some(t) => t,
             None => self.fresh_run_id(ids::unix_now())?,
         };
+        // Plan #217 L2: checked again just before the launch, for the window since the pick. A fresh run's folder is
+        // always the workflow's own new one, never one made beforehand (a resume names its existing campaign).
+        if input.campaign.is_none() && self.campaign_name_held(&run_id) {
+            return Err(fail("run_id_taken", "a campaign folder for this run id appeared before the start; start again"));
+        }
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let workers = input.max_in_flight;
@@ -1276,7 +1348,7 @@ impl App {
                 let a = profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)?;
                 // The pty supervisor passes no CODEX_HOME (`sessions::ENV_ALLOW`), so the Lead's Codex writes under ~/.codex.
                 let want = profiles::CodexWant { cwd: project, ticket_tmp: tmp, network: false, deny };
-                *check.borrow_mut() = Some(LeadCheck { want, marker, codex_home: self.home.join(".codex"), since: std::time::SystemTime::now() });
+                *check.borrow_mut() = Some(LeadCheck { want, marker, codex_home: self.home.join(".codex"), since: std::time::SystemTime::now(), after_applied: None });
                 Ok(a)
             }
         }, false, workers)?;
@@ -2418,6 +2490,11 @@ impl App {
         if !features.get("features").is_some_and(Value::is_array) {
             return bad(self);
         }
+        // The digest covers only the file contents, so an intact signed campaign copied into another campaign's folder
+        // keeps a valid signature. The slug it carries must be the one asked for, as the script's verify requires.
+        if campaign.get("slug").and_then(Value::as_str) != Some(slug) {
+            return bad(self);
+        }
         let sig: Vec<u8> = h.sig.iter().copied().filter(|b| !matches!(b, b' ' | b'\r' | b'\n')).collect();
         if sig.len() != 64 || !sig.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
             return bad(self);
@@ -2822,7 +2899,7 @@ mod state_tests;
 /// (FG-02c), so it would only be refused (#106 review).
 fn preflight_json(rows: &[preflight::Row], projects_row: Option<Value>) -> Value {
     let mut ok = preflight::start_enabled(rows);
-    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
+    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix, "advisory": r.advisory, "checked": r.checked})).collect();
     if let Some(row) = projects_row {
         out.push(row);
         ok = false;
