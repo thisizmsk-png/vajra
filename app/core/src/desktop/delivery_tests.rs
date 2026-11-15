@@ -167,6 +167,27 @@ fn verification() -> Verification {
     }
 }
 
+/// Codex on #270: the delivery picks each criterion's result the way the gate does. Results named in upper case, by
+/// the id followed by its text, or by the criterion's own text pass the gate, and the delivery runs exactly those
+/// commands, in criteria order.
+#[test]
+fn the_delivery_runs_the_results_the_gate_passed_on_however_the_verifier_named_them() {
+    let r = round();
+    let v = Verification {
+        results: vec![result("ac-2 holds", "cargo test ac2"), result("AC-1", "cargo test ac1")],
+        suite_command: "cargo test".into(), suite_passes: true, regressions: vec![], setup_cmds: vec!["npm ci".into()],
+    };
+    let problems = crate::desktop::verify::verification_problems(&v, &r.criteria);
+    let g = crate::desktop::verify::gate(&v, &problems, &r.criteria, &r.tasks, &[]);
+    assert!(g.passed, "{g:?}");
+    let c = commands(&v, &r.criteria).unwrap();
+    assert_eq!(c.checks, [("ac-1".to_string(), "cargo test ac1".to_string()), ("ac-2".to_string(), "cargo test ac2".to_string())]);
+    assert_eq!(c.all, ["npm ci", "cargo test ac1", "cargo test ac2", "cargo test"]);
+    // An id followed by its text maps too.
+    let v = Verification { results: vec![result("ac-1: limits apply", "cargo test ac1"), result("Ac-2", "cargo test ac2")], ..v };
+    assert_eq!(commands(&v, &r.criteria).unwrap().checks.len(), 2);
+}
+
 fn verifier() -> WorkerSeat {
     WorkerSeat {
         slot: "v1".into(), role: "verifier".into(), task: String::new(), account: "codex (work)".into(), model: None, effort: None, security: false, network: true,
@@ -219,8 +240,9 @@ fn every_record_write_carries_the_evidence_the_commit_and_the_tasks_own_branch()
     let Request::TasksClose { slug, id, evidence, head, commit, branch, base_commit, changed, repo } = &w[0] else { panic!("{:?}", w[0]) };
     assert_eq!((slug.as_str(), id.as_str(), evidence, head.as_str(), commit.as_str()), (SLUG, "20261114-0900.t1", &ev, HEAD, "a".repeat(40).as_str()));
     assert_eq!((branch.as_str(), base_commit.as_str(), changed.clone(), repo.as_path()), ("vajra/20261114-0900/task-t1-r1", BASE, vec!["src/t1.rs".to_string()], Path::new("/wt/evidence-r1")));
-    let Request::CampaignArchiveEvidence { dir, head, setup, .. } = &w[2] else { panic!("{:?}", w[2]) };
+    let Request::CampaignArchiveEvidence { dir, head, setup, repo, .. } = &w[2] else { panic!("{:?}", w[2]) };
     assert_eq!((dir.as_path(), head.as_str(), setup.clone()), (Path::new("/wt/evidence-r1/data/walkthroughs/deliver-20261114-0900"), HEAD, vec!["npm ci".to_string()]));
+    assert_eq!(repo.as_path(), Path::new("/wt/evidence-r1"), "the archive runs in the evidence worktree (codex on #270)");
     let Request::CampaignPass { feature, evidence, .. } = &w[3] else { panic!("{:?}", w[3]) };
     assert_eq!((feature.as_str(), evidence.as_str()), ("ac-1", "cargo test ac1 (exit 0)"), "the pass names the command that ran, as the workflow does");
     let Request::CampaignClose { status, .. } = &w[7] else { panic!("{:?}", w[7]) };

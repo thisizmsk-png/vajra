@@ -186,9 +186,11 @@ fn the_six_i_variants_build_the_workflows_argv() {
     // The archive: the workflow's `archive-evidence <campaign> <dir> <head> <setup JSON>`, the setup list as JSON.
     let dir = format!("/wt/data/walkthroughs/{SLUG}");
     let h40 = "a".repeat(40);
-    let (p, a, cwd) = plan_of(Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: dir.clone().into(), head: h40.clone(), setup: v(&["npm ci", "say \"hi\""]) });
-    assert_eq!((p.as_str(), a, cwd), ("vajra-campaign.sh", v(&["archive-evidence", SLUG, &dir, &h40, r#"["npm ci","say \"hi\""]"#]), Some(t.0.join("cwd"))));
-    assert_eq!(plan_of(Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: dir.clone().into(), head: h40.clone(), setup: vec![] }).1.last().unwrap(), "[]");
+    let (p, a, cwd) = plan_of(Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: dir.clone().into(), head: h40.clone(), setup: v(&["npm ci", "say \"hi\""]), repo: "/wt".into() });
+    // It runs in the evidence repository, not the record's dir (codex on #270): the engine reads the bundle as that
+    // repository's own walkthrough.
+    assert_eq!((p.as_str(), a, cwd), ("vajra-campaign.sh", v(&["archive-evidence", SLUG, &dir, &h40, r#"["npm ci","say \"hi\""]"#]), Some(PathBuf::from("/wt"))));
+    assert_eq!(plan_of(Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: dir.clone().into(), head: h40.clone(), setup: vec![], repo: "/wt".into() }).1.last().unwrap(), "[]");
     let h = "a".repeat(40);
     let (_, a, cwd) = plan_of(Request::TasksClose {
         slug: SLUG.into(),
@@ -246,13 +248,15 @@ fn every_variant_refuses_a_value_outside_its_regex_or_cap_and_spawns_nothing() {
         Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: "00000000".into(), base64: "IyByZXBvcnQK".into() },
         // The archive: a folder named for another campaign, a short head, a relative folder, a sixth or overlong or
         // blank or multi-line setup command.
-        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: "/wt/data/walkthroughs/other".into(), head: "a".repeat(40), setup: vec![] },
-        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/data/walkthroughs/{SLUG}").into(), head: "a".repeat(12), setup: vec![] },
-        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("data/walkthroughs/{SLUG}").into(), head: "a".repeat(40), setup: vec![] },
-        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: v(&["a", "b", "c", "d", "e", "f"]) },
-        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec!["x".repeat(1001)] },
-        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec![String::new()] },
-        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec!["npm ci\nrm -rf .".into()] },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: "/wt/data/walkthroughs/other".into(), head: "a".repeat(40), setup: vec![], repo: "/wt".into() },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/data/walkthroughs/{SLUG}").into(), head: "a".repeat(12), setup: vec![], repo: "/wt".into() },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("data/walkthroughs/{SLUG}").into(), head: "a".repeat(40), setup: vec![], repo: "/wt".into() },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: v(&["a", "b", "c", "d", "e", "f"]), repo: "/wt".into() },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec!["x".repeat(1001)], repo: "/wt".into() },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec![String::new()], repo: "/wt".into() },
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec!["npm ci\nrm -rf .".into()], repo: "/wt".into() },
+        // ...and a relative evidence repository.
+        Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec![], repo: "wt".into() },
         Request::CampaignReport { slug: SLUG.into(), bytes: 0, check: fnv32("IyByZXBvcnQK"), base64: "IyByZXBvcnQK".into() },
         Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: fnv32("not base64!"), base64: "not base64!".into() },
         Request::CampaignUnlockStale { slug: "a/b".into() },
@@ -743,6 +747,70 @@ fn an_orphan_close_right_after_the_end_waits_for_the_writer_and_the_ledger_match
 
 // ---------------------------------------------------------------- the real scripts (S8), when the machine has them
 
+/// Codex on #270: the archive runs in the evidence repository, not the record's own dir. With the real engine, a
+/// record dir and a separate evidence repository: a task closes on green evidence made there, the archive run in the
+/// record dir is refused (the engine reads the bundle as the cwd's own walkthrough), and the same archive run in the
+/// evidence repository lands.
+#[test]
+fn the_real_archive_runs_in_the_evidence_repository_not_the_record_dir() {
+    if ["/usr/bin/jq", "/usr/bin/openssl", "/usr/bin/python3"].iter().any(|p| !Path::new(p).is_file()) {
+        eprintln!("skipped: the engine needs /usr/bin/jq, /usr/bin/openssl and /usr/bin/python3");
+        return;
+    }
+    let t = Tmp::new();
+    let home = t.0.join("home");
+    let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts").canonicalize().unwrap();
+    let mut b = Bridge::new(scripts.clone()).with_home(home.clone());
+    let key = home.join(".claude/vajra/.hmac-key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&key, "00".repeat(32)).unwrap();
+    std::fs::create_dir_all(home.join(".claude/agents")).unwrap();
+    for a in ["bhima", "abhimanyu"] {
+        std::fs::write(home.join(".claude/agents").join(format!("{a}.md")), "---\nname: x\n---\n").unwrap();
+    }
+    let record = super::super::record_app::record_dir(&t.0.join("data")).unwrap();
+    b.record_cwd = Some(record.clone());
+    b.timeout = RECORD_TIMEOUT;
+    let store: Arc<dyn LedgerStore> =
+        Arc::new(super::super::record_app::AppLedgerStore::new(&t.0.join("data"), SLUG, home.join(".claude/vajra/campaigns"), key.clone(), b.clone()).unwrap());
+    let r = CoreRecord::new(t.cfg(false), b.clone(), store).unwrap();
+    r.plan(&plan()).unwrap();
+    let t1 = format!("{RUN}.t1");
+    r.send(Event::Claim { task: t1.clone(), agent: "bhima".into(), worktree: None });
+    r.flush();
+    assert!(r.card().notes.is_empty(), "{:?}", r.card().notes);
+    // The evidence repository, with green evidence from the real verify-work.
+    let ev_repo = t.0.canonicalize().unwrap().join("evidence-repo");
+    std::fs::create_dir_all(&ev_repo).unwrap();
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new("git").current_dir(&ev_repo).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    git(&["init", "-q"]);
+    std::fs::write(ev_repo.join("a.txt"), "a\n").unwrap();
+    git(&["add", "a.txt"]);
+    git(&["commit", "-qm", "one"]);
+    let head = git(&["rev-parse", "HEAD"]);
+    let o = std::process::Command::new("bash").current_dir(&ev_repo).env("HOME", &home).arg(scripts.join("vajra-verify-work.sh")).args([SLUG, "test -f a.txt"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let dir = ev_repo.join("data/walkthroughs").join(SLUG);
+    let close = Request::TasksClose {
+        slug: SLUG.into(), id: t1.clone(), evidence: dir.join("evidence.json"), head: head.clone(), commit: head.clone(), branch: format!("vajra/{RUN}/task-t1-r1"),
+        base_commit: head.clone(), changed: vec![], repo: ev_repo.clone(),
+    };
+    let out = b.run(&close).unwrap();
+    assert_eq!(out.exit(), Some(0), "{}", out.stderr);
+    let archive = |repo: &Path| b.run(&Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: dir.clone(), head: head.clone(), setup: vec!["true".into()], repo: repo.into() }).unwrap();
+    // In the record's own dir, as before the fix: refused.
+    let wrong = archive(&record);
+    assert_ne!(wrong.exit(), Some(0), "the record dir isn't the evidence's repository");
+    // In the evidence repository: archived.
+    let right = archive(&ev_repo);
+    assert_eq!(right.exit(), Some(0), "{}", right.stderr);
+    assert!(home.join(".claude/vajra/campaigns").join(SLUG).join("evidence").join(SLUG).join("manifest.json").is_file());
+}
+
 /// The engine's own scripts in a temp HOME, with the scrubbed env and no Claude session. Skipped where the script's
 /// tools are missing (`/usr/bin/jq` and `/usr/bin/openssl`).
 #[test]
@@ -1095,7 +1163,7 @@ fn ledger_and_back() -> (Ledger, ReadBack) {
 #[test]
 fn an_archive_is_the_scripts_progress_line_in_the_ledger_and_any_other_line_is_caught() {
     let (mut l, mut back) = ledger_and_back();
-    let req = Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec![] };
+    let req = Request::CampaignArchiveEvidence { slug: SLUG.into(), dir: format!("/wt/{SLUG}").into(), head: "a".repeat(40), setup: vec![], repo: "/wt".into() };
     l.applied(&req, &format!("evidence archived for {SLUG}: {SLUG} ({RUN}.t1)\n"), None);
     back.progress += &format!("- 2026-11-12T12:02:00Z evidence archived: {SLUG} ({RUN}.t1)\n");
     assert_eq!(l.check(&back), Ok(()));

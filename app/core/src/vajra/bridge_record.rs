@@ -245,7 +245,10 @@ impl Bridge {
                 campaign(vec![s("report"), s("--campaign"), slug(sl)?, s("--bytes"), bytes.to_string(), s("--check"), check.clone(), s("--base64"), base64.clone()])
             }
             Request::CampaignUnlockStale { slug: sl } => campaign(vec![s("unlock"), slug(sl)?, s("--if-stale")]),
-            Request::CampaignArchiveEvidence { slug: sl, dir, head, setup } => {
+            Request::CampaignArchiveEvidence { slug: sl, dir, head, setup, repo } => {
+                if !repo.is_absolute() {
+                    return Err(BridgeError::Invalid("the evidence repository path must be absolute".into()));
+                }
                 // `vajra_tasks.py`'s own limits: at most 5 setup commands, each 1 to 1000 characters.
                 if setup.len() > MAX_SETUP || setup.iter().any(|c| c.is_empty() || c.chars().count() > SETUP_MAX || c.chars().any(char::is_control)) {
                     return Err(BridgeError::Invalid(format!("an archive takes at most {MAX_SETUP} setup commands, each 1 to {SETUP_MAX} characters on one line")));
@@ -255,7 +258,11 @@ impl Bridge {
                     return Err(BridgeError::Invalid("the evidence folder must be named for the campaign".into()));
                 }
                 let setup = serde_json::to_string(setup).map_err(|_| BridgeError::Invalid("the setup commands can't be encoded".into()))?;
-                campaign(vec![s("archive-evidence"), slug(sl)?, abs(dir)?, sha(head, true)?, setup])
+                // In the evidence repository, not the record's dir: `vajra_tasks.py archive-evidence` reads the bundle
+                // as that repository's `data/walkthroughs/<slug>` (codex on #270). The campaign is named, so its state
+                // doesn't depend on the cwd.
+                let (program, argv, _) = campaign(vec![s("archive-evidence"), slug(sl)?, abs(dir)?, sha(head, true)?, setup])?;
+                Ok((program, argv, Some(repo.clone())))
             }
             Request::TasksAdd { slug: sl, id, title, owner, deps, files, acceptance, branch: br } => {
                 let mut argv = vec![s("add"), ident(id)?, s("--title"), text(title, TITLE_MAX, true)?, s("--owner"), agent(owner)?];

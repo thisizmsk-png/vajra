@@ -122,8 +122,11 @@ pub fn commands(v: &Verification, criteria: &[Criterion]) -> Result<Commands, St
     }
     let mut list = Vec::new();
     let mut per = Vec::new();
+    // The same mapping the gate passed on (`verify::results_by_criterion`: any case, an id followed by its text, or
+    // the criterion's own text), so the delivery runs exactly the result the gate accepted (codex on #270).
+    let by = super::verify::results_by_criterion(&v.results, criteria);
     for c in criteria {
-        let r = v.results.iter().find(|r| r.criterion_id == c.id).ok_or_else(|| format!("criterion {} has no check in the verifier's answer", c.id))?;
+        let r = by.get(&c.id).map(|&i| &v.results[i]).ok_or_else(|| format!("criterion {} has no check in the verifier's answer", c.id))?;
         if r.command.trim().is_empty() {
             return Err(format!("criterion {} has no check command", c.id));
         }
@@ -277,7 +280,7 @@ impl Delivery {
             write_or_fail!(req, "Closing the tasks", |why: String| format!("task {} didn't close: {why}", c.id));
         }
         log.ok("tasks_close");
-        let archive = Request::CampaignArchiveEvidence { slug: slug.into(), dir: tree.base.join(slug), head: head.into(), setup: cmds.setup.clone() };
+        let archive = Request::CampaignArchiveEvidence { slug: slug.into(), dir: tree.base.join(slug), head: head.into(), setup: cmds.setup.clone(), repo: tree.worktree.clone() };
         write_or_fail!(archive, "Archiving the evidence", |why: String| why);
         log.ok("archive");
         let marked = |s: String| if self.cfg.trust == Trust::OutsideGuard { format!("{OUTSIDE_GUARD} {s}") } else { s };
