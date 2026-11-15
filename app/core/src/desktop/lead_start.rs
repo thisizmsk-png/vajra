@@ -174,6 +174,7 @@ impl App {
         // ADR-15 D5, as for a classic start (`launch_kind`): one launch at a time, and the caps checked (one run per
         // project, `max_runs`, the worker ceiling) over classic and core runs together. Held until this run is counted.
         let _one = lock(&self.launching);
+        let _quiet = self.engine_quiet()?;
         self.within_caps(project, input.max_in_flight)?;
         let repo = super::repo_dir(cwd)?;
         let base = self.resolve_base(&repo, &input.base)?;

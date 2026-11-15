@@ -669,3 +669,27 @@ fn a_hanging_installer_times_out_and_is_rolled_back() {
     assert_eq!((d.report.outcome, d.report.reason), (Outcome::RolledBack, Some("install_timeout")));
     assert!(!w.skill().exists());
 }
+
+/// Codex P1 on #213: a failed install whose signature restore fails is never a clean rollback. The journal stays
+/// (so runs stay off, and nothing is cleared before the signature is back), and the next consented run puts the
+/// old signature back from the journal.
+#[test]
+fn a_failed_signature_restore_keeps_the_journal_until_the_signature_is_back() {
+    use crate::providers::launch::engine_ready;
+    let mut w = World::new("sig-restore", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    let sig = std::fs::read(w.vajra().join("manifest.sig")).unwrap();
+    let failing = "#!/bin/bash\necho signed-by-a-failing-install > \"$HOME/.claude/vajra/manifest.sig\"\nexit 3\n";
+    w.bundle(failing, "0.6.3");
+    super::FAULT_SIG_RESTORE.with(|f| f.set(true));
+    let d = w.run(&w.plan());
+    assert_eq!((d.report.outcome, d.report.reason), (Outcome::Broken, Some("rollback_failed")), "{:?}", d.report);
+    assert!(interrupted(&w.data), "the journal is not cleared while the signature is not back");
+    assert_eq!(engine_ready(&w.home, &w.data, &w.marks()).unwrap_err().code, "engine_broken");
+    // The next consented run (failing again) restores the old signature from the journal and rolls back cleanly.
+    let d = w.run(&w.plan());
+    assert_eq!((d.report.outcome, d.report.reason), (Outcome::RolledBack, Some("install_failed")), "{:?}", d.report);
+    assert_eq!(std::fs::read(w.vajra().join("manifest.sig")).unwrap(), sig, "the old engine's own signature");
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.2");
+    assert!(!interrupted(&w.data));
+}

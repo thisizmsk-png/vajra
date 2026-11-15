@@ -6195,3 +6195,25 @@ fn a_terminal_opening_and_an_engine_install_exclude_each_other() {
     }
     assert!(app.terminal_open_guard().is_some());
 }
+
+/// Codex P1 on #213: no run launches while the engine install holds its exclusion, classic or seated, and an install
+/// can't take it while a launch is between its checks and the run being counted.
+#[test]
+fn no_run_launches_while_the_engine_is_installed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    let p0 = app.launch_project(&r[0]).unwrap().1.id;
+    let input = crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 2, campaign: None, provider: None };
+    {
+        let _install = app.engine_excl.try_write().unwrap();
+        let e = app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, Engine::Claude, 2).unwrap_err();
+        assert_eq!(code(&e), "engine_installing", "{e}");
+        let e = app.start_lead_run(&p0, input, r[0].to_str().unwrap(), "20261112-0901").unwrap_err();
+        assert_eq!(code(&e), "engine_installing", "{e}");
+    }
+    assert!(!app.sup.is_running(&format!("run-{}", SIDS[0])).unwrap_or(false), "nothing was launched");
+    // A launch holds its share until it returns: an install can't start in between.
+    let _launch = app.engine_quiet().unwrap();
+    assert!(app.engine_excl.try_write().is_err());
+}

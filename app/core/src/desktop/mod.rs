@@ -1003,6 +1003,7 @@ impl App {
         // ADR 16.6: no agent launches without the startup git baseline.
         self.workers.refuse()?;
         let _one = lock(&self.launching);
+        let _quiet = self.engine_quiet()?;
         // A session whose process is already running is never launched again: `start_session` would replace its live control
         // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
         // its control session. Checked under the launching lock, before anything is read or changed (#80 review).
@@ -1168,6 +1169,12 @@ impl App {
             Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => None,
         }
+    }
+
+    /// A run launch's share of the engine exclusion (Codex P1 on #213): held from the launch's checks until the run
+    /// is counted, so an engine install can't start between them, and no run launches while an install runs.
+    pub(super) fn engine_quiet(&self) -> Result<std::sync::RwLockReadGuard<'_, ()>, Value> {
+        self.terminal_open_guard().ok_or_else(|| fail("engine_installing", "the engine is being installed; start again when Set up finishes"))
     }
 
     /// Fails closed: with no terminal registry wired the engine cannot see user terminals, so it counts as in use.

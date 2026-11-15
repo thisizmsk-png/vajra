@@ -209,29 +209,35 @@ fn sig_state(home: &Path) -> SigState {
     SigState { sig: std::fs::read(v.join("manifest.sig")).ok(), flag: v.join(".integrity-violation").exists() }
 }
 
-fn restore_sig(home: &Path, s: &SigState) {
+#[cfg(test)]
+thread_local! {
+    /// Test only: make the next `restore_sig` fail without changing anything.
+    pub static FAULT_SIG_RESTORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Put the signature and the tamper flag back as `s` had them. False if any part could not be confirmed (Codex P1 on
+/// #213: a failed restore is never reported as a clean rollback).
+fn restore_sig(home: &Path, s: &SigState) -> bool {
+    #[cfg(test)]
+    if FAULT_SIG_RESTORE.with(|f| f.replace(false)) {
+        return false;
+    }
     let v = home.join(".claude/vajra");
-    match &s.sig {
+    let gone = |r: std::io::Result<()>| r.is_ok() || r.is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    let sig_ok = match &s.sig {
         Some(b) => {
             let tmp = v.join("manifest.sig.vajra-restore");
             let _ = std::fs::remove_file(&tmp);
             use std::os::unix::fs::OpenOptionsExt;
-            if let Ok(mut f) = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&tmp) {
-                if std::io::Write::write_all(&mut f, b).is_ok() {
-                    let _ = std::fs::rename(&tmp, v.join("manifest.sig"));
-                }
-            }
+            std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&tmp).is_ok_and(|mut f| {
+                std::io::Write::write_all(&mut f, b).is_ok() && f.sync_all().is_ok() && std::fs::rename(&tmp, v.join("manifest.sig")).is_ok()
+            })
         }
-        None => {
-            let _ = std::fs::remove_file(v.join("manifest.sig"));
-        }
-    }
+        None => gone(std::fs::remove_file(v.join("manifest.sig"))),
+    };
     let flag = v.join(".integrity-violation");
-    if s.flag && !flag.exists() {
-        let _ = std::fs::write(&flag, b"");
-    } else if !s.flag {
-        let _ = std::fs::remove_file(&flag);
-    }
+    let flag_ok = if s.flag { flag.exists() || std::fs::write(&flag, b"").is_ok() } else { gone(std::fs::remove_file(&flag)) };
+    sig_ok && flag_ok
 }
 
 /// Re-hash the installed tree against `engine` (C3): every file present, regular, one link, the right bytes, and no
@@ -358,8 +364,8 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
     let pending = place.journal().filter(|j| j.phase != place::Phase::Committed);
     if let Some(b) = pending.as_ref().and_then(|j| j.before.as_ref()) {
         let back = place.workflows_dir(m.uid).is_ok_and(|wf| workflows::restore(&wf, &workflows::Snapshot(b.workflows.clone())).is_ok());
-        restore_sig(m.home, &SigState { sig: b.sig.clone(), flag: b.flag });
-        if !back {
+        let sig_back = restore_sig(m.home, &SigState { sig: b.sig.clone(), flag: b.flag });
+        if !(back && sig_back) {
             let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, "rollback_failed");
             return done(Report::new(Outcome::Broken, Some("rollback_failed"), None), None);
         }
@@ -429,8 +435,11 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
     };
     let undo = |reason: &'static str, exit: Option<u32>| {
         let key = key_problem();
-        let ok = workflows::restore(&wf, &snap).is_ok() & place.roll_back(&journal).is_ok();
-        restore_sig(m.home, &sig);
+        // Everything outside the folder goes back first; the journal is cleared only by the folder rollback, after it,
+        // and only once the workflows and signature were confirmed (Codex P1 on #213). Otherwise the journal stays,
+        // runs stay off and the next consented run restores them again from it.
+        let outside = workflows::restore(&wf, &snap).is_ok() & restore_sig(m.home, &sig);
+        let ok = outside && place.roll_back(&journal).is_ok();
         if let Some(k) = key {
             let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, k);
             return done(Report::new(Outcome::Broken, Some(k), exit), None);
