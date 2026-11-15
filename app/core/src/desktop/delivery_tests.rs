@@ -382,6 +382,33 @@ fn once_the_run_has_ended_nothing_more_runs_and_the_delivery_is_not_verified() {
     assert_eq!(f.calls(), ["tree", "run", "sign", "check", "write TasksClose", "remove"]);
 }
 
+/// Claude on #270: the run's life is checked before every record write and before the verify, so a run that ends
+/// after the task closes never gets a done close or a delivery report in its signed record.
+#[test]
+fn a_run_that_ends_after_any_record_write_gets_nothing_more_written() {
+    // The life checks, in order: 1 the worktree, 2 the run, 3 and 4 the two closes, 5 the archive, 6 and 7 the two
+    // passes, 8 the progress line, 9 the checkpoint, 10 the done close, 11 the report, 12 the verify.
+    let writes = ["TasksClose", "TasksClose", "CampaignArchiveEvidence", "CampaignPass", "CampaignPass", "CampaignProgress", "CampaignCheckpoint", "CampaignClose", "CampaignReport"];
+    for live_checks in 4..=11 {
+        let f = Fake::new(At::Nowhere);
+        let d = delivery(&f, Trust::Guarded).deliver(&round(), &verification(), &verifier(), &Life::for_checks(live_checks));
+        assert!(!d.verified, "{live_checks}");
+        assert_eq!(d.reason, "The record: the run ended before the evidence check finished", "{live_checks}");
+        let mut want: Vec<String> = ["tree", "run", "sign", "check"].map(String::from).to_vec();
+        want.extend(writes[..live_checks - 2].iter().map(|w| format!("write {w}")));
+        want.push("remove".into());
+        assert_eq!(f.calls(), want, "ended after {} live checks", live_checks);
+    }
+    // Ended between the closes and the archive, and between the done close and the report, by name.
+    let f = Fake::new(At::Nowhere);
+    delivery(&f, Trust::Guarded).deliver(&round(), &verification(), &verifier(), &Life::for_checks(4));
+    assert!(!f.calls().iter().any(|c| c == "write CampaignArchiveEvidence"));
+    let f = Fake::new(At::Nowhere);
+    delivery(&f, Trust::Guarded).deliver(&round(), &verification(), &verifier(), &Life::for_checks(10));
+    assert_eq!(f.calls().iter().rfind(|c| c.starts_with("write Campaign")).map(String::as_str), Some("write CampaignClose"));
+    assert!(!f.calls().iter().any(|c| c == "write CampaignReport" || c == "verify"));
+}
+
 // ---------------------------------------------------------------- the report
 
 #[test]

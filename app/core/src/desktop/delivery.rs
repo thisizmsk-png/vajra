@@ -204,6 +204,15 @@ impl Delivery {
         out
     }
 
+    /// One record write, only while the run is live. `Err(None)`: the run has ended, so nothing was written.
+    /// `Err(Some(why))`: the write failed.
+    fn live_write(&self, req: &Request, life: &dyn RunLife) -> Result<(), Option<String>> {
+        if !live(life) {
+            return Err(None);
+        }
+        self.steps.write(req).map_err(Some)
+    }
+
     fn in_tree(&self, round: &RoundInput, mut ask: Ask, cmds: &Commands, tree: &Tree, life: &dyn RunLife, log: &mut Log) -> Delivered {
         // The approval is bound to this repository (codex P1 on #249): the git dir of the worktree the core just made
         // from the run's Start repository, never one a caller names.
@@ -246,32 +255,36 @@ impl Delivery {
             return log.fail("The evidence check", &why);
         }
         log.ok("check_evidence");
-        // The record. A Stop between writes lets the current one finish, then ends the run (16.5a).
+        // The record. Every write from here, and the verify, goes through `live_write` (or checks the run's life
+        // itself): a Stop, a timeout or a lost lead lets the current write finish and nothing after it runs (16.5a),
+        // so the signed record never says delivered or done for a run that ended (Claude on #270). Only the used
+        // approval's progress line above is written regardless: the proof needs it.
+        macro_rules! write_or_fail {
+            ($req:expr, $step:expr, $why:expr) => {
+                match self.live_write(&$req, life) {
+                    Ok(()) => {}
+                    Err(None) => return log.fail("The record", ENDED),
+                    #[allow(clippy::redundant_closure_call)]
+                    Err(Some(why)) => return log.fail($step, &($why)(why)),
+                }
+            };
+        }
         for c in &round.closes {
-            if !live(life) {
-                return log.fail("The record", ENDED);
-            }
             let req = Request::TasksClose {
                 slug: slug.into(), id: c.id.clone(), evidence: evidence.clone(), head: head.into(), commit: c.commit.clone(), branch: c.branch.clone(),
                 base_commit: round.base.clone(), changed: c.changed.clone(), repo: tree.worktree.clone(),
             };
-            if let Err(why) = self.steps.write(&req) {
-                return log.fail("Closing the tasks", &format!("task {} didn't close: {why}", c.id));
-            }
+            write_or_fail!(req, "Closing the tasks", |why: String| format!("task {} didn't close: {why}", c.id));
         }
         log.ok("tasks_close");
         let archive = Request::CampaignArchiveEvidence { slug: slug.into(), dir: tree.base.join(slug), head: head.into(), setup: cmds.setup.clone() };
-        if let Err(why) = self.steps.write(&archive) {
-            return log.fail("Archiving the evidence", &why);
-        }
+        write_or_fail!(archive, "Archiving the evidence", |why: String| why);
         log.ok("archive");
         let marked = |s: String| if self.cfg.trust == Trust::OutsideGuard { format!("{OUTSIDE_GUARD} {s}") } else { s };
         for c in &round.criteria {
             let command = cmds.of(&c.id);
             let req = Request::CampaignPass { slug: slug.into(), feature: c.id.clone(), evidence: bridge_text::one_line(&marked(format!("{command} (exit 0)")), EVIDENCE_MAX) };
-            if let Err(why) = self.steps.write(&req) {
-                return log.fail("Passing the criteria", &format!("criterion {} wasn't marked passed: {why}", c.id));
-            }
+            write_or_fail!(req, "Passing the criteria", |why: String| format!("criterion {} wasn't marked passed: {why}", c.id));
         }
         log.ok("pass");
         let line = bridge_text::one_line(&marked(format!("run {} delivered round {} at {head}", self.cfg.run, round.round)), PROGRESS_MAX);
@@ -281,19 +294,18 @@ impl Delivery {
             (Request::CampaignCheckpoint { slug: slug.into(), label }, "the delivered checkpoint"),
             (Request::CampaignClose { slug: slug.into(), status: CloseStatus::Done }, "the done close"),
         ] {
-            if let Err(why) = self.steps.write(&req) {
-                return log.fail("The record", &format!("{what} wasn't written: {why}"));
-            }
+            write_or_fail!(req, "The record", |why: String| format!("{what} wasn't written: {why}"));
         }
         log.ok("close");
         let report = self.report(round, cmds);
         let b64 = crate::providers::install::plan::base64(report.as_bytes());
         let req = Request::CampaignReport { slug: slug.into(), bytes: report.len(), check: fnv32(&b64), base64: b64 };
-        if let Err(why) = self.steps.write(&req) {
-            return log.fail("The delivery report", &why);
-        }
+        write_or_fail!(req, "The delivery report", |why: String| why);
         log.ok("report");
         // Last: the report re-signs the state, so the check covers every write above.
+        if !live(life) {
+            return log.fail("The record", ENDED);
+        }
         if let Err(why) = self.steps.verify() {
             return log.fail("The run record", &why);
         }
