@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-14T19:45:32Z",
+  "generated": "2026-11-15T08:20:43Z",
   "version": "0.6.2",
   "files": {
     ".github/workflows/ci.yml": "5de6e2f57792023584aa014a2019794e4f2714b7753e36cd0912aa168702e5a8",
@@ -309,7 +309,7 @@
     "tests/hooks/run-install-agents.sh": "0aecbc2e4214012a201242fb99399981c0df79bd0144b06114859e57cc413a79",
     "tests/hooks/run-install.sh": "3f3b124f663dc5bc758f26382d82fc3f9345047a5d83aa31fde9b8b9387c11bc",
     "tests/hooks/run-manifest-fresh-modes.sh": "a01512721c3d0e4a5be1307d938bf71dbb2afbe3b93cbd80a5f05a1ddd8331a6",
-    "tests/hooks/run-manifest-fresh.sh": "a7f1150671432ad57b923bdc3ab059b87aaabaefdbffe515208c76eb64086200",
+    "tests/hooks/run-manifest-fresh.sh": "2c1b44deedf74a38d528f2380ff9f8eb20f49a73f7aaaa80b2e43a89c84a460d",
     "tests/hooks/run-openssl-pin.sh": "6830f391da265d58814783e35630ce5709db5f5361fedfa26680d8bbcb3f49e0",
     "tests/hooks/run-post-tool-use.sh": "83b3d6f0d3f08d198460a1183b70de9f2d0d4e386e9eb7babd7b772dae8a65b2",
     "tests/hooks/run-pre-compact.sh": "009e71d052f163f59c898ee2bf96b131e3df85131000100f1199e12d1027bcb9",
