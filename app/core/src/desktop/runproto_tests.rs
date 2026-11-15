@@ -699,6 +699,15 @@ fn the_stuck_lead_question_comes_only_after_a_failed_round_and_kills_nothing() {
     assert_eq!(r.p.card().questions, [Question::StuckLead]);
     assert!(r.w.kills.lock().unwrap().is_empty() && r.status().is_none(), "the core never kills for this");
     r.p.keep_going();
+    // A human seat pick while the lead is quiet is not lead activity (#275): the question still comes on time.
+    r.clock.advance(899);
+    assert!(r.p.pick_seat("t1", "w1").is_ok());
+    r.p.tick();
+    assert!(r.p.card().questions.is_empty());
+    r.clock.advance(1);
+    r.p.tick();
+    assert_eq!(r.p.card().questions, [Question::StuckLead], "the pick pushed the stuck-lead question back");
+    r.p.keep_going();
     assert!(r.p.card().questions.is_empty());
     r.clock.advance(899);
     r.p.tick();

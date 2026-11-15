@@ -1794,8 +1794,12 @@ impl RunProtocol {
         let mut st = self.lock();
         let out = (|| {
             // An ended run takes no pick: after a refused save its tasks may be a plan that was never kept, and a
-            // pick's save would write that plan (bhishma LATER-b on this fix).
-            self.open(&mut st)?;
+            // pick's save would write that plan (bhishma LATER-b on this fix). The limits are enforced, but a pick is
+            // the human's, not lead activity: `last_call` is left alone so the stuck-lead wait keeps its time (#275).
+            self.enforce(&mut st);
+            if let Some((s, _)) = &st.status {
+                return refuse(RUN_ENDED, format!("the run has ended ({}), so a seat can no longer be picked", json!(s).as_str().unwrap_or_default()));
+            }
             let role = st.task(task).map(|t| t.spec.owner_role.clone()).ok_or(Refusal { code: INVALID, reason: format!("unknown task {}", plan_id(task)) })?;
             if !self.writer_seats(&role).any(|s| s.slot == slot) {
                 return refuse(INVALID, format!("seat {} has no {role} role", plan_id(slot)));
