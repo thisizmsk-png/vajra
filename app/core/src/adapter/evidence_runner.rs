@@ -560,14 +560,16 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     group_hook(pid);
     // Signal first, reap second: until `wait` below the leader is our unreaped child (running, or a zombie), so `pid`
     // still names the group it made (`process_group(0)`) and no other. ESRCH is fine. A failed peek (ECHILD: reaped
-    // elsewhere) proves nothing about the pid, so then nothing is signalled and the run fails below.
-    if !peek_failed {
-        // SAFETY: killpg on the group our own unreaped child leads.
-        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+    // elsewhere) proves nothing about the pid, so then nothing is signalled or waited on (a wait could block on another
+    // child given that pid, bhishma L1) and the run fails.
+    if peek_failed {
+        return RunOutcome::Failed("the evidence runner lost track of the script".into());
     }
+    // SAFETY: killpg on the group our own unreaped child leads.
+    unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
     let status = child.wait();
     let code = match ended {
-        Ok(()) => match status.ok().and_then(|s| s.code()).filter(|_| !peek_failed) {
+        Ok(()) => match status.ok().and_then(|s| s.code()) {
             Some(c) => c,
             None => return RunOutcome::Failed("the evidence script was killed".into()),
         },
