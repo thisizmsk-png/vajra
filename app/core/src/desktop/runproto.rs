@@ -1174,8 +1174,9 @@ impl RunProtocol {
         sanitise(s, &self.0.cfg.redact)
     }
 
-    /// Apply the checked plan and keep it in the plan store, before any question, log line or acknowledgement goes out.
-    /// An error is the store's: the caller ends the run.
+    /// Apply the checked plan and keep it in the plan store, before any seat question, the plan's log line or the
+    /// acknowledgement goes out (only a stale question's answered line is logged earlier). An error is the store's:
+    /// the caller ends the run.
     fn accept(&self, st: &mut St, p: PlanInput, merged: Vec<PlanTask>) -> Result<PlanAccepted, String> {
         let r = p.round;
         let clean = |t: &PlanTask| PlanTask { title: self.text(&t.title), brief: self.text(&t.brief), ..t.clone() };
@@ -1792,6 +1793,9 @@ impl RunProtocol {
     pub fn pick_seat(&self, task: &str, slot: &str) -> Result<(), Refusal> {
         let mut st = self.lock();
         let out = (|| {
+            // An ended run takes no pick: after a refused save its tasks may be a plan that was never kept, and a
+            // pick's save would write that plan (bhishma LATER-b on this fix).
+            self.open(&mut st)?;
             let role = st.task(task).map(|t| t.spec.owner_role.clone()).ok_or(Refusal { code: INVALID, reason: format!("unknown task {}", plan_id(task)) })?;
             if !self.writer_seats(&role).any(|s| s.slot == slot) {
                 return refuse(INVALID, format!("seat {} has no {role} role", plan_id(slot)));

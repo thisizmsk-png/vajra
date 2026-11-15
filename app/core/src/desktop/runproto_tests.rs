@@ -1824,6 +1824,10 @@ fn a_plan_that_cannot_be_saved_is_refused_and_ends_the_run_before_dispatch() {
     assert!(r.p.card().questions.is_empty(), "{:?}", r.p.card().questions);
     assert!(r.p.dispatch_worker("t1").is_err());
     assert!(crate::lock(&r.w.tickets).is_empty());
+    // The ended run takes no seat pick, so the refused plan is never written by one.
+    k.fail.store(false, Ordering::SeqCst);
+    assert!(r.p.pick_seat("t3", "w1").is_err());
+    assert!(crate::lock(&k.plans).is_empty(), "the refused plan was saved");
 }
 
 #[test]
