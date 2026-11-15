@@ -65,12 +65,13 @@ pub const CRED_STAND_INS: [&str; 10] = [
     ".netrc",
 ];
 const STEPS: usize = 9;
-/// The python a credential probe runs: every path listed in the file it is given is opened; one that opens prints its
+/// The python a credential probe runs: every path listed in the file it is given, one whole path per line (a temp dir
+/// name may hold a space, #272 review), is opened; one that opens prints its
 /// contents and the probe exits 0, so a refusal is every open failing, with the last refusal raised (non-zero exit).
 /// Each open the OS refuses with EPERM is counted and the count printed after `CRED_REFUSALS`, so a probe that failed
 /// before opening the files (a broken interpreter that still printed EPERM) can't pass: all `CRED_STAND_INS` must be
 /// refused one by one (#212 bhishma L-5).
-pub const CRED_PROBE: &str = "import sys,errno\nerr=None\nok=False\nn=0\nfor p in open(sys.argv[1]).read().split():\n try:\n  print(open(p).read());ok=True\n except OSError as e:\n  err=e\n  n+=e.errno==errno.EPERM\nprint(\"vajra-credential-refusals\",n)\nif not ok and err: raise err";
+pub const CRED_PROBE: &str = "import sys,errno\nerr=None\nok=False\nn=0\nfor p in open(sys.argv[1]).read().splitlines():\n try:\n  print(open(p).read());ok=True\n except OSError as e:\n  err=e\n  n+=e.errno==errno.EPERM\nprint(\"vajra-credential-refusals\",n)\nif not ok and err: raise err";
 /// What the probe prints before its count of refused opens.
 pub const CRED_REFUSALS: &str = "vajra-credential-refusals";
 

@@ -149,6 +149,26 @@ fn a_credential_probe_that_refused_without_opening_each_file_is_not_proof() {
     assert!(CRED_PROBE.contains(CRED_REFUSALS) && CRED_STAND_INS.len() == 10, "the fake's count matches the probe");
 }
 
+/// #272 review: the credential probe reads its path list one whole path per line, so stand-ins under a temp folder
+/// whose name holds spaces are each opened, not split into fragments. Run here without a sandbox, so every open
+/// succeeds: both stand-ins print and no refusal is counted.
+#[test]
+fn the_credential_probe_opens_whole_paths_that_hold_spaces() {
+    let d = tmp("cred probe with spaces");
+    let dir = d.join("a folder with  spaces");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("first stand-in"), dir.join("second\tstand-in"));
+    std::fs::write(&a, "stand-in-one\n").unwrap();
+    std::fs::write(&b, "stand-in-two\n").unwrap();
+    let list = d.join("cred-paths");
+    std::fs::write(&list, format!("{}\n{}\n", a.display(), b.display())).unwrap();
+    let out = std::process::Command::new("/usr/bin/python3").args(["-I", "-c", CRED_PROBE]).arg(&list).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout} {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("stand-in-one") && stdout.contains("stand-in-two"), "{stdout}");
+    assert!(stdout.contains(&format!("{CRED_REFUSALS} 0")), "{stdout}");
+}
+
 /// An MCP server runs outside the OS sandbox: a build that loads one under empty setting sources fails, though the
 /// guard, the deny rules and the sandbox all held.
 #[test]
