@@ -141,6 +141,7 @@ export const S = {
     agent: {
       title: "Agent",
       readySummary: (name: string, version: string | null) => `${name}${version ? ` ${version}` : ""}, signed in`,
+      unsureSummary: (name: string, version: string | null) => `${name}${version ? ` ${version}` : ""} installed, couldn't check sign-in`,
       signedOutSummary: (name: string) => `${name} installed, signed out`,
       noneSummary: "None installed",
       failedSummary: "Couldn't read this check",

@@ -11,7 +11,7 @@ import { Problem } from "../screens/states";
 import { openSignIn } from "../terminal/TerminalDock";
 import type { SetupList, SetupRow } from "../setupContract";
 import type { AgentInfo, Picked, Read, Repo, Repos, Tools } from "./model";
-import { agentReady, agentSignedOut, reason } from "./model";
+import { agentReady, agentSignedIn, agentSignedOut, agentUnsure, reason } from "./model";
 import type { CheckKind } from "./CheckRow";
 
 const C = S.welcome;
@@ -130,9 +130,9 @@ export function FolderBody({ repos, picked, onUse, busy, error, onLookAgain }: F
 
 interface AgentLine { kind: CheckKind; word: string }
 function lineOf(a: AgentInfo): AgentLine {
-  if (agentReady(a)) return { kind: "pass", word: C.agent.state.signed_in };
+  if (agentSignedIn(a)) return { kind: "pass", word: C.agent.state.signed_in };
   if (agentSignedOut(a)) return { kind: "warn", word: C.agent.state.signed_out };
-  if (a.row.state === "installed") return { kind: "todo", word: C.agent.state.cannot_tell };
+  if (agentUnsure(a)) return { kind: "warn", word: C.agent.state.cannot_tell };
   if (a.row.state === "broken") return { kind: "fail", word: S.setup.state.broken };
   return { kind: "todo", word: C.agent.state.not_installed };
 }

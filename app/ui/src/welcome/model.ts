@@ -39,14 +39,19 @@ export const reason = (e: unknown): string => {
 };
 
 /** An agent counts when it is installed and its own login check says signed in. "Cannot tell" never counts. */
-export const agentReady = (a: AgentInfo): boolean => a.row.state === "installed" && a.login === "signed_in";
+export const agentSignedIn = (a: AgentInfo): boolean => a.row.state === "installed" && a.login === "signed_in";
+/** Installed and the login check could not tell (no entry in the provider list, an old CLI, a timeout, a failed read). The
+ *  core's contract says that never blocks a start, so it counts, shown with the warn shape. */
+export const agentUnsure = (a: AgentInfo): boolean => a.row.state === "installed" && a.login === "cannot_tell";
+/** An agent a run can start with: signed in, or installed with the sign-in unknown. Only an explicit "signed out" blocks. */
+export const agentReady = (a: AgentInfo): boolean => agentSignedIn(a) || agentUnsure(a);
 /** Installed but signed out is the one state a click fixes. */
 export const agentSignedOut = (a: AgentInfo): boolean => a.row.state === "installed" && a.login === "signed_out";
 
 export function derive(i: { repos: Repos; picked: Picked; tools: Tools; agents: Read<AgentInfo[]>; engine: Read<boolean> }): Model {
   const list = Array.isArray(i.agents) ? i.agents : null;
   const toolsOk = i.tools !== "missing";
-  const ready = list?.find(agentReady);
+  const ready = list?.find(agentSignedIn) ?? list?.find(agentUnsure);
   const out = list?.find(agentSignedOut);
   const agentOk = !!ready;
   const engineOk = i.engine === true;
@@ -59,7 +64,10 @@ export function derive(i: { repos: Repos; picked: Picked; tools: Tools; agents: 
     ? { kind: "pass", word: C.word.pass, summary: C.folder.pickedSummary(i.picked!.name, i.picked!.root) }
     : need(i.repos.at === "found" ? C.folder.found(i.repos.list.length) : i.repos.at === "none" ? C.folder.none : i.repos.at === "failed" ? C.folder.failed : C.folder.looking);
 
-  const agent: Check = toolsOk && agentOk ? { kind: "pass", word: C.word.pass, summary: C.agent.readySummary(ready!.row.name, ready!.row.version) }
+  const agent: Check = toolsOk && agentOk
+    ? (agentSignedIn(ready!)
+      ? { kind: "pass", word: C.word.pass, summary: C.agent.readySummary(ready!.row.name, ready!.row.version) }
+      : { kind: "warn", word: C.agent.state.cannot_tell, summary: C.agent.unsureSummary(ready!.row.name, ready!.row.version) })
     : !toolsOk ? todo(C.agent.toolsSummary)
     : i.agents === "loading" ? todo(C.checking)
     : i.agents === "failed" ? todo(C.agent.failedSummary)

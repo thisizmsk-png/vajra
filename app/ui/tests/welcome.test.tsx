@@ -162,6 +162,18 @@ describe("welcome: the seven states in the design", () => {
     expect(window.location.hash).toContain("first=1");
   });
 
+  it("when the provider list fails, an installed agent with unknown sign-in does not block Start", async () => {
+    boot({ pre: { rows: GIT_OK, start_enabled: true }, claude: "installed", engine: true, extra: { provider_list: () => { throw { error: "io_error", detail: "no answer" }; } } });
+    fireEvent.click((await screen.findAllByRole("radio"))[0]);
+    const ask = await screen.findByLabelText(W.ask.label);
+    await waitFor(() => expect(startButton().getAttribute("aria-disabled")).toBeNull());
+    expect(within(rowHead(W.agent.title)).getByText(W.agent.state.cannot_tell)).toBeTruthy();
+    expect(screen.getByText(W.ready)).toBeTruthy();
+    fireEvent.change(ask, { target: { value: "Fix the date header" } });
+    fireEvent.click(startButton());
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "act_start_run")).toHaveLength(1));
+  });
+
   it("7 first run done: the Review view carries a one-time line about what the rows mean", async () => {
     boot({ listed: true }, `#/p/${P}/review?slug=fix-date&first=1`);
     expect(await screen.findByText(W.done.note)).toBeTruthy();
@@ -262,7 +274,14 @@ describe("welcome: what each check means (pure)", () => {
   const base = { repos: { at: "found" as const, list: REPOS, truncated: false }, picked: null, tools: "ok" as const, agents: [agent("installed", "signed_in")], engine: true };
   it("counts a check ready only on a clear yes; 'cannot tell' and a failed read never count", () => {
     expect(derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" } }).ready).toBe(3);
-    expect(derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" }, agents: [agent("installed", "cannot_tell")] }).agent.kind).toBe("todo");
+    expect(derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" }, agents: [agent("installed", "cannot_tell")] }).ready).toBe(3);
+    // An installed agent whose sign-in could not be checked counts (the core's contract: never blocks), shown with the warn shape.
+    const unsure = derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" }, agents: [agent("installed", "cannot_tell")] }).agent;
+    expect([unsure.kind, unsure.word]).toEqual(["warn", W.agent.state.cannot_tell]);
+    // A signed-in agent is preferred over an unsure one; a signed-out one still blocks.
+    expect(derive({ ...base, agents: [agent("installed", "cannot_tell"), agent("installed", "signed_in")] }).agent.kind).toBe("pass");
+    expect(derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" }, agents: [agent("installed", "signed_out")] }).ready).toBe(2);
+    expect(derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" }, agents: [agent("manual", "cannot_tell")] }).ready).toBe(2);
     expect(derive({ ...base, agents: "failed" }).agent.summary).toBe(W.agent.failedSummary);
     expect(derive({ ...base, engine: "failed" }).engine.kind).toBe("todo");
   });
