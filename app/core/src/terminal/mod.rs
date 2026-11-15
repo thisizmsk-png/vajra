@@ -363,6 +363,13 @@ impl Terminals {
         lock(&self.map).terms.len()
     }
 
+    /// Whether a user terminal's shell is still running, or one is being opened. D7: the engine install treats either
+    /// as the engine being in use, since a Claude Code session in it has the engine's hooks and workflows loaded.
+    pub fn any_live(&self) -> bool {
+        let r = lock(&self.map);
+        !r.opening.is_empty() || r.terms.values().any(|t| !t.exited.load(Ordering::SeqCst))
+    }
+
     fn get(&self, id: u32) -> Result<Arc<Term>, TermError> {
         lock(&self.map).terms.get(&id).cloned().ok_or(TermError::NotFound)
     }

@@ -67,12 +67,13 @@ pub struct EngineRow {
     pub one_click: bool,
 }
 
-/// The engine-scripts row: `installed` is the file detection, `installing` whether the install lock is held now.
-pub fn engine_row(installed: bool, installing: bool, marks: &Marks) -> EngineRow {
+/// The engine-scripts row: `installed` is the file detection, `installing` whether the install lock is held now,
+/// `interrupted` whether an engine install's journal is still pending (it reads Broken, so Repair is offered).
+pub fn engine_row(installed: bool, installing: bool, interrupted: bool, marks: &Marks) -> EngineRow {
     let cat = catalog::catalog().ok();
     let state = if installing {
         "installing"
-    } else if marks.any(crate::providers::install::engine::flow::ID).is_some() {
+    } else if interrupted || marks.any(crate::providers::install::engine::flow::ID).is_some() {
         "broken"
     } else if installed {
         "installed"
@@ -164,7 +165,7 @@ pub fn list_marked(p: &dyn Probe, engine_installed: bool, marks: &Marks) -> Setu
     SetupList {
         schema: SETUP_SCHEMA.into(),
         rows: cat.map(|c| c.harnesses.iter().map(|h| row(h, p, marks)).collect()).unwrap_or_default(),
-        engine: engine_row(engine_installed, false, marks),
+        engine: engine_row(engine_installed, false, false, marks),
     }
 }
 

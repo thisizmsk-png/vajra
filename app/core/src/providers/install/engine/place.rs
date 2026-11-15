@@ -66,6 +66,29 @@ pub struct Journal {
     pub previous: Option<(String, u64, u64)>,
     /// The staged copy's name in the work area and its identity.
     pub staged: (String, u64, u64),
+    /// The ownership record as it was before this install, put back by `roll_back` (commit replaces it before its
+    /// fallible cleanup of the previous copy). None in a journal from before this field: the record is left alone.
+    #[serde(default)]
+    pub prior: Option<Prior>,
+    /// The workflows and signature state from before this install, saved before either is changed, so recovery
+    /// after a crash puts them back too (not just the folder). None until they are saved.
+    #[serde(default)]
+    pub before: Option<Before>,
+}
+
+/// The ownership record before an install (None: there was none).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prior {
+    pub record: Option<Record>,
+}
+
+/// What an install changes outside the skill folder, as it was before: each shipped workflow's bytes (None: it wasn't
+/// there), the manifest signature (None: none) and whether the tamper flag was set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Before {
+    pub workflows: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    pub sig: Option<Vec<u8>>,
+    pub flag: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,7 +248,7 @@ impl Place {
         let (sd, si) = self.identity(&self.work, staged)?;
         match found {
             Found::Absent => {
-                let j = Journal { phase: Phase::Staged, previous: None, staged: (staged.to_string(), sd, si) };
+                let j = Journal { phase: Phase::Staged, previous: None, staged: (staged.to_string(), sd, si), prior: Some(Prior { record: self.record() }), before: None };
                 self.write_data(JOURNAL, &j)?;
                 self.work.rename(staged, &self.skills, SKILL, Rename::Exclusive).map_err(|e| if e.raw_os_error() == Some(libc::EEXIST) { Unsafe::TargetChanged } else { Unsafe::Io })?;
                 let j = Journal { phase: Phase::Swapped, ..j };
@@ -238,8 +261,12 @@ impl Place {
                     return Err(Unsafe::TargetChanged);
                 }
                 let prev = format!("previous-{}", random_hex());
-                let j = Journal { phase: Phase::Staged, previous: Some((prev.clone(), *dev, *ino)), staged: (staged.to_string(), sd, si) };
+                let j = Journal { phase: Phase::Staged, previous: Some((prev.clone(), *dev, *ino)), staged: (staged.to_string(), sd, si), prior: Some(Prior { record: self.record() }), before: None };
                 self.write_data(JOURNAL, &j)?;
+                #[cfg(test)]
+                if FAULT_AFTER_JOURNAL.with(|f| f.replace(false)) {
+                    return Err(Unsafe::Io);
+                }
                 // After the swap the old copy has the staging name; then it gets its own name. If anything stops
                 // between the two (an error or a crash), the journal stays and `roll_back` finds the old copy under the
                 // staging name by its identity (bhishma M1). The caller rolls back through the journal on an error.
@@ -309,8 +336,25 @@ impl Place {
         if self.work.stat_at(staged).map_err(|_| Unsafe::Io)?.is_some_and(|s| (s.dev, s.ino) == (*sd, *si)) {
             let _ = self.work.remove_tree(staged);
         }
+        // The record goes back to what it was, so the restored copy is still recognised as the app's own.
+        match &j.prior {
+            Some(Prior { record: Some(r) }) => self.write_data(RECORD, r)?,
+            Some(Prior { record: None }) => match std::fs::remove_file(self.data.join(RECORD)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(Unsafe::Io),
+                _ => {}
+            },
+            None => {}
+        }
         self.clear_journal();
         Ok(())
+    }
+
+    /// Save what the install is about to change outside the skill folder into the journal, before changing any of it,
+    /// so a crash after this point is recovered in full. Returns the journal as written.
+    pub fn save_before(&self, j: &Journal, before: Before) -> Result<Journal, Unsafe> {
+        let j = Journal { before: Some(before), ..j.clone() };
+        self.write_data(JOURNAL, &j)?;
+        Ok(j)
     }
 
     /// After a verified install: record it, and deal with the previous copy. It is deleted only if it is byte for
@@ -322,6 +366,10 @@ impl Place {
         let manifest_sha256 = self.skills.open_dir(SKILL).ok().and_then(|d| d.read(super::pack::MANIFEST, 16 << 20).ok()).map(|b| sha256_hex(&b));
         self.write_data(RECORD, &Record { version: version.to_string(), tgz_sha256: tgz_sha256.to_string(), dev, ino, manifest_sha256 })?;
         let mut kept = None;
+        #[cfg(test)]
+        if FAULT_COMMIT_CLEANUP.with(|f| f.replace(false)) {
+            return Err(Unsafe::Io);
+        }
         if let Some((prev, pd, pi)) = &j.previous {
             if self.work.stat_at(prev).map_err(|_| Unsafe::Io)?.is_some_and(|s| (s.dev, s.ino) == (*pd, *pi)) {
                 let d = self.work.open_dir(prev).map_err(|_| Unsafe::Io)?;
@@ -361,6 +409,10 @@ impl Place {
 thread_local! {
     /// Test only: make the next `swap_in` stop right after the swap, before the old copy is renamed (bhishma M1).
     pub static FAULT_AFTER_SWAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test only: make the next update's `swap_in` stop right after its first journal write, before any rename.
+    pub static FAULT_AFTER_JOURNAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test only: make the next `commit` fail after it wrote the new record, before it cleans up the previous copy.
+    pub static FAULT_COMMIT_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The plan's read-only view of the same folders: any that don't exist yet are None, and nothing is created.
@@ -382,10 +434,12 @@ impl PlanView {
             let at = skills.stat_at(SKILL).ok().flatten();
             let (_, sd, si) = &j.staged;
             let target_is_staged = at.is_some_and(|s| (s.dev, s.ino) == (*sd, *si));
+            // A crash right after the first journal write of an update leaves the old copy at the target, untouched.
+            let target_is_previous = matches!((&j.previous, at), (Some((_, pd, pi)), Some(s)) if (s.dev, s.ino) == (*pd, *pi));
             return match (&j.previous, at) {
                 (None, None) => Found::Absent,
                 (None, Some(_)) if target_is_staged => Found::Absent,
-                (Some((_, pd, pi)), Some(_)) if target_is_staged => match self.record() {
+                (Some((_, pd, pi)), Some(_)) if target_is_staged || target_is_previous => match self.record() {
                     Some(r) if (r.dev, r.ino) == (*pd, *pi) => Found::Ours { version: r.version, dev: *pd, ino: *pi },
                     _ => Found::UserCopy,
                 },

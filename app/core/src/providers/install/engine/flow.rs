@@ -309,6 +309,14 @@ pub fn installing(home: &Path) -> bool {
     unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) != 0 }
 }
 
+/// Whether an engine install was interrupted: its journal is still in the app's data folder (a crash between the swap
+/// and the commit leaves it, with the lock released and no Broken mark). Until a consented install recovers and
+/// passes, the copy at the target was never confirmed, so check 6 refuses and the Set up row reads Broken. Read only;
+/// any entry by that name counts, even one that can't be parsed (fail closed).
+pub fn interrupted(data: &Path) -> bool {
+    std::fs::symlink_metadata(data.join(place::JOURNAL)).is_ok()
+}
+
 /// Whether a campaign is open (C8): any `.active*` pointer in the campaigns folder. Read only.
 pub fn campaign_open(home: &Path) -> bool {
     std::fs::read_dir(home.join(".claude/vajra/campaigns")).is_ok_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(".active")))
@@ -342,7 +350,18 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
     if (m.busy)() {
         return fail("engine_in_use");
     }
-    // A crash left a journal: recover under this consent first (C6).
+    // A crash left a journal: recover under this consent first (C6). What the install changed outside the folder (the
+    // workflows and the signature) goes back first, from the journal; both steps can be repeated, and the journal is
+    // removed only once the folder is back too.
+    let pending = place.journal();
+    if let Some(b) = pending.as_ref().and_then(|j| j.before.as_ref()) {
+        let back = place.workflows_dir(m.uid).is_ok_and(|wf| workflows::restore(&wf, &workflows::Snapshot(b.workflows.clone())).is_ok());
+        restore_sig(m.home, &SigState { sig: b.sig.clone(), flag: b.flag });
+        if !back {
+            let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, "rollback_failed");
+            return done(Report::new(Outcome::Broken, Some("rollback_failed"), None), None);
+        }
+    }
     if place.recover().is_err() {
         let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, "rollback_failed");
         return done(Report::new(Outcome::Broken, Some("rollback_failed"), None), None);
@@ -381,9 +400,39 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
             return fail(e.code());
         }
     };
+    // Before the workflows or the signature change, save how they were into the journal (a crash from here on is
+    // recovered in full by the next consented run).
+    let journal = match place.save_before(&journal, place::Before { workflows: snap.0.clone(), sig: sig.sig.clone(), flag: sig.flag }) {
+        Ok(j) => j,
+        Err(_) => {
+            if place.roll_back(&journal).is_err() {
+                let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, "rollback_failed");
+                return done(Report::new(Outcome::Broken, Some("rollback_failed"), None), None);
+            }
+            return fail("io");
+        }
+    };
+    // The signing key after an installer attempt, whatever its exit (bhishma L2, Codex P1 on #213): a key that existed
+    // before must be the same file, unchanged, and any key left must be a safe one. Either failure keeps Broken, even
+    // after a rollback, since the old signatures no longer match the key.
+    let key_problem = || -> Option<&'static str> {
+        let now = key_id(m.home);
+        if key_before.is_some() && now != key_before {
+            Some("key_rewritten")
+        } else if now.is_some() && !key_safe(m.home, m.uid) {
+            Some("key_unsafe")
+        } else {
+            None
+        }
+    };
     let undo = |reason: &'static str, exit: Option<u32>| {
+        let key = key_problem();
         let ok = workflows::restore(&wf, &snap).is_ok() & place.roll_back(&journal).is_ok();
         restore_sig(m.home, &sig);
+        if let Some(k) = key {
+            let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, k);
+            return done(Report::new(Outcome::Broken, Some(k), exit), None);
+        }
         let restored = match &prep.found {
             Found::Absent => !m.home.join(".claude/skills").join(SKILL).exists(),
             Found::Ours { .. } => place.skills.open_dir(SKILL).is_ok_and(|d| place::unmodified(&d) || matches!(place.found(), Found::Ours { .. })),

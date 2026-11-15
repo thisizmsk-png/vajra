@@ -51,6 +51,10 @@ impl World {
             ("package.json", pkg.into_bytes(), 0o644),
             ("scripts/install.sh", installer.as_bytes().to_vec(), 0o755),
             ("scripts/vajra-campaign.sh", format!("echo campaign {version}").into_bytes(), 0o755),
+            // The rest of check 6's engine files, so an installed fake engine passes it.
+            ("scripts/vajra-verify-work.sh", b"echo verify".to_vec(), 0o755),
+            ("scripts/vajra_tasks.py", b"# tasks".to_vec(), 0o644),
+            ("scripts/vajra_kb.py", b"# kb".to_vec(), 0o644),
             ("hooks/session-start.sh", check.as_bytes().to_vec(), 0o755),
             ("workflows/vajra-deliver.js", format!("// deliver {version}").into_bytes(), 0o644),
         ];
@@ -441,6 +445,122 @@ fn a_crash_between_the_swap_and_the_rename_is_recovered() {
     let p = w.plan();
     assert_eq!(w.run(&p).report.outcome, Outcome::Installed);
     assert_eq!(w.marks().any(ID), None);
+}
+
+/// Codex P1 on #213: a crash after the swap, before verify and commit, releases the lock and writes no Broken mark,
+/// while the unconfirmed new copy (with a tested version) is at the target. Check 6 must refuse it until a consented
+/// install recovers and passes; the Set up row reads Broken meanwhile.
+#[test]
+fn a_crash_after_the_swap_keeps_runs_off_until_a_passing_install() {
+    use crate::providers::launch::engine_ready;
+    let mut w = World::new("p1-launch", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    assert!(engine_ready(&w.home, &w.data, &w.marks()).is_ok(), "{:?}", engine_ready(&w.home, &w.data, &w.marks()));
+    w.bundle(GOOD, "0.6.3");
+    let p = w.plan();
+    let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
+    let staged = place.stage(&p.engine, &w.pin.sha256).unwrap();
+    place::FAULT_AFTER_SWAP.with(|f| f.set(true));
+    assert!(place.swap_in(&staged, &p.found).is_err(), "the crash: stopped after the swap");
+    drop(place);
+    assert!(!installing(&w.home), "the lock is released");
+    assert_eq!(w.marks().any(ID), None, "and no Broken mark was written");
+    assert!(std::fs::read_to_string(w.skill().join("package.json")).unwrap().contains("0.6.3"), "the unconfirmed copy is in place");
+    for _ in 0..2 {
+        assert_eq!(engine_ready(&w.home, &w.data, &w.marks()).unwrap_err().code, "engine_broken");
+    }
+    assert!(interrupted(&w.data), "reading it never clears it");
+    // The consented install recovers first, then installs and commits; runs are allowed again.
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    assert!(!interrupted(&w.data));
+    assert!(engine_ready(&w.home, &w.data, &w.marks()).is_ok());
+}
+
+/// Codex P1 on #213: an installer that replaces an existing key and then fails still marks Broken after the rollback,
+/// since every signature made with the old key is now invalid.
+#[test]
+fn a_key_replaced_by_a_failing_installer_still_marks_the_engine_broken() {
+    let w = World::new("key-fail", "#!/bin/bash\nV=\"$HOME/.claude/vajra\"\nrm -f \"$V/.hmac-key\"\nprintf '%064d\\n' 1 > \"$V/.hmac-key\"\nchmod 600 \"$V/.hmac-key\"\nexit 1\n", "0.6.2");
+    let v = w.vajra();
+    std::fs::create_dir_all(&v).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&v, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(v.join(".hmac-key"), format!("{}\n", "a".repeat(64))).unwrap();
+    std::fs::set_permissions(v.join(".hmac-key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let d = w.run(&w.plan());
+    assert_eq!((d.report.outcome, d.report.reason), (Outcome::Broken, Some("key_rewritten")), "{:?}", d.report);
+    assert_eq!(w.marks().any(ID).as_deref(), Some("key_rewritten"));
+    assert!(!w.skill().exists(), "the folder is still rolled back");
+}
+
+/// Codex P1 on #213: a crash after the new workflows and signature were written, then a retry that fails. Recovery
+/// puts the workflows and signature back from the journal, so the failed retry leaves the old engine with its own.
+#[test]
+fn a_crash_after_signing_then_a_failed_retry_leaves_the_old_engine_whole() {
+    let mut w = World::new("p1-snap", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    let wf = w.home.join(".claude/workflows/vajra-deliver.js");
+    let sig = std::fs::read(w.vajra().join("manifest.sig")).unwrap();
+    // The interrupted install: swapped, its "before" saved, then the new workflow and signature written; no commit.
+    w.bundle(GOOD, "0.6.3");
+    let p = w.plan();
+    let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
+    let staged = place.stage(&p.engine, &w.pin.sha256).unwrap();
+    let j = place.swap_in(&staged, &p.found).unwrap();
+    let before = place::Before { workflows: [("vajra-deliver.js".to_string(), Some(std::fs::read(&wf).unwrap()))].into(), sig: Some(sig.clone()), flag: false };
+    place.save_before(&j, before).unwrap();
+    std::fs::write(&wf, "// deliver 0.6.3").unwrap();
+    std::fs::write(w.vajra().join("manifest.sig"), "signed-by-the-interrupted-install").unwrap();
+    drop(place);
+    // The retry fails: the old copy comes back with its own workflow and signature.
+    w.bundle("#!/bin/bash\nexit 3\n", "0.6.4");
+    let d = w.run(&w.plan());
+    assert_eq!((d.report.outcome, d.report.reason), (Outcome::RolledBack, Some("install_failed")), "{:?}", d.report);
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.2");
+    assert_eq!(std::fs::read_to_string(&wf).unwrap(), "// deliver 0.6.2");
+    assert_eq!(std::fs::read(w.vajra().join("manifest.sig")).unwrap(), sig, "the old engine's own signature");
+    assert!(!interrupted(&w.data));
+}
+
+/// Codex P2 on #213: a crash right after an update's first journal write, before any rename. The old copy is still at
+/// the target: the plan still sees the app's own copy (not a user copy), and the consented run recovers and installs.
+#[test]
+fn a_crash_right_after_the_first_journal_write_is_recovered() {
+    let mut w = World::new("p2-staged", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    w.bundle(GOOD, "0.6.3");
+    let p = w.plan();
+    let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
+    let staged = place.stage(&p.engine, &w.pin.sha256).unwrap();
+    place::FAULT_AFTER_JOURNAL.with(|f| f.set(true));
+    assert!(place.swap_in(&staged, &p.found).is_err(), "the crash: stopped after the journal, before any rename");
+    assert!(place.journal().is_some());
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.2", "the target is untouched");
+    drop(place);
+    assert!(matches!(w.plan_with(false), Offer::Plan(_)), "still the app's own copy, so recovery is offered");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.3");
+    let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
+    assert!(place.journal().is_none());
+    assert!(place.strays().is_empty(), "{:?}", place.strays());
+}
+
+/// Codex P2 on #213: commit writes the new record, then its cleanup of the previous copy fails. The rollback puts the
+/// old record back too, so the restored copy is still the app's own and the next plan offers an update, not a manual.
+#[test]
+fn a_failed_commit_cleanup_restores_the_old_record() {
+    let mut w = World::new("p2-record", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    let record = std::fs::read(w.data.join(place::RECORD)).unwrap();
+    w.bundle(GOOD, "0.6.3");
+    place::FAULT_COMMIT_CLEANUP.with(|f| f.set(true));
+    let d = w.run(&w.plan());
+    assert_eq!((d.report.outcome, d.report.reason), (Outcome::RolledBack, Some("io")), "{:?}", d.report);
+    assert_eq!(std::fs::read(w.data.join(place::RECORD)).unwrap(), record, "the old record is back");
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), "echo campaign 0.6.2");
+    let p = w.plan();
+    assert!(matches!(p.plan.pin, Pin::Engine { case: "update", .. }), "{:?}", p.plan.pin);
+    assert_eq!(w.run(&p).report.outcome, Outcome::Installed);
 }
 
 /// bhishma L2: an existing key that the installer replaces (a new file, or the same file rewritten) marks Broken.

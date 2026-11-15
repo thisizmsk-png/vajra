@@ -6165,3 +6165,33 @@ fn a_codex_lead_with_a_readable_vajra_dir_is_ended() {
     }
     assert!(!app.sup.is_running(&stream).unwrap(), "a readable Vajra dir ends the Lead");
 }
+
+#[test]
+fn a_live_user_terminal_counts_as_the_engine_being_in_use() {
+    use std::sync::atomic::AtomicBool;
+    let t = Tmp::new();
+    let app = t.app();
+    app.set_resources(t.home().join("res"));
+    assert!(!app.with_engine(|m| (m.busy)()).unwrap(), "no terminal registry wired means not busy");
+    let live = Arc::new(AtomicBool::new(true));
+    let l = live.clone();
+    app.set_terminals_live(Arc::new(move || l.load(Ordering::SeqCst)));
+    assert!(app.with_engine(|m| (m.busy)()).unwrap(), "a live terminal makes the engine busy");
+    live.store(false, Ordering::SeqCst);
+    assert!(!app.with_engine(|m| (m.busy)()).unwrap(), "once every terminal ends the engine is free");
+}
+
+#[test]
+fn a_terminal_opening_and_an_engine_install_exclude_each_other() {
+    let t = Tmp::new();
+    let app = t.app();
+    {
+        let _open = app.terminal_open_guard().expect("no install runs, so a terminal may open");
+        assert!(app.engine_excl.try_write().is_err(), "an install cannot start while a terminal opens");
+    }
+    {
+        let _install = app.engine_excl.try_write().unwrap();
+        assert!(app.terminal_open_guard().is_none(), "no terminal opens while the engine is replaced");
+    }
+    assert!(app.terminal_open_guard().is_some());
+}

@@ -101,12 +101,16 @@ pub fn launchable_marked(route_available: bool, choice: &Choice, kind: Kind, age
 }
 
 /// Check 6, once per proposal: the engine scripts are installed under `home`, at a version the core was tested with,
-/// not marked Broken by a failed engine install, and not being installed right now (D7, bhishma C8, C9). The engine's
-/// mark is only read here, never cleared: it ends only with a passing engine install.
-pub fn engine_ready(home: &Path, marks: &crate::providers::install::marks::Marks) -> Result<(), Refused> {
+/// not marked Broken by a failed engine install, not left by an interrupted one (its journal is still in `data`), and
+/// not being installed right now (D7, bhishma C8, C9). The engine's mark and journal are only read here, never
+/// cleared: they end only with a consented, passing engine install.
+pub fn engine_ready(home: &Path, data: &Path, marks: &crate::providers::install::marks::Marks) -> Result<(), Refused> {
     use crate::providers::install::engine::flow;
     if flow::installing(home) {
         return refuse("engine_installing", "the engine is being installed. Start again when Set up finishes.");
+    }
+    if flow::interrupted(data) {
+        return refuse("engine_broken", format!("the last engine install stopped before it was confirmed. {ENGINE_INSTALL}"));
     }
     if let Some(reason) = marks.any(flow::ID) {
         return refuse("engine_broken", format!("the last engine install could not be undone cleanly ({reason}). {ENGINE_INSTALL}"));

@@ -124,13 +124,17 @@ fn the_engine_row_shows_a_broken_mark_and_an_install_in_progress() {
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     let marks = Marks::at(&d);
-    assert_eq!(engine_row(true, false, &marks).state, "installed");
+    assert_eq!(engine_row(true, false, false, &marks).state, "installed");
+    // An interrupted install (its journal still pending) reads Broken too, so Repair is offered.
+    let pending = engine_row(true, false, true, &marks);
+    assert_eq!(pending.state, "broken");
+    assert!(!pending.installed);
     marks.set("engine", &d, None, "rollback_failed").unwrap();
-    let broken = engine_row(true, false, &marks);
+    let broken = engine_row(true, false, false, &marks);
     assert_eq!(broken.state, "broken");
     assert!(!broken.installed);
-    assert_eq!(engine_row(true, false, &marks).state, "broken", "reading the mark never clears it");
-    let busy = engine_row(true, true, &marks);
+    assert_eq!(engine_row(true, false, false, &marks).state, "broken", "reading the mark never clears it");
+    let busy = engine_row(true, true, false, &marks);
     assert_eq!(busy.state, "installing");
     assert!(!busy.one_click);
     let _ = std::fs::remove_dir_all(&d);

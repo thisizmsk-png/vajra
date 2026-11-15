@@ -383,6 +383,11 @@ pub struct App {
     /// The app bundle's resources folder (Tauri's resource dir), where the packed engine is (D7). `None` until the
     /// window sets it; the engine install is then not offered (`engine_not_bundled`).
     resources: Mutex<Option<PathBuf>>,
+    /// D7 (Codex P1 on #213): an engine install and a user terminal's open exclude each other in this app. The install
+    /// holds it for writing for its whole run; an open holds it for reading while it starts the shell. Neither waits.
+    engine_excl: std::sync::RwLock<()>,
+    /// D7: whether any user terminal is live or opening. Set by main.rs, which owns the terminal registry.
+    terminals_live: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// ADR 16.6: the global git baseline (taken first thing in `open`) and the worker runtime, built on first use.
     workers: Arc<worker_host::WorkerHost>,
 }
@@ -512,6 +517,8 @@ impl App {
             closeout: closeout::Store::open(data),
             consents: Default::default(),
             resources: Mutex::new(None),
+            engine_excl: Default::default(),
+            terminals_live: Mutex::new(None),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -1131,7 +1138,8 @@ impl App {
         let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
         let marks = crate::providers::install::marks::Marks::at(&self.data);
         let mut l = crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks);
-        l.engine = crate::providers::setup::engine_row(engine, crate::providers::install::engine::flow::installing(&self.home), &marks);
+        use crate::providers::install::engine::flow;
+        l.engine = crate::providers::setup::engine_row(engine, flow::installing(&self.home), flow::interrupted(&self.data), &marks);
         serde_json::to_value(l).map_err(|e| fail("internal", e))
     }
 
@@ -1146,15 +1154,37 @@ impl App {
         crate::providers::catalog::catalog().is_ok_and(|c| c.engine_scripts.verified())
     }
 
+    /// The terminal registry's liveness check (main.rs owns the registry). D7: the engine install counts a live user
+    /// terminal as the engine being in use.
+    pub fn set_terminals_live(&self, live: Arc<dyn Fn() -> bool + Send + Sync>) {
+        *lock(&self.terminals_live) = Some(live);
+    }
+
+    /// Held by a user terminal while it opens. None while an engine install runs: the open is refused, so no shell
+    /// starts on an engine that is being replaced (Codex P1 on #213).
+    pub fn terminal_open_guard(&self) -> Option<std::sync::RwLockReadGuard<'_, ()>> {
+        match self.engine_excl.try_read() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    fn terminals_live(&self) -> bool {
+        let live = lock(&self.terminals_live).clone();
+        live.is_some_and(|f| f())
+    }
+
     /// Hand `f` the engine install's view of this app: the home, data and resources folders, the compiled-in pin, the
-    /// system tools and what counts as busy (C8: an active run, any live session but a Setup one, an open campaign).
+    /// system tools and what counts as busy (C8: an active run, any live session but a Setup one, an open campaign, a
+    /// live user terminal).
     fn with_engine<R>(&self, f: impl FnOnce(&crate::providers::install::engine::flow::Machine) -> R) -> Result<R, &'static str> {
         use crate::providers::install::engine::{flow, Pin};
         let resources = lock(&self.resources).clone().ok_or("engine_not_bundled")?;
         let (pin, tools) = (Pin::built(), flow::Tools::system());
         // SAFETY: geteuid has no preconditions.
         let uid = unsafe { libc::geteuid() };
-        let busy = || self.active_run_count() > 0 || self.sup.any_running_besides_setup() || flow::campaign_open(&self.home);
+        let busy = || self.active_run_count() > 0 || self.sup.any_running_besides_setup() || flow::campaign_open(&self.home) || self.terminals_live();
         Ok(f(&flow::Machine { home: &self.home, data: &self.data, resources: &resources, pin: &pin, tools: &tools, uid, busy: &busy }))
     }
 
@@ -1179,6 +1209,12 @@ impl App {
             return Err(fail("source_not_verified", "the engine install is Install it yourself"));
         }
         let _running = self.consents.begin(flow::ID).map_err(|e| fail(e.code(), "setup refused"))?;
+        // No user terminal may open while the engine is replaced; one that is opening now makes this refuse instead.
+        let _excl = match self.engine_excl.try_write() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(fail("engine_in_use", "a terminal is opening")),
+        };
         let audit = self.claude.join("vajra/audit.log");
         let done = self
             .with_engine(|m| {
