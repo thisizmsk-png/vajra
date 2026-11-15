@@ -43,7 +43,7 @@ pub struct Tools {
 
 impl Tools {
     pub fn system() -> Tools {
-        let clt = std::process::Command::new("/usr/bin/xcode-select").arg("-p").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        let clt = crate::spawnlock::status(std::process::Command::new("/usr/bin/xcode-select").arg("-p").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())).is_ok_and(|s| s.success());
         Tools { bash: "/bin/bash".into(), jq: "/usr/bin/jq".into(), openssl: "/usr/bin/openssl".into(), clt }
     }
 
@@ -477,7 +477,7 @@ pub fn session_check(ctx_env: &crate::providers::install::env::SetupEnv) -> impl
         for (k, v) in ctx_env.vars() {
             cmd.env(k, v);
         }
-        cmd.status().is_ok_and(|s| s.success())
+        crate::spawnlock::status(&mut cmd).is_ok_and(|s| s.success())
     }
 }
 

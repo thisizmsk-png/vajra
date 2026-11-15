@@ -139,6 +139,9 @@ fn pack_engine() {
         assert!(p.tree_ok, "engine pack: a release needs every engine file to match manifest.json; these differ: {:?}", p.mismatched);
         let package = std::fs::read(repo.join("package.json")).expect("package.json");
         assert!(engine_pack::engine_version(&package).is_some_and(|(_, ok)| ok), "engine pack: a release needs the engine version {} inside the tested range", p.version);
+        // The spawn lock (clippy.toml) guards the running app's threads and fds; this build script is its own
+        // single-threaded process at compile time and cannot reach crate::spawnlock.
+        #[allow(clippy::disallowed_methods)]
         let clean = std::process::Command::new("git").arg("-C").arg(&repo).args(["diff", "--quiet", "HEAD", "--"]).args(listed.keys()).arg(engine_pack::MANIFEST).status();
         assert!(clean.is_ok_and(|s| s.success()), "engine pack: a release needs the packed engine files committed (git diff shows changes)");
     } else if !p.tree_ok {
