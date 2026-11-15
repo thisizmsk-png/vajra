@@ -52,6 +52,9 @@
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
 /* The page title stands clear of the first section heading; flush, the two read as one two-line title. */
 h1.v-run__name { margin-bottom: var(--space-lg); }
+/* The one-time line on the Run screen after the first run from the welcome */
+.v-run__first { display: flex; align-items: center; gap: var(--space-md); margin-bottom: var(--space-lg); padding: var(--space-sm) var(--space-md); border-left: 2px solid var(--c-border-strong); background: var(--c-surface); border-radius: 0 var(--radius-md) var(--radius-md) 0; }
+.v-run__first > :first-child { flex: 1; min-width: 0; }
 .v-run__row { display: flex; align-items: center; gap: var(--space-md); height: 100%; border-bottom: 1px solid var(--c-border); }
 .v-run__row > span { flex: 1; }
 .v-run__row > .v-badge { flex: none; }
