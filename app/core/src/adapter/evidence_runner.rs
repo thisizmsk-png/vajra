@@ -528,7 +528,9 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
     let mut f = std::fs::File::from(rd);
     let (mut line, mut chunk) = (Vec::new(), [0u8; 8192]);
     let start = std::time::Instant::now();
-    let (mut exited, mut eof) = (None::<(Option<i32>, std::time::Instant)>, false);
+    // `exited` is seen without reaping (codex L2 on #234): the leader stays a zombie, so its pid, and with it the
+    // number of the group it leads, can't be handed to another process before the group is signalled below.
+    let (mut exited, mut eof, mut peek_failed) = (None::<std::time::Instant>, false, false);
     let ended = loop {
         while !eof && line.len() <= EVIDENCE_MAX {
             match f.read(&mut chunk) {
@@ -540,27 +542,35 @@ pub fn run(profile: &Profile, r: &EvidenceRun) -> RunOutcome {
             }
         }
         if exited.is_none() {
-            match child.try_wait() {
-                Ok(Some(s)) => exited = Some((s.code(), std::time::Instant::now())),
-                Ok(None) => {}
-                Err(_) => exited = Some((None, std::time::Instant::now())),
+            match exited_unreaped(pid) {
+                Ok(true) => exited = Some(std::time::Instant::now()),
+                Ok(false) => {}
+                Err(_) => (exited, peek_failed) = (Some(std::time::Instant::now()), true),
             }
         }
         match exited {
             _ if !nonblocking => break Err("couldn't read the evidence pipe"),
             _ if line.len() > EVIDENCE_MAX => break Err("the evidence script returned no single evidence line"),
-            Some((code, _)) if eof => break Ok(code),
-            Some((_, at)) if at.elapsed() >= EOF_GRACE => break Err("the evidence channel stayed open after the script ended"),
+            Some(_) if eof => break Ok(()),
+            Some(at) if at.elapsed() >= EOF_GRACE => break Err("the evidence channel stayed open after the script ended"),
             _ if start.elapsed() >= r.limit => break Err("the evidence check ran past its time limit"),
             _ => std::thread::sleep(Duration::from_millis(20)),
         }
     };
-    // SAFETY: the group this child leads (`process_group(0)`); ESRCH is fine.
-    unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
-    let _ = child.wait();
+    group_hook(pid);
+    // Signal first, reap second: until `wait` below the leader is our unreaped child (running, or a zombie), so `pid`
+    // still names the group it made (`process_group(0)`) and no other. ESRCH is fine. A failed peek (ECHILD: reaped
+    // elsewhere) proves nothing about the pid, so then nothing is signalled and the run fails below.
+    if !peek_failed {
+        // SAFETY: killpg on the group our own unreaped child leads.
+        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+    }
+    let status = child.wait();
     let code = match ended {
-        Ok(Some(c)) => c,
-        Ok(None) => return RunOutcome::Failed("the evidence script was killed".into()),
+        Ok(()) => match status.ok().and_then(|s| s.code()).filter(|_| !peek_failed) {
+            Some(c) => c,
+            None => return RunOutcome::Failed("the evidence script was killed".into()),
+        },
         Err(why) => return RunOutcome::Failed(why.into()),
     };
     if code == 2 {
@@ -627,6 +637,39 @@ type StageHook = Option<Box<dyn Fn(&str)>>;
 thread_local! {
     /// Test-only: runs at each stage of making the run's tmp ("before-create", "after-create"), to swap it for a link.
     pub(super) static TMP_HOOK: std::cell::RefCell<StageHook> = const { std::cell::RefCell::new(None) };
+}
+
+/// Has our child `pid` exited? Reads its state without reaping it (`WNOWAIT`), so it stays waitable and its pid stays
+/// reserved for the group signal `run` sends before it reaps (as the worker self-test does). EINTR reads as not yet.
+fn exited_unreaped(pid: u32) -> std::io::Result<bool> {
+    // SAFETY: a zeroed siginfo_t is a valid out-parameter; waitid only writes it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: waits on our own child by pid; WNOHANG never blocks, WNOWAIT leaves it unreaped.
+    let rc = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        return if e.kind() == std::io::ErrorKind::Interrupted { Ok(false) } else { Err(e) };
+    }
+    // SAFETY: si_pid is set by waitid when it reports a child, and left zeroed when WNOHANG finds none.
+    Ok(unsafe { info.si_pid() } == pid as libc::pid_t)
+}
+
+#[cfg(test)]
+type PidHook = Option<Box<dyn Fn(u32)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs with the leader's pid just before `run` signals its group, so a test can see it isn't reaped yet.
+    pub(super) static GROUP_HOOK: std::cell::RefCell<PidHook> = const { std::cell::RefCell::new(None) };
+}
+
+fn group_hook(_pid: u32) {
+    #[cfg(test)]
+    GROUP_HOOK.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f(_pid)
+        }
+    });
 }
 
 fn tmp_hook(_stage: &str) {
