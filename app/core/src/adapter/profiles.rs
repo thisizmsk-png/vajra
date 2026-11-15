@@ -1021,10 +1021,10 @@ fn user_deny_forms(home: &Path, entry: &str) -> Vec<String> {
     } else {
         format!("{home_s}/.claude/{}", entry.strip_prefix("./").unwrap_or(entry))
     };
-    let given = abs.trim_end_matches('/').to_string();
-    if given.is_empty() {
-        return Vec::new();
-    }
+    // Every form here is absolute, so trimming the separators off the filesystem root leaves it empty: keep the root
+    // itself, a user deny of the whole filesystem, rather than dropping it (#272 review).
+    let trimmed = abs.trim_end_matches('/');
+    let given = if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() };
     let mut out = vec![given.clone()];
     if !given.contains(['*', '?', '[', ']', '{', '}']) {
         if let Some(real) = std::fs::canonicalize(&given).ok().and_then(|r| r.to_str().map(|s| s.trim_end_matches('/').to_string())) {

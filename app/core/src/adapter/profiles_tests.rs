@@ -422,6 +422,29 @@ fn the_worker_sandbox_refuses_reads_of_every_credential_path_given_and_real() {
     assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).is_err());
 }
 
+/// #272 review: a user deny of the whole filesystem, in any spelling, stays a deny of the root; it is never trimmed to
+/// nothing and dropped, which would leave the worker with only Vajra's own denies.
+#[test]
+fn a_users_deny_of_the_filesystem_root_carries_over() {
+    let d = tmpdir("carry-root");
+    let (home, work, repo, data, tmp) = (d.join("home"), d.join("work"), d.join("repo"), d.join("data"), d.join("tmp"));
+    for p in [&home, &work, &repo, &data, &tmp] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    let ours: Vec<String> = serde_json::from_value(
+        serde_json::from_str::<Value>(&claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).unwrap()).unwrap()["sandbox"]["filesystem"]["denyRead"].clone(),
+    )
+    .unwrap();
+    for root in ["/", "//", "///"] {
+        let c = claude_carry_over(Some(&json!({"sandbox": {"filesystem": {"denyRead": [root]}}}).to_string()));
+        assert_eq!(c.deny_read, vec![root.to_string()]);
+        let v: Value = serde_json::from_str(&claude_worker_flag_with(&home, &work, std::slice::from_ref(&repo), &data, &tmp, &c).unwrap()).unwrap();
+        let all: Vec<String> = serde_json::from_value(v["sandbox"]["filesystem"]["denyRead"].clone()).unwrap();
+        assert_eq!(all[..ours.len()], ours[..], "{root}: ours first");
+        assert_eq!(all[ours.len()..], ["/".to_string()][..], "{root}: the root is kept as one deny");
+    }
+}
+
 /// Owner rule (keep users' CLI settings with ours on top), #212 codex M1: the user's own `sandbox.filesystem.denyRead`
 /// entries are added after Vajra's; nothing else from their sandbox, permissions or hooks reaches the flag.
 #[test]
