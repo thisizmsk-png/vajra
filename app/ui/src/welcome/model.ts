@@ -18,7 +18,10 @@ export type Tools = "ok" | "missing" | "unknown";
 /** A read that has not answered yet, or failed, is its own state: it is never shown as "none installed". */
 export type Read<T> = T | "loading" | "failed";
 
-export interface AgentInfo { row: SetupRow; login: LoginState }
+/** The agents the core can start a run with (its fixed adapter list). The provider list covers only these; the setup catalog has more. */
+export const STARTABLE: readonly string[] = ["claude", "codex"];
+/** `startable`: the core can start a run with this agent. Without it an unknown sign-in is not a green light. */
+export interface AgentInfo { row: SetupRow; login: LoginState; startable: boolean }
 export interface Check { kind: CheckKind; word: string; summary: string }
 export interface Model {
   folder: Check;
@@ -42,7 +45,7 @@ export const reason = (e: unknown): string => {
 export const agentSignedIn = (a: AgentInfo): boolean => a.row.state === "installed" && a.login === "signed_in";
 /** Installed and the login check could not tell (no entry in the provider list, an old CLI, a timeout, a failed read). The
  *  core's contract says that never blocks a start, so it counts, shown with the warn shape. */
-export const agentUnsure = (a: AgentInfo): boolean => a.row.state === "installed" && a.login === "cannot_tell";
+export const agentUnsure = (a: AgentInfo): boolean => a.row.state === "installed" && a.login === "cannot_tell" && a.startable;
 /** An agent a run can start with: signed in, or installed with the sign-in unknown. Only an explicit "signed out" blocks. */
 export const agentReady = (a: AgentInfo): boolean => agentSignedIn(a) || agentUnsure(a);
 /** Installed but signed out is the one state a click fixes. */

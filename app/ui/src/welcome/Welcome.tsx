@@ -16,7 +16,7 @@ import { useSetup } from "../screens/settings/SetupPanel";
 import { onSignInEnded } from "../terminal/TerminalDock";
 import { AgentBody, EngineBody, FolderBody } from "./Bodies";
 import { CheckList, CheckRow } from "./CheckRow";
-import { derive, reason } from "./model";
+import { derive, reason, STARTABLE } from "./model";
 import type { AgentInfo, Picked, Read, Repo, Repos, Tools } from "./model";
 import "./welcome.css";
 
@@ -84,7 +84,11 @@ export function Welcome({ onAdded, onStarted }: { onAdded: () => void; onStarted
   const agents: Read<AgentInfo[]> = useMemo(() => {
     if (setup.error) return "failed";
     if (!setup.list || !provs.done) return "loading";
-    return setup.list.rows.map((row) => ({ row, login: provs.list?.find((p) => p.id === row.id)?.login.state ?? "cannot_tell" }));
+    return setup.list.rows.map((row) => {
+      const entry = provs.list?.find((p) => p.id === row.id);
+      // The provider list answered: an agent with no entry in it is one the core cannot start. It failed: trust only the fixed ids.
+      return { row, login: entry?.login.state ?? "cannot_tell", startable: provs.list ? !!entry : STARTABLE.includes(row.id) };
+    });
   }, [setup.list, setup.error, provs]);
   const engineRead: Read<boolean> = setup.error ? "failed" : setup.list ? setup.list.engine.installed : "loading";
   const tools = toolsOf(pre);

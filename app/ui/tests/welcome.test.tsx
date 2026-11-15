@@ -174,6 +174,15 @@ describe("welcome: the seven states in the design", () => {
     await waitFor(() => expect(f.calls.filter((c) => c.cmd === "act_start_run")).toHaveLength(1));
   });
 
+  it("a Mac where only Gemini is installed does not show the agent check as ready", async () => {
+    const rows = [setupRow("claude", "Claude Code", "manual", null), setupRow("gemini", "Gemini CLI", "installed", "0.67.0")];
+    boot({ pre: { rows: GIT_OK, start_enabled: true }, engine: true, extra: { setup_list: () => ({ ...setup("manual", true), rows }) } });
+    fireEvent.click((await screen.findAllByRole("radio"))[0]);
+    await waitFor(() => expect(rowHead(W.agent.title).getAttribute("aria-expanded")).toBe("true"));
+    expect(startButton().getAttribute("aria-disabled")).toBe("true");
+    expect(within(rowHead(W.agent.title)).queryByText(W.agent.state.cannot_tell)).toBeNull();
+  });
+
   it("7 first run done: the Review view carries a one-time line about what the rows mean", async () => {
     boot({ listed: true }, `#/p/${P}/review?slug=fix-date&first=1`);
     expect(await screen.findByText(W.done.note)).toBeTruthy();
@@ -269,8 +278,8 @@ describe("welcome: the row is reusable and keyboard-first", () => {
 });
 
 describe("welcome: what each check means (pure)", () => {
-  const agent = (state: string, login: "signed_in" | "signed_out" | "cannot_tell" | "not_installed"): AgentInfo =>
-    ({ row: { id: "claude", name: "Claude Code", state: state as "installed", version: "2.1", path: null, reason_code: null, commands: [], docs_url: "https://x.y", can_sign_in: true, one_click: false }, login });
+  const agent = (state: string, login: "signed_in" | "signed_out" | "cannot_tell" | "not_installed", id = "claude", startable = true): AgentInfo =>
+    ({ row: { id, name: id, state: state as "installed", version: "2.1", path: null, reason_code: null, commands: [], docs_url: "https://x.y", can_sign_in: true, one_click: false }, login, startable });
   const base = { repos: { at: "found" as const, list: REPOS, truncated: false }, picked: null, tools: "ok" as const, agents: [agent("installed", "signed_in")], engine: true };
   it("counts a check ready only on a clear yes; 'cannot tell' and a failed read never count", () => {
     expect(derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" } }).ready).toBe(3);
@@ -282,6 +291,9 @@ describe("welcome: what each check means (pure)", () => {
     expect(derive({ ...base, agents: [agent("installed", "cannot_tell"), agent("installed", "signed_in")] }).agent.kind).toBe("pass");
     expect(derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" }, agents: [agent("installed", "signed_out")] }).ready).toBe(2);
     expect(derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" }, agents: [agent("manual", "cannot_tell")] }).ready).toBe(2);
+    // An installed agent the core cannot start (gemini has no provider entry) never makes the agent check ready.
+    const gemini = derive({ ...base, picked: { id: P, name: "vajra-site", root: "/r" }, agents: [agent("installed", "cannot_tell", "gemini", false)] });
+    expect([gemini.ready, gemini.agent.kind]).toEqual([2, "todo"]);
     expect(derive({ ...base, agents: "failed" }).agent.summary).toBe(W.agent.failedSummary);
     expect(derive({ ...base, engine: "failed" }).engine.kind).toBe("todo");
   });
