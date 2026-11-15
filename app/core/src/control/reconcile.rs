@@ -48,6 +48,7 @@ fn kind_of_tool(tool: &str) -> Option<&'static str> {
         "message_worker" => "message",
         "redirect_worker" => "redirect",
         "stop_worker" => "stop",
+        "propose_run" => "propose",
         _ => return None,
     })
 }

@@ -42,7 +42,8 @@ judge() { # expect desc rc
 bash_case() { # expect desc command [cwd]
   local json rc
   json="$(jq -nc --arg c "$3" --arg d "${4:-$PROJ}" '{session_id:"t",transcript_path:"/x",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c,description:"x"}}')"
-  printf '%s' "$json" | bash "$HOOK" >/dev/null 2>&1; rc=$?
+  local err; err="$(printf '%s' "$json" | bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+  [ -n "${VAJRA_TEST_WHY:-}" ] && [ "$rc" = 2 ] && [ "$1" = ALLOW ] && echo "  why: $err"
   judge "$1" "$2" "$rc"
 }
 file_case() { # expect desc tool path [cwd]
@@ -629,6 +630,258 @@ worker BLOCK "Sol: worker grep -r with cwd above control"   "$(bj "cd \"$H/Libra
 raw_case ALLOW "F-D main session may still name it"       "$(bj "ls \"$CTRL\"")"
 worker ALLOW "worker vajra_tasks.py still runs" "$(bj "python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py show --campaign x")"
 
+# --- ADR-16: the whole app data dir <data> is write-protected; <work> is not ---
+# design.md 16.6/16.8: seats.json, run records, profiles, ticket dirs and the git
+# baseline live under <data> beside the control dir. Agents never write any of it;
+# reads stay allowed. Worktrees live under <work>, a sibling root, and stay writable.
+DATA="$H/Library/Application Support/VajraDesktop"
+WORK="$H/Library/Application Support/VajraWorktrees"
+mkdir -p "$DATA/runs/r1/lead" "$DATA/profiles" "$DATA/git-baseline" "$WORK/proj/r1/t1-r1" "$WORK/proj/r1/tmp/t1-r1"
+echo '{}' > "$DATA/seats.json"; echo brief > "$DATA/runs/r1/lead/brief.md"; echo '{}' > "$DATA/profiles/claude-worker.json"
+echo x > "$WORK/proj/r1/t1-r1/a.txt"
+ln -s "$DATA" "$PROJ/datalink"; ln -s "$DATA/runs" "$PROJ/runslink"; ln -s "$DATA/seats.json" "$PROJ/seatslink"
+file_case BLOCK "D16 Write seats.json"              Write "$DATA/seats.json"
+file_case BLOCK "D16 Edit profile"                  Edit "$DATA/profiles/claude-worker.json"
+file_case BLOCK "D16 MultiEdit run record"          MultiEdit "$DATA/runs/r1/lead/brief.md"
+file_case BLOCK "D16 NotebookEdit under data"       NotebookEdit "$DATA/runs/r1/n.ipynb"
+file_case BLOCK "D16 Write new file in git-baseline" Write "$DATA/git-baseline/config"
+file_case BLOCK "D16 Write data dir itself"         Write "$DATA"
+file_case BLOCK "D16 Write tilde path"              Write "~/Library/Application Support/VajraDesktop/seats.json"
+file_case BLOCK "D16 Write case variant"            Write "$H/LIBRARY/application support/vajradesktop/SEATS.json"
+file_case BLOCK "D16 Write via dir symlink"         Write "$PROJ/datalink/seats.json"
+file_case BLOCK "D16 Write via subdir symlink"      Write "$PROJ/runslink/r1/lead/brief.md"
+file_case BLOCK "D16 Write via file symlink"        Write "$PROJ/seatslink"
+file_case BLOCK "D16 Write relative .."             Write "../Library/Application Support/VajraDesktop/seats.json"
+file_case BLOCK "D16 Write .. through work"         Write "$WORK/../VajraDesktop/seats.json"
+bash_case BLOCK "D16 redirect quoted"               "echo x > \"$DATA/seats.json\""
+bash_case BLOCK "D16 redirect escaped space"        'echo x > ~/Library/Application\ Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 append redirect"               "echo x >> '$DATA/runs/r1/lead/brief.md'"
+bash_case BLOCK "D16 redirect case variant"         "echo x > \"$H/library/APPLICATION SUPPORT/VAJRADESKTOP/seats.json\""
+bash_case BLOCK "D16 redirect via symlink"          'echo x > datalink/seats.json'
+bash_case BLOCK "D16 redirect via file symlink"     'printf x > seatslink'
+bash_case BLOCK "D16 tee"                           "echo x | tee \"$DATA/seats.json\""
+bash_case BLOCK "D16 tee -a via symlink"            'echo x | tee -a runslink/r1/lead/brief.md'
+bash_case BLOCK "D16 cp into data"                  "cp /tmp/evil.json \"$DATA/seats.json\""
+bash_case BLOCK "D16 cp -r into data"               "cp -r out \"$DATA/profiles/\""
+bash_case BLOCK "D16 mv into data"                  "mv /tmp/evil.json \"$DATA/profiles/claude-worker.json\""
+bash_case BLOCK "D16 mv out of data"                "mv \"$DATA/seats.json\" /tmp/x.json"
+bash_case BLOCK "D16 mv case variant"               "mv /tmp/e.json \"$H/Library/Application Support/vajradesktop/RUNS/\""
+bash_case BLOCK "D16 ln -s into data"               "ln -s /tmp/evil \"$DATA/runs/r1/evil\""
+bash_case BLOCK "D16 ln -sf over seats.json"        "ln -sf /tmp/evil.json \"$DATA/seats.json\""
+bash_case BLOCK "D16 python open for write"         "python3 -c 'open(\"$DATA/seats.json\",\"w\").write(\"x\")'"
+bash_case BLOCK "D16 python via symlink"            "python3 -c 'open(\"datalink/seats.json\",\"w\").write(\"x\")'"
+bash_case BLOCK "D16 sed -i"                        "sed -i '' s/a/b/ \"$DATA/seats.json\""
+bash_case BLOCK "D16 touch"                         "touch \"$DATA/new\""
+bash_case BLOCK "D16 mkdir under data"              "mkdir -p \"$DATA/runs/r2\""
+bash_case BLOCK "D16 rm seats.json"                 "rm \"$DATA/seats.json\""
+bash_case BLOCK "D16 rm -rf runs"                   "rm -rf \"$DATA/runs\""
+bash_case BLOCK "D16 cd data && plain-word redirect" "cd \"$DATA\" && printf x > seats.json"
+bash_case BLOCK "D16 cd escaped space && rm"        'cd ~/Library/Application\ Support/VajraDesktop/runs && rm -rf r1'
+bash_case BLOCK "D16 cwd is data dir"               "echo x > seats.json" "$DATA"
+bash_case BLOCK "D16 cwd below data dir"            "touch x" "$DATA/runs/r1"
+# #148 review: a reader's plain-word redirect from a cwd below <data> skipped the per-cwd fast path.
+bash_case BLOCK "D16 reader redirect, cwd runs/r1"  "echo x > brief.md" "$DATA/runs/r1"
+bash_case BLOCK "D16 cd profiles && printf >"       "cd \"$DATA/profiles\" && printf x > claude-worker.json"
+bash_case BLOCK "D16 cd profiles escaped && echo >" 'cd ~/Library/Application\ Support/VajraDesktop/profiles && echo "{}" > claude-worker.json'
+bash_case BLOCK "D16 tee plain word, cwd git-baseline" "echo x | tee config" "$DATA/git-baseline"
+bash_case BLOCK "D16 cat heredoc, cwd runs/r1/lead" "cat > brief.md <<'EOF'
+x
+EOF" "$DATA/runs/r1/lead"
+bash_case ALLOW "D16 reader redirect, cwd in work"  "echo x > a.txt" "$WORK/proj/r1/t1-r1"
+# bhishma H1/L1 on #148: readers with a plain-word target from every first-level dir below <data>.
+bash_case BLOCK "D16 cwd below data, echo > plain word"  'echo x > brief.md'        "$DATA/runs/r1/lead"
+bash_case BLOCK "D16 cwd below data, printf >> plain"    'printf x >> new.json'     "$DATA/runs"
+bash_case BLOCK "D16 cwd profiles, echo > plain"         'echo x > claude-worker.json' "$DATA/profiles"
+bash_case BLOCK "D16 cwd git-baseline, printf > plain"   'printf x > config'        "$DATA/git-baseline"
+bash_case BLOCK "D16 cd below data && echo > plain"      "cd \"$DATA/runs\" && echo x > a.json"
+bash_case BLOCK "D16 cd git-baseline && cat > config"    "cd \"$DATA/git-baseline\" && cat /tmp/x > config"
+bash_case BLOCK "D16 cd below data && git log > plain"   "cd \"$DATA/runs\" && git log > a"
+bash_case BLOCK "D16 cd below data && jq > plain"        "cd \"$DATA/runs/r1/lead\" && jq . brief.md > b2.md"
+# claude #148 thread 2: an odd spelling of the bare <data> root.
+bash_case BLOCK "D16 rm -rf root, \${IFS}"          'rm -rf ~/Library/Application${IFS}Support/VajraDesktop'
+bash_case BLOCK "D16 mv root, \$'\\040'"             'mv ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop /tmp/x'
+bash_case BLOCK "D16 rm -rf root, \${IFS}, trailing ;" 'rm -rf ~/Library/Application${IFS}Support/VajraDesktop; ls'
+bash_case BLOCK "D16 mv root, \${IFS}, quoted"       'mv "$HOME/Library/Application${IFS}Support/VajraDesktop" /tmp/x'
+# bhishma H2: a variable holds <data> or an ancestor; quote-split app names.
+bash_case BLOCK "D16 var holds data, redirect"      "D=\"$DATA\"; echo x > \"\$D/seats.json\""
+bash_case BLOCK "D16 var holds data, cd && echo"    "D=\"$DATA\"; cd \"\$D\" && echo x > seats.json"
+bash_case BLOCK "D16 var holds data, cp"            "D=\"$DATA\"; cp /tmp/e \"\$D/seats.json\""
+bash_case BLOCK "D16 export var, tee"               "export D=\"$DATA\"; echo x | tee \"\$D/runs/x\""
+bash_case BLOCK "D16 var holds data, rm -rf root"   "D=\"$DATA\"; rm -rf \"\$D\""
+bash_case BLOCK "D16 var holds data, \${D}"         "D=\"$DATA\"; echo x > \"\${D}/seats.json\""
+bash_case BLOCK "D16 var holds app-support parent"  "A=\"$H/Library/Application Support\"; echo x > \"\$A/VajraDesktop/seats.json\""
+bash_case BLOCK "D16 var builds the app name"       'V=Desktop; echo x > ~/Library/Application\ Support/Vajra$V/seats.json'
+bash_case BLOCK "D16 \$(...) builds the path"       'echo x > "$(echo ~/Library/Application\ Support)/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 backticks build the path"      'echo x > "`echo ~`/Library/Application Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 \$HOMEX is not \$HOME"         'echo x > "$HOMEX/Library/Application Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 B1 \${IFS} + \"VajraDesktop\"/" 'echo x > ~/Library/Application${IFS}Support/"VajraDesktop"/seats.json'
+bash_case BLOCK "D16 B2 \${IFS} + Vajra''Desktop/"   "echo x > ~/Library/Application\${IFS}Support/Vajra''Desktop/seats.json"
+bash_case BLOCK "D16 B3 \$'\\040' + Vajra\\Desktop/"  'echo x > ~/Library/Application$'"'"'\040'"'"'Support/Vajra\Desktop/seats.json'
+bash_case BLOCK "D16 var holds data, >16 KB command" "echo $(printf 'a%.0s' $(seq 1 17000)) ; D=\"$DATA\"; rm -rf \"\$D\""
+bash_case BLOCK "D16 quote-split, >16 KB command"   "echo $(printf 'a%.0s' $(seq 1 17000)) ; echo x > ~/Library/Application\${IFS}Support/Vajra''Desktop/seats.json"
+bash_case BLOCK "D16 quote-split, plain spelling"  "echo x > ~/Library/Application\ Support/Vajra''Desktop/seats.json"
+# bhishma M1: ~name and ~- forms are refused outright (fail closed); ~+ is the cwd.
+U="$(id -un)"
+bash_case BLOCK "D16 ~user tilde, redirect"         "echo x > ~$U/\"${DATA#$H/}/seats.json\""
+bash_case BLOCK "D16 ~user tilde, control"          "echo x > ~$U/\"${DATA#$H/}/control/x\""
+bash_case BLOCK "D16 ~user tilde, rm -rf root"      "rm -rf ~$U/Library/Application\ Support/VajraDesktop"
+file_case BLOCK "D16 ~user tilde, Write"            Write "~$U/${DATA#$H/}/seats.json"
+bash_case BLOCK "D16 ~- tilde"                      'echo x > ~-/seats.json'
+bash_case BLOCK "D16 ~+ is the cwd"                 'echo x > ~+/seats.json' "$DATA"
+bash_case ALLOW "D16 ~+ inside work"                'echo x > ~+/a.txt' "$WORK/proj/r1/t1-r1"
+# bhishma re-check on 7ee4b96 (N1-N4): one rule for ambiguous words (glob, brace,
+# variable, non-ASCII) whose literal directory could reach <data>.
+AS="${DATA%/*}"; APP="${DATA##*/}"
+bash_case BLOCK "N1 redirect glob over seats.json"  "echo x > \"$AS\"/${APP%?}*/seats.json"
+bash_case BLOCK "N1 redirect ? glob"                "echo x > \"$AS\"/?${APP#?}/seats.json"
+bash_case BLOCK "N1 cp [..] glob dest"              "cp /tmp/e \"$AS\"/${APP%???????}[${APP:5:1}]${APP#??????}/seats.json"
+bash_case BLOCK "N1 touch brace"                    "touch \"$AS\"/${APP%???????}{${APP#?????},Zz}/new"
+bash_case BLOCK "N1 cwd parent, touch brace"        "touch ${APP%???????}{${APP#?????},Zz}/new" "$AS"
+bash_case BLOCK "N1 cd glob && echo > plain"        "cd \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd ? glob && echo > plain"      "cd \"$AS\"/${APP%???????}?${APP#??????} && echo x > seats.json"
+bash_case BLOCK "N1 cd parent && cd glob"           "cd \"$AS\" && cd ${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd parent && cd brace"          "cd \"$AS\" && cd ${APP%???????}{${APP#?????},} && echo x > seats.json"
+bash_case BLOCK "N1 pushd glob && echo > plain"     "pushd \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd -P glob && echo > plain"     "cd -P \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 env -C glob echo"               "env -C \"$AS\"/${APP%?}* sh -c 'echo x > seats.json'"
+bash_case BLOCK "N1 mv glob dest"                   "mv /tmp/e \"$AS\"/${APP%?}*/seats.json"
+bash_case BLOCK "N2 ./ + \$V"           "V=${APP#?????}; echo x > \"$AS\"/./${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 // + \$V"           "V=${APP#?????}; echo x > \"$AS\"//${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 <work>/.. + \$V"    "V=${APP#?????}; echo x > \"$WORK\"/../${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 cd parent; \$V"     "cd \"$AS\" && V=${APP#?????} && echo x > ${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 cwd parent; \$V"    "V=${APP#?????}; echo x > ${APP%???????}\$V/seats.json" "$AS"
+bash_case BLOCK "N2 cwd parent; whole \$V" "V=$APP; echo x > \$V/seats.json" "$AS"
+bash_case ALLOW "N2 \$V inside <work>"  "V=a; echo x > \"$WORK/proj/r1/t1-r1/\$V.txt\""
+KS=$'\xe2\x84\xaa'; LS=$'\xc5\xbf'
+bash_case BLOCK "N3 kelvin, redirect"  "echo x > \"$AS/${APP%????}${KS}top/seats.json\""
+bash_case BLOCK "N3 long s, redirect"  "echo x > \"$AS/${APP%?????}${LS}ktop/seats.json\""
+file_case BLOCK "N3 kelvin, Write"     Write "$AS/${APP%????}${KS}top/seats.json"
+file_case BLOCK "N3 long s, Edit"      Edit  "$AS/${APP%?????}${LS}ktop/seats.json"
+file_case BLOCK "N3 long s, Write into the skill dir" Write "$H/.claude/${LS}kills/vajra/hooks/pre-tool-use.sh"
+bash_case BLOCK "N3 kelvin, cd && echo" "cd \"$AS/${APP%????}${KS}top\" && echo x > seats.json"
+bash_case BLOCK "N4 sed script names <control> oddly" "sed 's#${APP}/seats.json#${APP}/control/seats.json#g' /tmp/f > /tmp/g"
+# bhishma re-check on 3296d41 (F1-F3, F5, F6).
+G1="${APP%?}*"; TW="$WORK/proj/r1/t1-r1"
+bash_case BLOCK "F1 glob then ../.. redirect"   "echo PWN > \"$WORK\"/p*/../../$G1/seats.json"
+bash_case BLOCK "F1 cp glob then ../.."         "cp /etc/hosts \"$WORK\"/p*/../../$G1/seats.json"
+bash_case BLOCK "F1 V=.. then glob"             "V=..; echo PWN > \"$WORK\"/\$V/$G1/seats.json"
+bash_case BLOCK "F1 V=.. from worker cwd"       "V=../../../..; echo PWN > \$V/$G1/seats.json" "$TW"
+bash_case BLOCK "F1 cd V=.. then cd glob"       "V=..; cd \"$WORK\"/\$V && cd $G1 && echo PWN > seats.json"
+bash_case BLOCK "F1 cd glob/.. then cd glob"    "cd \"$WORK\"/p*/.. && cd $G1 && echo x > seats.json"
+bash_case BLOCK "F1 brace {..,zz} then glob"    "touch \"$WORK\"/{..,zz}/$G1/new"
+bash_case BLOCK "F1 <control> via V=.."         "V=..; echo PWN > \"$WORK\"/\$V/$G1/${CTRL##*/}*/x.json"
+bash_case BLOCK "F1 split name in two vars"     "V=../../../../${APP%???????}; W=${APP#?????}; echo PWN > \$V\$W/seats.json" "$TW"
+bash_case BLOCK "F1 for list climbs"            "for v in ../../../..; do echo PWN > \$v/$G1/seats.json; done" "$TW"
+bash_case BLOCK "F1 abs value near <data>"      "V=\"$AS/${APP%???????}\"; echo PWN > \${V}${APP#?????}/seats.json"
+bash_case BLOCK "F1 cd unknown, then non-reader" "cd \"$AS\"/$G1 && touch seats.json"
+bash_case BLOCK "F2 >| glob"                    "echo PWN >| \"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 1>| glob"                   "echo PWN 1>| \"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 >|glob no space"            "echo PWN >|\"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 >| literal seats.json"      "echo PWN >| \"$DATA/seats.json\""
+bash_case BLOCK "F3 ls -d glob | xargs -I sh"   "ls -d \"$AS\"/$G1 | xargs -I{} sh -c 'echo PWN > \"{}/seats.json\"'"
+bash_case BLOCK "F3 echo glob | xargs -0 cp"    "echo \"$AS\"/$G1/seats.json | tr '\\n' '\\0' | xargs -0 -n1 cp /etc/hosts"
+bash_case BLOCK "F3 printf glob | xargs cp"     "printf '%s\\n' \"$AS\"/$G1/seats.json | xargs -n1 cp /etc/hosts"
+bash_case BLOCK "F6 >| skill hook"              "echo x >| \"$SKILL/hooks/pre-tool-use.sh\""
+bash_case BLOCK "F6 >| glob skill hook"         "echo x >| \"$SKILL\"/hook*/pre-tool-use.sh"
+bash_case BLOCK "F6 >| user settings"           "echo x >| \"$H/.claude/settings.json\""
+bash_case BLOCK "F6 >| glob user settings"      "echo x >| \"$H/.claude\"/setting*.json"
+bash_case ALLOW "F5 export PATH with \$HOME"    'export PATH="$HOME/bin:$PATH"'
+bash_case ALLOW "F5 cd glob in HOME, read"      'cd ~/Devel* && ls'
+bash_case ALLOW "F5 cd glob in HOME, then cd abs and write" 'cd ~/Devel* && ls && cd /tmp && echo x > vajra-f5.txt'
+bash_case ALLOW "F5 declare and readonly values" 'declare X="$HOME/bin:$PATH"; readonly Y="$HOME/a*"'
+bash_case ALLOW "F3 glob read piped into a reader" "ls -d \"$AS\"/$G1 | wc -l"
+# A temp dir beside HOME, never above it (on Linux the suite HOME lives under /tmp, an ancestor of HOME).
+OUT2="$(mktemp -d "${TMPDIR:-/tmp}/vajra-ptu-out2-XXXXXX")"
+bash_case ALLOW "F1 abs value outside protected" "V=$OUT2/vajra-f1.txt; echo x > \$V"
+rm -rf "$OUT2"
+bash_case ALLOW "F1 for loop over project files" 'for f in src/*.ts; do sed -i "" s/a/b/ "$f"; done' "$PROJ"
+bash_case ALLOW "F1 single \$OUT from worker cwd" 'echo x > $OUT' "$TW"
+# Fail closed: a ".." after a glob is judged from "/", even inside <work> (write the path without the climb).
+bash_case BLOCK "F1 glob climb inside <work> tree" "touch \"$WORK\"/proj/r1/t1-r1/s*/../a.txt"
+# claude review on 33aff51: three false positives.
+# (1) A ~word that is not an account, ~- or a dir-stack entry stays literal (bash leaves it so).
+bash_case ALLOW "R1 echo with a ~2s approximation"     'echo "the build takes ~2s now"' "$PROJ"
+bash_case ALLOW "R1 commit message with ~3x"           'git commit -m "make it ~3x faster"' "$PROJ"
+bash_case ALLOW "R1 gh body with a ~ approximation"    'gh pr create --title t --body "build takes ~2s"' "$PROJ"
+bash_case ALLOW "R1 ~nosuchaccount word"               'echo ~nosuchaccount9z/x' "$PROJ"
+# ~0, ~+0 and ~-0 are the cwd in bash even with no pushd (claude review on 51da747).
+DREL="${DATA#$H/}"
+bash_case BLOCK "R1 ~0 from cwd HOME"                  "echo x > ~0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~+0 from cwd HOME"                 "echo x > ~+0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~-0 from cwd HOME"                 "echo x > ~-0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~0 after cd ~"                     "cd ~ && echo x > ~0/\"$DREL/seats.json\"" "$PROJ"
+bash_case ALLOW "R1 ~2 in a sentence stays literal"    'echo "about ~2 minutes"' "$PROJ"
+bash_case BLOCK "R1 ~-0 with a populated stack"        "cd \"$DATA\" && pushd /tmp && echo x > ~-0/seats.json" "$PROJ"
+bash_case BLOCK "R1 ~+0 after pushd is still judged"   "pushd \"$DATA\" && echo x > ~+0/seats.json" "$PROJ"
+bash_case BLOCK "R1 ~user of a real account stays"     "echo x > ~$U/x.txt" "$PROJ"
+bash_case BLOCK "R1 dir-stack ~1 after pushd"          'pushd /tmp && pushd ~ && echo x > ~1/a.txt' "$PROJ"
+# (2) The backslash-escaped space is a plain spelling for reads; writes still meet the path analysis.
+bash_case ALLOW "R2 ls escaped-space runs dir"         'ls ~/Library/Application\ Support/VajraDesktop/runs' "$PROJ"
+bash_case ALLOW "R2 cat escaped-space seats.json"      'cat ~/Library/Application\ Support/VajraDesktop/seats.json' "$PROJ"
+bash_case BLOCK "R2 redirect escaped space still blocked" 'echo x > ~/Library/Application\ Support/VajraDesktop/runs/x' "$PROJ"
+# (3) AMB_DYN only for read/mapfile/readarray/getopts as a command word and -v of printf/declare/typeset/local/read.
+bash_case ALLOW "R3 grep -v redirected to \$TMPDIR"    'grep -v x a.txt > "$TMPDIR/out.txt"' "$PROJ"
+bash_case ALLOW "R3 cp -v into \$DEST"                 'cp -v a.txt "$DEST/"' "$PROJ"
+bash_case ALLOW "R3 rsync -v to a variable target"     'rsync -v a.txt "$DEST"/' "$PROJ"
+bash_case ALLOW "R3 test -v then write"                'test -v DEST && cp a.txt "$DEST/x"' "$PROJ"
+bash_case ALLOW "R3 commit message with read and \$X"  'git commit -m "read the $X docs" && cp a.txt "$DEST/"' "$PROJ"
+bash_case BLOCK "R3 while read feeds a write"          "while read v; do echo PWN > \$v/$G1/seats.json; done < list.txt" "$TW"
+bash_case BLOCK "R3 printf -v feeds a write"           "printf -v V ../../../..; echo PWN > \$V/$G1/seats.json" "$TW"
+# The rule leaves ordinary globs, variables and non-ASCII names outside protected areas alone.
+bash_case ALLOW "amb: \$OUT in the project"         'echo x > $OUT' "$PROJ"
+bash_case ALLOW "amb: \$TMPDIR target from project" 'rm -rf "$TMPDIR"/x' "$PROJ"
+# A temp dir beside HOME, never above it (on Linux the suite HOME itself lives under /tmp).
+OUTSIDE="$(mktemp -d "${TMPDIR:-/tmp}/vajra-ptu-out-XXXXXX")"
+bash_case ALLOW "amb: glob write in a temp dir"     "touch \"$OUTSIDE\"/vajra-test-*.log"
+rm -rf "$OUTSIDE"
+EA=$'\xc3\xa9'
+bash_case ALLOW "amb: non-ASCII name in project"    "echo x > caf${EA}.txt" "$PROJ"
+bash_case BLOCK "amb: non-ASCII name in HOME"       "echo x > caf${EA}.txt" "$H"
+file_case ALLOW "amb: non-ASCII Write in project"   Write "$PROJ/caf"$'\xc3\xa9'".txt"
+bash_case ALLOW "amb: cd glob in the project"       'cd sr* && ls' "$PROJ"
+bash_case ALLOW "amb: glob read of <data>"          "cat \"$AS\"/${APP%?}*/seats.json"
+bash_case ALLOW "amb: glob write in <work>"         "touch \"$WORK\"/proj/r1/t1-r1/*.txt"
+# The plain forms keep working: $HOME and ${HOME}, the bare word, a $ with no <data> path.
+bash_case ALLOW "D16 cat via \$HOME"                'cat "$HOME/Library/Application Support/VajraDesktop/seats.json"'
+bash_case ALLOW "D16 ls via \${HOME}"               'ls "${HOME}/Library/Application Support/VajraDesktop"'
+bash_case ALLOW "D16 bare word with a \$ anchor"    "grep -rn 'VajraDesktop\$' src"
+bash_case ALLOW "D16 var in work, no data path"     "W=\"$WORK/proj/r1/t1-r1\"; echo x > \"\$W/a.txt\""
+bash_case BLOCK "D16 odd spacing \${IFS}"           'echo x > ~/Library/Application${IFS}Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 odd spacing \$'\\040'"          'echo x > ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 variable spelling"             'D="$HOME/Library/Application"; echo x > "$D Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 glob App*Support"              'echo x > ~/Library/App*Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 glob App*/Vajra*"              'echo x > ~/Library/App*/Vajra*/seats.json'
+bash_case BLOCK "D16 glob, new file name"           'echo x > ~/Library/App*Support/VajraDesktop/brandnew.json'
+bash_case BLOCK "D16 cd glob && plain-word redirect" 'cd ~/Library/App*Support && echo x > VajraDesktop/seats.json'
+bash_case ALLOW "D16 bare app name in a grep"       'grep -rn VajraDesktop src'
+# Never weaker than before: the <data> root was an ancestor of <control>, so copying it whole stays blocked.
+bash_case BLOCK "D16 cp -r data root out"           "cp -r \"$DATA\" out/d"
+bash_case BLOCK "D16 rsync data root out"           "rsync -a \"$DATA\" out/d"
+bash_case BLOCK "D16 cp -R alias spelling root out" 'cp -R ~/Library/Application\ Support/VajraDesktop out/d'
+worker BLOCK "D16 worker Write seats.json"        "$(fj Write "$DATA/seats.json")"
+worker BLOCK "D16 worker redirect into data"        "$(bj "echo x > \"$DATA/runs/r1/lead/brief.md\"")"
+# Reads stay allowed (the control dir keeps its own worker read block above).
+file_case ALLOW "D16 Read seats.json"               Read "$DATA/seats.json"
+file_case ALLOW "D16 Read via symlink"              Read "$PROJ/seatslink"
+path_case ALLOW "D16 Grep runs dir"                 Grep "$DATA/runs"
+bash_case ALLOW "D16 cat seats.json"                "cat \"$DATA/seats.json\""
+bash_case ALLOW "D16 ls data dir"                   "ls \"$DATA\""
+bash_case ALLOW "D16 cp data file out"              "cp \"$DATA/seats.json\" out/seats.json"
+bash_case ALLOW "D16 jq a profile"                  "jq . \"$DATA/profiles/claude-worker.json\""
+worker ALLOW "D16 worker Read run brief"            "$(fj Read "$DATA/runs/r1/lead/brief.md")"
+worker ALLOW "D16 worker cat seats.json"            "$(bj "cat \"$DATA/seats.json\"")"
+# <work> stays writable, and so does a sibling whose name only starts like <data>.
+file_case ALLOW "D16 Write in work worktree"        Write "$WORK/proj/r1/t1-r1/a.txt"
+file_case ALLOW "D16 Edit in work worktree"         Edit "$WORK/proj/r1/t1-r1/a.txt"
+file_case ALLOW "D16 Write ticket tmp"              Write "$WORK/proj/r1/tmp/t1-r1/scratch"
+file_case ALLOW "D16 Write data-prefixed sibling"   Write "$H/Library/Application Support/VajraDesktopX/x.json"
+bash_case ALLOW "D16 redirect into work"            "echo x > \"$WORK/proj/r1/t1-r1/a.txt\""
+bash_case ALLOW "D16 redirect into work, escaped"   'echo x > ~/Library/Application\ Support/VajraWorktrees/proj/r1/t1-r1/a.txt'
+bash_case ALLOW "D16 tee into work"                 "echo x | tee \"$WORK/proj/r1/t1-r1/b.txt\""
+bash_case ALLOW "D16 mkdir and cp in work"          "mkdir -p \"$WORK/proj/r1/t1-r1/src\" && cp out/x \"$WORK/proj/r1/t1-r1/src/\""
+bash_case ALLOW "D16 cwd is a work worktree"        "echo x > a.txt && rm a.txt" "$WORK/proj/r1/t1-r1"
+worker ALLOW "D16 worker writes its worktree"       "$(jq -nc --arg c 'echo x > a.txt' --arg d "$WORK/proj/r1/t1-r1" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}')"
+
 # --- Tamper flag: reads still run, mutations blocked -----------------------
 echo '{}' > "$VS/.integrity-violation"
 file_case BLOCK "tamper: Write blocked"    Write "$PROJ/src/a.ts"
@@ -669,6 +922,366 @@ bash_case ALLOW "plain env still lists the environment"  "env"
 bash_case ALLOW "reading the script is fine"            "cat scripts/generate-manifest.sh" "$WT"
 bash_case ALLOW "grep for the name is fine"              "grep -n generate-manifest.sh README.md" "$WT"
 bash_case ALLOW "other worktree scripts still run"       "bash scripts/vajra-doctor.sh" "$WT"
+
+# --- Fail closed on an unexpected runtime error (item 4) -------------------
+# A copy of the hook with one runtime error injected, either just after the payload is read (every tool reaches it)
+# or just before the final allow (a Bash call that passed every check). Each call below is one the real hook allows,
+# so a copy that still allows it has failed open. The no-op copies prove the injection itself changes nothing.
+INJ_N=0
+INJ_TMP="$H/inj-tmp"; mkdir -p "$INJ_TMP"
+inject() { # where(early|late) snippet -> sets INJ_HOOK to a hook copy with the snippet added once
+  INJ_HOOK="$SKILL/hooks/inj-$INJ_N.sh"; INJ_N=$((INJ_N + 1))
+  case "$1" in
+    early) awk -v s="$2" '{ print } $0 == "PAYLOAD=\"$(cat)\" || PAYLOAD=\"\"" { print s }' "$HOOK" > "$INJ_HOOK" ;;
+    late)  awk -v s="$2" 'NR > 1 { print prev } { prev = $0 } END { print s; print prev }' "$HOOK" > "$INJ_HOOK" ;;
+  esac
+  [ "$(grep -cxF -- "$2" "$INJ_HOOK")" = 1 ]; judge ALLOW "inject[$1] anchor found once: $2" $?
+}
+inj_run() { # payload-json -> rc of the injected copy; its stderr in INJ_ERR
+  local rc
+  INJ_ERR="$(printf '%s' "$1" | TMPDIR="$INJ_TMP" bash "$INJ_HOOK" 2>&1 >/dev/null)"; rc=$?
+  return "$rc"
+}
+INJ_BASH="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"ls src"}}')"
+INJ_WRITE="$(jq -nc --arg d "$PROJ" --arg p "$PROJ/src/a.rs" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{file_path:$p,content:"x"}}')"
+INJ_READ="$(jq -nc --arg d "$PROJ" --arg p "$PROJ/src/a.rs" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Read",tool_input:{file_path:$p}}')"
+INJ_ERRORS=(
+  'inj() { echo "${#PAYLOAD//x/y}"; }; INJ="$(inj)"'
+  'INJ="$(echo "$VAJRA_INJ_UNSET")"'
+  'if [ "abc" -gt 3 ]; then :; fi'
+  'inj() { local v; v="$(echo "${#PAYLOAD//x/y}")"; return 0; }; inj'
+  'inj() { [ "abc" -gt 3 ] && return 1; return 0; }; inj'
+  'false'
+  'false | true'
+  'INJ=$(( 1 / 0 ))'
+  'exit 0'
+)
+for where in early late; do
+  inject "$where" ':'
+  for p in INJ_BASH INJ_WRITE INJ_READ; do
+    [ "$where" = late ] && [ "$p" != INJ_BASH ] && continue
+    inj_run "${!p}"; judge ALLOW "inject[$where] no-op still allows ${p#INJ_}" $?
+  done
+  for e in "${INJ_ERRORS[@]}"; do
+    inject "$where" "$e"
+    for p in INJ_BASH INJ_WRITE INJ_READ; do
+      [ "$where" = late ] && [ "$p" != INJ_BASH ] && continue
+      inj_run "${!p}"; judge BLOCK "inject[$where] ${p#INJ_} :: $e" $?
+    done
+  done
+done
+inject early 'inj() { echo "${#PAYLOAD//x/y}"; }; INJ="$(inj)"'
+inj_run "$INJ_BASH"
+r=1
+case "$INJ_ERR" in *"bad substitution"*) case "$INJ_ERR" in *"(fail-closed)"*) r=0 ;; esac ;; esac
+judge ALLOW "an injected error is named on stderr with the fail-closed reason" "$r"
+[ -z "$(ls -A "$INJ_TMP")" ]; judge ALLOW "the hook leaves no error file behind" $?
+# bhishma #218 M: while the hook checks, its error file has no name a leftover process could open and truncate.
+inject late '[ -e "$GERR" ] && { DECIDED=1; exit 7; }'
+inj_run "$INJ_BASH"; judge ALLOW "the error file is deleted by name before any check runs" $?
+[ -z "$(ls -A "$INJ_TMP")" ]; judge ALLOW "no error file is in the temp folder during the check" $?
+# Truncating what used to be the file's name changes nothing: the error is still seen through the hook's own fd.
+inject late 'inj() { local v; v="$(echo "${#PAYLOAD//x/y}")"; return 0; }; inj; : > "$GERR"'
+inj_run "$INJ_BASH"; judge BLOCK "an error is still seen after its old file name is truncated" $?
+# bhishma #218 L: a signal or a timeout kill blocks.
+# A signal ignored when bash starts can neither be trapped nor kill it (CI runners start jobs with SIGPIPE ignored), so
+# the hook then reaches its normal decision; the case is judged only where the signal is live.
+for s in TERM HUP INT PIPE; do
+  inject late "kill -$s \$\$"
+  if [ "$(bash -c "kill -$s \$\$; echo alive" 2>/dev/null)" = alive ]; then
+    inj_run "$INJ_BASH"; judge ALLOW "inject[late] SIG$s is ignored by this environment, so the hook decides normally" $?
+  else
+    inj_run "$INJ_BASH"; judge BLOCK "inject[late] SIG$s blocks" $?
+  fi
+done
+# An unwritable temp folder blocks every call, and says why.
+UT_ERR="$(printf '%s' "$INJ_BASH" | TMPDIR="$H/no-such-tmp" bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+judge BLOCK "an unwritable temp folder blocks" "$rc"
+case "$UT_ERR" in *"private error file"*"not writable"*) r=0 ;; *) r=1 ;; esac
+judge ALLOW "an unwritable temp folder is named in the message" "$r"
+
+# --- #190 H1 (4): agents never write a campaign Vajra Desktop's core runs ---
+CS="bash ~/.claude/skills/vajra/scripts/vajra-campaign.sh"; TP="python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py"
+# The CLI workflow's own campaign, before any core run exists: every write it makes is allowed.
+bash_case ALLOW "no core run: a CLI pass is allowed"      "$CS pass ac-1 --evidence 'npm test (exit 0)' --campaign deliver-20261112-1900"
+LEAD="$H/Library/Application Support/VajraDesktop/control/lead"
+mkdir -p "$LEAD/20261112-1900" "$LEAD/20261112-1901" "$LEAD/20261112-1902" "$LEAD/20261112-1903"
+echo '{"schema":"vajra.run_seats/1","run_id":"20261112-1900","evidence_trust":"guarded","campaign_slug":"deliver-20261112-1900"}' > "$LEAD/20261112-1900/seats.json"
+echo '{"schema":"vajra.run_seats/1","run_id":"20261112-1901","evidence_trust":"outside_guard","campaign_slug":"deliver-20261112-1901-og"}' > "$LEAD/20261112-1901/seats.json"
+printf '{"campaign_slug": "deliver-2026' > "$LEAD/20261112-1902/seats.json"   # truncated: stands for both slugs of its run
+echo cli > "$LEAD/20261112-1903/provider"                                        # a Lead run with no seats: the CLI workflow's
+C0="deliver-20261112-1900"; COG="deliver-20261112-1901-og"
+bash_case BLOCK "core: pass --campaign"                   "$CS pass ac-1 --evidence 'npm test (exit 0)' --campaign $C0"
+worker    BLOCK "core: a worker's pass --campaign"        "$(bj "$CS pass ac-1 --campaign $C0")"
+bash_case BLOCK "core: pass --revoke"                     "$CS pass ac-1 --revoke --campaign $C0"
+bash_case BLOCK "core: progress --campaign="              "$CS progress 'all good' --campaign=$C0"
+bash_case BLOCK "core: checkpoint"                        "$CS checkpoint 'delivered abc' --campaign $C0"
+bash_case BLOCK "core: close done"                        "$CS close $C0 --status done"
+bash_case BLOCK "core: close an -og campaign"             "$CS close $COG --status done"
+bash_case BLOCK "core: resume"                            "$CS resume $C0"
+bash_case BLOCK "core: unlock"                            "$CS unlock $C0 --if-stale"
+bash_case BLOCK "core: create, sanitized to the core slug" "$CS create ${C0}- --goal g --feature 'a|b'"
+bash_case BLOCK "core: archive-evidence"                  "$CS archive-evidence $C0 data/walkthroughs/$C0 abc '[]'"
+bash_case BLOCK "core: report"                            "$CS report --campaign $C0 --bytes 1 --check 0 --base64 eA=="
+bash_case BLOCK "core tasks: report done"                 "$TP report t1 done --summary ok --campaign $C0"
+bash_case BLOCK "core tasks: close"                       "$TP close t1 --evidence data/walkthroughs/$C0/evidence.json --campaign $C0"
+bash_case BLOCK "core tasks: claim --campaign="           "$TP claim t1 bhima --campaign=$C0"
+bash_case BLOCK "core tasks: add"                         "$TP add t9 --title x --owner bhima --campaign $C0"
+bash_case BLOCK "core: unreadable seats, plain slug"      "$CS pass ac-1 --campaign deliver-20261112-1902"
+bash_case BLOCK "core: unreadable seats, -og slug"        "$CS pass ac-1 --campaign deliver-20261112-1902-og"
+bash_case BLOCK "core: a variable slug while a core run exists" "$CS pass ac-1 --campaign \$S"
+bash_case BLOCK "core: a variable slug for close"         "$CS close \$S --status done"
+bash_case BLOCK "core: nested bash -c"                    "bash -c '$CS pass ac-1 --campaign $C0'"
+bash_case BLOCK "core: chained after a read"              "$CS show $C0 && $CS pass ac-1 --campaign $C0"
+echo "$C0" > "$VS/campaigns/.active-0123456789ab"
+APPREC="$H/Library/Application Support/VajraDesktop/record"; mkdir -p "$APPREC"
+# Only the core's record repo (in the app data dir) has a pointer that names a core slug.
+bash_case BLOCK "core pointer: no slug, cwd in the app's record repo" "$CS pass ac-1 --evidence x" "$APPREC"
+bash_case BLOCK "core pointer: no slug after a cd"         "cd ~/rec && $CS pass ac-1 --evidence x"
+bash_case BLOCK "core pointer: no slug after pushd"        "pushd ~/rec; $CS checkpoint x"
+bash_case BLOCK "core pointer: no slug with env --chdir"   "env --chdir=/tmp $CS pass ac-1"
+bash_case ALLOW "core pointer: no slug in a user repo"     "$CS pass ac-1 --evidence x"
+bash_case ALLOW "core active: a CLI slug named explicitly"  "$CS pass ac-1 --campaign deliver-20261112-0930"
+bash_case ALLOW "core active: CLI create still works"       "$CS create deliver-20261112-0931 --goal g --feature 'ac-1|x'"
+rm -f "$VS/campaigns/.active-0123456789ab"
+bash_case ALLOW "core: no slug, no core active pointer"   "$CS pass ac-1 --evidence x" "$APPREC"
+# bhishma #194 F1: a copy of either script, anywhere, is the same script.
+mkdir -p "$PROJ/scripts"; echo "#" > "$PROJ/scripts/vajra-campaign.sh"; echo "#" > "$PROJ/scripts/vajra_tasks.py"
+bash_case BLOCK "F1: a repo copy of the campaign script"   "bash scripts/vajra-campaign.sh pass ac-1 --campaign $C0"
+bash_case BLOCK "F1: a /tmp copy of the tasks script"      "python3 /tmp/x/vajra_tasks.py report t1 done --campaign $C0"
+bash_case BLOCK "F1: a copy run directly"                  "./scripts/vajra-campaign.sh close $C0"
+bash_case ALLOW "F1: a copy's read is still a read"        "bash scripts/vajra-campaign.sh show $C0"
+# bhishma #194 (on e512745a): the slug triggers too, so a copy that never spells either script's name is judged.
+bash_case BLOCK "slug: a wildcard script name closes it"    "bash scripts/vajra-campaig?.sh close $C0 --status done"
+bash_case BLOCK "slug: a wildcard name run directly"        "./scripts/vajra-campa?gn.sh close $C0 --status done"
+bash_case ALLOW "slug: copying the script names no slug"    "cp scripts/vajra-campaign.sh /tmp/c"
+bash_case BLOCK "slug: a renamed copy closes it"            "bash /tmp/c close $C0 --status done"
+bash_case BLOCK "slug: a renamed copy run directly"         "/tmp/c close $C0 --status done"
+bash_case BLOCK "slug: a python one-liner builds the name"  "python3 -c 'import subprocess as s; s.run([\"bash\", \"scripts/vajra-\" + \"campaign.sh\", \"close\", \"$C0\"])'"
+bash_case BLOCK "slug: a renamed copy, -og slug"            "bash /tmp/c close $COG --status done"
+bash_case BLOCK "slug: a renamed copy, upper case"          "bash /tmp/c close DELIVER-20261112-1900"
+bash_case BLOCK "slug: xargs runs a renamed copy"           "echo $C0 | xargs bash /tmp/c close"
+bash_case BLOCK "slug: a substitution beside a reader"      "cat \$(bash /tmp/c close $C0)"
+bash_case BLOCK "slug: a backtick beside a reader"         "echo \`bash /tmp/c close $C0\`"
+bash_case BLOCK "slug: process substitution beside a reader" "cat <(bash /tmp/c close $C0)"
+bash_case BLOCK "slug: a pipe into a shell"                 "echo close $C0 | xargs -n2 /tmp/c"
+bash_case BLOCK "slug: the text piped into a shell"         "echo 'bash /tmp/c close $C0' | sh"
+bash_case BLOCK "slug: cd then a renamed copy"              "cd /tmp && ./c close $C0"
+bash_case BLOCK "slug: env runs a renamed copy"             "env -i FOO=1 bash /tmp/c close $C0"
+bash_case BLOCK "slug: a subshell runs a renamed copy"      "( bash /tmp/c close $C0 )"
+bash_case ALLOW "slug: a read of the core campaign passes"  "$CS show $C0"
+bash_case ALLOW "slug: a copy's read by its own name"       "bash scripts/vajra-campaign.sh show $C0 --json"
+bash_case ALLOW "slug: plain readers may name it"           "ls data/walkthroughs/$C0 && grep -rn $C0 docs | head -5"
+bash_case ALLOW "slug: a git read may name it"              "git log --oneline --grep $C0"
+# A resumed campaign keeps its own slug: the seats file's slug is a trigger even without deliver- in it.
+mkdir -p "$LEAD/20261112-1904"
+echo '{"schema":"vajra.run_seats/1","run_id":"20261112-1904","evidence_trust":"guarded","campaign_slug":"login-flow"}' > "$LEAD/20261112-1904/seats.json"
+bash_case BLOCK "slug: a resumed core slug, renamed copy"   "bash /tmp/c close login-flow --status done"
+bash_case BLOCK "slug: a resumed core slug as create sanitizes it" "bash /tmp/c create LOGIN_FLOW --goal g"
+bash_case ALLOW "slug: a resumed core slug, plain read"     "cat notes/login-flow.md"
+rm -rf "$LEAD/20261112-1904"
+# F2: a redirect before the subcommand is skipped, never taken for it.
+bash_case BLOCK "F2: input redirect before pass"           "$CS </dev/null pass ac-1 --campaign $C0"
+bash_case BLOCK "F2: output redirect before progress"      "$CS >/dev/null progress x --campaign $C0"
+bash_case BLOCK "F2: >> before close"                      "$CS >>/tmp/log close $C0"
+bash_case BLOCK "F2: &> before close"                      "$CS &>/dev/null close $C0"
+bash_case BLOCK "F2: 2> before tasks report"               "$TP 2>/dev/null report t1 done --campaign $C0"
+bash_case BLOCK "F2: spaced redirect before claim"         "$TP > /tmp/o claim t1 bhima --campaign $C0"
+bash_case ALLOW "F2: no subcommand, nothing core named: usage only" "$CS"
+bash_case BLOCK "F2: no subcommand is judged as a write"   "$CS --x $C0"
+# F3 and the claude thread: words bash expands, in any position.
+bash_case BLOCK "thread: a variable subcommand and slug"   "$CS \$SUB $C0"
+bash_case BLOCK "thread: a variable subcommand, variable slug" "$CS \$SUB \$S --status done"
+bash_case BLOCK "F3: option first, then a variable slug"   "$CS close --status done \$S"
+bash_case BLOCK "F3: resume option first, variable slug"   "$CS resume --from-checkpoint 2 \$S"
+bash_case BLOCK "F3: a split variable after pass"          "$CS pass ac-1 \$ARGS"
+bash_case BLOCK "F3: braced variable"                      "$CS close \${S} --status done"
+bash_case BLOCK "F3: brace expansion"                      "$CS close deliver-2026{1112-1900} --status done"
+bash_case BLOCK "F3: a glob"                               "$CS close deliver-20261112-190? --status done"
+bash_case BLOCK "F3: a bracket glob"                       "$CS close deliver-20261112-190[0] --status done"
+bash_case BLOCK "F3: ANSI-C quoting"                       "$CS close \$'\\x64eliver-20261112-1900'"
+bash_case BLOCK "F3: double-quoted variable"               "$CS close \"\$S\" --status done"
+bash_case ALLOW "F3: a read with a variable stays a read"  "$CS show \$S --json"
+bash_case ALLOW "F3: a tasks read with a variable"         "$TP status t1 --campaign \$S"
+bash_case ALLOW "F3: \$ and * inside single quotes are data" "$CS pass ac-1 --evidence 'echo \$X *.ts (exit 0)' --campaign deliver-20261112-0930"
+# F4: one call never splits into unchecked pieces.
+bash_case BLOCK "F4: a substitution in a data argument"    "$CS pass ac-1 --evidence \"\$(true)\" --campaign $C0"
+bash_case BLOCK "F4: a quoted separator before the slug"   "$CS progress 'a;b|c&d' --campaign $C0"
+bash_case BLOCK "F4: backticks before the slug"            "$CS progress \`true\` --campaign $C0"
+bash_case BLOCK "F4: unclosed quote (raw fallback)"        "$CS progress 'x --campaign deliver-20261112-0930"
+bash_case BLOCK "F4: xargs feeding the slug"               "echo $C0 | xargs $CS close"
+# bhishma vajra-75 on 38e802d. H1: a script name built by a glob, variable or $'..' is refused before any write check.
+bash_case BLOCK "H1: a ? glob in the tasks script name"     "python3 scripts/vajra_task?.py report t1 done --campaign deliver-20261112-0930"
+bash_case BLOCK "H1: a * glob in the campaign script name"  "bash scripts/vajra-camp*.sh close deliver-20261112-0930"
+bash_case BLOCK "H1: a bracket glob in the name"            "bash scripts/vajra-[c]ampaign.sh pass ac-1"
+bash_case BLOCK "H1: a variable in the script name"         "python3 scripts/vajra_\${T}.py report t1 done --campaign deliver-20261112-0930"
+bash_case BLOCK "H1: ANSI-C quoting in the script name"     "python3 scripts/\$'vajra_tasks\\x2epy' report t1 done --campaign deliver-20261112-0930"
+bash_case BLOCK "H1: a glob in the dir and name"            "bash ~/.claude/skills/v*/scripts/vajra-c*.sh close deliver-20261112-0930"
+bash_case ALLOW "H1: an unrelated variable is not a script" "echo \$tasks"
+# H2: the body of bash -c, sh -c or eval is code, so its single quotes protect nothing.
+bash_case BLOCK "H2: a variable slug inside bash -c quotes" "bash -c '$CS pass ac-1 --campaign \$S'"
+bash_case BLOCK "H2: sh -lc with a variable"                "sh -lc '$CS close \$S --status done'"
+bash_case BLOCK "H2: eval with a variable"                  "eval '$CS close \$S --status done'"
+bash_case BLOCK "H2: a bash here-string body"               "bash <<< '$CS close \$S'"
+# The same through a repo copy, which only this check sees (the installed path is refused by the protected-path rule).
+RC="bash scripts/vajra-campaign.sh"; RT="python3 scripts/vajra_tasks.py"
+bash_case BLOCK "H2 copy: a variable slug inside bash -c"   "bash -c '$RC pass ac-1 --campaign \$S'"
+bash_case BLOCK "H2 copy: sh -lc with a variable"           "sh -lc '$RC close \$S --status done'"
+bash_case BLOCK "H2 copy: eval with a variable"             "eval '$RT report t1 done --campaign \$S'"
+bash_case BLOCK "H2 copy: a here-string body"               "bash <<< '$RC close \$S'"
+bash_case BLOCK "H3 copy: xargs reading slugs from a file"  "xargs -a /tmp/slugs $RC close"
+bash_case BLOCK "H3 copy: stdin through xargs"              "cat /tmp/s | xargs $RT report t1 done --campaign"
+bash_case BLOCK "H3 copy: parallel"                         "parallel $RC close ::: /tmp/x"
+bash_case BLOCK "H3 copy: find -exec"                       "find /tmp/s -type f -exec $RC close +"
+# (A repo copy: the installed path inside bash -c or xargs is already refused by the protected-path rule.)
+bash_case ALLOW "H2: a plain bash -c CLI write is allowed"  "bash -c 'bash scripts/vajra-campaign.sh pass ac-1 --campaign deliver-20261112-0930'"
+# bhishma vajra-75 on 75cdccd. H1-b: an interpreter's script operand is judged by position, not by its letters.
+bash_case BLOCK "H1-b: a variable holding a path, plus .py"   "s=scripts/vajra_tasks; python3 \$s.py report t1 done --campaign deliver-20261112-0930"
+bash_case BLOCK "H1-b: cd scripts, then a variable name"      "cd scripts && python3 \$f report t1 done"
+bash_case BLOCK "H1-b: a variable operand with no letters"    "python3 \$X report t1 done"
+bash_case BLOCK "H1-b: bash with options, then a variable"    "bash -e -x \$S close deliver-20261112-0930"
+bash_case BLOCK "H1-b: a glob operand"                        "cd scripts; python3 v*.py report t1 done"
+bash_case ALLOW "H1-b: a literal operand is fine"             "python3 tests/check.py --x \$HOME"
+bash_case ALLOW "H1-b: python -c inline code is not an operand" "python3 -c 'print(1)'"
+bash_case ALLOW "LOW: a for-list of test files is not a script name" "for f in tests/*_task*.py; do echo \$f; done"
+# H2-b: -c, -s or stdin anywhere among the shell's options; the dot builtin and trap.
+bash_case BLOCK "H2-b: bash -x -c"                            "bash -x -c '$RC close \$S'"
+bash_case BLOCK "H2-b: bash -e -c"                            "bash -e -c '$RC close \$S'"
+bash_case BLOCK "H2-b: bash -o errexit -c"                    "bash -o errexit -c '$RC close \$S'"
+bash_case BLOCK "H2-b: bash -s with a here-string"            "bash -s <<< '$RC close \$S'"
+bash_case BLOCK "H2-b: bash -ex with a here-string"           "bash -ex <<< '$RC close \$S'"
+bash_case BLOCK "H2-b: the dot builtin on stdin"              ". /dev/stdin <<< '$RC close \$S'"
+bash_case BLOCK "H2-b: trap with a quoted body"               "trap '$RC close \$S' EXIT"
+bash_case ALLOW "H2-b: a plain bash -x -c CLI write"          "bash -x -c '$RC pass ac-1 --campaign deliver-20261112-0930'"
+# bhishma #194 M1 (on e953cf9): a quoted variable or glob operand with literal arguments is one argument the command
+# shows in full, so it runs while core runs exist; everything that could hide a core campaign stays refused.
+bash_case ALLOW "M1: a for-loop running python3 on each test"   "for f in tests/*_task*.py; do python3 \"\$f\"; done"
+bash_case ALLOW "M1: a bash loop over tests"                    "for t in tests/*.sh; do bash \"\$t\" --fast; done"
+bash_case ALLOW "M1: python3 on a quoted variable path"         "v=tests/check.py; python3 \"\$v\" -k 'test_*'"
+bash_case ALLOW "M1: python3 on a PWD path"                     "python3 \$PWD/tests/check.py --fast"
+bash_case ALLOW "M1: node on a HOME path"                       "node \"\${HOME}/bin/tool.js\" build"
+bash_case BLOCK "M1: an unquoted variable may split into args"  "for f in tests/*.py; do python3 \$f; done"
+bash_case BLOCK "M1: a quoted operand, an argument expands"     "python3 \"\$s\" report t1 done --campaign \$C"
+bash_case BLOCK "M1: a quoted operand, all arguments hidden"    "python3 \"\$s\" \$ARGS"
+bash_case BLOCK "M1: a quoted operand, an unquoted glob arg"    "python3 \"\$s\" * close"
+bash_case BLOCK "M1: a quoted operand naming a deliver- slug"   "python3 \"\$s\" close t1 --campaign deliver-20261112-0930"
+bash_case BLOCK "M1: a quoted operand naming a core slug"       "python3 \"\$s\" close $C0"
+bash_case BLOCK "M1: a quoted operand saying campaign"          "bash \"\$s\" progress x --campaign=x"
+echo "$C0" > "$VS/campaigns/.active-0123456789ab"
+bash_case BLOCK "M1: a quoted operand in the app's record repo"  "python3 \"\$s\" report t1 done" "$APPREC"
+bash_case BLOCK "M1: a quoted operand after a cd"               "cd ~/rec && python3 \"\$s\" report t1 done"
+bash_case ALLOW "M1: a quoted operand in a user repo"           "python3 \"\$s\" report t1 done"
+# bhishma #194 (on 15fe1ff): the M1 relaxation must not reopen H3. A quoted operand whose arguments come from xargs,
+# parallel, find -exec, an args file or stdin is a hit, as both were on e953cf9.
+bash_case BLOCK "M1/H3: xargs feeds a quoted operand"           "echo report t1 done | xargs python3 \"\$s\""
+bash_case BLOCK "M1/H3: xargs reads an args file"               "xargs -a /tmp/args python3 \"\$s\""
+bash_case BLOCK "M1/H3: parallel feeds a quoted operand"        "parallel python3 \"\$s\" ::: report"
+bash_case BLOCK "M1/H3: find -exec feeds a quoted operand"      "find /tmp/a -exec python3 \"\$s\" {} +"
+bash_case BLOCK "M1/H3: stdin redirected into the interpreter"  "python3 \"\$s\" < /tmp/args"
+bash_case BLOCK "M1/H3: stdin piped into the interpreter"       "cat /tmp/args | python3 \"\$s\""
+bash_case ALLOW "M1/H3: a quoted operand, output to a file"     "python3 \"\$s\" report t1 done > /tmp/out"
+bash_case ALLOW "M1/H3: a quoted operand piped out, not in"     "python3 \"\$s\" report t1 done | tail -n 3"
+# bhishma #194 Low, documented over-block: while a core campaign runs, an interpreter operand built by a substitution
+# is refused, quoted or not (its name is what the substitution prints). Run the tool by a literal path instead.
+bash_case BLOCK "Low: node on an unquoted npm bin substitution" "node \$(npm bin)/tasks-tool.js build"
+bash_case BLOCK "Low: node on a quoted npm bin substitution"    "node \"\$(npm bin)/tasks-tool.js\" build"
+bash_case ALLOW "Low: node on the literal path is fine"         "node node_modules/.bin/tasks-tool.js build"
+# bhishma #194 (on 15fe1ff): a backtick substitution is judged like \$( ).
+bash_case BLOCK "backtick: builds the operand"                  "python3 \`echo scripts/vajra_ta\`sks.py report t1 done"
+bash_case BLOCK "backtick: is the whole operand"                "python3 \`printf %s \$X\` report t1 done"
+bash_case BLOCK "backtick: builds the command word"             "\`printf scripts/vajra_ta\`sks.py report t1 done"
+bash_case BLOCK "dollar-paren: builds the operand (unchanged)"  "python3 \$(echo scripts/vajra_ta)sks.py report t1 done"
+bash_case BLOCK "dollar-paren: builds the command word (unchanged)" "\$(printf scripts/vajra_ta)sks.py report t1 done"
+rm -f "$VS/campaigns/.active-0123456789ab"
+# M2: the first word is in command position (bash 3.2 errors on index -1; 4.3+ reads the last word).
+bash_case BLOCK "M2: a first-word glob naming the script"      "scr*/vajra_tasks.py report t1 done --campaign deliver-20261112-0930"
+# M3: options as typed. python -X and -W take a value, -E is a flag; bash --norc is a flag, not -c.
+bash_case BLOCK "M3: python3 -X dev, then a variable"          "python3 -X dev \$s report t1 done"
+bash_case BLOCK "M3: python3 -W ignore, then a variable"       "python3 -W ignore \$s close t1"
+bash_case BLOCK "M3: python3 -E is a flag, not code"           "python3 -E \$s close t1"
+bash_case BLOCK "M3: bash --norc, then a variable"             "bash --norc \$S close deliver-20261112-0930"
+bash_case BLOCK "M3: bash -O extglob, then a variable"         "bash -O extglob \$S close t1"
+bash_case ALLOW "M3: perl -E is code, not a script"            "perl -E 'say 1'"
+bash_case ALLOW "M3: bash --norc on a quoted test"             "bash --norc \"\$t\""
+# H3: arguments fed by xargs, parallel or find -exec never show in the command text.
+bash_case BLOCK "H3: xargs reading slugs from a file"       "xargs -a /tmp/slugs $CS close"
+bash_case BLOCK "H3: stdin from a file through xargs"       "cat /tmp/s | xargs $TP report t1 done --campaign"
+bash_case BLOCK "H3: parallel feeding the slug"             "parallel $CS close ::: /tmp/x"
+bash_case BLOCK "H3: find -exec adding arguments"           "find /tmp/s -type f -exec $CS close + "
+bash_case ALLOW "H3: xargs around a read is a read"         "xargs -a /tmp/slugs bash scripts/vajra-campaign.sh show"
+# F6: create's slug as the script sanitizes it.
+bash_case BLOCK "F6: create with a leading dash"           "$CS create -$C0 --goal g --feature 'a|b'"
+bash_case BLOCK "F6: create upper case, underscores"       "$CS create DELIVER_20261112_1900 --goal g"
+# F5: the data dir override, and run folders that can't be read.
+ALT="$H/altdata"; mkdir -p "$ALT/control/lead/20261112-2000"
+echo '{"campaign_slug":"deliver-20261112-2000"}' > "$ALT/control/lead/20261112-2000/seats.json"
+export VAJRA_DESKTOP_DATA="$ALT"
+bash_case BLOCK "F5: seats under VAJRA_DESKTOP_DATA"       "$CS pass ac-1 --campaign deliver-20261112-2000"
+mkdir -p "$ALT/control/lead/20261112-2001"; chmod 000 "$ALT/control/lead/20261112-2001"
+bash_case BLOCK "F5: an unreadable run folder stands for its run" "$CS pass ac-1 --campaign deliver-20261112-2001-og"
+chmod 700 "$ALT/control/lead/20261112-2001"
+chmod 000 "$ALT/control/lead"
+bash_case BLOCK "F5: an unreadable lead dir: any deliver- write" "$CS pass ac-1 --campaign deliver-20261112-0930"
+bash_case ALLOW "F5: an unreadable lead dir: another campaign" "$CS pass ac-1 --campaign login-flow"
+chmod 700 "$ALT/control/lead"
+unset VAJRA_DESKTOP_DATA
+bash_case ALLOW "F5: without the override, that slug is the CLI's" "$CS pass ac-1 --campaign deliver-20261112-2000"
+# Reads of a core campaign stay allowed.
+bash_case ALLOW "core read: show --json"                  "$CS show $C0 --json"
+bash_case ALLOW "core read: list"                         "$CS list"
+bash_case ALLOW "core read: verify"                       "$CS verify $C0"
+bash_case ALLOW "core read: active --brief"               "$CS active --brief"
+bash_case ALLOW "core read: tasks status"                 "$TP status t1 --campaign $C0"
+bash_case ALLOW "core read: tasks ready"                  "$TP ready --campaign $C0"
+bash_case ALLOW "core read: check-evidence"               "$TP check-evidence data/walkthroughs/$C0/evidence.json --head abc"
+# The CLI deliver workflow's own commands, verbatim shapes, while core runs exist: a CLI run id, and a Lead run with no seats.
+for CL in deliver-20261112-0930 deliver-20261112-1903; do
+  bash_case ALLOW "CLI $CL: create"        "$CS create $CL --goal 'Add a --json flag' --feature 'ac-1|export --json prints JSON'"
+  bash_case ALLOW "CLI $CL: pass"          "$CS pass ac-1 --evidence 'npm test -- export (exit 0)' --campaign $CL"
+  bash_case ALLOW "CLI $CL: progress"      "$CS progress 'run 20261112-0930 delivered vajra/x @ abc1234' --campaign $CL"
+  bash_case ALLOW "CLI $CL: checkpoint"    "$CS checkpoint 'delivered abc1234' --campaign $CL"
+  bash_case ALLOW "CLI $CL: close"         "$CS close $CL --status done"
+  bash_case ALLOW "CLI $CL: report"        "$CS report --campaign $CL --bytes 1 --check 0 --base64 eA=="
+  bash_case ALLOW "CLI $CL: archive"       "$CS archive-evidence $CL data/walkthroughs/$CL abc1234 '[\"npm ci\"]'"
+  bash_case ALLOW "CLI $CL: tasks add"     "$TP add t1 --title x --owner bhima --campaign $CL"
+  bash_case ALLOW "CLI $CL: tasks claim"   "$TP claim t1 bhima --stacked --campaign $CL --worktree \"\$PWD\""
+  bash_case ALLOW "CLI $CL: tasks report"  "$TP report t1 in_progress --campaign $CL"
+  bash_case ALLOW "CLI $CL: tasks close"   "$TP close t1 --evidence data/walkthroughs/$CL/evidence.json --head abc --campaign $CL"
+done
+# Fail-closed: the guard's words ignore quotes, so a core slug as any word of a write counts (the CLI never writes one).
+bash_case BLOCK "a core slug as any word of a write is refused" "$CS progress 'see $C0 for context' --campaign deliver-20261112-0930"
+bash_case BLOCK "a core slug inside a longer word still counts (fail-closed)" "$CS progress 'see ${C0}x' --campaign deliver-20261112-0930"
+
+# bhishma #194 M1: a core run's whole campaign folder is the core's, not only tasks.json and checkpoints.
+CF="$VS/campaigns/$C0"; mkdir -p "$CF" "$VS/campaigns/$COG" "$VS/campaigns/deliver-20261112-0930"
+echo '{}' > "$CF/campaign.json"
+file_case BLOCK "M1: Write a core campaign.json"           Write "$CF/campaign.json"
+file_case BLOCK "M1: Edit a core features.json"            Edit "$CF/features.json"
+file_case BLOCK "M1: Write a core progress.md"             Write "$CF/progress.md"
+file_case BLOCK "M1: Write a core report.md"               Write "$CF/report.md"
+file_case BLOCK "M1: Write an -og campaign's state.sig"    Write "$VS/campaigns/$COG/state.sig"
+file_case BLOCK "M1: Write an unreadable-seats run's file" Write "$VS/campaigns/deliver-20261112-1902-og/progress.md"
+file_case BLOCK "M1: Write, upper-case slug"               Write "$VS/campaigns/DELIVER-20261112-1900/campaign.json"
+file_case BLOCK "M1: Write, tilde path"                    Write "~/.claude/vajra/campaigns/$C0/progress.md"
+bash_case BLOCK "M1: redirect into state.sig"              "echo x > ~/.claude/vajra/campaigns/$C0/state.sig"
+bash_case BLOCK "M1: append to progress.md"                "echo x >> \"$CF/progress.md\""
+bash_case BLOCK "M1: cp over report.md"                    "cp /tmp/r.md \"$CF/report.md\""
+bash_case BLOCK "M1: mv a planted campaign.json in"        "mv /tmp/c.json \"$CF/campaign.json\""
+bash_case BLOCK "M1: plant .lock with mkdir"               "mkdir \"$CF/.lock\""
+bash_case BLOCK "M1: plant .lock with touch"               "touch \"$CF/.lock\""
+bash_case BLOCK "M1: sed -i on features.json"              "sed -i '' s/false/true/ \"$CF/features.json\""
+bash_case BLOCK "M1: python writes campaign.json"          "python3 -c 'open(\"$CF/campaign.json\",\"w\").write(\"x\")'"
+bash_case BLOCK "M1: cd into the folder, then redirect"    "cd \"$CF\" && echo x > progress.md"
+bash_case BLOCK "M1: cwd is the folder"                    "echo x > progress.md" "$CF"
+bash_case BLOCK "M1: rm the folder"                        "rm -rf \"$CF\""
+file_case ALLOW "M1: Read a core campaign.json"            Read "$CF/campaign.json"
+bash_case ALLOW "M1: cat a core campaign.json"             "cat \"$CF/campaign.json\""
+file_case ALLOW "M1: a CLI campaign's progress.md is not the core's" Write "$VS/campaigns/deliver-20261112-0930/progress.md"
+file_case BLOCK "M1: a CLI campaign's tasks.json stays script-only" Write "$VS/campaigns/deliver-20261112-0930/tasks.json"
+export VAJRA_DESKTOP_DATA="$ALT"; chmod 000 "$ALT/control/lead"
+file_case BLOCK "M1: unreadable lead dir: any deliver- folder" Write "$VS/campaigns/deliver-20261112-0930/progress.md"
+file_case ALLOW "M1: unreadable lead dir: another campaign"   Write "$VS/campaigns/login-flow/progress.md"
+chmod 700 "$ALT/control/lead"; unset VAJRA_DESKTOP_DATA
 
 # --- Latency ---------------------------------------------------------------
 LAT_JSON="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit -m \"wip\" && npm test -- --watch=false 2>&1 | tail -n 20"}}')"

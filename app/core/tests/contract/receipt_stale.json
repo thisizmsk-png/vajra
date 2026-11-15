@@ -1,0 +1,1 @@
+{"schema":"vajra.receipt/1","action_id":"act-0004-dddd","project_id":"proj-1","action":"stop_worker","target":"w1","expect_generation":2,"current_generation":3,"state":"rejected","reason":"stale_generation","detail":"the target changed since you looked; refresh and try again","retry":"after_refresh","rev":9,"ts_ms":1800000000000}

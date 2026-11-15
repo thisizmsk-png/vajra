@@ -23,6 +23,14 @@ export const ICONS = {
   terminal: <><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" /><path d="m4.5 6.3 2 1.7-2 1.7M8 10h3.5" /></>,
   file: <><path d="M4 1.8h5l3 3v9.4H4Z" /><path d="M9 1.8v3h3" /></>,
   branch: <><circle cx="4.5" cy="3.8" r="1.5" /><circle cx="4.5" cy="12.2" r="1.5" /><circle cx="11.5" cy="5.5" r="1.5" /><path d="M4.5 5.3v5.4M11.5 7c0 2.5-3 2.6-6.4 4.1" /></>,
+  plus: <path d="M8 3v10M3 8h10" />,
+  phone: <><rect x="4.2" y="1.8" width="7.6" height="12.4" rx="1.6" /><path d="M7 11.8h2" /></>,
+  /** The project column (shell B): a frame with its left pane marked. */
+  panelLeft: <><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" /><path d="M6 2.8v10.4" /></>,
+  /** The inspector: a frame with its right pane marked. */
+  panelRight: <><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" /><path d="M10 2.8v10.4" /></>,
+  board: <><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" /><path d="M6 2.8v10.4M10 2.8v10.4" /></>,
+  director: <><circle cx="8" cy="5" r="2.4" /><path d="M3.2 13.5c.6-2.6 2.5-4 4.8-4s4.2 1.4 4.8 4" /></>,
 } satisfies Record<string, ReactNode>;
 export type IconName = keyof typeof ICONS;
 

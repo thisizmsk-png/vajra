@@ -22,7 +22,7 @@ const RULES: Array<[string, RegExp]> = [
   ["ALL-CAPS transform", /text-transform\s*:\s*uppercase|\buppercase\b/],
 ];
 // `#` inside a url fragment or a JSX/TS private field is not a color; the lookahead above keeps ids like #root out.
-const EXEMPT_DIRS = ["theme", "node_modules", "dist", "tests"];
+const EXEMPT_DIRS = ["theme", "node_modules", "dist", "dist-lag", "tests"];
 
 // A JSX style object may span lines, so it is matched on the whole text, not per line. Any colour property in it is
 // a violation: colours come from tokens in a class, never inline.

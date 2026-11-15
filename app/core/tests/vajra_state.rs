@@ -184,6 +184,35 @@ fn campaigns_root_lists_directories_only() {
 }
 
 #[test]
+fn a_machine_with_no_campaigns_folder_lists_no_campaigns() {
+    // First launch: the agent folder exists, but nothing has ever run, so `vajra/campaigns` is not there.
+    let h = Home::new();
+    fs::remove_dir_all(h.vajra().join("campaigns")).unwrap();
+    assert_eq!(Reader::new(h.allow()).campaigns().unwrap(), Vec::<String>::new());
+    // Nor is `vajra/` itself, before the engine is installed.
+    let allow = h.allow();
+    fs::remove_dir_all(h.vajra()).unwrap();
+    assert_eq!(Reader::new(allow).campaigns().unwrap(), Vec::<String>::new());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_campaigns_link_that_leads_nowhere_or_outside_is_still_refused() {
+    let h = Home::new();
+    let dir = h.vajra().join("campaigns");
+    fs::remove_dir_all(&dir).unwrap();
+    // Present but dangling: not "no campaigns yet".
+    std::os::unix::fs::symlink(h.home.join("gone"), &dir).unwrap();
+    assert!(Reader::new(h.allow()).campaigns().is_err());
+    // Present and pointing outside the allowlist.
+    fs::remove_file(&dir).unwrap();
+    let outside = h.home.join("outside");
+    fs::create_dir_all(outside.join("deliver-x")).unwrap();
+    std::os::unix::fs::symlink(&outside, &dir).unwrap();
+    assert!(Reader::new(h.allow()).campaigns().is_err());
+}
+
+#[test]
 fn active_and_done_campaign_summaries() {
     let h = Home::new();
     let mut r = Reader::new(h.allow());

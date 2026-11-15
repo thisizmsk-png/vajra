@@ -1,0 +1,100 @@
+{
+  "schema": "vajra.preferences/1",
+  "rev": 0,
+  "project_id": null,
+  "overrides": {
+    "theme": null,
+    "editor": null,
+    "shell": null,
+    "notifications": null,
+    "notifications_text": null,
+    "agent": null,
+    "model": null,
+    "workers": null,
+    "rounds": null,
+    "auto_close_finished": null,
+    "shortcuts": null,
+    "ping": null,
+    "agents": null
+  },
+  "effective": {
+    "theme": "system",
+    "editor": "system",
+    "shell": "login",
+    "notifications": true,
+    "notifications_text": false,
+    "agent": "claude",
+    "model": "",
+    "workers": 4,
+    "rounds": 2,
+    "auto_close_finished": true,
+    "shortcuts": {
+      "palette": "Primary+K",
+      "settings": "Primary+,"
+    },
+    "ping": {
+      "per_hour": 6,
+      "batch_minutes": 2,
+      "decisions": true,
+      "questions": true,
+      "blocked": true
+    }
+  },
+  "sources": {
+    "theme": "global",
+    "editor": "global",
+    "shell": "global",
+    "notifications": "global",
+    "notifications_text": "global",
+    "agent": "global",
+    "model": "global",
+    "workers": "global",
+    "rounds": "global",
+    "auto_close_finished": "global",
+    "shortcuts": "global",
+    "ping": "global",
+    "agents": "global"
+  },
+  "caps": {
+    "active_runs": 1,
+    "workers_per_run": 16,
+    "editable": false
+  },
+  "global": {
+    "theme": "system",
+    "editor": "system",
+    "shell": "login",
+    "notifications": true,
+    "notifications_text": false,
+    "agent": "claude",
+    "model": "",
+    "workers": 4,
+    "rounds": 2,
+    "auto_close_finished": true,
+    "shortcuts": {
+      "palette": "Primary+K",
+      "settings": "Primary+,"
+    },
+    "ping": {
+      "per_hour": 6,
+      "batch_minutes": 2,
+      "decisions": true,
+      "questions": true,
+      "blocked": true
+    }
+  },
+  "agents": {
+    "default": {
+      "account": "claude",
+      "model": null,
+      "effort": null
+    },
+    "roles": {},
+    "allowed": [
+      {
+        "account": "claude",
+        "model": null
+      }
+    ]
+  }
+}

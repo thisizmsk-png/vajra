@@ -1,0 +1,24 @@
+/* The ping rule strip at the top of the Inbox: one line at rest, the form inline when changed, the log folded. */
+.v-ping { margin: var(--space-md) var(--space-md) 0; padding: var(--space-sm) var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); display: grid; gap: var(--space-xs); font: 400 13px/20px var(--font-ui); }
+.v-ping__line { display: flex; align-items: baseline; gap: var(--space-md); flex-wrap: wrap; }
+.v-ping__h { margin: 0; font: 600 13px/20px var(--font-ui); flex: none; }
+.v-ping__sum { margin: 0; color: var(--c-text-secondary); flex: 1 1 24ch; min-width: 0; }
+.v-ping__line .v-button { margin-left: auto; align-self: center; }
+.v-ping__note { margin: 0; color: var(--c-text-muted); font-size: 12px; line-height: 18px; }
+.v-ping__err { margin: 0; color: var(--c-danger); }
+.v-ping__form { display: grid; gap: 0; max-width: 560px; padding-top: var(--space-xs); }
+.v-ping__row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); padding: var(--space-sm) 0; border-bottom: 1px solid var(--c-border); }
+.v-ping__row small { display: block; color: var(--c-text-muted); font-size: 12px; line-height: 16px; }
+.v-ping__row select { min-height: var(--row-h); padding: var(--space-xs) var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); color: var(--c-text); font: inherit; }
+.v-ping__row select:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-ping__kinds { margin: 0; padding: 0; border: 0; min-width: 0; }
+.v-ping__kinds legend { padding: var(--space-sm) 0 0; color: var(--c-text-secondary); }
+.v-ping__form > .v-ping__note { padding: var(--space-sm) 0; }
+.v-ping__acts { display: flex; justify-content: flex-end; gap: var(--space-sm); }
+.v-ping__log summary { cursor: pointer; color: var(--c-text-secondary); width: max-content; border-radius: var(--radius-sm); }
+.v-ping__log summary:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-ping__log ol { list-style: none; margin: var(--space-xs) 0 0; padding: 0; display: grid; }
+.v-ping__e { display: grid; gap: 2px; padding: var(--space-sm) 0; border-top: 1px solid var(--c-border); }
+.v-ping__e--quiet { color: var(--c-text-secondary); }
+.v-ping__when { color: var(--c-text-muted); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.v-ping__why { color: var(--c-text-muted); font-size: 12px; line-height: 18px; }

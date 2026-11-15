@@ -43,6 +43,10 @@ pub const REPO_RULES: [&str; 5] = ["**/.env", "**/.env.*", "**/id_rsa*", "**/id_
 /// Rules under the app data dir (it can differ from the default `$HOME` location through `VAJRA_DESKTOP_DATA`).
 pub const DATA_RULES: [&str; 1] = ["**"];
 
+/// Rules under every other project's folder (ADR-15 D8): one project's Lead never reads another project's code or
+/// secrets into its transcript.
+pub const OTHER_PROJECT_RULES: [&str; 1] = ["**"];
+
 /// The hook entries, byte for byte what `hooks/hooks.json` registers for the guard and the Atman observer.
 /// `desktop-control.sh` is left out on purpose: it serves workers only, and the Lead has no `agent_id`.
 pub const PRE_TOOL_USE_MATCHER: &str = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|LS|mcp__vajra-desktop__.*";
@@ -85,21 +89,106 @@ fn rule(base: &str, suffix: &str) -> String {
     format!("Read(//{}/{suffix})", &base[1..])
 }
 
+/// Extra write-protected files under `$HOME` for a Claude worker: the user's git config, which the core's git baseline
+/// is taken from.
+pub const WORKER_EDIT_HOME_RULES: [&str; 2] = [".gitconfig", ".config/git/**"];
+
+/// A Claude worker's `Edit(//...)` deny rules (Claude Code applies Edit rules to every built-in edit tool): every
+/// `HOME_RULES` entry plus `WORKER_EDIT_HOME_RULES`, and the whole data dir, in both the given and realpath forms. They
+/// cover the edit tools only; a Bash write is the guard's or the OS sandbox's to stop (#147 gate H1).
+pub fn worker_edit_rules(home: &Path, data: &Path) -> Result<Vec<String>, LeadError> {
+    let mut out: Vec<String> = Vec::new();
+    let tables: [(&Path, &str, &[&str]); 3] = [(home, "HOME", &HOME_RULES), (home, "HOME", &WORKER_EDIT_HOME_RULES), (data, "data dir", &DATA_RULES)];
+    for (base, what, table) in tables {
+        for form in forms(base, what)? {
+            for suffix in table {
+                let r = format!("Edit(//{}/{suffix})", &form[1..]);
+                if !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The folder under `$HOME` that holds the signing key and Vajra state: `HOME_RULES`' first entry, without its `/**`.
+pub const KEY_DIR: &str = ".claude/vajra";
+
+/// The folders a Claude worker's OS sandbox refuses to read or write (`sandbox.filesystem.denyRead`/`denyWrite`): the
+/// key folder and the data dir, each in its given and realpath forms. Unlike the deny rules these hold for every
+/// process a Bash call starts, whatever it names, since Seatbelt checks the real path.
+pub fn sandbox_locked_dirs(home: &Path, data: &Path) -> Result<Vec<String>, LeadError> {
+    let mut out: Vec<String> = Vec::new();
+    for (base, what) in [(home.join(KEY_DIR), "key folder"), (data.to_path_buf(), "data dir")] {
+        for form in forms(&base, what)? {
+            if !out.contains(&form) {
+                out.push(form);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Every deny rule for this machine, deduped, in table order. A base that is not a plain absolute path is refused
 /// (`lead_guard_missing`). When a base differs from its realpath (macOS `/var` → `/private/var`, a symlinked HOME
 /// or repo) both forms are emitted: the spike did not show the twin is needed, but emitting it costs nothing.
 pub fn deny_rules(home: &Path, repo: &Path, data: &Path) -> Result<Vec<String>, LeadError> {
+    deny_rules_with(home, repo, data, &[])
+}
+
+/// `deny_rules` plus `Read(//<root>/**)` for each of `others`, the folders of the app's other projects (ADR-15 D8). The
+/// caller leaves out its own project and any folder that holds it. A root that is not a plain absolute path is
+/// refused like any other base: the Lead fails closed rather than run without that rule.
+pub fn deny_rules_with(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf]) -> Result<Vec<String>, LeadError> {
+    deny_rules_iso(home, repo, data, others, &[])
+}
+
+/// `deny_rules_with` plus the secret-file rules (`REPO_RULES`) for each of `secret_dirs`: other projects' folders that hold the Lead's
+/// own folder (a project nested inside another one), which cannot be denied whole without denying the Lead itself.
+pub fn deny_rules_iso(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<Vec<String>, LeadError> {
+    deny_rules_for_iso(home, std::slice::from_ref(&repo.to_path_buf()), data, others, secret_dirs)
+}
+
+/// `deny_rules_with` where the project has more than one folder (its main checkout plus worktrees or run folders
+/// elsewhere): the repo secret-file rules (`.env`, `id_rsa*`, ...) are generated under EVERY one of `repos`, so a
+/// worktree outside the main checkout keeps them. At least one repo is required.
+pub fn deny_rules_for(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf]) -> Result<Vec<String>, LeadError> {
+    deny_rules_for_iso(home, repos, data, others, &[])
+}
+
+/// `deny_rules_for` plus secret-file rules for `secret_dirs` (see `deny_rules_iso`).
+pub fn deny_rules_for_iso(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<Vec<String>, LeadError> {
+    if repos.is_empty() {
+        return Err(LeadError::GuardMissing("no project folder to guard".into()));
+    }
     let mut out: Vec<String> = Vec::new();
     let mut push = |r: String| {
         if !out.contains(&r) {
             out.push(r);
         }
     };
-    for (base, what, table) in
-        [(home, "HOME", &HOME_RULES[..]), (repo, "repo", &REPO_RULES[..]), (data, "data dir", &DATA_RULES[..])]
-    {
+    let bases: Vec<(&Path, &str, &[&str])> = std::iter::once((home, "HOME", &HOME_RULES[..]))
+        .chain(repos.iter().map(|r| (r.as_path(), "repo", &REPO_RULES[..])))
+        .chain(std::iter::once((data, "data dir", &DATA_RULES[..])))
+        .collect();
+    for (base, what, table) in bases {
         for form in forms(base, what)? {
             for suffix in table {
+                push(rule(&form, suffix));
+            }
+        }
+    }
+    for other in others {
+        for form in forms(other, "another project's folder")? {
+            for suffix in OTHER_PROJECT_RULES {
+                push(rule(&form, suffix));
+            }
+        }
+    }
+    for dir in secret_dirs {
+        for form in forms(dir, "the folder of a project holding this one")? {
+            for suffix in REPO_RULES {
                 push(rule(&form, suffix));
             }
         }
@@ -108,7 +197,11 @@ pub fn deny_rules(home: &Path, repo: &Path, data: &Path) -> Result<Vec<String>, 
 }
 
 fn render(rules: &[String], hooks: bool) -> String {
-    let allow: Vec<&str> = LEAD_TOOLS.split(',').collect();
+    render_allow(rules, hooks, LEAD_TOOLS)
+}
+
+fn render_allow(rules: &[String], hooks: bool, tools: &str) -> String {
+    let allow: Vec<&str> = tools.split(',').collect();
     let mut v = json!({
         "permissions": {
             "defaultMode": "dontAsk",
@@ -134,13 +227,59 @@ fn render(rules: &[String], hooks: bool) -> String {
     s
 }
 
+/// A run lead's flag file (ADR-16 16.4, 6d2): the same deny table and guard hooks as the Director-General's, with the
+/// run lead's own tool list as the allow list.
+pub fn run_lead_settings(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf], tools: &str) -> Result<String, LeadError> {
+    Ok(render_allow(&deny_rules_for(home, repos, data, others)?, true, tools))
+}
+
 /// The Lead's settings file, as the bytes the core writes: the guard hooks and the generated deny rules.
 pub fn settings(home: &Path, repo: &Path, data: &Path) -> Result<String, LeadError> {
-    Ok(render(&deny_rules(home, repo, data)?, true))
+    settings_with(home, repo, data, &[])
+}
+
+/// `settings` with the other projects' folders denied too (ADR-15 D8).
+pub fn settings_with(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_with(home, repo, data, others)?, true))
+}
+
+/// `settings_with` for a project with several folders (see `deny_rules_for`).
+pub fn settings_for(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_for(home, repos, data, others)?, true))
+}
+
+/// `settings_no_hooks_with` for a project with several folders.
+pub fn settings_no_hooks_for(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_for(home, repos, data, others)?, false))
+}
+
+/// `settings_with` plus secret-file rules for the folders that hold this project (`deny_rules_iso`).
+pub fn settings_iso(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_iso(home, repo, data, others, secret_dirs)?, true))
+}
+
+/// `settings_iso` with the hooks removed (the startup self-test).
+pub fn settings_no_hooks_iso(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_iso(home, repo, data, others, secret_dirs)?, false))
+}
+
+/// `settings_for` plus secret-file rules for `secret_dirs`.
+pub fn settings_for_iso(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_for_iso(home, repos, data, others, secret_dirs)?, true))
+}
+
+/// `settings_no_hooks_for` plus secret-file rules for `secret_dirs`.
+pub fn settings_no_hooks_for_iso(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_for_iso(home, repos, data, others, secret_dirs)?, false))
 }
 
 /// The same file with the hooks removed. Used by the startup self-test and the live deny-rule tests, which must
 /// prove the deny layer on its own. Never passed to a real ask.
 pub fn settings_no_hooks(home: &Path, repo: &Path, data: &Path) -> Result<String, LeadError> {
-    Ok(render(&deny_rules(home, repo, data)?, false))
+    settings_no_hooks_with(home, repo, data, &[])
+}
+
+/// `settings_no_hooks` with the other projects' folders denied too.
+pub fn settings_no_hooks_with(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_with(home, repo, data, others)?, false))
 }

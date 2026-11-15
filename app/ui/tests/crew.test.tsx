@@ -4,6 +4,7 @@ import { setTransport } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
+import { Live, liveRun } from "./liveRun";
 
 afterEach(() => {
   cleanup();
@@ -100,8 +101,9 @@ describe("Crew tree (S2a, US-2.1)", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     window.location.hash = "#/crew?slug=camp&id=r1";
     let status = "in_progress";
-    open({ crew: () => tree(status) });
-    render(<Crew />);
+    // Only a live run is re-read on a timer.
+    open({ ...liveRun(), crew: () => tree(status) });
+    render(<Live><Crew /></Live>);
     await screen.findByText("Backend");
     status = "blocked";
     await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
@@ -121,16 +123,16 @@ describe("Crew tree (S2a, US-2.1)", () => {
     expect(again.getAttribute("aria-selected")).toBe("true");
   });
 
-  it("shows the engine id only in the details of the selected node (AC-2.1.3)", async () => {
+  it("shows no engine id for a task, a run or a check: only a worker's own pane has that field (AC-2.1.3)", async () => {
     window.location.hash = "#/crew?slug=camp&id=r1";
     open({ crew: tree() });
     render(<Crew />);
     const backend = (await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement;
-    expect(screen.queryByText("bhima")).toBeNull();
     fireEvent.click(backend);
     const details = await screen.findByRole("region", { name: S.crew.details });
-    expect(within(details).getByText("bhima")).toBeTruthy();
-    expect(within(screen.getByRole("tree")).queryByText("bhima")).toBeNull();
+    expect(within(details).getByText(S.crew.kind)).toBeTruthy();
+    expect(within(details).queryByText(S.crew.engineId)).toBeNull();
+    expect(screen.queryByText("bhima")).toBeNull();
   });
 
   it("names an overlay on the node, such as a stop or a pending message", async () => {

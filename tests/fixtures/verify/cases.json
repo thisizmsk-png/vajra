@@ -1,0 +1,145 @@
+{
+  "_": "Shared cases for the verify and review rules (ADR-16 16.5a, PR 6g). 'expect' is what workflows/vajra-deliver.js gives; the node test tests/workflows/vajra-verify-parity.test.mjs and the Rust test desktop::verify::tests both check it. Regenerate with that node test and --write. A gate case may omit criteria and tasks (the defaults) and reviews ([]).",
+  "defaults": {
+    "criteria": [
+      {
+        "id": "ac-1",
+        "criterion": "export has a --json flag",
+        "check": "npm test -- export"
+      },
+      {
+        "id": "ac-2",
+        "criterion": "the docs mention the json flag",
+        "check": "grep -q json README.md"
+      },
+      {
+        "id": "ac-3",
+        "criterion": "the cli prints its version",
+        "check": "node cli.js --version"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "flag",
+        "owner_role": "backend",
+        "files": [
+          "src/"
+        ],
+        "deps": [],
+        "criteria": [
+          "ac-1"
+        ],
+        "brief": "b",
+        "touches_security": false
+      },
+      {
+        "id": "t3",
+        "title": "version",
+        "owner_role": "backend",
+        "files": [
+          "cli.js"
+        ],
+        "deps": [
+          "t1"
+        ],
+        "criteria": [
+          "ac-3"
+        ],
+        "brief": "b",
+        "touches_security": false
+      },
+      {
+        "id": "t2",
+        "title": "docs",
+        "owner_role": "frontend",
+        "files": [
+          "README.md"
+        ],
+        "deps": [],
+        "criteria": [
+          "ac-2"
+        ],
+        "brief": "b",
+        "touches_security": false
+      }
+    ]
+  },
+  "js_gate_sha256": "c6cddbfda163c57d059a0b9f60938c021ac2265536c96cd4e639271a89afea80",
+  "cases": [
+    {"name":"rbc: exact ids","kind":"results_by_criterion","results":[{"criterion_id":"ac-2"},{"criterion_id":"ac-1"}],"expect":{"ac-2":0,"ac-1":1}},
+    {"name":"rbc: an upper-case id","kind":"results_by_criterion","results":[{"criterion_id":"AC-1"}],"expect":{"ac-1":0}},
+    {"name":"rbc: id then text","kind":"results_by_criterion","results":[{"criterion_id":"ac-2: the docs mention it"},{"criterion_id":"ac-3 - version"}],"expect":{"ac-2":0,"ac-3":1}},
+    {"name":"rbc: an id run into a word is no id","kind":"results_by_criterion","results":[{"criterion_id":"ac-1x"},{"criterion_id":"ac-12"}],"expect":{}},
+    {"name":"rbc: the criterion text, any punctuation","kind":"results_by_criterion","results":[{"criterion_id":"Export has a --JSON flag!"}],"expect":{"ac-1":0}},
+    {"name":"rbc: a loose match of 8 or more","kind":"results_by_criterion","results":[{"criterion_id":"prints its version"}],"expect":{"ac-3":0}},
+    {"name":"rbc: a short text has no loose match","kind":"results_by_criterion","results":[{"criterion_id":"version"}],"expect":{}},
+    {"name":"rbc: an ambiguous loose match","kind":"results_by_criterion","results":[{"criterion_id":"the"},{"criterion_id":"json flag"}],"expect":{}},
+    {"name":"rbc: the first result for an id wins","kind":"results_by_criterion","results":[{"criterion_id":"ac-1","notes":"first"},{"criterion_id":"ac-1","notes":"second"}],"expect":{"ac-1":0}},
+    {"name":"rbc: unknown and empty ids","kind":"results_by_criterion","results":[{"criterion_id":"ac-9"},{"criterion_id":""},{"criterion_id":"  \n "}],"expect":{}},
+    {"name":"rbc: a criterion of only punctuation is in every long text","kind":"results_by_criterion","criteria":[{"id":"ac-1","criterion":"!!!","check":"c"}],"results":[{"criterion_id":"something long here"}],"expect":{"ac-1":0}},
+    {"name":"cmd: none","kind":"command_problem","cmd":"","expect":{"problem":"no command"}},
+    {"name":"cmd: a plain command","kind":"command_problem","cmd":"npm test -- export","expect":{"problem":null}},
+    {"name":"cmd: a note in parentheses","kind":"command_problem","cmd":"pytest -q  (venv python)","expect":{"problem":"ends with a note in parentheses \"(venv python)\"; the command must be only what ran, notes go in notes"}},
+    {"name":"cmd: a subshell is no note","kind":"command_problem","cmd":"make (a && b)","expect":{"problem":null}},
+    {"name":"cmd: an assignment in parentheses is no note","kind":"command_problem","cmd":"x (a=1)","expect":{"problem":null}},
+    {"name":"cmd: parentheses after a separator are no note","kind":"command_problem","cmd":"make; (cd x)","expect":{"problem":null}},
+    {"name":"cmd: only parentheses","kind":"command_problem","cmd":"(make test)","expect":{"problem":null}},
+    {"name":"cmd: a nested paren is no note","kind":"command_problem","cmd":"a (b) c)","expect":{"problem":null}},
+    {"name":"cmd: a long note is cut","kind":"command_problem","cmd":"make (this note goes on for a long while, far longer than eighty characters, so the message cuts it short)","expect":{"problem":"ends with a note in parentheses \"(this note goes on for a long while, far longer than eighty characters, so the me)\"; the command must be only what ran, notes go in notes"}},
+    {"name":"cmd: an elision","kind":"command_problem","cmd":"grep \"...\" x","expect":{"problem":"elides part of the command (...); give the literal command that ran"}},
+    {"name":"cmd: an ellipsis character","kind":"command_problem","cmd":"make test … then more","expect":{"problem":"elides part of the command (...); give the literal command that ran"}},
+    {"name":"cmd: home","kind":"command_problem","cmd":"cat ~/notes","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: a bare tilde","kind":"command_problem","cmd":"ls ~","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: a tilde in a word","kind":"command_problem","cmd":"git log HEAD~1","expect":{"problem":null}},
+    {"name":"cmd: $HOME","kind":"command_problem","cmd":"ls $HOME/x","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: ${TMPDIR}","kind":"command_problem","cmd":"ls ${TMPDIR}","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: $HOMEX is another variable","kind":"command_problem","cmd":"echo $HOMEX","expect":{"problem":null}},
+    {"name":"cmd: /Users","kind":"command_problem","cmd":"/Users/me/bin/x --check","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: =/tmp","kind":"command_problem","cmd":"make OUT=/tmp/x","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: a quoted /var/folders","kind":"command_problem","cmd":"ls '/var/folders/ab/x'","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: /var/tmp","kind":"command_problem","cmd":"ls /var/tmp/","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: /var alone is fine","kind":"command_problem","cmd":"ls /var/log/x","expect":{"problem":null}},
+    {"name":"cmd: /tmp inside a word is fine","kind":"command_problem","cmd":"ls cd/tmp/x","expect":{"problem":null}},
+    {"name":"cmd: an absolute venv","kind":"command_problem","cmd":"/opt/app/.venv/bin/python -m pytest","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: an absolute node_modules","kind":"command_problem","cmd":"(\"/srv/x/node_modules/.bin/jest\")","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: a venv at the root is no absolute venv path","kind":"command_problem","cmd":"/venv/bin/python x","expect":{"problem":null}},
+    {"name":"cmd: a relative venv","kind":"command_problem","cmd":"a/.venv/bin/python -m pytest","expect":{"problem":null}},
+    {"name":"cmd: echo $?","kind":"command_problem","cmd":"cli --version; echo $?","expect":{"problem":"masks the exit code (echo $? or || true); the exit code itself is the result"}},
+    {"name":"cmd: echo $? at the start","kind":"command_problem","cmd":"echo ok $?","expect":{"problem":"masks the exit code (echo $? or || true); the exit code itself is the result"}},
+    {"name":"cmd: || true","kind":"command_problem","cmd":"make test || true","expect":{"problem":"masks the exit code (echo $? or || true); the exit code itself is the result"}},
+    {"name":"cmd: ||:","kind":"command_problem","cmd":"make test ||:","expect":{"problem":"masks the exit code (echo $? or || true); the exit code itself is the result"}},
+    {"name":"cmd: || true in the middle","kind":"command_problem","cmd":"make test || true; make lint","expect":{"problem":null}},
+    {"name":"cmd: setup ignores masks","kind":"command_problem","cmd":"npm ci || true","kind_of":"setup","expect":{"problem":null}},
+    {"name":"cmd: setup still refuses outside paths","kind":"command_problem","cmd":"python3 -m venv ~/venv","kind_of":"setup","expect":{"problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}},
+    {"name":"cmd: a bare python after a venv","kind":"command_problem","cmd":"python -m pytest","setup":["python3 -m venv .venv"],"expect":{"problem":"calls a bare python/pip/pytest, but each command runs in a fresh shell with no virtualenv activated; call the one setup_cmds built (.venv/bin/python)"}},
+    {"name":"cmd: a bare pytest after a separator","kind":"command_problem","cmd":"make && pytest","setup":["uv venv"],"expect":{"problem":"calls a bare python/pip/pytest, but each command runs in a fresh shell with no virtualenv activated; call the one setup_cmds built (.venv/bin/python)"}},
+    {"name":"cmd: a bare pip in a subshell","kind":"command_problem","cmd":"(pip install x)","setup":["virtualenv .venv"],"expect":{"problem":"calls a bare python/pip/pytest, but each command runs in a fresh shell with no virtualenv activated; call the one setup_cmds built (.venv/bin/python)"}},
+    {"name":"cmd: pip3 is not pip","kind":"command_problem","cmd":"pip3 install x","setup":["python3 -m venv .venv"],"expect":{"problem":null}},
+    {"name":"cmd: activated","kind":"command_problem","cmd":"source .venv/bin/activate && python x","setup":["python3 -m venv .venv"],"expect":{"problem":null}},
+    {"name":"cmd: the venv's python","kind":"command_problem","cmd":".venv/bin/python -m pytest","setup":["python3 -m venv .venv"],"expect":{"problem":null}},
+    {"name":"cmd: no venv made","kind":"command_problem","cmd":"python -m pytest","setup":["npm ci"],"expect":{"problem":null}},
+    {"name":"cmd: venvy is no venv","kind":"command_problem","cmd":"python x","setup":["python3 -m venvy"],"expect":{"problem":null}},
+    {"name":"cmd: controls and runs of spaces","kind":"command_problem","cmd":"  npm\ttest\u0007   (x)  ","expect":{"problem":"ends with a note in parentheses \"(x)\"; the command must be only what ran, notes go in notes"}},
+    {"name":"setup: dropped checkouts, repeats and blanks","kind":"setup_of","setup_cmds":["npm ci","git checkout main","git switch -c x","git checkout-index -a","  npm   ci ","","git status","npm ci"],"expect":{"setup":["npm ci","git status"]}},
+    {"name":"setup: none","kind":"setup_of","setup_cmds":[],"expect":{"setup":[]}},
+    {"name":"problems: none","kind":"verification_problems","verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test","notes":"","exit_code":0,"evidence":"ok"}],"suite_command":"npm test","suite_passes":true,"regressions":[],"setup_cmds":["npm ci"]},"expect":{"criteria":{},"suite":null,"setup":[],"any":false}},
+    {"name":"problems: a passing check and the suite and setup","kind":"verification_problems","verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test || true","notes":"","exit_code":0,"evidence":"ok"},{"criterion_id":"ac-2","status":"fail","command":"grep x ~/README.md","notes":"","exit_code":1,"evidence":"no"},{"criterion_id":"ac-3","status":"pass","command":"node cli.js --version (twice)","notes":"","exit_code":0,"evidence":"1.0"}],"suite_command":"npm test; echo $?","suite_passes":true,"regressions":[],"setup_cmds":["npm ci --prefix /tmp/x","git checkout main"]},"expect":{"criteria":{"ac-1":"masks the exit code (echo $? or || true); the exit code itself is the result","ac-3":"ends with a note in parentheses \"(twice)\"; the command must be only what ran, notes go in notes"},"suite":"masks the exit code (echo $? or || true); the exit code itself is the result","setup":[{"command":"npm ci --prefix /tmp/x","problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}],"any":true}},
+    {"name":"problems: a blank suite command is not checked","kind":"verification_problems","verification":{"results":[],"suite_command":"  ","suite_passes":false,"regressions":[],"setup_cmds":[]},"expect":{"criteria":{},"suite":null,"setup":[],"any":false}},
+    {"name":"redo: what the verifier is told","kind":"redo_feedback","verification":{"results":[{"criterion_id":"AC-1","status":"pass","command":"npm test || true","notes":"","exit_code":0,"evidence":"ok"},{"criterion_id":"ac-3","status":"pass","command":"node cli.js --version (twice)","notes":"","exit_code":0,"evidence":"1.0"}],"suite_command":"npm test; echo $?","suite_passes":true,"regressions":[],"setup_cmds":["npm ci --prefix /tmp/x"]},"expect":{"criteria":[{"criterion_id":"ac-1","command":"npm test || true","problem":"masks the exit code (echo $? or || true); the exit code itself is the result"},{"criterion_id":"ac-3","command":"node cli.js --version (twice)","problem":"ends with a note in parentheses \"(twice)\"; the command must be only what ran, notes go in notes"}],"suite":{"command":"npm test; echo $?","problem":"masks the exit code (echo $? or || true); the exit code itself is the result"},"setup_cmds":[{"command":"npm ci --prefix /tmp/x","problem":"uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python"}]}},
+    {"name":"redo: only the suite","kind":"redo_feedback","verification":{"results":[],"suite_command":"make test || :","suite_passes":true,"regressions":[],"setup_cmds":[]},"expect":{"criteria":[],"suite":{"command":"make test || :","problem":"masks the exit code (echo $? or || true); the exit code itself is the result"},"setup_cmds":[]}},
+    {"name":"gate: everything passes","kind":"gate","reviews":[{"verdict":"approve","blocking_issues":[],"risks":[],"rationale":"fine"}],"verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test -- export","notes":"","exit_code":0,"evidence":"ok"},{"criterion_id":"ac-2","status":"pass","command":"grep -q json README.md","notes":"","exit_code":0,"evidence":"found"},{"criterion_id":"ac-3","status":"pass","command":"node cli.js --version","notes":"","exit_code":0,"evidence":"1.0.0"}],"suite_command":"npm test","suite_passes":true,"regressions":[],"setup_cmds":["npm ci"]},"expect":{"passed":true,"failing":[],"suite_ok":true,"feedback":{},"rejected":false}},
+    {"name":"gate: a failed, a missing and a not-run criterion","kind":"gate","reviews":[{"verdict":"approve","blocking_issues":[],"risks":[],"rationale":""}],"verification":{"results":[{"criterion_id":"ac-1","status":"fail","command":"npm test -- export","notes":"","exit_code":1,"evidence":"1 failing"},{"criterion_id":"ac-3","status":"not_run","command":"","notes":"no node","exit_code":0,"evidence":""}],"suite_command":"","suite_passes":false,"regressions":[],"setup_cmds":[]},"expect":{"passed":false,"failing":["ac-1","ac-2","ac-3"],"suite_ok":true,"feedback":{"t1":{"failing_criteria":[{"criterion":{"id":"ac-1","criterion":"export has a --json flag","check":"npm test -- export"},"result":{"criterion_id":"ac-1","status":"fail","command":"npm test -- export","notes":"","exit_code":1,"evidence":"1 failing"}}]},"t2":{"failing_criteria":[{"criterion":{"id":"ac-2","criterion":"the docs mention the json flag","check":"grep -q json README.md"},"result":"not checked"}]},"t3":{"failing_criteria":[{"criterion":{"id":"ac-3","criterion":"the cli prints its version","check":"node cli.js --version"},"result":{"criterion_id":"ac-3","status":"not_run","command":"","notes":"no node","exit_code":0,"evidence":""}}]}},"rejected":false}},
+    {"name":"gate: pass with a bad exit code, no evidence, a blank command","kind":"gate","reviews":[],"verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test","notes":"","exit_code":1,"evidence":"ok"},{"criterion_id":"ac-2","status":"pass","command":"grep -q json README.md","notes":"","exit_code":0,"evidence":"  "},{"criterion_id":"ac-3","status":"pass","command":" ","notes":"","exit_code":0,"evidence":"1.0"}],"suite_command":"","suite_passes":true,"regressions":[],"setup_cmds":[]},"expect":{"passed":false,"failing":["ac-1","ac-2","ac-3"],"suite_ok":true,"feedback":{"t1":{"failing_criteria":[{"criterion":{"id":"ac-1","criterion":"export has a --json flag","check":"npm test -- export"},"result":{"criterion_id":"ac-1","status":"pass","command":"npm test","notes":"","exit_code":1,"evidence":"ok"}}]},"t2":{"failing_criteria":[{"criterion":{"id":"ac-2","criterion":"the docs mention the json flag","check":"grep -q json README.md"},"result":{"criterion_id":"ac-2","status":"pass","command":"grep -q json README.md","notes":"","exit_code":0,"evidence":"  "}}]},"t3":{"failing_criteria":[{"criterion":{"id":"ac-3","criterion":"the cli prints its version","check":"node cli.js --version"},"result":{"criterion_id":"ac-3","status":"pass","command":" ","notes":"","exit_code":0,"evidence":"1.0"},"verifier_command_problem":"no command (the check could not be re-run as written; make sure the criterion has a runnable check)"}]}},"rejected":false}},
+    {"name":"gate: a passing check whose command can't be re-run","kind":"gate","reviews":[],"verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test || true","notes":"","exit_code":0,"evidence":"ok"},{"criterion_id":"ac-2","status":"pass","command":"grep -q json README.md","notes":"","exit_code":0,"evidence":"found"},{"criterion_id":"ac-3","status":"pass","command":"node cli.js --version","notes":"","exit_code":0,"evidence":"1.0.0"}],"suite_command":"","suite_passes":true,"regressions":[],"setup_cmds":[]},"expect":{"passed":false,"failing":["ac-1"],"suite_ok":true,"feedback":{"t1":{"failing_criteria":[{"criterion":{"id":"ac-1","criterion":"export has a --json flag","check":"npm test -- export"},"result":{"criterion_id":"ac-1","status":"pass","command":"npm test || true","notes":"","exit_code":0,"evidence":"ok"},"verifier_command_problem":"masks the exit code (echo $? or || true); the exit code itself is the result (the check could not be re-run as written; make sure the criterion has a runnable check)"}]}},"rejected":false}},
+    {"name":"gate: the suite fails with every criterion passing","kind":"gate","reviews":[],"verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test -- export","notes":"","exit_code":0,"evidence":"ok"},{"criterion_id":"ac-2","status":"pass","command":"grep -q json README.md","notes":"","exit_code":0,"evidence":"found"},{"criterion_id":"ac-3","status":"pass","command":"node cli.js --version","notes":"","exit_code":0,"evidence":"1.0.0"}],"suite_command":"npm test","suite_passes":false,"regressions":["test/a.test.js > x"],"setup_cmds":[]},"expect":{"passed":false,"failing":[],"suite_ok":false,"feedback":{"t1":{"suite_regressions":[["test/a.test.js > x"]]},"t3":{"suite_regressions":[["test/a.test.js > x"]]},"t2":{"suite_regressions":[["test/a.test.js > x"]]}},"rejected":false}},
+    {"name":"gate: a suite command that can't be re-run","kind":"gate","reviews":[],"verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test -- export","notes":"","exit_code":0,"evidence":"ok"},{"criterion_id":"ac-2","status":"pass","command":"grep -q json README.md","notes":"","exit_code":0,"evidence":"found"},{"criterion_id":"ac-3","status":"pass","command":"node cli.js --version","notes":"","exit_code":0,"evidence":"1.0.0"}],"suite_command":"npm test || true","suite_passes":true,"regressions":[],"setup_cmds":[]},"expect":{"passed":false,"failing":[],"suite_ok":false,"feedback":{"t1":{"suite_command_problem":["masks the exit code (echo $? or || true); the exit code itself is the result"]},"t3":{"suite_command_problem":["masks the exit code (echo $? or || true); the exit code itself is the result"]},"t2":{"suite_command_problem":["masks the exit code (echo $? or || true); the exit code itself is the result"]}},"rejected":false}},
+    {"name":"gate: blocking issues, one named and one not","kind":"gate","reviews":[{"verdict":"revise","blocking_issues":[{"task":"t2","issue":"the docs example is wrong"},{"task":"t9","issue":"no changelog"}],"risks":[],"rationale":"close"},{"verdict":"approve","blocking_issues":[{"task":"t1","issue":"unescaped output"}],"risks":["x"],"rationale":""}],"verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test -- export","notes":"","exit_code":0,"evidence":"ok"},{"criterion_id":"ac-2","status":"pass","command":"grep -q json README.md","notes":"","exit_code":0,"evidence":"found"},{"criterion_id":"ac-3","status":"pass","command":"node cli.js --version","notes":"","exit_code":0,"evidence":"1.0.0"}],"suite_command":"npm test","suite_passes":false,"regressions":["r1"],"setup_cmds":[]},"expect":{"passed":false,"failing":[],"suite_ok":false,"feedback":{"t2":{"blocking_issues":["the docs example is wrong","no changelog"],"suite_regressions":[["r1"]]},"t1":{"blocking_issues":["unescaped output","no changelog"],"suite_regressions":[["r1"]]},"t3":{"blocking_issues":["no changelog"],"suite_regressions":[["r1"]]}},"rejected":false}},
+    {"name":"gate: a revise with no blocking issue reworks nothing","kind":"gate","reviews":[{"verdict":"revise","blocking_issues":[],"risks":[],"rationale":"unsure"}],"verification":{"results":[{"criterion_id":"ac-1","status":"pass","command":"npm test -- export","notes":"","exit_code":0,"evidence":"ok"},{"criterion_id":"ac-2","status":"pass","command":"grep -q json README.md","notes":"","exit_code":0,"evidence":"found"},{"criterion_id":"ac-3","status":"pass","command":"node cli.js --version","notes":"","exit_code":0,"evidence":"1.0.0"}],"suite_command":"","suite_passes":true,"regressions":[],"setup_cmds":[]},"expect":{"passed":false,"failing":[],"suite_ok":true,"feedback":{},"rejected":false}},
+    {"name":"gate: a criterion two tasks share","kind":"gate","tasks":[{"id":"t1","title":"a","owner_role":"backend","files":["a"],"deps":[],"criteria":["ac-1"],"brief":"b","touches_security":false},{"id":"t2","title":"b","owner_role":"backend","files":["b"],"deps":["t1"],"criteria":["ac-1","ac-2","ac-3"],"brief":"b","touches_security":false}],"reviews":[{"verdict":"reject","blocking_issues":[],"risks":[],"rationale":"wrong approach"}],"verification":{"results":[{"criterion_id":"ac-1","status":"fail","command":"npm test -- export","notes":"","exit_code":2,"evidence":"boom"}],"suite_command":"","suite_passes":true,"regressions":[],"setup_cmds":[]},"expect":{"passed":false,"failing":["ac-1","ac-2","ac-3"],"suite_ok":true,"feedback":{"t1":{"failing_criteria":[{"criterion":{"id":"ac-1","criterion":"export has a --json flag","check":"npm test -- export"},"result":{"criterion_id":"ac-1","status":"fail","command":"npm test -- export","notes":"","exit_code":2,"evidence":"boom"}}]},"t2":{"failing_criteria":[{"criterion":{"id":"ac-1","criterion":"export has a --json flag","check":"npm test -- export"},"result":{"criterion_id":"ac-1","status":"fail","command":"npm test -- export","notes":"","exit_code":2,"evidence":"boom"}},{"criterion":{"id":"ac-2","criterion":"the docs mention the json flag","check":"grep -q json README.md"},"result":"not checked"},{"criterion":{"id":"ac-3","criterion":"the cli prints its version","check":"node cli.js --version"},"result":"not checked"}]}},"rejected":true}},
+    {"name":"security: the ask","kind":"security","ask":"fix the login form","criteria_text":["it works"],"touches_security":false,"expect":{"flagged":true}},
+    {"name":"security: a criterion","kind":"security","ask":"tidy the export","criteria_text":["tokens rotate daily"],"touches_security":false,"expect":{"flagged":true}},
+    {"name":"security: the lead's flag","kind":"security","ask":"tidy the export","criteria_text":["it works"],"touches_security":true,"expect":{"flagged":true}},
+    {"name":"security: none","kind":"security","ask":"tidy the export","criteria_text":["it works","the docs say so"],"touches_security":false,"expect":{"flagged":false}}
+  ]
+}

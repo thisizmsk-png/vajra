@@ -1,0 +1,16 @@
+.v-pref { display: flex; flex-direction: column; gap: var(--space-sm); padding: var(--space-lg) 0; font: 400 13px/20px var(--font-ui); }
+.v-pref p { margin: 0; color: var(--c-text-secondary); }
+.v-pref__row { padding: var(--space-sm) 0; border-bottom: 1px solid var(--c-border); }
+.v-pref__row label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); }
+.v-pref small { display: block; color: var(--c-text-muted); font-size: 11px; }
+.v-pref select, .v-pref-scope select { max-width: 100%; min-height: var(--row-h); padding: var(--space-xs) var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); color: var(--c-text); font: inherit; }
+.v-pref input { accent-color: var(--c-primary); }
+.v-pref select:focus-visible, .v-pref-scope select:focus-visible, .v-pref input:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-pref__actions { display: flex; flex-wrap: wrap; gap: var(--space-xs); padding-top: var(--space-sm); }
+/* Save and Discard act on your edits; Reset and Reload are rare, so they sit apart and quieter. */
+.v-pref__rare { display: flex; flex-wrap: wrap; gap: var(--space-xs); margin-left: auto; }
+.v-pref-scope { padding: var(--space-sm) 0; font: 400 13px/20px var(--font-ui); }
+.v-pref-scope select { margin-left: var(--space-sm); }
+.v-copies { display: flex; flex-direction: column; gap: var(--space-sm); }
+.v-copies__act { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); padding-top: var(--space-xs); }
+.v-copies__note { margin: 0; font: 400 13px/20px var(--font-ui); color: var(--c-text-secondary); }

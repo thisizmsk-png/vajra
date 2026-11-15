@@ -1,11 +1,13 @@
 {
   "identifier": "default",
-  "description": "Core permissions for the main window only, plus dragging the window by its overlay title bar. No shell or fs plugins.",
+  "description": "Core permissions for the main window only, plus dragging the window by its overlay title bar, the system open dialog for choosing a repository folder, and every app command (the app manifest makes Tauri check each). No shell or fs plugins.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "dialog:allow-open",
+    "main-window-commands"
   ]
 }

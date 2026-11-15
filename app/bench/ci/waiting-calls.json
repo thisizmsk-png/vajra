@@ -1,0 +1,14 @@
+{
+  "main_thread_commands": [
+    "diagnostics_preview",
+    "lifecycle",
+    "term_ack",
+    "term_attach",
+    "term_list",
+    "term_resize",
+    "term_visible",
+    "term_write"
+  ],
+  "blocking_calls_in_main_thread_commands": 0,
+  "sync_ui_calls": 0
+}

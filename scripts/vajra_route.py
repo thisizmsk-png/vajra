@@ -308,13 +308,15 @@ def match_routes(cfg, ask):
     return matches
 
 
-def active_campaign():
-    """One line from `vajra-campaign.sh active --brief`, or ''. Never raises."""
+def active_campaign(cwd=None):
+    """One line from `vajra-campaign.sh active --brief`, or ''. Never raises. The pointer is per repo, so it
+    runs in the prompt's cwd."""
     if not CAMPAIGN_SCRIPT.is_file():
         return ""
     try:
+        wd = cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None
         res = subprocess.run(["bash", str(CAMPAIGN_SCRIPT), "active", "--brief"],
-                             capture_output=True, text=True, timeout=2)
+                             capture_output=True, text=True, timeout=2, cwd=wd)
         if res.returncode != 0:
             return ""
         line = (res.stdout or "").strip().splitlines()
@@ -659,7 +661,7 @@ def route(payload):
         text += "Suggestions for its plan to consider (not binding): " + suggestion_text(cfg, matches, limit) + ". "
     else:
         text += "No route matched; the workflow picks owners from the roster. "
-    camp = active_campaign()
+    camp = active_campaign(payload.get("cwd"))
     if camp:
         if not camp.lower().startswith("vajra campaign"):
             camp = "Vajra campaign: " + camp

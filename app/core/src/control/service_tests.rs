@@ -10,7 +10,7 @@ fn svc() -> (Service, PathBuf) {
     fs::create_dir_all(dir.join("wt")).unwrap();
     let mut s = Service::open(&dir, dir.join("audit.log"), None).unwrap();
     s.start_session(SID, "20261105-1810").unwrap();
-    s.set_workers(vec![WorkerInfo {
+    s.set_workers(SID, vec![WorkerInfo {
         worker: Worker {
             agent_id: "aa870dd40540481f0".into(),
             engine_id: "bhima".into(),
@@ -18,6 +18,7 @@ fn svc() -> (Service, PathBuf) {
             prompt_first_line: None,
             branch: None,
             status: Status::InProgress,
+            provider: None,
         },
         task_id: Some("20261105-1810.t1".into()),
         title: None,
@@ -152,14 +153,14 @@ fn discovery_marking_a_worker_finished_expires_its_queued_messages() {
     let (mut s, dir) = svc();
     let id = s.message_worker(Actor::Human, "bhima", "late note").unwrap()["action_id"].as_str().unwrap().to_string();
     assert_eq!(files(&dir, "queue"), 1);
-    let mut ws = s.workers.clone();
+    let mut ws = s.sessions[SID].workers.clone();
     ws[0].live = false;
     ws[0].worker.status = Status::Done;
-    s.set_workers(ws.clone());
+    s.set_workers(SID, ws.clone());
     assert_eq!(files(&dir, "queue"), 0, "a finished worker never receives it later");
     assert!(!s.pending.contains_key(&id));
     // Repeating the same refresh is harmless.
-    s.set_workers(ws);
+    s.set_workers(SID, ws);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -262,7 +263,7 @@ fn a_claimed_message_is_still_settled_after_its_session_ended() {
     let root = dir.join("control").join(SID);
     let qf = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
     fs::rename(&qf, root.join("inflight").join(format!("{id}.4242"))).unwrap();
-    s.end_session();
+    s.end_session(SID);
     assert!(s.pending.contains_key(&id), "a claimed message outlives the session");
     fs::create_dir_all(root.join("acks")).unwrap();
     fs::write(root.join("acks").join(format!("{id}.json")), format!(r#"{{"action_id":"{id}"}}"#)).unwrap();
@@ -345,7 +346,7 @@ const ASK: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const LEAD_SID: &str = "1a8fad5b-d9cb-469f-a165-70867728950f";
 
 fn ask(s: &mut Service, state: AskState, text: Option<&str>, reason: Option<&str>) {
-    s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state, text, reason }).unwrap();
+    s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state, text, reason, project: None, tokens: None }).unwrap();
 }
 
 fn ledger_of(dir: &Path) -> Vec<Value> {
@@ -385,14 +386,14 @@ fn ask_ledger_records_are_human_ui_and_carry_the_text_once() {
 fn signals_show_a_queued_message_and_a_stop_in_force_until_resumed() {
     let (mut s, dir) = svc();
     let key = "aa870dd40540481f0".to_string();
-    assert!(s.signals().message_pending.is_empty() && s.signals().stopped.is_empty());
+    assert!(s.signals(SID).message_pending.is_empty() && s.signals(SID).stopped.is_empty());
     s.message_worker(Actor::Human, "bhima", "hello").unwrap();
-    assert!(s.signals().message_pending.contains(&key), "a queued message is pending");
-    assert!(s.signals().stopped.is_empty());
+    assert!(s.signals(SID).message_pending.contains(&key), "a queued message is pending");
+    assert!(s.signals(SID).stopped.is_empty());
     s.stop_worker(Actor::Human, "bhima", None).unwrap();
-    assert!(s.signals().stopped.contains(&key), "a confirmed stop is in force");
+    assert!(s.signals(SID).stopped.contains(&key), "a confirmed stop is in force");
     s.resume_worker(Actor::Human, "bhima").unwrap();
-    assert!(!s.signals().stopped.contains(&key), "a resume lifts it");
+    assert!(!s.signals(SID).stopped.contains(&key), "a resume lifts it");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -423,7 +424,7 @@ fn ask_records_survive_a_restart_without_becoming_pending() {
 fn a_ledger_failure_is_an_error_not_a_silent_skip() {
     let (mut s, dir) = svc();
     s.ledger.break_for_test();
-    let r = s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state: AskState::Queued, text: Some("x"), reason: None });
+    let r = s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state: AskState::Queued, text: Some("x"), reason: None, project: None, tokens: None });
     assert!(r.is_err(), "the caller must not spawn the Lead for an ask the ledger never recorded");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -501,7 +502,7 @@ fn lead_mcp_audit_line_per_call() {
 fn a_lead_stop_request_that_awaits_confirmation_is_not_yet_a_stop() {
     let (mut s, dir) = svc();
     s.stop_worker(Actor::Lead, "bhima", None).unwrap();
-    assert!(s.signals().stopped.is_empty(), "only the human's confirmed stop is enforced");
+    assert!(s.signals(SID).stopped.is_empty(), "only the human's confirmed stop is enforced");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -576,8 +577,8 @@ fn a_check_failure_is_logged_once_per_distinct_error() {
     let logs = dir.join("logs");
     let mut s = Service::open(&dir, dir.join("audit.log"), Some(crate::logging::Logger::open(&logs).unwrap())).unwrap();
     s.start_session(SID, "20261105-1810").unwrap();
-    s.set_workers(vec![WorkerInfo {
-        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: "task.t1.r1".into(), prompt_first_line: None, branch: None, status: Status::InProgress },
+    s.set_workers(SID, vec![WorkerInfo {
+        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: "task.t1.r1".into(), prompt_first_line: None, branch: None, status: Status::InProgress, provider: None },
         task_id: Some("20261105-1810.t1".into()),
         title: None,
         round: Some(1),
@@ -640,7 +641,7 @@ fn a_stop_with_no_file_and_no_ack_settles_as_unknown_after_the_ttl() {
     s.tick_at(later);
     assert!(s.pending.contains_key(&id), "a stop whose file is in force stays pending past the TTL");
     let key = s.pending[&id].worker.clone();
-    fs::remove_file(s.session().unwrap().dir.stop_path(&key)).unwrap();
+    fs::remove_file(s.session(SID).unwrap().dir.stop_path(&key)).unwrap();
     s.tick_at(SystemTime::now());
     assert!(s.pending.contains_key(&id), "inside the TTL the missing file is not judged yet");
     s.tick_at(later);
@@ -749,4 +750,30 @@ fn an_acknowledged_stop_settles_even_when_queue_is_unreadable() {
     assert!(!s.pending.contains_key(&id), "a stop never reads queue/");
     assert_eq!(last_record(&s, &id)["state"].as_str(), Some("delivered"));
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// Receipt lines (T2) share `control/ledger.jsonl`; rebuilding the control state from it must ignore them.
+#[test]
+fn rebuild_skips_receipt_lines() {
+    let dir = std::env::temp_dir().join(format!("vajra-svc-rc-{}-{}", std::process::id(), nonce::random_hex(4).unwrap()));
+    {
+        let mut s = Service::open(&dir, dir.join("audit.log"), None).unwrap();
+        s.start_session(SID, "20261105-1810").unwrap();
+    }
+    let mut l = Ledger::open(&dir.join("control/ledger.jsonl")).unwrap();
+    l.append(&json!({"v": 1, "kind": "receipt", "action_id": "act-0001-aaaa", "receipt": {"state": "accepted"}})).unwrap();
+    assert!(Service::open(&dir, dir.join("audit.log"), None).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_worker_in_the_state_view_carries_its_provider_or_null() {
+    let (mut s, dir) = svc();
+    let view = s.workers_view();
+    assert_eq!(view[0]["provider"], Value::Null, "not reported: null, not a guess");
+    let mut w = s.in_scope().next().unwrap().workers[0].clone();
+    w.worker.provider = Some(crate::providers::effective::ProviderTag::new("claude", "claude-model-x", "subscription", None));
+    s.set_workers(SID, vec![w]);
+    assert_eq!(s.workers_view()[0]["provider"], json!({"account": "claude", "label": "Claude Code", "family": "claude", "model": "claude-model-x", "model_name": null, "billing": "subscription", "requested": null, "error": null}));
+    let _ = fs::remove_dir_all(dir);
 }

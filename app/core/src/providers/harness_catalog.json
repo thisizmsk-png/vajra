@@ -1,0 +1,57 @@
+{
+  "schema": "vajra.harness_catalog/1",
+  "harnesses": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "binary": "claude",
+      "detect_args": ["--version"],
+      "adapter": "claude",
+      "sign_in": { "argv": ["claude", "auth", "login"] },
+      "docs_url": "https://code.claude.com/docs/en/setup",
+      "source_verified_by": null,
+      "source_verified_on": null,
+      "verification_ref": null,
+      "allowed_binaries": ["claude"],
+      "methods": [
+        { "kind": "brew_cask", "package": "claude-code", "tap": "homebrew/cask", "command": "brew install --cask claude-code" },
+        { "kind": "npm", "package": "@anthropic-ai/claude-code", "version": "2.1.322", "integrity": "sha512-oP7oW4vM5DREWfL1jn4JSGlmLcrJ5QmppgADrVNJBUPiC1mQ5YvRrke0on+YZ/3QhKIaCJtdr6jPvehcAQIHLQ==", "command": "npm install -g @anthropic-ai/claude-code" }
+      ]
+    },
+    {
+      "id": "codex",
+      "name": "Codex CLI",
+      "binary": "codex",
+      "detect_args": ["--version"],
+      "adapter": "codex",
+      "sign_in": { "argv": ["codex", "login"] },
+      "docs_url": "https://github.com/openai/codex",
+      "source_verified_by": null,
+      "source_verified_on": null,
+      "verification_ref": null,
+      "allowed_binaries": ["codex"],
+      "methods": [
+        { "kind": "brew_cask", "package": "codex", "tap": "homebrew/cask", "command": "brew install --cask codex" },
+        { "kind": "npm", "package": "@openai/codex", "version": "0.167.1", "integrity": "sha512-39uApTRT9bkhE8tMXTIfZxaZ27oi7hPqWoF2Coyp+iQFAD3NVHgH838IYVUfJaX85leMSP2s4JOmVw0mMSCN5Q==", "command": "npm install -g @openai/codex" }
+      ]
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "binary": "gemini",
+      "detect_args": ["--version"],
+      "adapter": null,
+      "sign_in": { "argv": ["gemini"] },
+      "docs_url": "https://github.com/google-gemini/gemini-cli",
+      "source_verified_by": null,
+      "source_verified_on": null,
+      "verification_ref": null,
+      "allowed_binaries": ["gemini"],
+      "methods": [
+        { "kind": "brew_formula", "package": "gemini-cli", "tap": "homebrew/core", "command": "brew install gemini-cli" },
+        { "kind": "npm", "package": "@google/gemini-cli", "version": "0.68.0", "integrity": "sha512-eq7AWY+YCijNGKVwyiRjN+GuOdXU/djuOZhX18p+HDmNyUqFdqH7C5V6vDJLl1uffhRPhGijePV+YvY8lymrbQ==", "command": "npm install -g @google/gemini-cli" }
+      ]
+    }
+  ],
+  "engine_scripts": { "manual_command": "bash ~/.claude/skills/vajra/scripts/install.sh" }
+}

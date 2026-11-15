@@ -11,7 +11,7 @@ use super::{nonce, time};
 use crate::crew::redact::Redactor;
 use crate::ids;
 
-pub use super::lead_settings::{deny_rules, settings, settings_no_hooks};
+pub use super::lead_settings::{deny_rules, deny_rules_iso, deny_rules_with, settings, settings_iso, settings_no_hooks, settings_no_hooks_iso, settings_no_hooks_with, settings_with};
 
 /// Ask text length, in chars (ADR-13 Decision 3). Same bound as a worker message.
 pub const MAX_TEXT: usize = super::service::MAX_TEXT;
@@ -24,6 +24,8 @@ pub enum LeadError {
     /// The run is not one this app launched or resumed (S3 shows the input disabled).
     ReadOnly(&'static str),
     Busy,
+    /// The app already runs `MAX_TURNS` Director-General turns (ADR-15 2.3).
+    TurnsFull,
     /// No Lead is spawned without the Vajra guard (ADR-13 2a). The text says which precondition failed.
     GuardMissing(String),
     ClaudeNotFound,
@@ -34,6 +36,18 @@ pub enum LeadError {
     Cancelled,
     /// The app is quitting: no new ask starts.
     ShuttingDown,
+    /// The run's folder is not a project (FG-02c, decision Q1): nothing is created silently. The folder goes in its own
+    /// field (`path`) with the `add_project` action, never in the detail text.
+    NotAProject(String),
+    ProjectArchived,
+    /// The run's project record is gone from the store.
+    ProjectMissing,
+    /// The app's projects folder was refused at open (a symbolic link, not a folder; #106 review): what is wrong, what to
+    /// do (the fix names the path), and the path in its own field. Nothing that needs the store can run until it is fixed.
+    ProjectsUnavailable { detail: String, fix: String, path: String },
+    /// A receipt-wrapped action aimed at an older conversation (FG-02c, decision Q2): the Director-General is at this
+    /// generation now.
+    StaleGeneration(u32),
     Io(String),
 }
 
@@ -43,6 +57,7 @@ impl LeadError {
             Self::Invalid(_) => "invalid_args",
             Self::ReadOnly(_) => "read_only",
             Self::Busy => "lead_busy",
+            Self::TurnsFull => "turns_full",
             Self::GuardMissing(_) => "lead_guard_missing",
             Self::ClaudeNotFound => "claude_not_found",
             Self::NoInit => "lead_no_init",
@@ -51,6 +66,11 @@ impl LeadError {
             Self::Timeout => "lead_timeout",
             Self::Cancelled => "cancelled",
             Self::ShuttingDown => "shutting_down",
+            Self::NotAProject(_) => "not_a_project",
+            Self::ProjectArchived => "project_archived",
+            Self::ProjectMissing => "project_missing",
+            Self::ProjectsUnavailable { .. } => "projects_unavailable",
+            Self::StaleGeneration(_) => "stale_generation",
             Self::Io(_) => "io_error",
         }
     }
@@ -60,16 +80,41 @@ impl LeadError {
         match self {
             Self::Invalid(d) | Self::GuardMissing(d) => Some(d.clone()),
             Self::ReadOnly(d) => Some((*d).to_string()),
+            Self::TurnsFull => Some("Two Director-General turns are running, the most the app runs at once. Ask again when one finishes.".into()),
+            Self::NotAProject(_) => Some(NOT_A_PROJECT.into()),
+            Self::ProjectArchived => Some(PROJECT_ARCHIVED.into()),
+            Self::ProjectMissing => Some(PROJECT_MISSING.into()),
+            Self::ProjectsUnavailable { detail, .. } => Some(detail.clone()),
+            Self::StaleGeneration(_) => Some(STALE_CONVERSATION.into()),
             _ => None,
         }
     }
 
     pub fn to_json(&self) -> serde_json::Value {
+        if let Self::NotAProject(path) = self {
+            return not_a_project_json(path);
+        }
+        if let Self::ProjectsUnavailable { detail, fix, path } = self {
+            return serde_json::json!({"error": self.code(), "detail": detail, "fix": fix, "path": path});
+        }
+        if let Self::StaleGeneration(g) = self {
+            return serde_json::json!({"error": self.code(), "detail": STALE_CONVERSATION, "current_generation": g});
+        }
         match self.detail() {
             Some(d) => serde_json::json!({"error": self.code(), "detail": d}),
             None => serde_json::json!({"error": self.code()}),
         }
     }
+}
+
+pub const NOT_A_PROJECT: &str = "This folder is not a project. Add it as a project first.";
+pub const PROJECT_ARCHIVED: &str = "This project is archived. Restore it to use it again.";
+pub const PROJECT_MISSING: &str = "This project is no longer in the app's project list.";
+pub const STALE_CONVERSATION: &str = "The Director-General started a new conversation since you looked. Refresh and try again.";
+
+/// `not_a_project` with the one-click action the UI offers (decision Q1, a UX default the owner can flip).
+pub fn not_a_project_json(path: &str) -> serde_json::Value {
+    serde_json::json!({"error": "not_a_project", "detail": NOT_A_PROJECT, "action": "add_project", "path": path})
 }
 
 impl fmt::Display for LeadError {
@@ -146,9 +191,12 @@ pub fn sanitise(text: &str, red: &Redactor) -> String {
     red.redact(kept)
 }
 
-const HEADER_START: &str = "[Vajra Desktop: question from the human, ask ";
-const HEADER_MID: &str = ", run ";
-const HEADER_END: &str = ". Answer with the read and control tools only.]\n";
+/// The fixed first line of every Lead turn. It carries no ids: the ask and run ids are in the ledger, and nothing reads them
+/// back from the model's context, so a changing id here was ~25 tokens of Vajra text per turn that told the model nothing.
+/// Being one constant, it is also the same bytes on every turn. It must start with `[` (never `/`, see `frame`), and keep the
+/// `[Vajra Desktop: question from the human` prefix, which `strip_header` in `desktop/lead.rs` uses to hide it in the transcript
+/// (and which transcripts written by older headers also match).
+pub(crate) const HEADER: &str = "[Vajra Desktop: question from the human. Answer with the read and control tools only.]\n";
 
 /// The exact stdin body of one Lead turn: a fixed header line, then the sanitised text. The field is private and
 /// the spawn function takes only this type, so no code path can write a raw `&str` to the Lead's stdin.
@@ -192,9 +240,7 @@ pub fn frame(ask_id: &str, run_id: &str, text: &str, red: &Redactor) -> Result<F
     if clean.trim().is_empty() {
         return Err(LeadError::Invalid("text: must not be empty".into()));
     }
-    let header = format!("{HEADER_START}{ask_id}{HEADER_MID}{run_id}{HEADER_END}");
-    let header_len = header.len();
-    Ok(FramedAsk { body: header + &clean, header_len })
+    Ok(FramedAsk { body: format!("{HEADER}{clean}"), header_len: HEADER.len() })
 }
 
 #[cfg(test)]

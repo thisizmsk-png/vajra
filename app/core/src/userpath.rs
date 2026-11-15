@@ -1,4 +1,4 @@
-//! The user's PATH, resolved once at startup.
+//! The user's PATH, resolved at startup and again on `refresh` (ADR-17 rule 7).
 //!
 //! A macOS app started from Finder, the Dock or `open` gets the minimal GUI PATH (`/usr/bin:/bin:/usr/sbin:/sbin`),
 //! so `claude` and the tools a user installed with an installer, Homebrew or npm are not on it. `init` asks the
@@ -13,7 +13,8 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// How long the login shell gets before it is killed and the fallback is used.
@@ -28,19 +29,162 @@ const OUT_CAP: usize = 64 * 1024;
 /// The PATH the shell itself starts with, so `path_helper` and rc files that call system tools work.
 const BASE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-static CURRENT: OnceLock<Vec<PathBuf>> = OnceLock::new();
+/// How long a reader waits for a first resolution that runs in the background: the shell's own deadline (`TIMEOUT`,
+/// unchanged) plus room for the kill and the install-dir probe.
+pub const FIRST_WAIT: Duration = TIMEOUT.saturating_add(Duration::from_secs(2));
 
-/// Resolve the user PATH once. Call from `main` before anything reads it; later calls keep the first answer.
-pub fn init(home: &Path) {
-    let login = login_shell().and_then(|sh| detect(&sh, home, TIMEOUT));
-    let _ = CURRENT.set(effective(login, &process_path(), home));
+/// The resolved PATH and how it gets there. One static in the app; tests make their own.
+pub struct State {
+    current: RwLock<Option<Vec<PathBuf>>>,
+    /// True from `start` until the first resolution has stored its answer.
+    pending: Mutex<bool>,
+    done: Condvar,
+    refresh: Refresh,
+    /// True once a refresh has stored an answer; the first resolution then no longer overwrites it.
+    refreshed: AtomicBool,
 }
 
-/// The resolved dirs. Before `init` (unit tests, `--mcp`) this is the process PATH plus the install dirs; no shell
-/// is ever started here.
+/// Ends the first resolution when dropped, so readers are woken even if it panicked or its thread never started.
+struct Finish(&'static State);
+
+impl Drop for Finish {
+    fn drop(&mut self) {
+        *self.0.pending.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        self.0.done.notify_all();
+    }
+}
+
+impl State {
+    pub const fn new() -> Self {
+        Self { current: RwLock::new(None), pending: Mutex::new(false), done: Condvar::new(), refresh: Refresh::new(), refreshed: AtomicBool::new(false) }
+    }
+
+    fn set(&self, dirs: Vec<PathBuf>) {
+        let mut cur = self.current.write().unwrap_or_else(|e| e.into_inner());
+        *cur = Some(dirs);
+        self.refreshed.store(true, Ordering::SeqCst);
+    }
+
+    /// Store the first resolution's answer unless a refresh already stored a newer one (a refresh whose wait for the
+    /// first resolution timed out can finish before it). Checked under the same lock as `set`.
+    fn set_first(&self, dirs: Vec<PathBuf>) {
+        let mut cur = self.current.write().unwrap_or_else(|e| e.into_inner());
+        if !self.refreshed.load(Ordering::SeqCst) {
+            *cur = Some(dirs);
+        }
+    }
+
+    /// Run the first resolution on its own thread and return at once. Until it has stored its answer, `current` and
+    /// `refresh` wait for it (at most `wait`), so no reader ever acts on a PATH from before it.
+    pub fn start(&'static self, resolve: impl FnOnce() -> Vec<PathBuf> + Send + 'static) {
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        let finish = Finish(self);
+        // If the thread cannot start, the closure is dropped, `finish` with it, and readers get the fallback.
+        let _ = std::thread::Builder::new().name("userpath".into()).spawn(move || {
+            let finish = finish;
+            finish.0.set_first(resolve());
+        });
+    }
+
+    /// Block while the first resolution is in flight, at most `wait`.
+    fn wait_first(&self, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        while *pending {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            pending = self.done.wait_timeout(pending, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
+
+    /// The resolved dirs, after any first resolution in flight. `None` when nothing was ever resolved.
+    pub fn current(&self, wait: Duration) -> Option<Vec<PathBuf>> {
+        self.wait_first(wait);
+        self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Resolve again, after any first resolution in flight, so the stored answer is never older than the first one.
+    /// Single-flight and at most once per `REFRESH_GAP` (`Refresh::run`). `true` when it ran.
+    pub fn refresh(&self, wait: Duration, now: Instant, resolve: impl FnOnce() -> Vec<PathBuf>) -> bool {
+        self.wait_first(wait);
+        self.refresh.run(now, resolve).map(|d| self.set(d)).is_some()
+    }
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static STATE: State = State::new();
+
+/// The shortest time between two refreshes: each one runs the user's login shell.
+pub const REFRESH_GAP: Duration = Duration::from_secs(10);
+
+fn resolve(home: &Path) -> Vec<PathBuf> {
+    let login = login_shell().and_then(|sh| detect(&sh, home, TIMEOUT));
+    effective(login, &process_path(), home)
+}
+
+/// Resolve the user PATH on this thread: the caller waits for the login shell (up to `TIMEOUT`).
+pub fn init(home: &Path) {
+    STATE.set(resolve(home));
+}
+
+/// Resolve the user PATH in the background, so the window does not wait for the user's login shell. Call from `main`.
+/// The first reader (`current`, `joined`, `refresh`) waits for the answer instead, at most `FIRST_WAIT`.
+pub fn start(home: &Path) {
+    let home = home.to_path_buf();
+    STATE.start(move || resolve(&home));
+}
+
+/// One login-shell run at a time, and at most one per `REFRESH_GAP`.
+pub struct Refresh {
+    last: Mutex<Option<Instant>>,
+}
+
+impl Refresh {
+    pub const fn new() -> Self {
+        Self { last: Mutex::new(None) }
+    }
+
+    /// `resolve()`'s answer, or `None` when a refresh is already running or the last one started under a gap ago.
+    pub fn run(&self, now: Instant, resolve: impl FnOnce() -> Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+        let mut last = match self.last.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        if last.is_some_and(|t| now.saturating_duration_since(t) < REFRESH_GAP) {
+            return None;
+        }
+        *last = Some(now);
+        Some(resolve())
+    }
+}
+
+impl Default for Refresh {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Resolve the user PATH again (ADR-17 rule 7), so a folder an install created after the app started is found without
+/// a restart. Only the UI asks for it (Settings > Providers > Set up); it is single-flight and runs at most once per
+/// `REFRESH_GAP`. The bridge's fixed PATH (`bridge::BASE_PATH`) never depends on it. `true` when it ran. A first
+/// resolution still in flight is waited for first, so a read after this never sees a PATH from before the refresh.
+pub fn refresh(home: &Path) -> bool {
+    STATE.refresh(FIRST_WAIT, Instant::now(), || resolve(home))
+}
+
+/// The resolved dirs, waiting for a first resolution still in flight (`start`). With neither `init` nor `start`
+/// (unit tests, `--mcp`) this is the process PATH plus the install dirs; no shell is ever started here.
 pub fn current() -> Vec<PathBuf> {
-    match CURRENT.get() {
-        Some(d) => d.clone(),
+    match STATE.current(FIRST_WAIT) {
+        Some(d) => d,
         None => {
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
             effective(None, &process_path(), &home)
@@ -416,5 +560,144 @@ mod tests {
     #[test]
     fn the_script_is_constant_and_quotes_path() {
         assert!(SCRIPT.contains("${PATH}") && !SCRIPT.contains('`') && !SCRIPT.contains("$("));
+    }
+
+    #[test]
+    fn a_folder_created_after_the_first_resolve_is_found_by_a_refresh() {
+        let home = tmp("refresh");
+        let before = effective(None, &[], &home);
+        assert!(!before.contains(&home.join(".local/bin")));
+        // An install creates the folder after the app started.
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let gate = Refresh::new();
+        let after = gate.run(Instant::now(), || effective(None, &[], &home)).expect("the first refresh runs");
+        assert!(after.contains(&home.join(".local/bin")), "{after:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_refresh_runs_at_most_once_per_gap() {
+        let gate = Refresh::new();
+        let t0 = Instant::now();
+        let calls = std::cell::Cell::new(0);
+        let resolve = || {
+            calls.set(calls.get() + 1);
+            vec![PathBuf::from("/usr/bin")]
+        };
+        assert!(gate.run(t0, resolve).is_some());
+        assert!(gate.run(t0 + Duration::from_secs(3), resolve).is_none(), "too soon");
+        assert!(gate.run(t0 + REFRESH_GAP, resolve).is_some());
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn a_refresh_while_one_is_running_does_not_start_another() {
+        let gate = std::sync::Arc::new(Refresh::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let g = gate.clone();
+        let h = std::thread::spawn(move || {
+            g.run(Instant::now(), || {
+                tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                vec![]
+            })
+        });
+        rx.recv().unwrap();
+        let called = std::cell::Cell::new(false);
+        assert!(gate.run(Instant::now() + REFRESH_GAP * 2, || { called.set(true); vec![] }).is_none());
+        assert!(!called.get(), "a second login shell never starts while one runs");
+        go_tx.send(()).unwrap();
+        assert!(h.join().unwrap().is_some());
+    }
+
+    fn state() -> &'static State {
+        Box::leak(Box::new(State::new()))
+    }
+
+    #[test]
+    fn a_background_start_returns_at_once_and_the_first_reader_waits_for_the_answer() {
+        let st = state();
+        assert_eq!(st.current(Duration::from_secs(5)), None, "nothing started: no wait and no answer");
+        let t = Instant::now();
+        st.start(|| {
+            std::thread::sleep(Duration::from_millis(400));
+            vec![PathBuf::from("/first/bin")]
+        });
+        assert!(t.elapsed() < Duration::from_millis(200), "start must not wait for the shell: {:?}", t.elapsed());
+        assert_eq!(st.current(Duration::from_secs(5)), Some(vec![PathBuf::from("/first/bin")]), "the reader waited");
+        assert!(t.elapsed() >= Duration::from_millis(400));
+        let t = Instant::now();
+        assert!(st.current(Duration::from_secs(5)).is_some());
+        assert!(t.elapsed() < Duration::from_millis(200), "later readers do not wait");
+    }
+
+    #[test]
+    fn a_refresh_during_a_slow_first_resolution_waits_and_the_next_read_sees_the_refreshed_path() {
+        // The post-install check: an install links a binary while the first resolution is still running, then calls
+        // refresh and reads the PATH. The read must hold the folder the refresh found, never an empty or older PATH.
+        let st = state();
+        let home = tmp("postinstall");
+        let (h1, h2) = (home.clone(), home.clone());
+        st.start(move || {
+            let seen = effective(None, &[], &h1); // before the install: no ~/.local/bin
+            std::thread::sleep(Duration::from_millis(400));
+            seen
+        });
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        assert!(st.refresh(Duration::from_secs(5), Instant::now(), move || effective(None, &[], &h2)), "the refresh ran");
+        let dirs = st.current(Duration::from_secs(5)).expect("resolved");
+        assert!(dirs.contains(&home.join(".local/bin")), "{dirs:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_first_resolution_that_finishes_after_a_timed_out_refresh_does_not_overwrite_it() {
+        let st = state();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let (old, new) = (PathBuf::from("/old/first"), PathBuf::from("/new/refreshed"));
+        let first = old.clone();
+        st.start(move || {
+            let _ = gate.recv(); // held until the refresh has stored its answer
+            vec![first]
+        });
+        // The refresh gives up waiting for the first resolution, then resolves and stores.
+        let fresh = new.clone();
+        assert!(st.refresh(Duration::from_millis(50), Instant::now(), move || vec![fresh]), "the refresh ran");
+        release.send(()).unwrap();
+        // `current` waits for the first resolution to finish; its older answer must not replace the refresh.
+        assert_eq!(st.current(Duration::from_secs(5)), Some(vec![new]));
+    }
+
+    #[test]
+    fn a_first_resolution_that_panics_or_overruns_never_hangs_a_reader() {
+        let st = state();
+        st.start(|| panic!("resolve failed"));
+        let t = Instant::now();
+        assert_eq!(st.current(Duration::from_secs(5)), None, "the caller falls back");
+        assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
+        // A resolution that outlasts the bound: the reader gives up at the bound.
+        let st = state();
+        st.start(|| {
+            std::thread::sleep(Duration::from_secs(2));
+            vec![]
+        });
+        let t = Instant::now();
+        assert_eq!(st.current(Duration::from_millis(200)), None);
+        assert!(t.elapsed() < Duration::from_secs(1), "took {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn the_reader_bound_covers_the_shell_deadline_which_is_unchanged() {
+        assert_eq!(TIMEOUT, Duration::from_secs(3));
+        assert!(FIRST_WAIT > TIMEOUT + LAST_PAIR_GRACE);
+    }
+
+    #[test]
+    fn a_refresh_never_moves_the_fixed_bridge_path() {
+        // The bridge PATH is a constant, not derived from the user PATH, so no refresh can move it.
+        let gate = Refresh::new();
+        assert!(gate.run(Instant::now(), || vec![PathBuf::from("/tmp/vajra-refresh-test/bin")]).is_some());
+        assert_eq!(crate::vajra::bridge::bridge_path(), std::ffi::OsString::from(crate::vajra::bridge::BASE_PATH.join(":")));
     }
 }

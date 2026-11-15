@@ -65,6 +65,10 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     if b.len() != 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
         return None;
     }
+    // `parse::<u32>` would accept a leading `+`; every other byte must be an ASCII digit.
+    if !b.iter().enumerate().all(|(i, c)| matches!(i, 4 | 7 | 10 | 13 | 16) || c.is_ascii_digit()) {
+        return None;
+    }
     let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<u32>().ok();
     let (y, mo, d, h, mi, se) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
@@ -86,7 +90,7 @@ mod tests {
         assert_eq!(parse_iso("2026-11-05T10:00:00.5Z"), Some(1_793_872_800));
         assert_eq!(parse_iso("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_iso("2024-02-29T23:59:59Z"), Some(1_709_251_199));
-        for bad in ["", "2026-11-05 10:00:00Z", "2026-11-05T10:00:00", "2026-13-05T10:00:00Z", "2026-11-05T10:00:00.xZ"] {
+        for bad in ["", "2026-11-05 10:00:00Z", "2026-11-05T10:00:00", "2026-13-05T10:00:00Z", "2026-11-05T10:00:00.xZ", "+026-11-05T10:00:00Z", "2026-11-05T+0:00:00Z"] {
             assert_eq!(parse_iso(bad), None, "{bad}");
         }
     }

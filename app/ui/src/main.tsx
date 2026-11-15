@@ -2,17 +2,19 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { followSystemTheme } from "./theme";
+import { systemTheme } from "./theme";
 
 // Before the first render, so the first paint already has the OS theme.
-followSystemTheme();
+document.documentElement.dataset.theme = systemTheme();
 
 async function boot() {
   // Perf CI only: the build sets VITE_PERF_FIXTURE, otherwise this branch and the fixture are dropped from the bundle.
   if (import.meta.env.VITE_PERF_FIXTURE) (await import("./perf/fixture")).install();
+  // Dev server only (a build drops the branch and the import): the terminal dock on its own, at `?fixture#terminal`.
+  const Page = import.meta.env.DEV && location.hash === "#terminal" ? (await import("./terminal/TerminalHarness")).TerminalHarness : App;
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
-      <App />
+      <Page />
     </StrictMode>,
   );
 }

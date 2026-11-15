@@ -9,7 +9,9 @@ import { errorText, isIpcError } from "../ipc";
  */
 export const problemDetail = (e: unknown): string => (isIpcError(e) ? errorText(e) : S.states.noAnswer);
 
-const clock = (d: Date) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+// Seconds stay: two checks inside one minute must read differently, or the second looks like a dead click. The hour
+// is not padded ("2:03:34 AM", not "02:03:34 AM").
+export const clock = (d: Date) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
 
 /**
  * A screen or section could not load: a plain title, the detail, and Try again when it can be retried. A retry that

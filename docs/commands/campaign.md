@@ -24,6 +24,11 @@ bash $S close [slug] [--status done|abandoned]
 `pass` flips one feature's `passes` field; nothing else in `features.json`
 changes.
 
+The active campaign is per repo: `create` and `resume` set it for the repo of
+the current directory (its git common dir, so every worktree of a repo shares
+it; outside a repo, one shared "global" pointer). A run in another repo never
+sees it, and a command given no slug uses the current repo's campaign.
+
 - `/vajra continue` runs `resume` on the active campaign. If verification
   fails, report "Integrity check failed" and stop. Then:
   - For a `deliver-*` campaign (created by `vajra-deliver`), relaunch the

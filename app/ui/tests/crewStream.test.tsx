@@ -4,6 +4,7 @@ import { setTransport } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
+import { Live, liveRun } from "./liveRun";
 
 afterEach(() => {
   cleanup();
@@ -31,9 +32,10 @@ function core(head: number, first = 1, extra: object = {}) {
 
 async function openBackend(replies: Record<string, unknown>) {
   window.location.hash = "#/crew?slug=camp&id=r1";
-  const f = fakeIpc({ active_runs: { count: 0, runs: [] }, crew: tree, ...replies });
+  // A live run: its worker's stream is polled.
+  const f = fakeIpc({ ...liveRun(), crew: tree, ...replies });
   setTransport(f.transport);
-  render(<Crew />);
+  render(<Live><Crew /></Live>);
   fireEvent.click((await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement);
   return f;
 }

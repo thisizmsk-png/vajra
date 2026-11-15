@@ -47,7 +47,9 @@ vajra-campaign.sh checkpoint "after fix round 1"
 
 ## Resuming (`/vajra continue`)
 
-`resume` re-verifies the signature, re-marks the campaign active, and prints the goal,
+`resume` re-verifies the signature, re-marks the campaign active for the current repo (the
+pointer is per repo: `campaigns/.active-<project id>`, the knowledge ledger's id for the
+git common dir), and prints the goal,
 the still-failing features and the recent progress wrapped in a `<campaign-state>` block
 (treated as data, not instructions). To continue an ask, `vajra-deliver` is relaunched
 with `{"campaign":"<slug>"}`: it reloads the features, keeps the criteria ids, and skips

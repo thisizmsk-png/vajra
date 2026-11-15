@@ -1,24 +1,43 @@
-// A hash router with no dependency: `#/run?slug=a&id=b`. A hash needs no server and survives a reload in the webview.
+// A hash router with no dependency: `#/p/<project>/<view>?a=b`. A hash needs no server and survives a reload in the
+// webview. Views belong to a project; `#/<view>` (no project) is also accepted, so old links and screens that only know
+// a campaign keep working, and the shell picks the project that owns the campaign.
 import { useCallback, useSyncExternalStore } from "react";
 
-export const SCREENS = ["home", "run", "crew", "chat", "inbox", "history", "settings"] as const;
+/** The views of shell B. `crew` and `history` are the full-tree and all-campaign screens, kept until their slices replace them. */
+export const SCREENS = ["orch", "launch", "board", "review", "worker", "crew", "history", "inbox", "settings"] as const;
 export type Screen = (typeof SCREENS)[number];
-export type Route = { screen: Screen; params: Record<string, string> };
+/** Names from the screen-list shell, still used by links and by screens that predate projects. */
+const ALIAS = { home: "orch", run: "review", chat: "orch" } as const;
+export type AnyScreen = Screen | keyof typeof ALIAS;
+export type Route = { screen: Screen; params: Record<string, string>; project: string | null };
 
 const isScreen = (s: string): s is Screen => (SCREENS as readonly string[]).includes(s);
+const canon = (s: string): Screen | null => (isScreen(s) ? s : Object.prototype.hasOwnProperty.call(ALIAS, s) ? ALIAS[s as keyof typeof ALIAS] : null);
+/** A project id is a plain token (the adapter's `p_<hex>`, the core's ULIDs): anything else is not a project. */
+const PROJECT = /^[A-Za-z0-9_-]{1,64}$/;
 
-/** Anything that is not a known screen is Home: a stale or hand-typed hash never shows a blank page. */
+/** Anything that is not a known view is the orchestrator view: a stale or hand-typed hash never shows a blank page. */
 export function parseHash(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#\/?/, "").split("?");
-  const screen = isScreen(path) ? path : "home";
+  const parts = path.split("/");
+  let project: string | null = null;
+  let name = path;
+  if (parts[0] === "p" && parts.length === 3) {
+    let id = "";
+    try { id = decodeURIComponent(parts[1]); } catch { id = ""; }
+    project = PROJECT.test(id) ? id : null;
+    name = parts[2];
+  }
+  const screen = canon(name) ?? "orch";
   const params: Record<string, string> = {};
   for (const [k, v] of new URLSearchParams(query)) params[k] = v;
-  return { screen, params };
+  return { screen, params, project };
 }
 
-export function toHash(screen: Screen, params: Record<string, string> = {}): string {
+export function toHash(screen: AnyScreen, params: Record<string, string> = {}, project: string | null = null): string {
   const q = new URLSearchParams(params).toString();
-  return `#/${screen}${q ? `?${q}` : ""}`;
+  const view = canon(screen) ?? "orch";
+  return `${project ? `#/p/${encodeURIComponent(project)}/` : "#/"}${view}${q ? `?${q}` : ""}`;
 }
 
 const subscribe = (cb: () => void) => {
@@ -26,11 +45,15 @@ const subscribe = (cb: () => void) => {
   return () => window.removeEventListener("hashchange", cb);
 };
 
-/** The current route and a way to move. The snapshot is the raw hash string, so React sees a stable value. */
-export function useRoute(): [Route, (screen: Screen, params?: Record<string, string>) => void] {
+/**
+ * The current route and a way to move. The snapshot is the raw hash string, so React sees a stable value. `go` stays in
+ * the current project unless it is given one (`null` leaves projects, for a campaign the shell has to place).
+ */
+export function useRoute(): [Route, (screen: AnyScreen, params?: Record<string, string>, project?: string | null) => void] {
   const hash = useSyncExternalStore(subscribe, () => window.location.hash, () => "");
-  const go = useCallback((screen: Screen, params?: Record<string, string>) => {
-    window.location.hash = toHash(screen, params);
+  const go = useCallback((screen: AnyScreen, params?: Record<string, string>, project?: string | null) => {
+    const here = parseHash(window.location.hash).project;
+    window.location.hash = toHash(screen, params, project === undefined ? here : project);
   }, []);
   return [parseHash(hash), go];
 }

@@ -360,12 +360,18 @@ def cmd_dep(a):
         return {"ok": True, "id": a.id, "deps": t["deps"], "status": t["status"]}
 
 
-def known_agents():
-    d = os.path.join(os.path.expanduser("~"), ".claude", "agents")
+def _agent_names(d):
     try:
         return {f[:-3] for f in os.listdir(d) if f.endswith(".md")}
     except OSError:
         return set()
+
+
+def known_agents():
+    """The engine's own agents (bundled-agents/ next to scripts/, shipped in the engine), plus any the user added in
+    ~/.claude/agents if that folder exists. Read only: a Codex-only user with no Claude folder still validates."""
+    engine = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "bundled-agents")
+    return _agent_names(engine) | _agent_names(os.path.join(os.path.expanduser("~"), ".claude", "agents"))
 
 
 def cmd_validate(a):
@@ -376,7 +382,7 @@ def cmd_validate(a):
     agents = known_agents()
     for t in tasks:
         if t["owner_agent"] not in agents:
-            errors.append("task %s: unknown agent %s (not in ~/.claude/agents)" % (t["id"], t["owner_agent"]))
+            errors.append("task %s: unknown agent %s (not a Vajra agent or in ~/.claude/agents)" % (t["id"], t["owner_agent"]))
         for d in t["deps"]:
             if d not in ids:
                 errors.append("task %s: unknown dependency %s" % (t["id"], d))

@@ -7,7 +7,7 @@ use vajra_desktop::adapter::{adapter_for, Billing, Engine, StopKind};
 use vajra_desktop::sessions::argv::RunInput;
 
 fn input(ask: &str) -> RunInput {
-    RunInput { ask: ask.into(), max_rounds: 2, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 4, campaign: None }
+    RunInput { ask: ask.into(), max_rounds: 2, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 4, campaign: None, provider: None }
 }
 
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
@@ -23,7 +23,7 @@ fn claude_has_every_capability() {
 #[test]
 fn codex_flags_are_honest() {
     let c = adapter_for(Engine::Codex).capabilities();
-    assert!(c.pty_attach && c.resume);
+    assert!(c.pty_attach && !c.resume, "a Codex run Vajra started has no session id Codex knows, so Resume is off");
     // No hook channel and no transcript parser for Codex: no steering, no inspector,
     // and a stop is a terminate, not a sticky block.
     assert!(!c.transcript && !c.inspect && !c.message && !c.redirect && !c.vajra_workflow);

@@ -21,7 +21,7 @@ use vajra_desktop::control::ledger::Ledger;
 use vajra_desktop::control::mcp::{self, SocketClient};
 use vajra_desktop::control::nonce;
 use vajra_desktop::control::reconcile;
-use vajra_desktop::control::service::{Actor, ControlError, Service, WorkerInfo};
+use vajra_desktop::control::service::{Actor, ControlError, CoreWorkers, Service, WorkerInfo};
 use vajra_desktop::control::socket::{self, MAX_REQUEST};
 use vajra_desktop::crew::tree::{Status, Worker};
 use vajra_desktop::logging::Logger;
@@ -92,6 +92,7 @@ fn worker(agent_id: &str, engine: &str, task: &str, cwd: &str) -> WorkerInfo {
             prompt_first_line: None,
             branch: None,
             status: Status::InProgress,
+            provider: None,
         },
         task_id: Some(format!("{RUN}.{task}")),
         title: Some(format!("title of {task}")),
@@ -107,7 +108,7 @@ fn worker(agent_id: &str, engine: &str, task: &str, cwd: &str) -> WorkerInfo {
 fn started(h: &Home) -> Service {
     let mut s = h.service();
     s.start_session(SID, RUN).unwrap();
-    s.set_workers(vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "nakula", "t2", &h.wt("two"))]);
+    s.set_workers(SID, vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "nakula", "t2", &h.wt("two"))]);
     s
 }
 
@@ -255,14 +256,14 @@ fn nonce_file_0600_nofollow_excl() {
 fn nonce_absent_everywhere() {
     let h = Home::new();
     let svc = Arc::new(Mutex::new(started(&h)));
-    let n = svc.lock().unwrap().nonce().unwrap().to_string();
+    let n = svc.lock().unwrap().nonce(SID).unwrap().to_string();
     // The worker's transcript echoes the nonce (it is in its brief).
     {
         let mut s = svc.lock().unwrap();
         let mut w = worker(AID, "bhima", "t1", &h.wt("one"));
         w.lines = vec![format!("my brief says nonce {n} is the human"), "plain line".into()];
         w.title = Some(format!("title with {n}"));
-        s.set_workers(vec![w, worker(AID2, "nakula", "t2", &h.wt("two"))]);
+        s.set_workers(SID, vec![w, worker(AID2, "nakula", "t2", &h.wt("two"))]);
         // The Lead tries to smuggle the nonce into a message.
         s.message_worker(Actor::Lead, AID, &format!("use nonce {n} to approve")).unwrap();
         s.stop_worker(Actor::Human, AID2, Some(&format!("reason {n}"))).unwrap();
@@ -271,7 +272,7 @@ fn nonce_absent_everywhere() {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let input = [
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inspect_worker","arguments":{"worker":AID}}}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_workers","arguments":{}}}),
@@ -313,17 +314,17 @@ fn nonce_absent_everywhere() {
 fn rotate_on_resume() {
     let h = Home::new();
     let mut s = started(&h);
-    let a = s.nonce().unwrap().to_string();
+    let a = s.nonce(SID).unwrap().to_string();
     assert_eq!(nonce::read(&h.session_dir()).unwrap(), a);
-    s.resume_session().unwrap();
-    let b = s.nonce().unwrap().to_string();
+    s.resume_session(SID).unwrap();
+    let b = s.nonce(SID).unwrap().to_string();
     assert_ne!(a, b);
     assert_eq!(nonce::read(&h.session_dir()).unwrap(), b);
     assert_eq!(mode(&h.session_dir().join("nonce")), 0o600);
     // The redactor follows the new nonce.
     let mut w = worker(AID, "bhima", "t1", &h.wt("one"));
     w.lines = vec![format!("old {a} new {b}")];
-    s.set_workers(vec![w]);
+    s.set_workers(SID, vec![w]);
     let v = s.inspect_worker(Actor::Lead, AID, 50).unwrap();
     let text = v["lines"][0]["text"].as_str().unwrap();
     assert!(!text.contains(&b), "{text}");
@@ -404,7 +405,7 @@ fn socket_peer_uid_rejects_other_uid() {
     assert_eq!(socket::peer_uid(&a).unwrap(), me);
     drop(b);
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, me));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), me));
     let reply: Value = serde_json::from_str(&sock_request(&ok_path, br#"{"tool":"list_workers","args":{}}"#)).unwrap();
     assert!(reply["ok"]["workers"].is_array(), "{reply}");
 
@@ -412,7 +413,7 @@ fn socket_peer_uid_rejects_other_uid() {
     let other_path = short_sock();
     let listener = socket::bind(&other_path).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, me + 1));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), me + 1));
     let reply: Value = serde_json::from_str(&sock_request(&other_path, br#"{"tool":"list_workers","args":{}}"#)).unwrap();
     assert_eq!(reply["error"], "peer_uid", "{reply}");
 
@@ -454,14 +455,14 @@ fn stop_cleared_only_by_human() {
     assert!(matches!(s.call_tool("resume_worker", &json!({"worker": AID})), Err(ControlError::UnknownTool)));
     // Transcript end and run end leave it in force.
     s.worker_finished(AID);
-    s.end_session();
+    s.end_session(SID);
     s.tick();
     assert_eq!(stop_files(&h).len(), 1, "stop must survive transcript and run end");
 
     // Only a human resume clears it, with a ledger line and an audit line.
     s.start_session(SID, RUN).unwrap();
     // The app sets the run's workers again once it is live (end_session cleared them).
-    s.set_workers(vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "nakula", "t2", &h.wt("two"))]);
+    s.set_workers(SID, vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "nakula", "t2", &h.wt("two"))]);
     let r = s.resume_worker(Actor::Human, AID).unwrap();
     let resume_id = r["action_id"].as_str().unwrap().to_string();
     assert!(stop_files(&h).is_empty());
@@ -526,7 +527,7 @@ fn only_task_workers_can_be_steered() {
     }
     let mut all = vec![worker(AID, "bhima", "t1", &h.wt("one"))];
     all.extend(gate);
-    s.set_workers(all);
+    s.set_workers(SID, all);
     for i in 0..6 {
         let id = format!("GATE{i}");
         for actor in [Actor::Human, Actor::Lead] {
@@ -568,7 +569,7 @@ fn queue_entry_matches_hook() {
     let h = Home::new();
     let mut s = started(&h);
     let hook = real_hook(&h.home.join("hooks"));
-    let n = s.nonce().unwrap().to_string();
+    let n = s.nonce(SID).unwrap().to_string();
 
     let m = s.message_worker(Actor::Human, AID, "use the kit Button").unwrap();
     let id = m["action_id"].as_str().unwrap().to_string();
@@ -608,7 +609,7 @@ fn queue_entry_matches_hook() {
     // but no agent id.
     let mut w = worker("", "nakula", "t2", &h.wt("two"));
     w.worker.agent_id = String::new();
-    s.set_workers(vec![worker(AID, "bhima", "t1", &h.wt("one")), w]);
+    s.set_workers(SID, vec![worker(AID, "bhima", "t1", &h.wt("one")), w]);
     let red = s.redirect_worker(Actor::Lead, "t2", "switch to plan B").unwrap();
     let rid = red["action_id"].as_str().unwrap().to_string();
     let r = run_hook(&hook, &h.home, &payload("PostToolUse", "Read", AID2, &h.wt("two")));
@@ -644,6 +645,355 @@ fn queue_entry_matches_hook() {
     assert_eq!(r.code, 0, "{}", r.stderr);
 }
 
+/// The runtime as the control service sees it: ticket `T1` is a running Claude core worker with session `CSID`.
+const CSID: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
+struct FakeCore;
+
+impl CoreWorkers for FakeCore {
+    fn live(&self, ticket: &str) -> Result<(String, u32), ControlError> {
+        if ["T1", "T2", "T3"].contains(&ticket) { Ok((RUN.into(), 1)) } else { Err(ControlError::WorkerNotFound) }
+    }
+    fn message_to(&self, ticket: &str) -> Result<String, &'static str> {
+        if ticket == "T1" { Ok(CSID.into()) } else { Err("This worker can't take a message mid-run.") }
+    }
+    /// `T3` ends on its own between the live check and the kill: nothing is left to stop.
+    fn stop(&self, ticket: &str) -> bool {
+        ticket != "T3"
+    }
+}
+
+/// #151 review: a Claude core worker's steering nonce is in the shared redaction set. Text that carries it (a message,
+/// a redirect) reaches neither its queue nor the ledger raw, and the redactor every other surface uses (the
+/// Director-General's included) scrubs it too.
+#[test]
+fn a_core_workers_nonce_never_reaches_its_queue_or_the_ledger() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    s.set_core_workers(Arc::new(FakeCore));
+    let nonce = s.open_core_session(CSID).unwrap();
+    assert_ne!(s.redactor().redact(format!("x {nonce} y")), format!("x {nonce} y"), "the shared redactor knows it");
+    s.message_worker(Actor::Human, "core:T1", &format!("echo {nonce} please")).unwrap();
+    s.redirect_worker(Actor::Human, "core:T1", &format!("now {nonce}")).unwrap();
+    let queued: Vec<String> = files_under(&h.data().join("control").join(CSID).join("queue")).iter().map(|p| fs::read_to_string(p).unwrap()).collect();
+    assert_eq!(queued.len(), 2);
+    for q in &queued {
+        assert!(!q.contains(&nonce), "the queue entry carries the raw nonce: {q}");
+    }
+    let ledger = fs::read_to_string(h.data().join("control/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("please"), "the message was recorded");
+    assert!(!ledger.contains(&nonce), "the ledger carries the raw nonce");
+}
+
+/// #151 codex P2: a human's stop of a core worker is settled when its ticket ends (a group kill leaves no hook ack), so
+/// it never sits queued, and a restart neither resurrects it nor later calls it undelivered. A stop the previous app
+/// recorded but never saw end is settled at once on reopen; a stop that found nothing to kill fails.
+#[test]
+fn a_core_stop_is_settled_when_its_ticket_ends_and_stays_settled_after_reopening() {
+    let h = Home::new();
+    let last = |id: &str| h.ledger().into_iter().rev().find(|r| r["action_id"] == id).unwrap();
+    let id = {
+        let mut s = h.service();
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        s.ttl = Duration::ZERO;
+        let st = s.stop_worker(Actor::Human, "core:T1", None).unwrap();
+        let id = st["action_id"].as_str().unwrap().to_string();
+        assert_eq!(st["state"], "queued");
+        s.tick();
+        assert_eq!(last(&id)["state"], "queued", "the watcher has no stop file to wait for: it leaves a core stop alone");
+        s.core_ticket_ended("T1", None);
+        let done = last(&id);
+        assert_eq!(done["state"], "done", "{done}");
+        assert_eq!(done["outcome"], "stopped", "{done}");
+
+        let refused = s.stop_worker(Actor::Human, "core:T3", None).unwrap_err();
+        assert_eq!(refused.code(), "worker_finished");
+        let failed = h.ledger().into_iter().rev().find(|r| r["worker"] == "core:T3").unwrap();
+        assert_eq!((failed["state"].as_str(), failed["reason"].as_str()), (Some("failed"), Some("worker_finished")), "{failed}");
+        id
+    };
+    let n = h.ledger().len();
+    let leftover = {
+        let mut s = h.service();
+        s.ttl = Duration::ZERO;
+        s.tick();
+        assert_eq!(h.ledger().len(), n, "reopening adds nothing for a settled stop");
+        assert_eq!(last(&id)["state"], "done");
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        // This app ends before it sees the ticket end.
+        s.stop_worker(Actor::Human, "core:T1", None).unwrap()["action_id"].as_str().unwrap().to_string()
+    };
+    let mut s = h.service();
+    let r = last(&leftover);
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("app_restarted")), "settled at open: {r}");
+    s.ttl = Duration::ZERO;
+    s.tick();
+    assert_eq!(last(&leftover)["state"], "delivery_unknown", "and never re-judged as stop_file_missing");
+    assert_eq!(last(&id)["state"], "done");
+}
+
+/// #177 review (2): a second app starts no control watcher and binds no Lead socket. The first app's socket is left in
+/// place (the same inode, still accepting), and the shared ledger is not ticked. The app holding the locks does serve.
+#[test]
+fn a_second_app_serves_no_control_socket_and_ticks_nothing() {
+    use std::os::unix::fs::MetadataExt as _;
+    use vajra_desktop::desktop::App;
+    // Short paths: a Unix socket path must fit in about 104 bytes.
+    let d = PathBuf::from(format!("/tmp/vsc-{}-{}", std::process::id(), uniq()));
+    let _ = fs::remove_dir_all(&d);
+    let (data, home) = (d.join("d"), d.join("h"));
+    fs::create_dir_all(&home).unwrap();
+    let first = App::open(&data, &home).unwrap();
+    let w = first.serve_control().expect("the app holding the locks serves");
+    let sock = vajra_desktop::control::socket_path(&data);
+    let ino = fs::symlink_metadata(&sock).unwrap().ino();
+    // A pending core stop in the shared ledger: the first app's live action.
+    {
+        let mut c = first.control.lock().unwrap();
+        c.start_session(SID, RUN).unwrap();
+        c.set_core_workers(Arc::new(FakeCore));
+        c.stop_worker(Actor::Human, "core:T1", None).unwrap();
+    }
+    drop(w);
+    let path = data.join("control/ledger.jsonl");
+    let before = fs::read(&path).unwrap();
+    let second = App::open(&data, &home).unwrap();
+    assert!(second.other_instance());
+    assert!(second.serve_control().is_none(), "a second app starts no watcher");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(fs::symlink_metadata(&sock).unwrap().ino(), ino, "the first app's socket is not replaced");
+    assert!(UnixStream::connect(&sock).is_ok(), "and still accepts");
+    assert_eq!(fs::read(&path).unwrap(), before, "nothing ticked the shared ledger");
+    drop(second);
+    drop(first);
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// #177 review: a second app on the same data folder (a dev build beside the installed one) settles nothing in the
+/// shared control ledger. The first app's pending core stop is its live action: the second app's open leaves the
+/// ledger byte for byte as it was. Only the next app that holds the folder, after the first is gone, settles it.
+#[test]
+fn a_second_app_leaves_the_first_apps_pending_core_stop_unsettled() {
+    use vajra_desktop::desktop::App;
+    let h = Home::new();
+    let first = App::open(&h.data(), &h.home).unwrap();
+    assert!(!first.other_instance());
+    // The first app's live stop of a core worker, recorded in the shared ledger and not yet ended.
+    let stop = {
+        let mut s = h.service();
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        s.stop_worker(Actor::Human, "core:T1", None).unwrap()["action_id"].as_str().unwrap().to_string()
+    };
+    let path = h.data().join("control/ledger.jsonl");
+    let before = fs::read(&path).unwrap();
+    let second = App::open(&h.data(), &h.home).unwrap();
+    assert!(second.other_instance());
+    drop(second);
+    assert_eq!(fs::read(&path).unwrap(), before, "a second app writes nothing to the shared control ledger");
+    // The first app ends without seeing the ticket end; the next sole app settles the leftover at open.
+    drop(first);
+    let next = App::open(&h.data(), &h.home).unwrap();
+    assert!(!next.other_instance());
+    let r = h.ledger().into_iter().rev().find(|r| r["action_id"] == stop.as_str()).unwrap();
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("app_restarted")), "{r}");
+}
+
+/// #151 review: two Stops of one core worker before its ticket ends (a second human click, or a confirmed
+/// Director-General stop) are both settled by the one ticket-ended callback; neither is left queued, now or after reopen.
+#[test]
+fn every_stop_of_a_core_worker_is_settled_when_its_ticket_ends() {
+    let h = Home::new();
+    let last = |id: &str| h.ledger().into_iter().rev().find(|r| r["action_id"] == id).unwrap();
+    let ids: Vec<String> = {
+        let mut s = h.service();
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        let ids: Vec<String> = (0..2)
+            .map(|_| s.stop_worker(Actor::Human, "core:T1", None).unwrap()["action_id"].as_str().unwrap().to_string())
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        for id in &ids {
+            assert_eq!(last(id)["state"], "queued");
+        }
+        s.core_ticket_ended("T1", None);
+        for id in &ids {
+            let r = last(id);
+            assert_eq!((r["state"].as_str(), r["outcome"].as_str()), (Some("done"), Some("stopped")), "{r}");
+        }
+        ids
+    };
+    let n = h.ledger().len();
+    let mut s = h.service();
+    s.ttl = Duration::ZERO;
+    s.tick();
+    assert_eq!(h.ledger().len(), n, "reopening finds nothing left to settle");
+    for id in &ids {
+        assert_eq!(last(id)["state"], "done");
+    }
+}
+
+/// #151 (16.7, after #148/#150): a Message and a Redirect to a Claude core worker land in its own control dir, matched
+/// `{"session": <its id>}`; the REAL hook delivers them to that top-level session with its nonce, never to the run's
+/// lead or another session, and the ack watcher records the delivery.
+#[test]
+fn a_claude_core_worker_takes_message_and_redirect_through_the_real_hook() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    s.set_core_workers(Arc::new(FakeCore));
+    let hook = real_hook(&h.home.join("hooks"));
+    let top = |sid: &str, tool: &str| json!({"session_id": sid, "hook_event_name": "PostToolUse", "tool_name": tool, "cwd": h.wt("one"), "tool_input": {"command": "ls"}, "tool_response": {"stdout": "ok"}});
+
+    // Not opened yet (the worker never started): nothing is queued.
+    assert_eq!(s.message_worker(Actor::Human, "core:T1", "hi").unwrap_err().code(), "not_supported_by_harness");
+    assert_eq!(s.message_worker(Actor::Human, "core:T2", "hi").unwrap_err().code(), "not_supported_by_harness", "a Codex worker has no channel");
+    let nonce = s.open_core_session(CSID).unwrap();
+    let dir = h.data().join("control").join(CSID);
+    assert_eq!(mode(&dir), 0o700);
+
+    let m = s.message_worker(Actor::Human, "core:T1", "use the kit Button").unwrap();
+    let id = m["action_id"].as_str().unwrap().to_string();
+    let q: Vec<Value> = files_under(&dir.join("queue")).iter().map(|p| serde_json::from_slice(&fs::read(p).unwrap()).unwrap()).collect();
+    assert_eq!(q.len(), 1);
+    assert_eq!(q[0]["match"], json!({"session": CSID}), "{}", q[0]);
+    assert!(files_under(&h.session_dir().join("queue")).is_empty(), "nothing in the run's own dir");
+
+    // The run's lead session and a subagent of the worker's session never take it.
+    let lead = run_hook(&hook, &h.home, &top(SID, "Bash"));
+    assert!(!lead.stdout.contains("kit Button"), "{}", lead.stdout);
+    let sub = run_hook(&hook, &h.home, &payload_for(CSID, "PostToolUse", "Bash", AID, &h.wt("one")));
+    assert!(!sub.stdout.contains("kit Button"), "{}", sub.stdout);
+
+    // The worker's own next tool call takes it, inside a block with its nonce.
+    let r = run_hook(&hook, &h.home, &top(CSID, "Bash"));
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let out: Value = serde_json::from_str(r.stdout.trim()).unwrap();
+    let ctx = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(ctx.contains(&format!("<vajra-steer nonce=\"{nonce}\" source=\"human\" kind=\"message\" id=\"{id}\">")), "{ctx}");
+    assert!(ctx.contains("use the kit Button"), "{ctx}");
+    s.tick();
+    let states: Vec<String> = h.ledger().iter().filter(|r| r["action_id"] == id.as_str()).map(|r| r["state"].as_str().unwrap().to_string()).collect();
+    assert_eq!(states, ["queued", "delivered"]);
+    let rec = h.ledger().into_iter().find(|r| r["action_id"] == id.as_str()).unwrap();
+    assert_eq!((rec["worker"].as_str(), rec["run_id"].as_str()), (Some("core:T1"), Some(RUN)), "{rec}");
+
+    let red = s.redirect_worker(Actor::Lead, "core:T1", "switch to plan B").unwrap();
+    let rid = red["action_id"].as_str().unwrap().to_string();
+    let r = run_hook(&hook, &h.home, &top(CSID, "Read"));
+    assert!(r.stdout.contains("Change of direction from the Lead: switch to plan B"), "{}", r.stdout);
+    s.tick();
+    assert_eq!(h.ledger().iter().rev().find(|r| r["action_id"] == rid.as_str()).unwrap()["state"], "delivered");
+
+    // A ticket that ends takes nothing more: what it didn't take expires.
+    let late = s.message_worker(Actor::Human, "core:T1", "too late").unwrap();
+    s.core_ticket_ended("T1", None);
+    let lid = late["action_id"].as_str().unwrap();
+    assert_eq!(h.ledger().iter().rev().find(|r| r["action_id"] == lid).unwrap()["state"], "not_delivered");
+    let r = run_hook(&hook, &h.home, &top(CSID, "Bash"));
+    assert!(!r.stdout.contains("too late"), "{}", r.stdout);
+}
+
+fn last_state(h: &Home, id: &str) -> String {
+    h.ledger().iter().rev().find(|r| r["action_id"] == id).unwrap()["state"].as_str().unwrap().to_string()
+}
+
+/// 6c-3 pruning: an ended core worker's control dir goes once its unclaimed messages have expired (written to the
+/// ledger first); its channel is closed; its nonce is still redacted, because its output may still be shown.
+#[test]
+fn an_ended_core_workers_dir_is_removed_and_its_nonce_still_redacted() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    s.set_core_workers(Arc::new(FakeCore));
+    let nonce = s.open_core_session(CSID).unwrap();
+    let dir = h.data().join("control").join(CSID);
+    let id = s.message_worker(Actor::Human, "core:T1", "hi").unwrap()["action_id"].as_str().unwrap().to_string();
+    s.core_ticket_ended("T1", Some(CSID));
+    assert_eq!(last_state(&h, &id), "not_delivered", "expired in the ledger before its dir went");
+    assert!(!dir.exists(), "the ended worker's dir is removed");
+    assert!(h.session_dir().is_dir(), "the run's own dir stays");
+    assert_ne!(s.redactor().redact(format!("x {nonce}")), format!("x {nonce}"), "still redacted");
+    assert_eq!(s.message_worker(Actor::Human, "core:T1", "late").unwrap_err().code(), "not_supported_by_harness");
+    s.tick();
+    assert!(!dir.exists(), "a tick resurrects nothing");
+}
+
+/// 6c-3 pruning: a message the worker's hook already claimed keeps the dir until its ack is read, then the dir goes.
+#[test]
+fn a_claimed_message_keeps_the_dir_until_its_ack_is_read() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    s.set_core_workers(Arc::new(FakeCore));
+    s.open_core_session(CSID).unwrap();
+    let hook = real_hook(&h.home.join("hooks"));
+    let dir = h.data().join("control").join(CSID);
+    let id = s.message_worker(Actor::Human, "core:T1", "use the kit").unwrap()["action_id"].as_str().unwrap().to_string();
+    let top = json!({"session_id": CSID, "hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": h.wt("one"), "tool_input": {"command": "ls"}, "tool_response": {"stdout": "ok"}});
+    let r = run_hook(&hook, &h.home, &top);
+    assert!(r.stdout.contains("use the kit"), "{}", r.stdout);
+    s.core_ticket_ended("T1", Some(CSID));
+    assert!(dir.is_dir(), "its ack is still to be read there");
+    s.tick();
+    assert_eq!(last_state(&h, &id), "delivered");
+    assert!(!dir.exists(), "gone once nothing settles through it");
+}
+
+/// 6c-3 pruning at start: only a stale session dir goes. A live session's, a kept one's (a run that may be resumed),
+/// a non-session name, a link and a file with a session name are each left alone, and the link's target is untouched.
+#[test]
+fn start_up_prune_removes_only_stale_session_dirs() {
+    let h = Home::new();
+    let control = h.data().join("control");
+    let (stale, kept, linked, filed) = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444");
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    for d in [stale, kept, "lead/r1"] {
+        fs::create_dir_all(control.join(d).join("queue")).unwrap();
+    }
+    let outside = h.home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("keepme"), "x").unwrap();
+    std::os::unix::fs::symlink(&outside, control.join(linked)).unwrap();
+    fs::write(control.join(filed), "x").unwrap();
+    let keep: std::collections::HashSet<String> = [kept.to_string()].into();
+    assert_eq!(s.prune_control_dirs(&keep), 1);
+    assert!(!control.join(stale).exists());
+    for p in [control.join(kept), control.join(SID), control.join("lead/r1"), outside.join("keepme"), control.join(filed), control.join("ledger.jsonl")] {
+        assert!(p.exists(), "{}", p.display());
+    }
+    assert!(control.join(linked).symlink_metadata().unwrap().file_type().is_symlink());
+}
+
+/// 6c-3 pruning: the retired nonces the redactor keeps are capped (4096, oldest out).
+#[test]
+fn retired_nonces_are_capped_oldest_out() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.set_core_workers(Arc::new(FakeCore));
+    let sid = |i: usize| format!("{i:08x}-0000-4000-8000-000000000000");
+    let first = s.open_core_session(&sid(0)).unwrap();
+    s.core_ticket_ended("T1", Some(&sid(0)));
+    let mut last = String::new();
+    for i in 1..=4096 {
+        last = s.open_core_session(&sid(i)).unwrap();
+        s.core_ticket_ended("T1", Some(&sid(i)));
+    }
+    assert_eq!(s.redactor().redact(format!("x {first}")), format!("x {first}"), "the oldest aged out");
+    assert_ne!(s.redactor().redact(format!("x {last}")), format!("x {last}"));
+    assert!(files_under(&h.data().join("control")).iter().all(|p| !p.to_string_lossy().contains("-0000-4000-8000-")), "every ended dir went");
+}
+
+fn payload_for(sid: &str, event: &str, tool: &str, agent_id: &str, cwd: &str) -> Value {
+    let mut p = payload(event, tool, agent_id, cwd);
+    p["session_id"] = json!(sid);
+    p
+}
+
 // ---------------------------------------------------------------- ledger
 
 #[test]
@@ -677,7 +1027,7 @@ fn ledger_append_only() {
     drop(s);
     let mut s = h.service();
     s.start_session(SID, RUN).unwrap();
-    s.set_workers(vec![worker(AID, "bhima", "t1", &h.wt("one"))]);
+    s.set_workers(SID, vec![worker(AID, "bhima", "t1", &h.wt("one"))]);
     s.list_workers(Actor::Human, None).unwrap();
     assert_eq!(h.ledger().len(), 5);
     // The ledger refuses to open through a symlink.
@@ -777,7 +1127,7 @@ fn message_errors() {
     let mut s = h.service();
     assert!(matches!(s.message_worker(Actor::Human, AID, "x"), Err(ControlError::ControlDisabled)));
     s.start_session(SID, RUN).unwrap();
-    s.set_workers(vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "bhima", "t1", &h.wt("two"))]);
+    s.set_workers(SID, vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "bhima", "t1", &h.wt("two"))]);
     assert!(matches!(s.message_worker(Actor::Human, "nobody", "x"), Err(ControlError::WorkerNotFound)));
     assert!(matches!(s.message_worker(Actor::Human, "bhima", "x"), Err(ControlError::WorkerAmbiguous)));
     assert!(matches!(s.message_worker(Actor::Human, AID, ""), Err(ControlError::InvalidArgs(_))));
@@ -785,7 +1135,7 @@ fn message_errors() {
     let mut done = worker(AID, "bhima", "t1", &h.wt("one"));
     done.live = false;
     done.worker.status = Status::Done;
-    s.set_workers(vec![done]);
+    s.set_workers(SID, vec![done]);
     assert!(matches!(s.message_worker(Actor::Human, AID, "x"), Err(ControlError::WorkerFinished)));
     assert!(matches!(s.start_session("../../etc", RUN), Err(ControlError::InvalidArgs(_))));
     assert!(queue_entries(&h).is_empty());
@@ -809,7 +1159,7 @@ fn mcp_session(h: &Home, lines: &[Value]) -> Vec<Value> {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let input: String = lines.iter().map(|v| format!("{v}\n")).collect();
     let mut out = Vec::new();
     mcp::serve(Cursor::new(input), &mut out, &mut SocketClient::new(&sock)).unwrap();
@@ -839,7 +1189,7 @@ fn mcp_initialize_list_and_call() {
     assert_eq!(out[0]["result"]["protocolVersion"], "2025-06-18");
     assert!(out[0]["result"]["capabilities"]["tools"].is_object());
     let names: Vec<&str> = out[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["list_workers", "inspect_worker", "message_worker", "redirect_worker", "stop_worker"]);
+    assert_eq!(names, ["list_workers", "inspect_worker", "message_worker", "redirect_worker", "stop_worker", "propose_run"]);
     for t in out[1]["result"]["tools"].as_array().unwrap() {
         assert_eq!(t["inputSchema"]["additionalProperties"], false);
     }
@@ -940,9 +1290,9 @@ fn a_stop_request_is_bound_to_its_session() {
     let mut s = started(&h);
     let r = s.stop_worker(Actor::Lead, AID2, None).unwrap();
     let id = r["action_id"].as_str().unwrap().to_string();
-    s.end_session();
+    s.end_session(SID);
     s.start_session(SID2, RUN).unwrap();
-    s.set_workers(vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "nakula", "t2", &h.wt("two"))]);
+    s.set_workers(SID2, vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "nakula", "t2", &h.wt("two"))]);
     assert!(matches!(s.confirm_stop(Actor::Human, &id), Err(ControlError::ActionNotFound)));
     let stops = h.data().join("control").join(SID2).join("stops");
     assert!(fs::read_dir(&stops).map(|mut d| d.next().is_none()).unwrap_or(true), "no stop written into the new session");
@@ -957,7 +1307,7 @@ fn a_resume_retires_messages_queued_under_the_old_nonce() {
     let mut s = started(&h);
     let r = s.message_worker(Actor::Human, AID, "before resume").unwrap();
     let id = r["action_id"].as_str().unwrap().to_string();
-    s.resume_session().unwrap();
+    s.resume_session(SID).unwrap();
     assert!(h.ledger().iter().any(|r| r["action_id"] == id.as_str() && r["state"] == "not_delivered"));
     let q = h.data().join("control").join(SID).join("queue");
     assert!(fs::read_dir(&q).map(|mut d| d.next().is_none()).unwrap_or(true), "old message left in the queue");
@@ -968,7 +1318,7 @@ fn an_ended_session_lists_no_workers() {
     // Panel lead (dots): the Lead must not see the last run's workers as live.
     let h = Home::new();
     let mut s = started(&h);
-    s.end_session();
+    s.end_session(SID);
     assert_eq!(s.list_workers(Actor::Lead, None).unwrap()["workers"], json!([]));
     assert!(matches!(s.inspect_worker(Actor::Lead, AID, 5), Err(ControlError::WorkerNotFound)));
 }
@@ -981,7 +1331,7 @@ fn lead_mcp_calls_are_bound_to_the_run_being_asked_about() {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let finished_run = "20261104-0900";
     let call = |bound: Option<&str>, tool: &str, args: Value| -> Value {
         let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}}));
@@ -1015,8 +1365,74 @@ fn lead_mcp_calls_are_bound_to_the_run_being_asked_about() {
     assert_eq!(r["isError"], false, "{r}");
     assert_eq!(r["structuredContent"]["workers"].as_array().unwrap().len(), 2);
     // After B ends, a Lead bound to B is refused too (an ask that outlives its run).
-    svc.lock().unwrap().end_session();
+    svc.lock().unwrap().end_session(SID);
     assert_eq!(call(Some(RUN), "list_workers", json!({}))["structuredContent"]["error"], "run_not_current");
     // A malformed binding is refused, not ignored.
     assert_eq!(call(Some("../x"), "list_workers", json!({}))["structuredContent"]["error"], "invalid_args");
+}
+
+#[test]
+fn director_general_mcp_calls_are_bound_to_project_and_generation() {
+    const PROJ: &str = "k_0123456789abcdef0123456789abcdef";
+    let h = Home::new();
+    let mut started = started(&h);
+    started.set_project(SID, PROJ).unwrap();
+    started.set_generation(PROJ, 3).unwrap();
+    let svc = Arc::new(Mutex::new(started));
+    let sock = short_sock();
+    let listener = socket::bind(&sock).unwrap();
+    let srv = svc.clone();
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
+    let call = |c: &mut SocketClient, tool: &str| -> Value {
+        let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":{}}}));
+        let mut out = Vec::new();
+        mcp::serve(Cursor::new(input), &mut out, c).unwrap();
+        serde_json::from_str::<Value>(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap()["result"].clone()
+    };
+    // The environment the app writes into the Director-General's mcp.json.
+    let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| std::ffi::OsString::from(*v));
+    let mut current = SocketClient::from_env(&sock, env(&[(mcp::PROJECT_ENV, PROJ), (mcp::GEN_ENV, "3")])).unwrap();
+    let r = call(&mut current, "list_workers");
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(r["structuredContent"]["workers"].as_array().unwrap().len(), 2);
+    // A replaced conversation (older generation) gets nothing.
+    let mut stale = SocketClient::from_env(&sock, env(&[(mcp::PROJECT_ENV, PROJ), (mcp::GEN_ENV, "2")])).unwrap();
+    assert_eq!(call(&mut stale, "list_workers")["structuredContent"]["error"], "stale_generation");
+    // Another project, even at the right generation number, gets nothing.
+    let mut other = SocketClient::for_project(&sock, "k_ffffffffffffffffffffffffffffffff", 3);
+    assert_eq!(call(&mut other, "list_workers")["structuredContent"]["error"], "stale_generation");
+    // A partial or malformed binding is a refusal to start, never "unbound".
+    for bad in [
+        &[(mcp::PROJECT_ENV, PROJ)][..],
+        &[(mcp::GEN_ENV, "3")][..],
+        &[(mcp::PROJECT_ENV, PROJ), (mcp::GEN_ENV, "x")][..],
+        &[(mcp::PROJECT_ENV, "p_nope"), (mcp::GEN_ENV, "3")][..],
+        &[(mcp::PROJECT_ENV, PROJ), (mcp::GEN_ENV, "3"), (mcp::RUN_ENV, RUN)][..],
+    ] {
+        let pairs: Vec<(String, String)> = bad.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let got = SocketClient::from_env(&sock, |k| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()));
+        assert!(got.is_err(), "{bad:?}");
+    }
+    // A raw request that names both a run and a project, or a project without a generation, is refused.
+    // An explicit null is a value, not an omitted key (#81 review): with one live session, a null-only binding would
+    // otherwise be served as unbound.
+    for req in [
+        json!({"tool": "list_workers", "run": RUN, "project": PROJ, "generation": 3}),
+        json!({"tool": "list_workers", "project": PROJ}),
+        json!({"tool": "list_workers", "project": null, "generation": null}),
+        json!({"tool": "list_workers", "project": null}),
+        json!({"tool": "list_workers", "generation": null}),
+        json!({"tool": "list_workers", "run": null}),
+        json!({"tool": "list_workers", "project": PROJ, "generation": null}),
+        json!({"tool": "list_workers", "project": null, "generation": 3}),
+        json!({"tool": "list_workers", "run": RUN, "project": null, "generation": null}),
+        json!({"tool": "list_workers", "run": null, "project": PROJ, "generation": 3}),
+        json!({"tool": "message_worker", "args": {"worker": AID, "text": "hi"}, "project": null, "generation": null}),
+    ] {
+        let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        writeln!(s, "{req}").unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(s), &mut line).unwrap();
+        assert!(line.contains("invalid_args"), "{req}: {line}");
+    }
 }

@@ -1,6 +1,6 @@
 import unittest
-from gate import check, evaluate, post_only
-from measure import classify, flavour_key, flavour_summary, identity_key, launch_flavours, launch_summary, helper_type, postload_summary
+from gate import check, evaluate, idle_summary, post_only
+from measure import GATED, LAUNCHES, WARMUP, classify, flavour_key, flavour_summary, idle_report, identity_key, launch_flavours, launch_summary, helper_type, postload_summary
 
 ID = "25D1|20622.1.22"  # macOS build | WebKit version
 NW = "Networking+WebContent"
@@ -231,6 +231,68 @@ class Measure(unittest.TestCase):
         fails, _ = evaluate(bl(flavour=NW), idle, None, ci=True)
         self.assertTrue(any("no baseline entry" in f for f in fails), fails)
 
+
+IDENT = {"key": ID}
+
+
+def launches(meds, flavours=None, footprints=None, unknown=None):
+    """Launch records as idle() writes them: the first one is the warm-up."""
+    flavours = flavours or [NW] * len(meds)
+    footprints = footprints or [90.0] * len(meds)
+    unknown = unknown or [[] for _ in meds]
+    return [{"run": i + 1, "warmup": i == 0, "median_mib": m, "flavour": f, "clean_samples": 15, "churn": False,
+             "unknown_types": u, "footprint_mib": fp} for i, (m, f, fp, u) in enumerate(zip(meds, flavours, footprints, unknown))]
+
+
+class WarmupAndMedian(unittest.TestCase):
+    def test_launch_1_is_left_out_of_the_median(self):
+        # the shape of a real CI run: a high first launch, then a mix of settled and high ones (#166 read 201.6 first)
+        rep = idle_report(launches([201.6, 184.8, 191.6, 185.7, 191.2, 185.0]), IDENT)
+        self.assertEqual((rep["gated_launches"], rep["warmup_launches"], rep["median_of_medians_mib"]), (5, 1, 185.7))
+        self.assertEqual(rep["gated_spread_mib"], [184.8, 191.6])
+        # the reference fields keep describing every usable launch, warm-up included
+        self.assertEqual(rep["spread_mib"], [184.8, 201.6])
+        self.assertEqual(rep["all_launches_median_mib"], 188.45)
+
+    def test_the_median_of_the_launches_after_the_warmup_is_what_is_gated(self):
+        rep = idle_report(launches([201.6, 184.8, 191.6, 185.7, 191.2, 185.0]), IDENT)
+        self.assertEqual(check(bl(181.6), rep, None, ci=False), [])
+
+    def test_a_real_regression_still_fails(self):
+        # every gated launch is 8 MiB over the 181.6 baseline: leaving launch 1 out must not hide it
+        rep = idle_report(launches([201.6, 190.0, 190.4, 189.6, 190.2, 189.9]), IDENT)
+        self.assertEqual(len(check(bl(181.6), rep, None, ci=False)), 1)
+
+    def test_the_baseline_and_the_tolerance_are_unchanged(self):
+        self.assertEqual(check(bl(181.6), run(186.6), None, ci=False), [])
+        self.assertEqual(len(check(bl(181.6), run(187.1), None, ci=False)), 1)
+
+    def test_an_unknown_helper_type_in_the_warmup_still_fails(self):
+        rep = idle_report(launches([201.6, 185, 185, 185, 185, 185], unknown=[["Plugin"], [], [], [], [], []]), IDENT)
+        self.assertEqual(rep["unknown_types"], ["Plugin"])
+        self.assertTrue(any("Plugin" in f for f in check(bl(181.6), rep, None, ci=False)))
+
+    def test_an_unbaselined_flavour_in_the_warmup_still_fails(self):
+        rep = idle_report(launches([201.6, 185, 185, 185, 185, 185], flavours=[GPU, NW, NW, NW, NW, NW]), IDENT)
+        self.assertEqual(rep["launch_flavours"], [GPU, NW])
+        self.assertTrue(any("no baseline entry" in f for f in check(bl(181.6), rep, None, ci=False)))
+
+    def test_footprint_is_recorded_beside_rss_and_never_gated(self):
+        rep = idle_report(launches([201.6, 185, 185, 185, 185, 185], footprints=[500.0, 90.1, 90.3, 89.9, 90.2, 90.0]), IDENT)
+        self.assertEqual(rep["footprint_median_mib"], 90.1)
+        self.assertEqual(check(bl(181.6), dict(rep, footprint_median_mib=900.0), None, ci=False), [])
+        self.assertIn("90.1 MiB", idle_summary(rep))
+
+    def test_a_missing_footprint_tool_does_not_fail_the_gate(self):
+        rep = idle_report(launches([201.6, 185, 185, 185, 185, 185], footprints=[None] * 6), IDENT)
+        self.assertIsNone(rep["footprint_median_mib"])
+        self.assertEqual(check(bl(181.6), rep, None, ci=False), [])
+
+    def test_an_idle_json_from_before_the_rule_has_no_extra_summary(self):
+        self.assertEqual(idle_summary(run(150)), "")
+
+    def test_launch_count_is_one_warmup_plus_five_gated(self):
+        self.assertEqual((WARMUP, GATED, LAUNCHES), (1, 5, 6))
 
 
 POST = {"pre_load_mib": 150.0, "peak_mib": 210.0, "plus2_mib": 190.0, "plus10_mib": 195.0, "retained_mib": 45.0, "helpers": 2}

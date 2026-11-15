@@ -1,0 +1,1 @@
+{"schema":"vajra.session/1","id":"s_01JC5X8Z3B0K2M4N6P7Q8R9S0T","project_id":"p_01JC5X8Z3A9K2M4N6P7Q8R9S0T","kind":"worker","parent":"s_01JC5X8Z3C1K2M4N6P7Q8R9S0T","provider":"claude","native_session_id":null,"run_id":"20261108-0930","campaign":"deliver-20261108-0930","task_id":"t3","attempt":2,"generation":3,"status":"running","started":"2026-11-08T09:30:00Z","ended":null}

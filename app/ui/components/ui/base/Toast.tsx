@@ -5,7 +5,8 @@ import { cn } from "../cn";
 import { Button } from "./Button";
 import { StatusDot } from "./StatusDot";
 
-export type ToastItem = { id: number; kind: "info" | "success" | "danger"; text: string };
+/** `detail` is a second, quieter line: for a ping, why it pinged. `label` replaces the dot's status word. */
+export type ToastItem = { id: number; kind: "info" | "success" | "danger"; text: string; detail?: string; label?: string };
 
 const SHOWN_MS = 5000;
 const DOT: Record<ToastItem["kind"], StatusKey> = { info: "ready", success: "done", danger: "failed" };
@@ -27,8 +28,10 @@ function ToastView({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
       onFocus={() => setPaused(true)}
       onBlur={(e) => !e.currentTarget.contains(e.relatedTarget) && setPaused(false)}
     >
-      <StatusDot status={DOT[item.kind]} />
-      <span>{item.text}</span>
+      <StatusDot status={DOT[item.kind]} label={item.label} />
+      {item.detail ? (
+        <span className="v-toast__body"><span>{item.text}</span><span className="v-toast__detail">{item.detail}</span></span>
+      ) : <span>{item.text}</span>}
       <Button size="sm" variant="ghost" onClick={() => onDismiss(item.id)}>
         {S.dismiss}
       </Button>
@@ -50,7 +53,8 @@ export function ToastRegion({ toasts, onDismiss }: { toasts: ToastItem[]; onDism
 export function useToasts() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const next = useRef(1);
-  const push = useCallback((kind: ToastItem["kind"], text: string) => setToasts((t) => [...t, { id: next.current++, kind, text }]), []);
+  const push = useCallback((kind: ToastItem["kind"], text: string, detail?: string, label?: string) =>
+    setToasts((t) => [...t, { id: next.current++, kind, text, detail, label }]), []);
   const dismiss = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
   return { toasts, push, dismiss };
 }

@@ -29,6 +29,14 @@ describe("History", () => {
     expect(within(table).getByText(/bad signature/)).toBeTruthy();
   });
 
+  // A narrow table shortens the run name with an ellipsis, so the whole name is also the tooltip, as it is for the goal.
+  it("gives each run name its full text as a tooltip", async () => {
+    setTransport(fakeIpc({ list_campaigns: camps }).transport);
+    render(<History />);
+    const table = await screen.findByRole("table");
+    for (const slug of ["a-camp", "b-camp", "bad"]) expect(within(table).getByRole("button", { name: slug }).getAttribute("title")).toBe(slug);
+  });
+
   it("sorts by keyboard-reachable header buttons", async () => {
     setTransport(fakeIpc({ list_campaigns: camps }).transport);
     render(<History />);
@@ -44,7 +52,7 @@ describe("History", () => {
     setTransport(fakeIpc({ list_campaigns: camps }).transport);
     render(<History />);
     fireEvent.click(await screen.findByRole("button", { name: "a-camp" }));
-    expect(window.location.hash).toBe("#/run?slug=a-camp");
+    expect(window.location.hash).toBe("#/review?slug=a-camp");
   });
 
   it("says when there are no campaigns", async () => {
@@ -96,7 +104,7 @@ describe("Settings", () => {
     render(<Settings />);
     expect(await screen.findByText("brew install jq")).toBeTruthy();
     cleanup();
-    setTransport(fakeIpc({ preflight: () => { throw { error: "io_error", detail: "x" }; } }).transport);
+    setTransport(fakeIpc({ preflight: () => { throw { error: "io_error", detail: "x" }; }, provider_list: { schema: "vajra.providers/1", providers: [] }, setup_list: { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } } }).transport);
     render(<Settings />);
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(S.settings.failed));
   });

@@ -70,12 +70,17 @@ impl Lines {
     }
 }
 
+/// The marker `vajra-deliver.js` puts first in a line it writes for a campaign whose evidence ran outside the guard.
+const OG_MARK: &str = "[evidence ran outside the Vajra guard]";
+
 fn scan(progress: &str) -> Lines {
     let mut out = Lines::default();
     for line in progress.lines() {
         // Only the shape `append_progress` writes: `- <timestamp> <text>`, with the text starting `run <id>` (what the workflow
         // writes) or `resumed by vajra-deliver run <id>`. Free text that merely contains "run " (a note, a reject reason) is not read.
         let Some(text) = line.strip_prefix("- ").and_then(|l| l.split_once(' ')).map(|x| x.1) else { continue };
+        // A CLI resume of an outside-guard campaign puts the marker first (N17, #183); the line is otherwise the same.
+        let text = text.strip_prefix(OG_MARK).map_or(text, str::trim_start);
         if let Some(r) = text.strip_prefix("resumed by vajra-deliver run ") {
             // A resume is a new run: all run-scoped state starts over, even if the id were repeated.
             let id = r.split(|c: char| c.is_whitespace() || c == ':').next().unwrap_or("");
@@ -351,6 +356,17 @@ mod tests {
         assert_eq!(scope("", Some(&tasks)).0, "r2");
     }
 
+    /// #183: a CLI resume of an outside-guard campaign writes the marker first; the timeline reads the line the same way.
+    #[test]
+    fn a_line_with_the_outside_guard_marker_first_reads_like_the_plain_line() {
+        let t = [task("r.t1", "closed", &[])];
+        let m = OG_MARK;
+        assert_eq!(cur(&format!("run r round 1: 3/3 criteria passing\n{m} run r delivered b @ abc\n"), Some(&t)), ("Deliver", Outcome::Done));
+        assert_eq!(cur(&format!("{m} run r round 1: waiting for the user on t1; x\n"), Some(&t)), ("Execute", Outcome::NeedInput));
+        // Only at the start: a line that merely contains the marker later is free text, as before.
+        assert_ne!(cur(&format!("note {m} run r delivered b @ abc\n"), Some(&t)).1, Outcome::Done);
+    }
+
     #[test]
     fn the_four_ways_a_run_ends_each_show_status_and_the_node_reached() {
         let t = [task("r.t1", "closed", &[])];
@@ -454,12 +470,14 @@ mod tests {
 
         const WORKFLOW: &str = include_str!("../../../../workflows/vajra-deliver.js");
 
-        /// Every `sq(`run ${RUN}...`)` template in the workflow, with its placeholders filled in.
+        /// Every `sq(`run ${RUN}...`)` template in the workflow, also the `sq(og(`run ${RUN}...`))` form, with its
+        /// placeholders filled in.
         fn written_lines() -> Vec<String> {
             WORKFLOW
                 .lines()
                 .filter_map(|l| {
-                    let start = l.find("sq(`run ${RUN}")? + "sq(`".len();
+                    let (at, skip) = l.find("sq(`run ${RUN}").map(|i| (i, "sq(`".len())).or_else(|| l.find("sq(og(`run ${RUN}").map(|i| (i, "sq(og(`".len())))?;
+                    let start = at + skip;
                     let end = start + l[start..].find('`')?;
                     Some(l[start..end].to_string())
                 })

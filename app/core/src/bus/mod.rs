@@ -148,6 +148,8 @@ pub enum Event {
     },
     /// The queue overflowed; events were dropped. Pull a `snapshot`.
     SnapshotNeeded,
+    /// Nothing new to read: a loop blocked on this queue should look again (`Bus::wake`; a run started).
+    Wake,
 }
 
 /// Memory and disk counters, for health checks and tests.
@@ -822,6 +824,16 @@ impl Bus {
             inner.spill_total -= s.spill_len;
             drop(s.spill);
             let _ = std::fs::remove_file(self.spill_path(stream));
+        }
+    }
+
+    /// Wake every subscriber with no line: the app's loop blocks with no timer while nothing runs, and a run that has
+    /// not printed yet would otherwise go unnoticed until it does.
+    pub fn wake(&self) {
+        let mut inner = lock(&self.inner);
+        inner.subs.retain(|q| Arc::strong_count(q) > 1);
+        for q in &inner.subs {
+            q.offer(Event::Wake, self.cfg.queue_cap);
         }
     }
 

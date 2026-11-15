@@ -103,6 +103,15 @@ done
 : > "$SKILL/scripts/vajra-campaign.sh"
 out="$(run_ss)"; printf '%s' "$out" | grep -q "Vajra campaign"; [ $? -ne 0 ]; check "no campaign line when the brief is empty" $?
 
+# 9b. The campaign pointer is per repo, so the brief is asked from the session's cwd (the payload's), not the hook's.
+printf '#!/usr/bin/env bash\necho "cwd-is $(pwd -P)"\n' > "$SKILL/scripts/vajra-campaign.sh"
+SESS="$TEST_HOME/session-repo"; mkdir -p "$SESS"; SESS="$(cd "$SESS" && pwd -P)"
+out="$(cd / && run_ss "{\"session_id\":\"s\",\"source\":\"startup\",\"cwd\":\"$SESS\"}")"
+printf '%s' "$out" | grep -qx "Vajra campaign: cwd-is $SESS"; check "the campaign brief runs in the payload cwd" $?
+out="$(cd "$SESS" && run_ss "{\"session_id\":\"s\",\"source\":\"startup\",\"cwd\":\"$TEST_HOME/missing\"}")"
+printf '%s' "$out" | grep -qx "Vajra campaign: cwd-is $SESS"; check "a missing payload cwd falls back to the hook's cwd" $?
+: > "$SKILL/scripts/vajra-campaign.sh"
+
 # 10. Garbage stdin never fails the hook.
 printf 'not json' | bash "$SS" >/dev/null 2>&1; check "garbage stdin: exit 0" $?
 

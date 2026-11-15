@@ -9,6 +9,10 @@
 
 use std::ffi::OsString;
 
+pub mod claude_selftest;
+pub mod profiles;
+pub mod evidence_runner;
+
 use crate::sessions::argv::{self, InvalidInput, RunInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +32,33 @@ impl Engine {
 
     pub fn from_id(id: &str) -> Option<Engine> {
         [Engine::Claude, Engine::Codex].into_iter().find(|e| e.id() == id)
+    }
+}
+
+/// How a harness is authenticated and paid for. Not an engine: Codex under its own login and Codex through a gateway are
+/// one engine on two routes with different billing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// The CLI owns its login.
+    CliLogin,
+    /// A key the user pasted, held in the Keychain.
+    ApiKey,
+    /// A non-secret base URL plus a Keychain key.
+    Gateway,
+}
+
+/// One way of running and paying for agents: an id the preferences name, the harness that runs the worker, and the route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: String,
+    pub engine: Engine,
+    pub route: Route,
+}
+
+impl Account {
+    /// The built-in account for an engine under its own login; its id is the engine id.
+    pub fn login(engine: Engine) -> Account {
+        Account { id: engine.id().into(), engine, route: Route::CliLogin }
     }
 }
 
@@ -72,6 +103,16 @@ pub trait AgentAdapter: Send + Sync {
     fn billing(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Billing;
 }
 
+/// The launch argv for a Codex-harness account on the `ApiKey` or `Gateway` route. A login account, or a Claude one, is
+/// refused here: it launches through `adapter_for(..).run_argv` and never gets a generated config. Not called by
+/// `start_run` yet; a later PR wires it with `providers::codex_home::write` and account and model selection.
+pub fn gateway_run_argv(account: &Account, ask: &str, model: &str, effort: Option<&str>) -> Result<Vec<String>, InvalidInput> {
+    if account.engine != Engine::Codex || account.route == Route::CliLogin {
+        return Err(InvalidInput { field: "provider", reason: "is not a Codex gateway account" });
+    }
+    argv::build_gateway_argv(ask, model, effort)
+}
+
 pub fn adapter_for(engine: Engine) -> &'static dyn AgentAdapter {
     match engine {
         Engine::Claude => &Claude,
@@ -82,8 +123,8 @@ pub fn adapter_for(engine: Engine) -> &'static dyn AgentAdapter {
 struct Claude;
 struct Codex;
 
-const CLAUDE_KEYS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-const CODEX_KEYS: [&str; 2] = ["CODEX_API_KEY", "OPENAI_API_KEY"];
+pub(crate) const CLAUDE_KEYS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+pub(crate) const CODEX_KEYS: [&str; 2] = ["CODEX_API_KEY", "OPENAI_API_KEY"];
 
 fn billing(keys: &[&'static str], env: &dyn Fn(&str) -> Option<OsString>) -> Billing {
     let key_in_app_env = keys.iter().copied().find(|k| env(k).is_some_and(|v| !v.is_empty()));
@@ -130,7 +171,9 @@ impl AgentAdapter for Codex {
             message: false,
             redirect: false,
             stop: StopKind::Terminate,
-            resume: true,
+            // An app-started Codex run is never told the app's session id and Vajra does not read Codex's own, so there
+            // is no id to resume. Offering one would hand `codex resume` an id Codex never saw.
+            resume: false,
             vajra_workflow: false,
         }
     }

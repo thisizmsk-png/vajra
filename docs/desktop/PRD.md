@@ -257,7 +257,7 @@ part of review stage A1). Ranked by impact times likelihood.
 ### Pre-mortem, second pass (Critic, 2026-11-05)
 
 Eight failure modes the first table missed, from the Critic (duryodhana) after ADR-9 and the A1 fixes,
-reviewed at 386a4e2. All eight are adopted (requirements 7b, PM-1 to PM-8). The mitigations below are the
+reviewed at 386a4e2. All eight are adopted ([review-log.md](review-log.md), PM-1 to PM-8). The mitigations below are the
 current spec, not the Critic's first wording. The last column is the Critic's own test for dropping a row.
 
 | # | Failure (I x L) | Mitigation now in the spec | Earliest signal | Owner | Drop it if |

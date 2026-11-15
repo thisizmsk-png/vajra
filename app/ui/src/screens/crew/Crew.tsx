@@ -2,14 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import { ActionBar, CrewTree } from "../../../components/ui/desktop";
 import type { CrewNode } from "../../../components/ui/desktop";
+import { RunProvider } from "../ProviderControls";
+import { iconOf } from "../ProviderLine";
+import { parseWorkerProvider } from "../../workerProvider";
 import { S } from "../../../strings";
 import type { StatusKey } from "../../../strings";
-import { api, onChanged } from "../../ipc";
+import { api } from "../../ipc";
 import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import type { CrewNodeDto } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
+import { onChangedPaced, usePoll } from "../../projects/poll";
+import { useProjects } from "../../projects/store";
 import { WorkerPane } from "./WorkerPane";
+import { CoreWorkerPane } from "./CoreWorkerPane";
 
 /** A status or event is re-read at least this often: a tasks.json edit raises no event (AC-2.1.2: within 2 s). */
 const POLL_MS = 2000;
@@ -29,7 +35,8 @@ function statusLabel(n: CrewNodeDto): string {
 }
 
 function toNode(n: CrewNodeDto): CrewNode {
-  return { id: n.id, label: n.title, status: statusOf(n.status), statusLabel: statusLabel(n), children: n.children.map(toNode) };
+  const p = parseWorkerProvider(n.provider);
+  return { id: n.id, label: n.title, status: statusOf(n.status), statusLabel: statusLabel(n), icon: p ? iconOf(p) : undefined, children: n.children.map(toNode) };
 }
 
 const find = (n: CrewNodeDto, id: string): CrewNodeDto | null => {
@@ -49,9 +56,12 @@ const taskGroupOf = (n: CrewNodeDto, id: string, task: string | null = null): st
   }
   return undefined;
 };
-/** Every worker in the tree, in tree order. */
+/** A worker the core runs itself (ADR-16 16.7): its id is the full `core:<ticket>` reference its controls act on. */
+const isCore = (id: string) => id.startsWith("core:");
+const isWorker = (id: string) => id.startsWith("agent:") || isCore(id);
+/** Every worker in the tree (a run's subagents and the core's own), in tree order. */
 const agents = (n: CrewNodeDto, out: CrewNodeDto[] = []): CrewNodeDto[] => {
-  if (n.id.startsWith("agent:")) out.push(n);
+  if (isWorker(n.id)) out.push(n);
   n.children.forEach((c) => agents(c, out));
   return out;
 };
@@ -72,6 +82,7 @@ const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
 
 export function Crew() {
   const [route, go] = useRoute();
+  const { liveRuns } = useProjects();
   const routed = route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined;
   const [target, setTarget] = useState<Target | null | undefined>(routed);
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
@@ -79,7 +90,6 @@ export function Crew() {
   // `worker` in the route opens on that worker (a deep link, for example from an action card).
   const [selected, setSelected] = useState(route.params.worker ? `agent:${route.params.worker}` : "");
   const [err, setErr] = useState("");
-  const last = useRef(0);
   const current = useRef<Target | null | undefined>(target);
   current.current = target;
 
@@ -130,7 +140,6 @@ export function Crew() {
 
   const load = useCallback(() => {
     if (!target) return;
-    last.current = Date.now();
     const asked = target;
     api.crew(target.slug, target.runId).then(
       (n) => { if (current.current !== asked) return; setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
@@ -139,18 +148,10 @@ export function Crew() {
   }, [target]);
 
   useEffect(load, [load]);
-  useEffect(() => {
-    if (!target) return;
-    const poll = setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
-    // Leading and trailing: an event inside the gap is not lost, it is read when the gap ends.
-    let later: ReturnType<typeof setTimeout> | undefined;
-    const off = onChanged(() => {
-      const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
-      if (wait <= 0) load();
-      else if (later === undefined) later = setTimeout(() => { later = undefined; load(); }, wait);
-    });
-    return () => { clearInterval(poll); clearTimeout(later); off(); };
-  }, [target, load]);
+  // Polled only while this run is live and the window shows; a finished run changes only with an event.
+  usePoll(load, POLL_MS, !!target && liveRuns.includes(target.runId));
+  // Leading and trailing: an event inside the gap is not lost, it is read when the gap ends. Hidden: one read on showing.
+  useEffect(() => (target ? onChangedPaced(EVENT_MIN_GAP_MS, load) : undefined), [target, load]);
 
   // ⌘K: go to any worker of this run by name.
   useCommands(root ? agents(root).map((n) => ({ id: n.id, label: S.palette.goWorker(n.title), hint: statusLabel(n), run: () => setSelected(n.id) })) : []);
@@ -162,6 +163,8 @@ export function Crew() {
       {target && <span className="v-crew__id">{target.runId}</span>}
     </header>
   );
+  // A run on another provider names it, and what it cannot do there (FG-09 G6); keyed so a new run never shows the old one's.
+  const provider = target ? <RunProvider key={target.slug} slug={target.slug} /> : null;
   // Nothing to show yet: no run, a crew that could not be read, or one on its way. Each says so in words.
   if (!root) {
     // The problem stays up while it asks again; an answer clears it, so a retry that fails the same way still shows.
@@ -169,6 +172,7 @@ export function Crew() {
     return (
       <div className="v-screen v-crew">
         {head()}
+        {provider}
         <div className="v-screen__body v-crew__state">
           {err ? <Problem title={S.crew.failed} detail={err} retry={retry} />
             : target === null ? (
@@ -186,6 +190,7 @@ export function Crew() {
   return (
     <div className="v-screen v-crew">
       {head(run?.title)}
+      {provider}
       {err && <div role="alert" className="v-crew__err"><Text variant="body-sm">{S.crew.failed} {err}</Text></div>}
       <div className="v-crew__body">
         <div className="v-crew__tree">
@@ -193,7 +198,9 @@ export function Crew() {
             <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
           )}
         </div>
-        {root && picked && (picked.id.startsWith("agent:") ? (
+        {root && picked && (isCore(picked.id) ? (
+          <CoreWorkerPane key={picked.id} node={picked} status={statusLabel(picked)} />
+        ) : picked.id.startsWith("agent:") ? (
           target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={taskGroupOf(root, picked.id) ?? null} status={statusLabel(picked)} />
         ) : (
           <div className="v-crew__pane v-crew__pane--facts">
@@ -201,7 +208,6 @@ export function Crew() {
               <dl className="v-crew__facts" aria-label={S.crew.details}>
                 <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
                 <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
-                {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
               </dl>
             </Section>
             {(() => {

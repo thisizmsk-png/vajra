@@ -1,0 +1,7 @@
+/* The run log (W2): seq, time, who, what. Fixed-height rows, so the list stays windowed. Imported by RunLog.tsx, so the
+   typing-lag page measures it as the app draws it. */
+.v-runlog__bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm) var(--space-md); margin: var(--space-sm) 0; }
+.v-runlog__standing { display: inline-flex; align-items: center; gap: var(--space-sm); min-width: 0; }
+.v-vrow:has(> .v-runlog__row) { width: 100%; }
+.v-runlog__row { display: grid; grid-template-columns: 3rem 5.5rem minmax(0, 9rem) minmax(0, 1fr); column-gap: var(--space-md); align-items: center; height: 100%; border-bottom: 1px solid var(--c-border); }
+.v-runlog__row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

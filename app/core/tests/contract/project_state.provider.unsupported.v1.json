@@ -1,0 +1,29 @@
+{
+  "id": "gemini",
+  "name": "gemini",
+  "installed": false,
+  "tested": "unknown",
+  "login_state": "not_installed",
+  "capabilities": {
+    "pty_attach": false,
+    "transcript": false,
+    "inspect": false,
+    "message": false,
+    "redirect": false,
+    "stop": "other",
+    "resume": false,
+    "vajra_workflow": false
+  },
+  "limits": [
+    {
+      "control": "start",
+      "code": "not_supported",
+      "reason": "This version of Vajra does not support that provider"
+    },
+    {
+      "control": "resume",
+      "code": "not_supported",
+      "reason": "This version of Vajra does not support that provider"
+    }
+  ]
+}

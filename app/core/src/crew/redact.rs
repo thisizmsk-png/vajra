@@ -55,6 +55,139 @@ impl Redactor {
     }
 }
 
+/// Provider error text made safe for an event, a log line or the UI (R19): control characters dropped, then URL query
+/// strings and credentials, the account identifiers a provider echoes back (OpenRouter's `user_id`, Cloudflare's
+/// `cf-ray`), bearer tokens and anything shaped like a key. Errs toward removing too much.
+pub fn redact_provider_text(text: &str) -> String {
+    let cleaned = Redactor::default().clean(text);
+    let urls = redact_urls(&cleaned);
+    let fields = FIELDS.iter().fold(urls, |s, f| redact_field(&s, f));
+    redact_key_like(&fields)
+}
+
+const SECRET: &str = "<redacted>";
+
+/// Fields whose value is a token (a run of token characters). An auth scheme word before it (`Bearer`, `Basic`, ...) is
+/// skipped, so the credential after it is what goes.
+const FIELDS: [&str; 20] = [
+    "user_id", "cf-ray", "x-api-key", "api-key", "api_key", "apikey", "password", "passwd", "secret", "client_secret",
+    "access_token", "refresh_token", "id_token", "token", "key", "bearer", "proxy-authorization", "authorization", "set-cookie", "cookie",
+];
+/// Header names whose whole value is redacted, to the closing quote if it sat in quotes (JSON) and else to the end of
+/// the line, whatever the scheme (Basic, Token, Digest, a cookie list, ...). `set-cookie` and `proxy-authorization`
+/// contain the shorter names, but are listed so their value is cut the same way.
+const LINE_FIELDS: [&str; 4] = ["proxy-authorization", "authorization", "set-cookie", "cookie"];
+const SCHEMES: [&str; 6] = ["bearer", "basic", "token", "digest", "negotiate", "apikey"];
+
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '+' | '=')
+}
+
+/// `https://host/path?query#frag` -> `https://host/path?<redacted>`; `user:pw@` before the host goes too.
+fn redact_urls(s: &str) -> String {
+    let lc = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut at = 0;
+    while let Some(i) = ["http://", "https://"].iter().filter_map(|p| lc[at..].find(p).map(|j| at + j)).min() {
+        out.push_str(&s[at..i]);
+        let end = s[i..].find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '}')).map_or(s.len(), |j| i + j);
+        let url = &s[i..end];
+        let scheme = url.find("://").map_or(0, |j| j + 3);
+        let (head, rest) = url.split_at(scheme);
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let rest = match rest[..authority_end].rfind('@') {
+            Some(a) => &rest[a + 1..],
+            None => rest,
+        };
+        out.push_str(head);
+        match rest.find(['?', '#']) {
+            Some(q) => {
+                out.push_str(&rest[..q]);
+                out.push('?');
+                out.push_str(SECRET);
+            }
+            None => out.push_str(rest),
+        }
+        at = end;
+    }
+    out.push_str(&s[at..]);
+    out
+}
+
+/// Replace the value after every case-insensitive `name` that is followed by `:` or `=` (after any closing quote), as in
+/// `name: v`, `name=v` and `"name":"v"`; for `bearer`, the token after a space. A line field (`LINE_FIELDS`) loses its
+/// whole value; any other loses one token, after an auth scheme word if there is one.
+fn redact_field(s: &str, name: &str) -> String {
+    let lc = s.to_ascii_lowercase();
+    // A backslash counts as a quote: in an escaped JSON string the name and value are wrapped in `\"`.
+    let quote = |c: char| matches!(c, '"' | '\'' | '\\');
+    let whole = LINE_FIELDS.contains(&name);
+    let mut out = String::with_capacity(s.len());
+    let mut at = 0;
+    while let Some(j) = lc[at..].find(name) {
+        let after = at + j + name.len();
+        out.push_str(&s[at..after]);
+        at = after;
+        let rest = s[after..].trim_start_matches(quote);
+        let sep = rest.chars().next();
+        let ok = if name == "bearer" { sep == Some(' ') } else { matches!(sep, Some(':' | '=')) };
+        if !ok {
+            continue;
+        }
+        let before_value = rest[1..].trim_start_matches(' ');
+        let opener = before_value.chars().next().filter(|c| quote(*c));
+        let mut value = before_value.trim_start_matches(quote);
+        let len = if whole {
+            value.find(|c: char| c == '\n' || c == '\r' || Some(c) == opener).unwrap_or(value.len())
+        } else {
+            let word = value.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(0);
+            if word > 0 && value[word..].starts_with(' ') && SCHEMES.contains(&value[..word].to_ascii_lowercase().as_str()) {
+                value = value[word..].trim_start_matches(' ');
+            }
+            value.find(|c: char| !is_token_char(c)).unwrap_or(value.len())
+        };
+        if len == 0 {
+            continue;
+        }
+        out.push_str(&s[after..s.len() - value.len()]);
+        out.push_str(SECRET);
+        at = s.len() - value.len() + len;
+    }
+    out.push_str(&s[at..]);
+    out
+}
+
+/// Known key prefixes, or a long token that mixes letters and digits.
+fn key_like(tok: &str) -> bool {
+    const PREFIXES: [&str; 11] = ["sk-", "sk_", "pk-", "pk_", "ghp_", "gho_", "github_pat_", "xox", "akia", "aiza", "eyj"];
+    let lc = tok.to_ascii_lowercase();
+    if tok.len() >= 12 && PREFIXES.iter().any(|p| lc.starts_with(p)) {
+        return true;
+    }
+    tok.len() >= 32 && tok.chars().any(|c| c.is_ascii_digit()) && tok.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+fn redact_key_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut tok = String::new();
+    let flush = |tok: &mut String, out: &mut String| {
+        if !tok.is_empty() {
+            out.push_str(if key_like(tok) { SECRET } else { tok });
+            tok.clear();
+        }
+    };
+    for c in s.chars() {
+        if is_token_char(c) {
+            tok.push(c);
+        } else {
+            flush(&mut tok, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut tok, &mut out);
+    out
+}
+
 /// The nonce replaced in text that keeps its escapes. Escape sequences and invisible format characters are skipped
 /// when matching (they are not drawn), the matched visible characters are dropped from the original and replaced by
 /// one marker per match, and the escapes inside a match are kept (they carry colour only), so the output has no
@@ -214,6 +347,90 @@ mod tests {
         let up = N.to_ascii_uppercase();
         assert_eq!(red().clean(&format!("tail {}", &up[..20])), "tail [redacted]");
         assert_eq!(red().clean(&format!("{} head", &up[12..])), "[redacted] head");
+    }
+
+    // Fixtures use invented ids only.
+    const USER: &str = "user_SENTINEL0000TESTONLY";
+    const RAY: &str = "0000deadbeef0000-XXX";
+
+    #[test]
+    fn provider_text_loses_user_id_and_cf_ray() {
+        let raw = format!("{{\"error\":{{\"code\":401,\"user_id\":\"{USER}\"}}}} cf-ray: {RAY} ok");
+        let out = redact_provider_text(&raw);
+        assert!(!out.contains(USER) && !out.contains(RAY), "{out}");
+        assert!(out.contains("\"code\":401") && out.ends_with(" ok"), "{out}");
+        for form in [format!("user_id={USER} end"), format!("User_Id: {USER} end"), format!("CF-Ray:{RAY}")] {
+            let out = redact_provider_text(&form);
+            assert!(!out.contains(USER) && !out.contains(RAY), "{form} -> {out}");
+        }
+    }
+
+    #[test]
+    fn provider_text_loses_key_like_strings_and_bearer_tokens() {
+        for secret in ["sk-or-v1-FAKEFAKEFAKEFAKE0000", "ghp_FAKEFAKEFAKEFAKEFAKE", "0123456789abcdef0123456789abcdef0123"] {
+            let out = redact_provider_text(&format!("bad key {secret}, retry"));
+            assert!(!out.contains(secret) && out.contains("bad key") && out.contains(", retry"), "{out}");
+        }
+        let out = redact_provider_text("authorization: Bearer FAKEtoken123 failed");
+        assert!(!out.contains("FAKEtoken123"), "{out}");
+        for scheme in ["Basic dXNlcjpwYXNzd29yZA==", "Token abc", "Digest username=x, realm=y", "Negotiate YIIB"] {
+            for header in ["Authorization", "authorization", "Proxy-Authorization", "AUTHORIZATION"] {
+                let out = redact_provider_text(&format!("{header}: {scheme}\nnext line"));
+                assert!(!out.contains("dXNlcj") && !out.contains("abc") && !out.contains("username=x") && !out.contains("realm") && !out.contains("YIIB"), "{out}");
+                // Newlines are stripped first, so the whole rest of the text goes: safe, if more than needed.
+                assert!(out.starts_with(header) && out.contains(SECRET), "{out}");
+            }
+        }
+        // In JSON the value ends at its closing quote.
+        let out = redact_provider_text(r#"{"authorization":"Basic dXNlcjpwYXNzd29yZA==","code":401}"#);
+        assert!(!out.contains("dXNlcj") && out.contains(r#""code":401"#), "{out}");
+        let out = redact_provider_text("sent Bearer FAKEtoken123");
+        assert!(!out.contains("FAKEtoken123"), "{out}");
+    }
+
+    #[test]
+    fn provider_text_loses_fields_inside_escaped_json_strings() {
+        let single = format!(r#"{{"type":"error","message":"unexpected status 401: {{\"user_id\":\"{USER}\",\"code\":401}}"}}"#);
+        let double = single.replace('\\', "\\\\");
+        for raw in [single, double] {
+            let out = redact_provider_text(&raw);
+            assert!(!out.contains(USER), "{raw} -> {out}");
+        }
+        let out = redact_provider_text(r#"{"m":"{\"authorization\":\"Basic dXNlcjpwYXNzd29yZA==\",\"code\":401}"}"#);
+        assert!(!out.contains("dXNlcj"), "{out}");
+    }
+
+    #[test]
+    fn provider_text_loses_cookies_and_other_secret_fields() {
+        for (raw, secret) in [
+            ("Cookie: session=SENTINELCOOKIE; other=1\nx", "SENTINELCOOKIE"),
+            ("set-cookie: sid=SENTINELCOOKIE; HttpOnly", "SENTINELCOOKIE"),
+            ("x-api-key: SENTINELKEY", "SENTINELKEY"),
+            ("body api_key=SENTINELKEY&x=1", "SENTINELKEY"),
+            ("{\"password\":\"SENTINELPW\"}", "SENTINELPW"),
+            ("client_secret=SENTINELPW", "SENTINELPW"),
+            ("access_token: Bearer SENTINELTOK", "SENTINELTOK"),
+            ("refresh_token=SENTINELTOK", "SENTINELTOK"),
+            ("{\"key\":\"SENTINELKEY\"}", "SENTINELKEY"),
+            ("body key=SENTINELKEY&x=1", "SENTINELKEY"),
+            ("GET https://h.test/p?api_key=SENTINELKEY&key=SENTINELKEY&token=SENTINELKEY", "SENTINELKEY"),
+        ] {
+            let out = redact_provider_text(raw);
+            assert!(!out.contains(secret), "{raw} -> {out}");
+        }
+    }
+
+    #[test]
+    fn provider_text_loses_url_queries_and_credentials() {
+        let out = redact_provider_text("GET https://user:pw@api.example.test/v1/key?token=FAKEVALUE&a=b#frag failed; see https://docs.example.test/x.");
+        assert!(!out.contains("FAKEVALUE") && !out.contains("user:pw") && !out.contains("a=b"), "{out}");
+        assert!(out.contains("https://api.example.test/v1/key?<redacted>") && out.contains("https://docs.example.test/x."), "{out}");
+    }
+
+    #[test]
+    fn provider_text_keeps_ordinary_error_words() {
+        let t = "unexpected status 429 Too Many Requests, last status: 429 (request 7 of 30)";
+        assert_eq!(redact_provider_text(t), t);
     }
 
     #[test]

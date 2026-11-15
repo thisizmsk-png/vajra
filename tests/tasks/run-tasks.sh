@@ -53,9 +53,15 @@ T add t3 --title "ci" --owner hanuman --files .github/ >/dev/null; check "add t3
 [ "$(rc T status nope)" = 1 ]; check "unknown task -> exit 1" $?
 
 # --- validate ---
-[ "$(rc T validate)" = 2 ]; check "validate: unknown agents (no ~/.claude/agents) -> exit 2" $?
-{ TJ validate 2>/dev/null || true; } | grep -q 'unknown agent bhima'; check "validate --json names the unknown agent" $?
-mkdir -p "$HOME/.claude/agents"; for a in bhima abhimanyu hanuman nakula; do echo "# $a" > "$HOME/.claude/agents/$a.md"; done
+[ ! -e "$HOME/.claude/agents" ]; check "temp HOME has no Claude agents folder" $?
+T validate >/dev/null; check "validate passes with the engine's own agents and no Claude agents folder (S8)" $?
+[ ! -e "$HOME/.claude/agents" ]; check "validate wrote no Claude agents folder" $?
+T add t8 --title x --owner ghostagent --files y/ >/dev/null
+[ "$(rc T validate)" = 2 ]; check "validate: unknown agent -> exit 2" $?
+{ TJ validate 2>/dev/null || true; } | grep -q 'unknown agent ghostagent'; check "validate --json names the unknown agent" $?
+mkdir -p "$HOME/.claude/agents"; echo "# ghostagent" > "$HOME/.claude/agents/ghostagent.md"
+T validate >/dev/null; check "validate also accepts the user's own agents" $?
+rm -f "$HOME/.claude/agents/ghostagent.md"; T add t8 --title x --owner nakula --files y/ >/dev/null
 T validate >/dev/null; check "validate passes with known agents" $?
 T add t9 --title x --owner nakula --deps ghost --files x/ >/dev/null
 [ "$(rc T validate)" = 2 ]; check "validate: unknown dependency -> exit 2" $?

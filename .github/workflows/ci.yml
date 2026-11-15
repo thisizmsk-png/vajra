@@ -1,9 +1,20 @@
 name: ci
 
+# TEMPORARY (owner, 13 Nov): restore perf jobs on every PR once batch-3 is on main. (The perf jobs are in perf.yml; this
+# file keeps the test jobs on every pull request and every push to a PR branch, cancels an older run when a newer push
+# arrives on the same ref, and skips a pull request that changes only the three notes folders below. A push to main always
+# runs in full, so a docs-only change cannot leave main's manifest stale unseen.)
 on:
   push:
     branches: [main]
   pull_request:
+    # Skipped: docs/design, docs/assets and docs/reference, which no test reads. NOT skipped, because tests or shipped
+    # behaviour read them: any other markdown (agent definitions, skills, engine prompts, steering rules, SKILL.md,
+    # README), docs/commands (tests/docs/run-docs.sh), docs/architecture, docs/desktop and docs/roadmap.
+    paths-ignore:
+      - "docs/design/**"
+      - "docs/assets/**"
+      - "docs/reference/**"
 
 permissions:
   contents: read
@@ -49,6 +60,13 @@ jobs:
           # base is not main. Pushes to main and any pull_request into main stay strict, so main is never stale.
           VAJRA_MANIFEST_FRESH: ${{ github.event_name == 'pull_request' && github.base_ref != 'main' && 'warn' || '' }}
         run: bash tests/run-all.sh
+      - name: Profile sampler unit tests
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s app/bench/profile
+      - name: No waiting calls (main-thread commands and sync UI calls only go down)
+        run: |
+          python3 -m unittest discover -s app/bench/ci -p "test_waiting_calls.py"
+          python3 app/bench/ci/waiting_calls.py
       - name: Build the UI (tauri::generate_context! needs app/ui/dist)
         if: runner.os == 'macOS'
         working-directory: app/ui
@@ -60,3 +78,28 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: app/core
         run: cargo clippy --all-targets -- -D warnings
+      - name: The profile harness still starts a run
+        if: runner.os == 'macOS'
+        working-directory: app/core
+        run: cargo test --test profile_harness
+
+  core-tests:
+    # The core Rust tests on macOS (owner decision, 2026-11-12). Every test runs: most in parallel, and the ones listed in
+    # app/core/ci/serial-tests.txt (time limits or a lock that parallel load crowds out) one at a time. None is retried.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the UI (tauri::generate_context! needs app/ui/dist)
+        working-directory: app/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Core Rust tests
+        run: bash app/core/ci/run-tests.sh

@@ -40,6 +40,10 @@ impl Service {
                 Err(e) => self.check_failed(&id, &e, now),
             }
         }
+        // Retired dirs go once nothing pending settles through them (a claimed message's ack is read first).
+        if !self.retired_dirs.is_empty() {
+            self.prune_retired();
+        }
     }
 
     /// A settlement check failed (an unreadable `queue/`, a full descriptor table, a ledger that will not append).

@@ -54,12 +54,52 @@ pub enum EvidenceState {
 
 pub struct Reader {
     allow: Allowlist,
-    good: HashMap<PathBuf, Value>,
+    good: HashMap<PathBuf, Good>,
+    /// How many times `json` parsed a file (a cache hit does not count). Read by the tests.
+    parses: u64,
+}
+
+/// The last good parse of a path, and which file it was parsed from.
+struct Good {
+    value: Value,
+    /// `None`: the file was too fresh to be told apart from a later rewrite, so it is read again every time.
+    sig: Option<Sig>,
+}
+
+/// Which file an open descriptor is and when it last changed. The change time moves on every write, rename, link
+/// and `utimes`, and a writer cannot set it, so an equal signature on a settled file means the same bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Sig {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+/// A file changed less than this long ago is never answered from the cache: a second write inside one clock tick
+/// could leave the same size and the same times.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl Sig {
+    /// The signature of a file that has not changed for `SETTLE`, by its own change time against the wall clock.
+    fn settled(md: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let changed = std::time::Duration::new(u64::try_from(md.ctime()).ok()?, u32::try_from(md.ctime_nsec()).ok()?);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?;
+        (now.checked_sub(changed)? >= SETTLE).then(|| Self {
+            dev: md.dev(),
+            ino: md.ino(),
+            len: md.size(),
+            mtime: (md.mtime(), md.mtime_nsec()),
+            ctime: (md.ctime(), md.ctime_nsec()),
+        })
+    }
 }
 
 impl Reader {
     pub fn new(allow: Allowlist) -> Self {
-        Self { allow, good: HashMap::new() }
+        Self { allow, good: HashMap::new(), parses: 0 }
     }
 
     fn read_string(&self, path: &Path) -> io::Result<String> {
@@ -74,8 +114,16 @@ impl Reader {
 
     /// Campaign directories only. Stray files (the root also holds
     /// `<uuid>.json`) and symlinks that leave the allowlist are skipped.
+    ///
+    /// A machine that has never run a campaign has no campaigns folder yet. That is an empty list, not a failure:
+    /// nothing is read. Only a path that is truly absent counts; a link that is present but leads nowhere, or
+    /// outside the allowlist, is still refused below.
     pub fn campaigns(&self) -> io::Result<Vec<String>> {
-        let root = self.allow.resolve(&self.allow.campaigns_dir())?;
+        let dir = self.allow.campaigns_dir();
+        if matches!(std::fs::symlink_metadata(&dir), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+            return Ok(Vec::new());
+        }
+        let root = self.allow.resolve(&dir)?;
         let mut out = Vec::new();
         for entry in std::fs::read_dir(root)? {
             let entry = entry?;
@@ -93,18 +141,30 @@ impl Reader {
     }
 
     /// Read and parse a JSON file, keeping the last good snapshot per path.
+    ///
+    /// Every call opens the file through the allowlist, so every check runs every time. Only the read and the parse
+    /// are skipped, and only when the open descriptor is the settled file the last good snapshot was parsed from.
     pub fn json(&mut self, path: &Path) -> Snapshot {
-        let parsed = self
-            .read_string(path)
-            .map_err(|_| ())
-            .and_then(|s| serde_json::from_str::<Value>(&s).map_err(|_| ()));
         let key = path.to_path_buf();
-        match parsed {
-            Ok(v) => {
-                self.good.insert(key, v.clone());
+        let Ok(mut file) = self.allow.open_allowlisted(path) else {
+            return Snapshot { value: self.good.get(&key).map(|g| g.value.clone()), stale: true };
+        };
+        // Taken before the read: a write that lands during the read moves the change time past this signature.
+        let sig = file.metadata().ok().and_then(|md| Sig::settled(&md));
+        if let Some(g) = self.good.get(&key)
+            && sig.is_some()
+            && g.sig == sig
+        {
+            return Snapshot { value: Some(g.value.clone()), stale: false };
+        }
+        let mut s = String::new();
+        self.parses += 1;
+        match file.read_to_string(&mut s).ok().and_then(|_| serde_json::from_str::<Value>(&s).ok()) {
+            Some(v) => {
+                self.good.insert(key, Good { value: v.clone(), sig });
                 Snapshot { value: Some(v), stale: false }
             }
-            Err(()) => Snapshot { value: self.good.get(&key).cloned(), stale: true },
+            None => Snapshot { value: self.good.get(&key).map(|g| g.value.clone()), stale: true },
         }
     }
 
@@ -221,5 +281,108 @@ pub fn evidence_state(evidence: Option<&Value>, green: Option<bool>) -> Evidence
         EvidenceState::Verified
     } else {
         EvidenceState::Unverified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A temp folder that is removed when the test ends.
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn reader() -> (Tmp, Reader, PathBuf) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let tmp = Tmp(std::env::temp_dir().join(format!("vajra-reader-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst))));
+        let (claude, data) = (tmp.path().join(".claude"), tmp.path().join("data"));
+        let camp = claude.join("vajra/campaigns/c1");
+        std::fs::create_dir_all(&camp).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let r = Reader::new(Allowlist::new(&claude, &data).unwrap());
+        let file = camp.canonicalize().unwrap().join("tasks.json");
+        (tmp, r, file)
+    }
+
+    fn settle() {
+        std::thread::sleep(SETTLE + std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_settled_file_is_parsed_once_and_a_rewrite_of_the_same_size_is_seen() {
+        let (_tmp, mut r, file) = reader();
+        std::fs::write(&file, r#"{"tasks":[{"id":"t1","status":"aaaa"}]}"#).unwrap();
+        settle();
+        for _ in 0..5 {
+            let s = r.tasks("c1");
+            assert!(!s.stale);
+            assert_eq!(s.value.unwrap()["tasks"][0]["status"], "aaaa");
+        }
+        assert_eq!(r.parses, 1, "an unchanged file must not be read and parsed again");
+        // Rewritten in place: same inode, same length, and the old modification time put back.
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let mut f = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+        f.write_all(br#"{"tasks":[{"id":"t1","status":"bbbb"}]}"#).unwrap();
+        f.set_modified(before).unwrap();
+        drop(f);
+        // Wait out the settle window first. Read inside it, the window alone forces the read and the signature is
+        // never compared. After it, only the change time tells this file from the cached one: same inode, same
+        // length, same modification time.
+        settle();
+        let parsed = r.parses;
+        assert_eq!(r.tasks("c1").value.unwrap()["tasks"][0]["status"], "bbbb");
+        assert_eq!(r.parses, parsed + 1, "a same-size in-place rewrite with the old mtime must be seen by its change time");
+        // Settled again and cached.
+        r.tasks("c1");
+        assert_eq!(r.parses, parsed + 1);
+        // Replaced by rename (how the engine writes): a new inode. Same length, and the old mtime put back, so the
+        // inode and the change time are all that differ.
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let next = file.with_file_name("tasks.json.tmp");
+        std::fs::write(&next, r#"{"tasks":[{"id":"t1","status":"cccc"}]}"#).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&next).unwrap().set_modified(before).unwrap();
+        std::fs::rename(&next, &file).unwrap();
+        settle();
+        let parsed = r.parses;
+        assert_eq!(r.tasks("c1").value.unwrap()["tasks"][0]["status"], "cccc");
+        assert_eq!(r.parses, parsed + 1, "a file replaced by rename must be read again once it has settled");
+    }
+
+    #[test]
+    fn a_fresh_file_is_read_every_time() {
+        let (_tmp, mut r, file) = reader();
+        std::fs::write(&file, r#"{"tasks":[]}"#).unwrap();
+        r.tasks("c1");
+        r.tasks("c1");
+        assert_eq!(r.parses, 2, "a file changed inside the settle window is never answered from the cache");
+    }
+
+    #[test]
+    fn a_cached_file_that_is_no_longer_allowed_is_stale_and_a_broken_one_keeps_the_last_good() {
+        let (tmp, mut r, file) = reader();
+        std::fs::write(&file, r#"{"tasks":[1]}"#).unwrap();
+        settle();
+        assert!(!r.tasks("c1").stale);
+        assert!(!r.tasks("c1").stale);
+        assert_eq!(r.parses, 1);
+        // A second hard link: the open is refused, so the answer is stale even though the bytes did not change.
+        let link = tmp.path().join("data/link");
+        std::fs::hard_link(&file, &link).unwrap();
+        assert!(r.tasks("c1").stale);
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&file, "{ not json").unwrap();
+        let s = r.tasks("c1");
+        assert!(s.stale);
+        assert_eq!(s.value.unwrap()["tasks"][0], 1);
     }
 }

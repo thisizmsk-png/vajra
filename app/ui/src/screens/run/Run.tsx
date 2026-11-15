@@ -1,15 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Section, Text } from "../../../components/ui/base";
 import { VirtualList } from "../../../components/ui/desktop";
+import { RunProvider } from "../ProviderControls";
+import { ProviderLine } from "../ProviderLine";
+import { parseWorkerProvider } from "../../workerProvider";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
+import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
+import { Problem } from "../states";
+import { EvidenceApproval } from "./EvidenceApproval";
+import { Proof } from "./Proof";
+import { RunLog } from "./RunLog";
 
 const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
 const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
 const keyOf = (r: { task: string; criterion: string }) => `${r.task}\u0000${r.criterion}`;
 const ROW_H = 36;
+/** A task row is taller: its provider cell can carry a second line (a retry, or the provider it really ran on). */
+const TASK_H = 48;
+/** A task status in the one casing the rest of the app uses; a status with no wording of its own shows as the core sent it. */
+const taskStatus = (s: string) => S.run.taskStatus[s] ?? (S.status as Record<string, string>)[s] ?? s;
+/** One line: the provider the task ran on (icon, "Model · provider", errors), when the core says. */
+const provider = (t: { provider?: unknown }) => { const p = parseWorkerProvider(t.provider); return p ? <ProviderLine p={p} compact /> : null; };
 const GRAPH_H = 288;
 const LIST_H = 360;
 
@@ -19,6 +33,7 @@ const label = (s: string) => (S.run.status as Record<string, string>)[s] ?? S.ru
 export function Run() {
   const [route, go] = useRoute();
   const slug = route.params.slug ?? "";
+  const P = useProjects();
   const [rows, setRows] = useState<EvidenceRow[] | null>(null);
   const [err, setErr] = useState("");
   /** Rows whose check has not run yet: the core checks a bounded amount per call, so ask again until none are left. */
@@ -30,26 +45,36 @@ export function Run() {
   const [overview, setOverview] = useState<RunOverview | null>(null);
   const [overviewErr, setOverviewErr] = useState(false);
 
-  /** The slug the latest request was made for: a response for any other slug (the route changed while it was in flight) is dropped. */
-  const current = useRef(slug);
+  // Each load takes a number and only the newest may set state, on its answer and on its failure. Checking the slug is
+  // not enough: two loads of the same campaign overlap when events arrive while one is out, and the older must not land
+  // last. A new campaign, or leaving the view, retires whatever is still out.
+  const evSeq = useRef(0);
+  const ovSeq = useRef(0);
   const load = useCallback(() => {
     if (!slug) return;
-    current.current = slug;
+    const mine = ++evSeq.current;
     api.evidenceList(slug).then(
-      (r) => { if (current.current !== slug) return; setRows(r.rows); setPending(r.pending ?? 0); setErr(""); },
-      (e) => { if (current.current === slug) setErr(errorText(e)); },
+      (r) => { if (mine !== evSeq.current) return; setRows(r.rows); setPending(r.pending ?? 0); setErr(""); },
+      (e) => { if (mine === evSeq.current) setErr(errorText(e)); },
     );
   }, [slug]);
   // A new campaign starts empty: the previous campaign's rows, pending count, error and selection are not shown under it.
-  useEffect(() => { current.current = slug; setRows(null); setPending(0); setErr(""); setSel(null); }, [slug]);
+  useEffect(() => {
+    setRows(null); setPending(0); setErr(""); setSel(null);
+    return () => { evSeq.current++; };
+  }, [slug]);
   const loadOverview = useCallback(() => {
     if (!slug) return;
+    const mine = ++ovSeq.current;
     api.runOverview(slug).then(
-      (o) => { if (current.current === slug) { setOverview(o); setOverviewErr(false); } },
-      () => { if (current.current === slug) setOverviewErr(true); },
+      (o) => { if (mine === ovSeq.current) { setOverview(o); setOverviewErr(false); } },
+      () => { if (mine === ovSeq.current) setOverviewErr(true); },
     );
   }, [slug]);
-  useEffect(() => { setOverview(null); setOverviewErr(false); }, [slug]);
+  useEffect(() => {
+    setOverview(null); setOverviewErr(false);
+    return () => { ovSeq.current++; };
+  }, [slug]);
   useEffect(loadOverview, [loadOverview]);
   useEffect(() => (slug ? onChanged(loadOverview) : undefined), [slug, loadOverview]);
   useEffect(load, [load]);
@@ -78,6 +103,16 @@ export function Run() {
     return () => { live = false; };
   }, [slug, pickedTask]);
 
+  // With no project list there is nothing to choose from: "choose one in History" would send the person to an empty
+  // screen, so say what failed and offer the retry.
+  if (!slug && P.state === "error") {
+    return (
+      <div className="v-home">
+        <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+        <Problem title={S.frame.loadFailed} detail={P.error} retry={P.reload} />
+      </div>
+    );
+  }
   if (!slug) {
     return (
       <div className="v-home">
@@ -88,7 +123,11 @@ export function Run() {
   }
   return (
     <div className="v-home">
-      <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+      <Text as="h1" variant="headline-lg" className="v-run__name">{S.run.title}</Text>
+      <RunProvider slug={slug} />
+      {/* Keyed by run, so another run's dialog or answer never shows under this one. */}
+      {overview && <EvidenceApproval key={overview.run_id} runId={overview.run_id} />}
+      <Proof slug={slug} />
       <Section title={S.run.timeline}>
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
         {overview && (
@@ -112,18 +151,20 @@ export function Run() {
             role="list"
             aria-label={S.run.graph}
             count={overview.graph.tasks.length}
-            rowHeight={ROW_H}
+            rowHeight={TASK_H}
             height={GRAPH_H}
             renderRow={(i) => {
               const t = overview.graph.tasks[i];
               const open = () => go("crew", { slug, id: overview.run_id, focus: `task:${t.local}` });
+              const waits = t.deps.length > 0 ? `${S.run.waitsFor} ${t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}` : "";
               return (
-                <div role="listitem" className="v-run__row" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
+                <div role="listitem" className="v-run__row v-run__task" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
                   <Text as="span" variant="body-sm" muted>{S.run.wave(t.wave)}</Text>
-                  <span>{t.local} {t.title ?? ""}</span>
-                  <span>{t.owner ?? ""}</span>
-                  <Badge status={t.status === "closed" || t.status === "done" ? "success" : t.status === "failed" ? "danger" : undefined}>{S.run.taskStatus[t.status] ?? t.status}</Badge>
-                  {t.deps.length > 0 && <Text as="span" variant="body-sm" muted>{S.run.waitsFor} {t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}</Text>}
+                  <span className="v-run__title" title={t.title ?? undefined}>{t.local} {t.title ?? ""}</span>
+                  <span className="v-run__who">{provider(t) ?? t.owner ?? ""}</span>
+                  <Badge status={t.status === "closed" || t.status === "done" ? "success" : t.status === "failed" ? "danger" : undefined}>{taskStatus(t.status)}</Badge>
+                  {/* Always present, so the columns line up down the list. A long list is cut with an ellipsis; the tooltip has all of it. */}
+                  <span className="v-run__deps" title={waits || undefined}><Text as="span" variant="body-sm" muted>{waits}</Text></span>
                   <Button size="sm" variant="ghost" onClick={open}>{S.run.openWorker}</Button>
                 </div>
               );
@@ -131,6 +172,8 @@ export function Run() {
           />
         )}
       </Section>
+      {/* The run's own hash-chained log, live; keyed by run so a new run starts from its kept view or from 0. */}
+      {overview && <RunLog key={overview.run_id} runId={overview.run_id} />}
       <Section title={S.run.evidence}>
         {err && <div role="alert"><Text variant="body-sm">{S.run.failed} {err}</Text></div>}
         {rows && rows.length === 0 && <Text variant="body-sm" muted>{S.run.none}</Text>}

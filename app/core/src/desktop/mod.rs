@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -30,9 +30,15 @@ use crate::vajra::state::Reader;
 
 /// Every command answers `Ok(value)` or `Err({error, detail?})`.
 pub type Res = Result<Value, Value>;
+/// Emits a `changed` payload to the UI (see `App::set_change_sink`).
+pub type ChangeSink = Box<dyn Fn(Value) + Send + Sync>;
+
+pub use arrivals::EventSink;
 
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
+/// How long quit waits for the core tickets to end (their own kill, line and sweep) before the supervisor kills the rest.
+const QUIT_TICKETS: Duration = Duration::from_secs(4);
 /// Upper bound for one `tail` / `read_spill` page.
 const MAX_PAGE: usize = 64 * 1024;
 /// Most rows and text one `stream_window` call returns: a view shows tens of rows, so this is a ceiling, not a default.
@@ -76,6 +82,9 @@ const EVIDENCE_LIVE_TTL: Duration = Duration::from_secs(5);
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
+/// Every git call the core makes runs this binary (see `vajra::gitw`).
+const GIT: &str = "/usr/bin/git";
+
 fn fail(code: &str, detail: impl std::fmt::Display) -> Value {
     json!({"error": code, "detail": detail.to_string()})
 }
@@ -87,6 +96,20 @@ fn ctl<T>(r: Result<T, ControlError>) -> Result<T, Value> {
 fn invalid_input(e: InvalidInput) -> Value {
     invalid(e.field, e.reason)
 }
+
+/// A plain Codex Lead waiting for its first-turn read-back: what its `turn_context` must show, the marker that names its
+/// session file, the user's Codex home it writes to, and when it launched.
+#[derive(Clone, Debug)]
+struct LeadCheck {
+    want: crate::adapter::profiles::CodexWant,
+    marker: PathBuf,
+    codex_home: PathBuf,
+    since: std::time::SystemTime,
+}
+
+/// How long a plain Codex Lead may run before its first turn is read back. It may wait on the user first (Codex asks
+/// whether to trust a new folder), so this is generous; past it, a Lead whose session file never showed is ended.
+pub const LEAD_PROOF_WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// A run session started (or resumed) by this app.
 #[derive(Clone, Debug)]
@@ -223,13 +246,43 @@ type StateKey = (PathBuf, Option<PathBuf>);
 type WorktreeCache = HashMap<StateKey, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
+pub const SETUP_PLAN_SCHEMA: &str = "vajra.setup_plan/1";
+
 pub struct App {
+    preferences: Mutex<crate::preferences::Store>,
     data: PathBuf,
     home: PathBuf,
     claude: PathBuf,
+    /// Where provider CLIs are looked for; `None` is the user's resolved PATH. Tests point it at a temp dir.
+    provider_dirs: Option<Vec<PathBuf>>,
+    /// Tests only: the write-ledger answer for the proof label, until 6h's ledger is wired (`proof_app::ledger_of`).
+    #[cfg(test)]
+    proof_ledger: Option<proof::Ledger>,
+    /// N20 (bhishma M1 on #226): the asks this app made and the answers a person gave, per run, for the app's lifetime
+    /// only. The file is display; a consume needs this too, so a record written by hand (or kept over a restart) is void.
+    approvals: Mutex<HashMap<String, evidence_approval::Held>>,
+    /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
+    /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
+    provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
+    /// Stored API keys (D3): write-once, no read-back. Tests replace it with one over a fake `security`.
+    keys: crate::providers::keychain::Keys,
+    /// Usage meters: the last answer per account, the rate limit, and where a gateway key's usage is read from.
+    usage: crate::providers::usage::Meter,
+    usage_source: Box<dyn crate::providers::usage::UsageSource>,
     pub bus: Arc<Bus>,
-    pub sup: Supervisor,
+    pub sup: Arc<Supervisor>,
     pub control: Arc<Mutex<Service>>,
+    /// The live runs whose leads call `vajra-run` tools over the socket (ADR-16 16.5); never behind `control`.
+    pub run_leads: Arc<crate::control::runreg::RunRegistry>,
+    /// The leads of the core runs (6d2c), each watched on its own thread.
+    lead_runs: Arc<lead_start::LeadRuns>,
+    /// The ownership ledger: user shells, and every lead and worker the supervisor starts (6d2d). Shared with `main`'s
+    /// terminals, so there is one writer.
+    owned: Arc<crate::owned::Ledger>,
+    /// What the start-up reconcile did.
+    reconciled: recover::Reconciled,
+    /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
+    _instance: Option<(instance::Held, instance::Held)>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -246,12 +299,28 @@ pub struct App {
     /// `None` until `~/.claude` exists.
     reader: Mutex<Option<Reader>>,
     /// By bus stream id.
-    runs: Mutex<HashMap<String, Run>>,
+    runs: Arc<Mutex<HashMap<String, Run>>>,
     /// Worker transcripts by agent id, tailed into stream `w-<agent_id>`.
     transcripts: Mutex<HashMap<String, Transcript>>,
-    /// Held from the one-active-run check until the run is recorded, so two
-    /// Start clicks cannot both pass the check.
+    /// Held from the caps check until the run is recorded, so two Start clicks
+    /// (or two projects at once) cannot both pass the check on the same count.
     launching: Mutex<()>,
+    /// The run caps (ADR-15 D5); in memory until the settings store (FG-08) persists them.
+    limits: Mutex<caps::RunLimits>,
+    /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
+    run_workers: Mutex<HashMap<String, u32>>,
+    /// Each running plain Codex Lead whose first turn isn't read back yet, by stream (bhishma MUST, S12).
+    lead_checks: Mutex<HashMap<String, LeadCheck>>,
+    /// Each core run's record, by run id: live until its protocol finalizes, so it is never listed as an orphan
+    /// between tickets (6h).
+    live_records: Mutex<HashMap<String, std::sync::Weak<record::CoreRecord>>>,
+    /// Each core run's open log, by run id (W2): `run_log_since` reads the held one, so it sees what is written.
+    live_logs: Mutex<HashMap<String, std::sync::Weak<runlog_store::RunLog>>>,
+    /// Every anchor this app session sent to a run's signed record, by run id, kept for the app's life (W2, bhishma F4):
+    /// only these confirm an anchor, and a reopened log must still hold the last one.
+    log_anchors: Arc<Mutex<HashMap<String, Vec<runlog::Anchor>>>>,
+    /// Workers closed once finished (see `closeout`); persisted.
+    closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
@@ -271,29 +340,99 @@ pub struct App {
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// Why each non-green verdict in `evidence_cache` was not green (same key, same lifetime), so a cached answer says why too.
     evidence_why: Mutex<HashMap<EvKey, Value>>,
+    /// Moves on every write to `evidence_cache` or `worktree_state`: the board's cards read both (#107 review).
+    board_inputs_gen: std::sync::atomic::AtomicU64,
+    /// project_id -> the last board `project_state` built and the stamp of what it read (see `board::Cached`).
+    board_cache: Mutex<HashMap<String, board::Cached>>,
+    /// How many boards were built (tests count rebuilds).
+    board_builds: std::sync::atomic::AtomicU64,
+    /// Tests: how long a board build takes (to put a cache deadline inside one).
+    #[cfg(test)]
+    board_build_pause: Mutex<Duration>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
     worktree_state: Mutex<WorktreeCache>,
+    /// Each worker's `+N −M`, counted off the snapshot path (see `worker_diff`).
+    worker_diffs: Arc<worker_diff::WorkerDiffs>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
+    /// ADR-15: the project records under `<data>/projects`.
+    projects: Arc<crate::projects::store::Store>,
+    /// Role defaults and the launch checks for proposal seats; the service holds the same one.
+    seat_env: Arc<seat_env::SeatEnv>,
+    /// Action receipts and per-project revisions (see `state`).
+    acts: Mutex<state::Hub>,
+    /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
+    sink: Mutex<Option<ChangeSink>>,
+    /// New-item notifications (`inbox_new`), coalesced over 5 s (see `arrivals`).
+    events: Arc<arrivals::Hub>,
+    /// One-click install consents (ADR-17 rule 4): tokens in memory only, one run per harness at a time.
+    consents: crate::providers::install::consent::Consents,
+    /// ADR 16.6: the global git baseline (taken first thing in `open`) and the worker runtime, built on first use.
+    workers: Arc<worker_host::WorkerHost>,
 }
 
 impl App {
     /// Open everything under `data` (the app data dir) for the user whose
     /// home is `home`. Nothing under `home` is written.
     pub fn open(data: &Path, home: &Path) -> std::io::Result<Self> {
+        // A test build never reaches the real Keychain: its default `security` path does not exist.
+        let security = Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY });
         paths::ensure_private_dir(data)?;
+        // Before anything else (6d2d): the leads and workers an earlier life's crash left running are killed, each re-proved
+        // by its recorded pid and start stamp, and their tickets and runs are written ended. Shells wait for the human.
+        let owned = Arc::new(crate::owned::Ledger::new(crate::owned::ledger_path(data)));
+        // Only the one app that holds the data folder reconciles, and only it starts agents: a second instance (a
+        // development build beside the installed app) would otherwise take the first one's live agents for a crash's.
+        // Two locks: the data folder's (its ledger) and the shared worktree folder's (every app on this account puts its
+        // workers there, whatever its data folder, and the 6c-3 sweep kills what it finds there).
+        let instance = instance::InstanceLock::take_both(data, home);
+        let sole = instance.is_some();
+        let reconciled = if sole { recover::reconcile(data, &owned) } else { recover::Reconciled { other_instance: true, ..Default::default() } };
+        // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
+        // after `open` returns. A failure here turns agents off and still opens the app.
+        let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
+        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots(), instance.is_some()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
         let control_log = Logger::open(&logs.join("control")).ok();
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
-        let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        // A second instance settles nothing in the shared control ledger: its pending stops are the first app's live ones.
+        let mut svc = Service::open_with(data, claude.join("vajra/audit.log"), control_log, instance.is_some())?;
+        // A refused projects folder (a symlink, a file) no longer stops the launch (#77 follow-up): the store opens
+        // refusing, and preflight and every project command say what is wrong and what to do.
+        let projects = Arc::new(crate::projects::store::Store::open(data, home)?);
+        {
+            // FG-02c: every Director-General call is refused while its project is archived or gone from the store.
+            let store = projects.clone();
+            svc.set_project_gate(Box::new(move |pid: &str| orchestrator::project_gate(&store, pid)));
+        }
+        let seat_env = Arc::new(seat_env::SeatEnv::new(data, home, crate::providers::keychain::Keys::cli(security, home)));
+        svc.set_seat_policy(seat_env.clone());
+        svc.set_seats_enabled(seat_env.route());
+        svc.set_core_workers(workers.clone());
+        // Before any agent: control dirs no session needs any more (an earlier life's core workers, finished runs) go.
+        // Every session an index line names is kept, whatever its harness or folder, so a run that may be resumed keeps
+        // its steering dir. The index is worker-writable, so a forged line can only keep a dir, never remove one. Only
+        // the app holding the instance locks prunes: a second one would remove the first app's live sessions' dirs.
+        if let Some(keep) = instance.as_ref().and_then(|_| control_keep(data)) {
+            svc.prune_control_dirs(&keep);
+        }
+        let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
+            workers,
+            seat_env,
+            projects,
+            preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
+            acts,
+            sink: Mutex::new(None),
+            events: Default::default(),
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),
             shown: Mutex::new(HashMap::new()),
             deciding: Mutex::new(Default::default()),
+            _instance: instance,
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verify_slots: (Mutex::new(VERIFY_SLOTS), Condvar::new()),
@@ -307,21 +446,63 @@ impl App {
             },
             reader: Mutex::new(None),
             claude,
-            sup: Supervisor::new(bus.clone(), log.clone()),
+            provider_dirs: None,
+            #[cfg(test)]
+            proof_ledger: None,
+            approvals: Mutex::new(HashMap::new()),
+            provider_cache: Mutex::new(None),
+            keys: crate::providers::keychain::Keys::cli(security, home),
+            usage: Default::default(),
+            // Metered accounts are the ones with a stored key; the key reaches curl only through the `security` command's
+            // stdout pipe. With no key stored there is nothing to meter and no outbound call.
+            usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
+            sup: {
+                let sup = Arc::new(Supervisor::new(bus.clone(), log.clone()));
+                if sole {
+                    // Every lead and worker is recorded before its spawn returns; one that can't be is refused.
+                    sup.set_ledger(owned.clone());
+                } else {
+                    sup.refuse_spawns(instance::OTHER_INSTANCE);
+                }
+                sup
+            },
+            owned,
+            reconciled,
             bus,
             control: Arc::new(Mutex::new(svc)),
-            runs: Mutex::new(HashMap::new()),
+            run_leads: crate::control::runreg::RunRegistry::new(),
+            lead_runs: Arc::default(),
+            runs: Arc::new(Mutex::new(HashMap::new())),
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
             evidence_cache: Mutex::new(HashMap::new()),
             evidence_why: Mutex::new(HashMap::new()),
+            board_inputs_gen: std::sync::atomic::AtomicU64::new(0),
+            board_cache: Mutex::new(HashMap::new()),
+            board_builds: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            board_build_pause: Mutex::new(Duration::ZERO),
             worktree_state: Mutex::new(HashMap::new()),
+            worker_diffs: Arc::new(worker_diff::WorkerDiffs::default()),
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
+            limits: Mutex::new(caps::RunLimits::default()),
+            run_workers: Mutex::new(HashMap::new()),
+            lead_checks: Mutex::new(HashMap::new()),
+            live_records: Mutex::new(HashMap::new()),
+            live_logs: Mutex::new(HashMap::new()),
+            log_anchors: Default::default(),
+            closeout: closeout::Store::open(data),
+            consents: Default::default(),
             issued: Mutex::new(Default::default()),
             log,
         })
+    }
+
+    /// The ownership ledger, shared with the terminals.
+    pub fn owned_ledger(&self) -> Arc<crate::owned::Ledger> {
+        self.owned.clone()
     }
 
     pub fn note(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -375,10 +556,92 @@ impl App {
     pub fn preflight(&self) -> Res {
         let allow = self.allow()?;
         let rows = preflight::run(&allow, &self.bridge, &preflight::path_dirs());
-        let ok = preflight::start_enabled(&rows);
-        let rows: Vec<Value> =
-            rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
-        Ok(json!({"rows": rows, "start_enabled": ok}))
+        let mut out = preflight_json(&rows, self.projects_row());
+        if let (Some(row), Some(list)) = (self.workers.preflight_row(), out["rows"].as_array_mut()) {
+            list.push(row);
+            out["start_enabled"] = json!(false);
+        }
+        Ok(out)
+    }
+
+    /// The worker runtime (6d dispatches through it), built the first time it is asked for. Refused while agents are off.
+    pub fn worker_runtime(&self, cfg: impl FnOnce() -> workers::Config) -> Result<&workers::WorkerRuntime, Value> {
+        let runs = self.runs.clone();
+        let on_repo = move |common: &Path| -> Vec<String> {
+            let Some(root) = common.parent().map(|r| r.canonicalize().unwrap_or_else(|_| r.to_path_buf())) else { return Vec::new() };
+            // Copied out first: no path is resolved under the runs lock.
+            let live: Vec<(String, PathBuf)> = lock(&runs).iter().map(|(stream, r)| (stream.clone(), r.cwd.clone())).collect();
+            live.into_iter().filter(|(_, cwd)| cwd.canonicalize().unwrap_or_else(|_| cwd.clone()).starts_with(&root)).map(|(s, _)| s).collect()
+        };
+        let control = self.control.clone();
+        let hooks = move || workers::Hooks {
+            on_dispatch: None,
+            // A ticket that ended can't be stopped: a Lead's stop still waiting for the human is refused. On its own
+            // thread, since a human Stop ends a queued ticket while it holds the control lock.
+            on_outcome: Some(Box::new(move |v: &workers::TicketView| {
+                let (control, id, sid) = (control.clone(), v.id.clone(), v.harness_session.clone());
+                std::thread::spawn(move || lock(&control).core_ticket_ended(&id, sid.as_deref()));
+            })),
+        };
+        // A Claude task worker's steering channel: its own control dir and nonce, opened before it starts (16.7).
+        let steer_control = self.control.clone();
+        let cfg = move || {
+            let mut c = cfg();
+            c.steer.get_or_insert_with(|| Arc::new(move |sid: &str| lock(&steer_control).open_core_session(sid).ok()));
+            c
+        };
+        self.workers.runtime(&self.sup, &self.bus, on_repo, hooks, cfg)
+    }
+
+    /// Labs for `project`: `{"available": <developer build>, "on": <on for this project>}`.
+    pub fn labs_get(&self, project: &str) -> Res {
+        let labs = self.seat_env.labs();
+        Ok(json!({"available": labs::LABS_BUILD, "on": labs.on(project)}))
+    }
+
+    /// The human's Labs switch for `project`. Takes effect for the Director-General's next conversation's tool list,
+    /// and at once for the seat checks.
+    pub fn labs_set(&self, project: &str, on: bool) -> Res {
+        self.active_project(project).map_err(|e| e.to_json())?;
+        self.seat_env.labs().set(project, on).map_err(|code| fail(code, "Labs can't be changed for this project"))?;
+        self.note(if on { "labs_on" } else { "labs_off" }, &[]);
+        self.labs_get(project)
+    }
+
+    /// The preflight row's "Install developer tools": Apple's installer, only while git is missing (the human's click).
+    pub fn install_dev_tools(&self) -> Res {
+        if self.workers.install_action().is_none() {
+            return Err(fail("not_needed", "git is already installed"));
+        }
+        let child = std::process::Command::new("/usr/bin/xcode-select")
+            .arg("--install")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| fail("spawn_failed", e))?;
+        // It returns once the dialog is up; reaped off the caller.
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+        Ok(json!({"started": true}))
+    }
+
+    /// Settings: the disk the worker copies use (a walk; builds nothing).
+    pub fn worker_disk(&self) -> Res {
+        Ok(self.workers.disk_use())
+    }
+
+    /// Settings' Clean up: removes only copies that are clean now (see `WorkerRuntime::clean_up`).
+    pub fn worker_clean_up(&self) -> Res {
+        let done = self.workers.clean_up();
+        Ok(json!({"removed": done.removed, "disk": self.workers.disk_use()}))
+    }
+
+    /// Clean up through the receipt engine: the human's click only, deduped by its action id.
+    pub fn act_worker_clean_up(&self, env: &Envelope) -> Value {
+        self.act(env, crate::control::receipt::Caller::Ui, true, "worker_clean_up", "workers:clean_up", None::<u64>, || self.worker_clean_up())
     }
 
     pub fn list_campaigns(&self) -> Res {
@@ -420,24 +683,135 @@ impl App {
         Ok(json!({"campaigns": list}))
     }
 
-    /// The control service steers one session, so one run is active at a time.
-    fn no_active_run(&self) -> Result<(), Value> {
-        self.reap_locked();
-        if self.active_run_count() > 0 {
-            return Err(json!({"error": "run_active", "detail": "finish or stop the active run first"}));
+    /// ADR-15 D5: may a run in `cwd` with `workers` start now? One run per project, `max_runs` in the app, and the
+    /// worker ceiling across concurrent runs. Over a cap the start is held with a reason (`run_held`), never queued.
+    /// The control service keeps each session apart (per-session nonce, dirs, workers), which is what makes a second
+    /// concurrent run safe; the caps bound what runs at once.
+    ///
+    /// Projects are the store ids pinned when each run was launched (`launch_project` for the requested start, the guarded
+    /// record for every live run), never re-read from the worker-writable `.git`: rewriting an active worktree's `.git`
+    /// cannot make its project look free or make another one look busy. A live run with no pinned project refuses the
+    /// start. The caps compare the ids as opaque keys.
+    fn within_caps(&self, project: &str, workers: u32) -> Result<(), Value> {
+        // A worker count no start may ask for is a bad request, never a full ceiling (#80 review).
+        if !(1..=16).contains(&workers) {
+            return Err(invalid("maxInFlight", "must be 1 to 16"));
         }
-        Ok(())
+        self.reap_locked();
+        let active: Vec<caps::Active> = {
+            let runs = lock(&self.runs);
+            let per = lock(&self.run_workers);
+            let mut v = Vec::new();
+            for (s, r) in runs.iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)) {
+                let Some(project) = self.pinned_project(&r.run_id).filter(|p| crate::projects::contract::valid_project_id(p)).map(PathBuf::from) else {
+                    return Err(fail("project_not_recorded", "a run in progress has no recorded project, so a new start cannot be checked against it"));
+                };
+                v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) });
+            }
+            v
+        };
+        // Core runs (a seated proposal's, under its lead) count beside classic runs, so neither kind can start over the other.
+        let active: Vec<caps::Active> = active.into_iter().chain(self.lead_runs.active()).collect();
+        let limits = *lock(&self.limits);
+        caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
 
-    /// Runs whose PTY is still open.
+    /// The run caps and their bounds.
+    pub fn run_limits(&self) -> Res {
+        Ok(lock(&self.limits).to_json())
+    }
+
+    /// Set the app-wide run cap (1 to 4). Running work is never stopped: a lower cap only holds new starts.
+    pub fn set_run_limits(&self, max_runs: u32) -> Res {
+        let l = caps::RunLimits::with_max_runs(max_runs)?;
+        *lock(&self.limits) = l;
+        Ok(l.to_json())
+    }
+
+    /// Runs in progress: classic runs whose PTY is still open, and core runs whose lead is still watched.
     pub fn active_run_count(&self) -> usize {
-        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
+        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count() + self.lead_runs.active().len()
+    }
+
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end; every core run's lead is refused new
+    /// runs, killed and never restarted (`shutdown_leads`), so no lead calls `dispatch_worker` or `integrate` while its
+    /// tickets end; every core ticket ends `abandoned` (`app_quit`) with its line written and its descendants swept;
+    /// then every supervisor session is killed and reaped. Bounded: a lead not gone within `LEAD_SHUTDOWN_WAIT`, or a
+    /// ticket not done within `QUIT_TICKETS`, is left to the supervisor's kill.
+    pub fn quit(&self) {
+        self.shutdown_lead();
+        self.shutdown_leads(Self::LEAD_SHUTDOWN_WAIT);
+        self.workers.quit(QUIT_TICKETS);
+        self.sup.shutdown();
+    }
+
+    /// The lifecycle report's `swept`: `at_startup` (an earlier app life's workers, killed before any agent could start)
+    /// and `after_attempts` (descendants that left their worker's group, killed when its attempt ended).
+    pub fn swept_report(&self) -> Value {
+        let s = self.workers.startup_swept();
+        let (killed, survived) = self.workers.runtime_swept();
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance(), "crash_reconcile": self.reconciled})
+    }
+
+    /// After a clean quit: the ledger's shell records are dropped (every shell was reaped, nothing to recover). Only
+    /// the app holding the instance locks does this. A second instance's quit leaves the first app's ledger alone,
+    /// and does not rewrite it in a race with that app's records.
+    pub fn clear_ledger_on_quit(&self) {
+        if !self.other_instance() {
+            self.owned.clear();
+        }
+    }
+
+    /// Another app instance holds this data folder or the account's worktree folder: this one sweeps nothing and
+    /// starts no agent.
+    pub fn other_instance(&self) -> bool {
+        self._instance.is_none()
+    }
+
+    /// The control watcher and the Lead socket, started only by the app holding the instance locks (#177 review). A
+    /// second app on the same data folder would tick the first app's live pending actions (recording refusals, expiries
+    /// and acks in the shared ledger, twice when both settle the same ack), and binding would unlink the first app's
+    /// socket so its Director-General's tool calls reach a service with none of its sessions. `None`: nothing started,
+    /// the socket left as it was. A bind failure is noted and the watcher still runs.
+    pub fn serve_control(&self) -> Option<crate::control::service::Watcher> {
+        if self.other_instance() {
+            self.note("control_not_served_other_instance", &[]);
+            return None;
+        }
+        let watcher = crate::control::service::spawn_watcher(self.control.clone(), Duration::from_secs(1));
+        match crate::control::socket::bind(&crate::control::socket_path(&self.data)) {
+            Ok(listener) => {
+                let svc = self.control.clone();
+                // The run leads' vajra-run calls are routed to this registry, never behind `control` (ADR-16 16.5).
+                let runs = self.run_leads.clone();
+                // SAFETY: getuid has no preconditions and cannot fail.
+                let uid = unsafe { libc::getuid() };
+                std::thread::spawn(move || crate::control::socket::serve(listener, svc, runs, uid));
+            }
+            Err(e) => {
+                eprintln!("vajra-desktop: control socket: {e}");
+                self.note("control_socket_failed", &[]);
+            }
+        }
+        Some(watcher)
+    }
+
+    /// The active run groups for diagnostics: stream id and the pid of the group leader.
+    pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
+        let mut v: Vec<_> = lock(&self.runs)
+            .keys()
+            .filter(|s| self.sup.is_running(s).unwrap_or(false))
+            .filter_map(|s| Some(crate::lifecycle_report::RunDiag { stream: s.clone(), pid: self.sup.pid(s).ok()? }))
+            .collect();
+        v.sort_by(|a, b| a.stream.cmp(&b.stream));
+        v
     }
 
     /// End the control session once its run's PTY exited, so the Lead cannot
     /// queue to its workers (their messages expire). The run stays in `runs`:
     /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
+        self.check_codex_leads();
         // A launch in flight owns the session it just took; it reaps itself.
         // The guard stays bound until `reap_locked` returns, so a launch cannot install a session in between.
         let _guard = match self.launching.try_lock() {
@@ -448,6 +822,41 @@ impl App {
         self.reap_locked();
     }
 
+    /// bhishma MUST (S12): each running plain Codex Lead's first turn is read back like a worker's. Its own session file
+    /// (named by the launch's marker) must show the Vajra dirs denied under the profile, or the Lead is ended, with the
+    /// reason on its stream. A Lead whose first turn never shows within `LEAD_PROOF_WAIT` is ended too. Runs on every
+    /// busy tick (`LIVE_WAIT`), so a failing Lead runs at most about that long after its first turn starts.
+    pub fn check_codex_leads(&self) {
+        use crate::adapter::profiles::{LeadVerdict, codex_lead_verdict};
+        let pending: Vec<(String, LeadCheck)> = lock(&self.lead_checks).iter().map(|(s, c)| (s.clone(), c.clone())).collect();
+        for (stream, c) in pending {
+            if !self.sup.is_running(&stream).unwrap_or(false) {
+                lock(&self.lead_checks).remove(&stream);
+                continue;
+            }
+            let found = crate::providers::effective::codex_rollouts_since(&c.codex_home, c.since);
+            let verdict = match codex_lead_verdict(&found, &c.want, &c.marker) {
+                LeadVerdict::Pending if c.since.elapsed().is_ok_and(|e| e >= LEAD_PROOF_WAIT) => {
+                    LeadVerdict::NotApplied("the Lead's Codex session file never showed its first turn, so its Vajra profile can't be shown in force".into())
+                }
+                v => v,
+            };
+            match verdict {
+                LeadVerdict::Pending => {}
+                LeadVerdict::Applied => {
+                    lock(&self.lead_checks).remove(&stream);
+                    self.note("lead_profile_applied", &[]);
+                }
+                LeadVerdict::NotApplied(why) => {
+                    lock(&self.lead_checks).remove(&stream);
+                    let _ = self.sup.kill(&stream);
+                    let _ = self.bus.push(&stream, &format!("\r\nVajra ended this Codex Lead ({}): {why}\r\n", crate::adapter::profiles::PROFILE_NOT_APPLIED));
+                    self.note("lead_profile_not_applied", &[]);
+                }
+            }
+        }
+    }
+
     fn reap_locked(&self) {
         let ended: Vec<String> = lock(&self.runs)
             .iter()
@@ -455,9 +864,16 @@ impl App {
             .map(|(_, r)| r.session_id.clone())
             .collect();
         let mut svc = lock(&self.control);
-        if svc.session_id().is_some_and(|id| ended.iter().any(|e| e == id)) {
-            svc.end_session();
+        for id in ended {
+            if svc.has_session(&id) {
+                svc.end_session(&id);
+            }
         }
+        drop(svc);
+        // Forget the worker counts of runs that ended, here and not only on the next start (#80 review), so the map is
+        // bounded by the runs still going. The run itself stays in `runs` for its crew view.
+        let runs = lock(&self.runs);
+        lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
     }
 
     /// Take the control session, build the argv with its nonce, spawn. A
@@ -471,7 +887,23 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
-        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+        self.launch_engine(Engine::Claude, session_id, run_id, campaign, cwd, argv, rotate, caps::DEFAULT_RUN_WORKERS)
+    }
+
+    /// `launch` for the chosen provider: the session is recorded with it so a later resume knows which CLI ran it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_engine(
+        &self,
+        engine: Engine,
+        session_id: &str,
+        run_id: &str,
+        campaign: &str,
+        cwd: &Path,
+        argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
+        rotate: bool,
+        workers: u32,
+    ) -> Res {
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true, engine, workers)
     }
 
     /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
@@ -486,17 +918,50 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
         workflow: bool,
+        engine: Engine,
+        workers: u32,
     ) -> Res {
+        // ADR 16.6: no agent launches without the startup git baseline.
+        self.workers.refuse()?;
         let _one = lock(&self.launching);
-        self.no_active_run()?;
+        // A session whose process is already running is never launched again: `start_session` would replace its live control
+        // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
+        // its control session. Checked under the launching lock, before anything is read or changed (#80 review).
+        if self.sup.is_running(&format!("run-{session_id}")).unwrap_or(false) {
+            return Err(fail("session_running", "this session is already running; stop it before starting it again"));
+        }
+        // FG-02c (decision Q1): a run starts only in a project's folder; nothing makes one silently. The run's project: pinned
+        // before any worker of it can touch the repo's `.git` (#80 review), and the one the caps are checked against.
+        let (loc, project) = self.launch_project(cwd)?;
+        self.within_caps(&project.id, workers)?;
+        // Before any control state changes: which adapter this run is on, and the guarded record with the exact (location,
+        // project) checked above. If either cannot be written the launch is refused with the session's control state and
+        // nonce untouched: a resume never guesses the provider from the worker-writable index, and a run without its pin
+        // could never be held to its project (#80 review).
+        if self.record_run_provider(run_id, engine).is_err() {
+            return Err(fail("io", "could not record the run's provider"));
+        }
+        if self.record_run_pinned(run_id, cwd, &loc, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+            return Err(fail("io", "could not record the run's project"));
+        }
+        // A resume of this campaign counts at the same maxInFlight (#80 review). Written before anything spawns and refused
+        // on failure: without it a resume would count at the default and could pass the worker ceiling (#109 review).
+        if workflow && self.record_run_workers(run_id, workers).is_err() {
+            return Err(fail("io", "could not record the run's worker count"));
+        }
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
-            let n = if rotate { ctl(svc.resume_session()) } else { Ok(svc.nonce().unwrap_or_default()) };
+            // The run's project's Director-General sees and steers it (ADR-15 2.3).
+            if let Err(e) = svc.set_project(session_id, &project.id) {
+                svc.end_session(session_id);
+                return Err(e.to_json());
+            }
+            let n = if rotate { ctl(svc.resume_session(session_id)) } else { Ok(svc.nonce(session_id).unwrap_or_default()) };
             match n {
                 Ok(n) => n.to_string(),
                 Err(e) => {
-                    svc.end_session();
+                    svc.end_session(session_id);
                     return Err(e);
                 }
             }
@@ -505,27 +970,30 @@ impl App {
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
         let spawned = argv(&nonce).and_then(|argv| {
-            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone() };
+            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone(), extra_env: Vec::new() };
             self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
         });
         if let Err(e) = spawned {
-            lock(&self.control).end_session();
+            lock(&self.control).end_session(session_id);
             return Err(e);
         }
+        // A classic run's harness drives its campaign through its `--mcp` server, a Service client: a recorded root.
+        if let Ok(pid) = self.sup.pid(&stream) {
+            self.run_leads.allow_service(pid);
+        }
+        lock(&self.run_workers).insert(stream.clone(), workers);
         lock(&self.runs).insert(
             stream.clone(),
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
+        // The app's loop may be at rest, waiting on the bus with no timer: tell it a run is live now.
+        self.bus.wake();
         // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
-        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
+        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: Some(engine.id().to_string()) };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
         }
-        // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
-        // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
-            self.note("lead_cwd_record_failed", &[]);
-        }
+        self.note_run(&project, run_id, campaign, engine);
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
 
@@ -536,9 +1004,221 @@ impl App {
         let targets: serde_json::Map<String, Value> = runindex::latest(&self.data.join("runs.jsonl"))
             .into_iter()
             .filter(|(_, e)| e.cwd.is_dir())
-            .map(|(k, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy()})))
+            // Only a provider that can resume is offered: a Codex run's app-made id means nothing to `codex resume`.
+            .map(|(k, e)| {
+                // The guarded record decides; the index line's own `provider` is a worker-writable hint and is not used.
+                let engine = self.read_run_provider(&e.run_id).unwrap_or(Engine::Claude);
+                (k, engine, e)
+            })
+            .filter(|(_, engine, _)| adapter_for(*engine).capabilities().resume)
+            .map(|(k, engine, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(), "provider": engine.id()})))
             .collect();
         Ok(json!({"targets": targets}))
+    }
+
+    /// The provider a start or resume runs on: the id the caller passed (the effective `agent` preference), else
+    /// `claude`. A provider that is unknown or not installed is refused. There is never a fallback to another one,
+    /// and a login that cannot be checked does not block (the CLI itself says if it is signed out).
+    fn chosen_engine(&self, requested: Option<&str>) -> Result<Engine, Value> {
+        let id = requested.unwrap_or("claude");
+        let engine = Engine::from_id(id).ok_or_else(|| invalid("provider", "must be claude or codex"))?;
+        if !self.provider_probe().installed(engine) {
+            return Err(fail("provider_not_installed", format!("{id} is not installed; install it or choose another provider")));
+        }
+        Ok(engine)
+    }
+
+    /// The absolute codex binary a Codex Lead launches (bhishma #216 Low 1: never the bare word looked up again).
+    fn codex_for_lead(&self) -> Result<PathBuf, Value> {
+        use crate::providers::detect::Probe;
+        self.provider_probe().find("codex").ok_or_else(|| fail("provider_not_installed", "codex is not installed; install it or choose another provider"))
+    }
+
+    fn provider_probe(&self) -> crate::providers::detect::System {
+        crate::providers::detect::System::new(self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs)).with_home(self.home.clone())
+    }
+
+    /// `provider_list` (`vajra.providers/1`): every adapter with its install state, version, capabilities and the
+    /// CLI's own login check. Read-only; a missing or broken CLI is a row, not an error.
+    pub fn provider_list(&self) -> Res {
+        let l = crate::providers::detect::list(&self.provider_probe());
+        let v = serde_json::to_value(&l).map_err(|e| fail("internal", e))?;
+        *lock(&self.provider_cache) = Some(l);
+        Ok(v)
+    }
+
+    /// `setup_list` (`vajra.harness_setup/1`): Settings > Providers > Set up. Each catalog harness's state (installed,
+    /// installed but not runnable yet, broken, or the vendor's own install steps) and the engine-scripts row. Read-only:
+    /// it runs `--version` only, installs nothing, and stores no output.
+    pub fn setup_list(&self) -> Res {
+        // A folder created since the app started (a new Homebrew or npm bin) is found without a restart. Rate limited and
+        // single-flight in `userpath`; a test that pins `provider_dirs` never runs a login shell.
+        if self.provider_dirs.is_none() {
+            crate::userpath::refresh(&self.home);
+        }
+        let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
+        let marks = crate::providers::install::marks::Marks::at(&self.data);
+        serde_json::to_value(crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks)).map_err(|e| fail("internal", e))
+    }
+
+    /// `setup_plan` (`vajra.setup_plan/1`): the one-click plan for catalog harness `id` (ADR-17 rule 3: the exact
+    /// command, source, version, tools, target, needs_admin, notes, scope registry and dependencies), or `manual` with
+    /// why it is "Install it yourself". Installs nothing; npm's pack folder is private and removed before this answers.
+    pub fn setup_plan(&self, id: &str) -> Res {
+        use crate::providers::install::flow;
+        let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        let answer = |r: Result<Value, &str>| match r {
+            Ok(plan) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "plan": plan }),
+            Err(code) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "manual": code }),
+        };
+        // An unverified source never resolves a tool or runs anything.
+        if !h.verified() {
+            return Ok(answer(Err("source_not_verified")));
+        }
+        let offer = flow::offer(h, &flow::Machine::this(&self.home));
+        Ok(answer(offer.and_then(|o| serde_json::to_value(&o.plan).map_err(|_| "internal"))))
+    }
+
+    /// `setup_consent`: the user clicked Install on the plan whose hash is `hash`. A single-use token bound to {id,
+    /// hash}, valid for two minutes; it is never logged or stored.
+    pub fn setup_consent(&self, id: &str, hash: &str) -> Res {
+        crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(fail("bad_hash", "a plan hash is 64 hex digits"));
+        }
+        Ok(serde_json::json!({ "token": self.consents.mint(id, hash, std::time::Instant::now()) }))
+    }
+
+    /// `setup_run`: install `id` with consent `token`. The plan is recomputed and must hash the same; the install
+    /// streams on `setup-<id>`, is checked on every exit, rolled back or marked Broken, and audited. Blocks until done.
+    pub fn setup_run(&self, id: &str, token: &str) -> Res {
+        use crate::providers::install::{flow, run};
+        let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if !h.verified() {
+            return Err(fail("source_not_verified", "this harness is Install it yourself"));
+        }
+        // Read after the install too (a repair counts only if the program runs), so the PATH is refreshed first and
+        // the probe is built fresh: a newly linked binary must be found.
+        let current = || {
+            crate::userpath::refresh(&self.home);
+            crate::providers::setup::current(h, &self.provider_probe())
+        };
+        let audit = self.claude.join("vajra/audit.log");
+        let paths = flow::Paths { data: &self.data, audit: &audit };
+        let r = flow::run(h, &flow::Machine::this(&self.home), &self.consents, token, &self.sup, paths, &current).map_err(|c| fail(c, "setup refused"))?;
+        // The new binary is found without a restart.
+        crate::userpath::refresh(&self.home);
+        Ok(serde_json::json!({ "stream": run::stream(id), "report": r }))
+    }
+
+    /// The CLI's own sign-in for `id`, for a user terminal: only for a catalog harness that is installed and reports a
+    /// version. Vajra never sees the token.
+    pub fn setup_sign_in_command(&self, id: &str) -> Result<crate::providers::setup::SignInCommand, Value> {
+        crate::providers::setup::sign_in(id, &self.provider_probe()).map_err(|e| fail(e.code(), e))
+    }
+
+    /// `provider_accounts` (`vajra.provider_accounts/1`): one record per way of running agents, each CLI under its own
+    /// login, with the billing the CLI reports and a warning when its own config holds an API key setting that would
+    /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
+    pub fn provider_accounts(&self) -> Res {
+        // Each stored-key account says only whether a key is there (the store has no getter); a Keychain that cannot be
+        // asked reads as unknown. This runs when Settings asks, never on the idle path.
+        let list = crate::providers::detect::accounts_with_keys(&self.provider_probe(), &|id| self.keys.saved(id).ok());
+        serde_json::to_value(list).map_err(|e| fail("internal", e))
+    }
+
+    /// `provider_key_saved`: whether a key is stored for `account`. The only thing the core can tell about a key.
+    pub fn provider_key_saved(&self, account: &str) -> Res {
+        key_state(account, self.keys.saved(account))
+    }
+
+    /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
+    pub fn provider_key_save(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
+        self.key_changed(account, r.is_ok());
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_replace`: overwrite the stored key (or store the first one).
+    pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
+        self.key_changed(account, r.is_ok());
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
+    pub fn provider_key_remove(&self, account: &str) -> Res {
+        let r = self.keys.remove(account).map(|()| false);
+        self.key_changed(account, r.is_ok());
+        key_state(account, r)
+    }
+
+    /// A key was saved, replaced or removed (`ok`: the operation succeeded). The account's old figures are forgotten only
+    /// when it did, since a refused or failed one left the key as it was. The metered accounts are looked up again either
+    /// way (a failed Replace has already deleted the old key), and if what is shown changed the revisions advance and the
+    /// UI is told, so a subscriber does not keep a removed key's usage. What was shown is taken BEFORE the figures are
+    /// forgotten: replacing a key keeps the account list, and only the dropped figures differ.
+    fn key_changed(&self, account: &str, ok: bool) {
+        self.rediscover(ok.then_some(account));
+    }
+
+    /// Look the metered accounts up again, forgetting `forget`'s figures in between, and publish a change in what the usage
+    /// view shows. The "before" is read first, so dropped figures count as a change even when the account list is the same.
+    fn rediscover(&self, forget: Option<&str>) {
+        let before = self.provider_usage_cached().fingerprint();
+        if let Some(account) = forget {
+            self.usage.forget(account);
+        }
+        self.usage_source.refresh(true);
+        if self.provider_usage_cached().fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
+    }
+
+    /// Look up which accounts have a stored key (this runs `security`, so never on a cache read) and publish a change in
+    /// what the usage view shows. The app calls it once on a background thread at start, so the row appears shortly after
+    /// launch without opening the Providers page.
+    pub fn discover_usage_accounts(&self) {
+        self.rediscover(None);
+    }
+
+    /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
+    /// `page_open` is true while Settings > Providers is open. A key endpoint is called only when that is true or a run is
+    /// active, and at most once a minute per account; otherwise the last answer is returned and no call is made.
+    pub fn provider_usage(&self, page_open: bool) -> Res {
+        // What `project_state` serves now, against what this read leaves in the cache.
+        let before = self.provider_usage_cached().fingerprint();
+        let active = page_open || self.active_run_count() > 0;
+        if active {
+            // Account discovery runs here, after `before` was taken from the cache, so a changed account list is a change.
+            self.usage_source.refresh(false);
+        }
+        let now = self.usage_snapshot(active);
+        // Only a real change advances the revisions: `project_state` then answers in full with the new usage, and the UI is
+        // told through the usual `changed` event. A read that changes nothing (a cache hit, the same figures) moves nothing.
+        if now.fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
+        serde_json::to_value(now).map_err(|e| fail("internal", e))
+    }
+
+    /// The last usage answers, for `project_state`. Never calls out.
+    pub(super) fn provider_usage_cached(&self) -> crate::providers::usage::UsageList {
+        self.usage_snapshot(false)
+    }
+
+    fn usage_snapshot(&self, active: bool) -> crate::providers::usage::UsageList {
+        use crate::providers::usage::{Usage, UsageList, USAGE_SCHEMA};
+        let (now, read_at) = (std::time::Instant::now(), crate::control::time::iso_secs(std::time::SystemTime::now()));
+        // The CLI logins report no windows today, so they read "Not reported".
+        let mut usage: Vec<Usage> = ["claude", "codex"].iter().map(|a| Usage::not_reported(a)).collect();
+        usage.extend(self.usage_source.accounts().iter().map(|a| self.usage.read(a, active, now, &read_at, self.usage_source.as_ref())));
+        UsageList { schema: USAGE_SCHEMA.into(), usage }
+    }
+
+    /// The last `provider_list` answer, or `None` before the first. Never runs a process.
+    pub fn provider_cached(&self) -> Option<crate::providers::contract::ProviderList> {
+        lock(&self.provider_cache).clone()
     }
 
     /// The workflow takes only a commit sha, so a branch or ref is resolved
@@ -557,23 +1237,82 @@ impl App {
         }
     }
 
-    pub fn start_run(&self, mut input: RunInput, cwd: &str) -> Res {
+    pub fn start_run(&self, input: RunInput, cwd: &str) -> Res {
+        self.start_run_as(input, cwd, None)
+    }
+
+    /// `start_run`, optionally under a run id (and its minute) the caller already took with `fresh_run_id`, so the
+    /// guarded `seats.json` written before the start names the run that starts.
+    pub(super) fn start_run_as(&self, mut input: RunInput, cwd: &str, taken: Option<(u64, String)>) -> Res {
+        // Every start reads the project store (the run's project): a refused projects folder says so first (#106 review).
+        self.projects_usable()?;
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
         input.base = self.resolve_base(&cwd, &input.base)?;
-        let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
+        let (now, run_id) = match taken {
+            Some(t) => t,
+            None => self.fresh_run_id(ids::unix_now())?,
+        };
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
-        let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
-            argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
-        }, false)?;
+        let workers = input.max_in_flight;
+        let engine = self.chosen_engine(input.provider.as_deref())?;
+        let check: std::cell::RefCell<Option<LeadCheck>> = std::cell::RefCell::new(None);
+        let r = self.launch_engine(engine, &session_id, &run_id, &campaign, &cwd, |n| {
+            if engine == Engine::Claude {
+                argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
+            } else {
+                use crate::adapter::profiles;
+                // bhishma #216 H1: a Codex Lead never runs without the Vajra dirs denied.
+                let mut deny = profiles::vajra_deny_dirs(&self.home, &self.data);
+                let profile = profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
+                let real = |p: &Path| p.canonicalize().map_err(|e| fail("io_error", e));
+                let (project, tmp, data) = (real(&cwd)?, real(&std::env::temp_dir())?, real(&self.data)?);
+                // bhishma MUST (S12): the launch's marker names its session file for the first-turn read-back.
+                let marker = profiles::codex_lead_marker(&data, &profile);
+                deny.push(marker.clone());
+                // A second Lead in this project was already held by the one-run-per-project cap, under the launching lock.
+                let codex = self.codex_for_lead()?;
+                let a = profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)?;
+                // The pty supervisor passes no CODEX_HOME (`sessions::ENV_ALLOW`), so the Lead's Codex writes under ~/.codex.
+                let want = profiles::CodexWant { cwd: project, ticket_tmp: tmp, network: false, deny };
+                *check.borrow_mut() = Some(LeadCheck { want, marker, codex_home: self.home.join(".codex"), since: std::time::SystemTime::now() });
+                Ok(a)
+            }
+        }, false, workers)?;
+        if let (Some(c), Some(stream)) = (check.into_inner(), r["stream"].as_str()) {
+            lock(&self.lead_checks).insert(stream.to_string(), c);
+        }
         self.note("run_started", &[]);
         Ok(r)
     }
 
     /// ADR-9 resume: `claude --resume <session_id>` continuing the campaign
     /// through `/vajra-deliver` with a rotated steering nonce (design 5).
-    pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str) -> Res {
+    /// The folder the guarded records say `session_id` runs in: `Ok(None)` when no record names it (a legacy session), `Err` when
+    /// records of the same session name different folders (the membership is inconsistent, so nothing resumes).
+    fn guarded_session_folder(&self, session_id: &str) -> Result<Option<PathBuf>, Value> {
+        let real = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+        let mut found: Option<PathBuf> = None;
+        for run in self.recorded_runs() {
+            let Some((cwd, sid, _, _)) = self.read_run_record(&run) else { continue };
+            if sid != session_id {
+                continue;
+            }
+            // The folder pinned at launch, as stored: re-resolving a recorded path through today's filesystem would follow a symlink
+            // planted since. A record from before `cwd_real` existed has nothing better than its own path.
+            let cwd = self.read_run_cwd_real(&run).unwrap_or_else(|| real(cwd));
+            match &found {
+                Some(f) if *f != cwd => return Err(fail("project_membership_inconsistent", "earlier runs of this session were recorded in different folders")),
+                Some(_) => {}
+                None => found = Some(cwd),
+            }
+        }
+        Ok(found)
+    }
+
+    pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str, provider: Option<&str>) -> Res {
+        self.projects_usable()?;
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
             return Err(invalid("session_id", "must be a canonical uuid"));
@@ -581,13 +1320,37 @@ impl App {
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
         }
+        // The folder is the guarded records': the one the caller names came from the worker-writable index, and the index's run id
+        // is as forgeable as its cwd, so membership is looked up in the guarded records by SESSION, not by the index's run id. A
+        // session recorded in a folder is never resumed into another. A session with no guarded record at all is a legacy one
+        // (launched before records existed) and is resumed where the caller says.
+        if let Some(gcwd) = self.guarded_session_folder(session_id)? {
+            // The stored launch-time folder is compared as it is; only the folder the caller names is resolved.
+            if gcwd != std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone()) {
+                return Err(fail("resume_cwd_mismatch", "this session was started in a different folder; resume it there"));
+            }
+        }
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
         let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
         let run_id = run_id.as_str();
-        let claude = adapter_for(Engine::Claude);
-        let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
-            claude.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
-        }, true)?;
+        // The run this session belongs to, from the index (a lookup hint) and its guarded provider record: a request for
+        // a different provider than the one that ran it is refused, never run on the other.
+        let recorded = runindex::latest(&self.data.join("runs.jsonl")).get(campaign).filter(|e| e.session_id == session_id).and_then(|e| self.read_run_provider(&e.run_id));
+        if let (Some(rec), Some(asked)) = (recorded, provider) {
+            if rec.id() != asked {
+                return Err(fail("provider_mismatch", format!("that run was started on {}, not {asked}", rec.id())));
+            }
+        }
+        let engine = self.chosen_engine(provider.or(recorded.map(Engine::id)))?;
+        let adapter = adapter_for(engine);
+        if !adapter.capabilities().resume {
+            return Err(fail("provider_cannot_resume", format!("{} cannot resume a run", engine.id())));
+        }
+        // Counted at the maxInFlight the campaign's run was started with, not the default (#80 review).
+        let workers = self.original_workers(session_id, campaign);
+        let r = self.launch_engine(engine, session_id, run_id, campaign, &cwd, |n| {
+            adapter.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
+        }, true, workers)?;
         self.note("run_resumed", &[]);
         Ok(r)
     }
@@ -621,18 +1384,40 @@ impl App {
         };
         // Only the live run's workers are steering targets; viewing a past run
         // never retargets the control service.
-        if running {
-            self.publish_workers(run_id, &workers, &ctx);
+        if let (true, Some((_, r))) = (running, &run) {
+            self.publish_workers(&r.session_id, run_id, &workers, &ctx);
         }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
         // Overlays come from the live control session only; a past run shows none.
-        let signals = if running { lock(&self.control).signals() } else { Signals::default() };
-        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
-        Ok(node_json(&node))
+        let signals = match (&run, running) {
+            (Some((_, r)), true) => lock(&self.control).signals(&r.session_id),
+            _ => Signals::default(),
+        };
+        // The core's own workers come from the app's runtime, when one was built (#151).
+        let core = self.workers.core_workers(run_id);
+        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &core, &signals)))?;
+        // The counts come from the cache; due workers are handed to a background thread, never counted here.
+        if let (true, Some((_, r))) = (running, &run) {
+            let targets = workers
+                .iter()
+                .filter_map(|w| {
+                    let cwd = ctx.get(&w.agent_id)?.0.clone()?;
+                    let stamp = self.bus.tail(&worker_stream(&w.agent_id), u64::MAX, 1).head_seq;
+                    Some(worker_diff::Target { id: w.agent_id.clone(), cwd, repo: r.cwd.clone(), stamp })
+                })
+                .collect();
+            self.refresh_worker_diffs(targets);
+        }
+        Ok(node_json(&node, &|id| self.worker_diffs.get(id)))
     }
 
-    fn publish_workers(&self, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
+    /// Count the workers that are due on a background thread; returns at once.
+    fn refresh_worker_diffs(&self, targets: Vec<worker_diff::Target>) {
+        self.worker_diffs.refresh_in_background(&self.bridge, targets);
+    }
+
+    fn publish_workers(&self, session_id: &str, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
         let infos = workers
             .iter()
             .map(|w| {
@@ -650,15 +1435,21 @@ impl App {
                 }
             })
             .collect();
-        lock(&self.control).set_workers(infos);
+        lock(&self.control).set_workers(session_id, infos);
+        self.workers_published();
     }
 
-    /// Keep the control service's workers and the transcript tails current for the live run, without any UI view
+    /// Keep the control service's workers and the transcript tails current for every live run, without any UI view
     /// asking: steering and MCP inspect must work while the crew view is closed. Called by the core's own poll loop.
     pub fn refresh_workers(&self) {
-        let live = lock(&self.runs).iter().find(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.clone());
-        let Some(run) = live else { return };
-        let Ok(workers) = self.discover_workers(&run) else { return };
+        let live: Vec<Run> = lock(&self.runs).iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.clone()).collect();
+        for run in live {
+            self.refresh_run_workers(&run);
+        }
+    }
+
+    fn refresh_run_workers(&self, run: &Run) {
+        let Ok(workers) = self.discover_workers(run) else { return };
         let ctx: HashMap<String, (Option<String>, Vec<String>)> = {
             let tr = lock(&self.transcripts);
             workers
@@ -670,7 +1461,7 @@ impl App {
                 })
                 .collect()
         };
-        self.publish_workers(&run.run_id, &workers, &ctx);
+        self.publish_workers(&run.session_id, &run.run_id, &workers, &ctx);
     }
 
     fn discover_workers(&self, run: &Run) -> Result<Vec<Worker>, Value> {
@@ -700,10 +1491,7 @@ impl App {
         }
         let mut red = run.nonces.clone();
         {
-            let svc = lock(&self.control);
-            if svc.session_id() == Some(run.session_id.as_str()) {
-                red.add(svc.nonce());
-            }
+            red.add(lock(&self.control).nonce(&run.session_id));
         }
         let mut out = Vec::new();
         for d in dirs {
@@ -725,6 +1513,10 @@ impl App {
     /// Tail one worker transcript into its stream (new bytes only) and build its node.
     fn pump_worker(&self, allow: &Allowlist, red: &Redactor, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
         let mut map = lock(&self.transcripts);
+        // A closed worker is no longer tailed: no file reads, no new stream lines. Its record stays for the history view.
+        if self.worker_closed(id) {
+            return tree::worker_from(id, meta, j, map.get(id));
+        }
         let tr = map
             .entry(id.to_string())
             .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::default()));
@@ -828,6 +1620,12 @@ impl App {
     /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time and the whole call is bounded by `EVIDENCE_BUDGET`.
     /// The recorded commands, exit codes and output come from `evidence_detail`, per task; the list carries only the count.
     pub fn evidence_list(&self, slug: &str) -> Res {
+        self.evidence_list_with(slug, true)
+    }
+
+    /// `evidence_list`, or with `checks` false the same rows from what is already known: no check is started and no
+    /// git is run, so a criterion not checked yet (or whose repo state is not cached) reads `checking`, never pass.
+    pub(super) fn evidence_list_with(&self, slug: &str, checks: bool) -> Res {
         if !bus::valid_stream_id(slug) {
             return Err(invalid("slug", "not a campaign slug"));
         }
@@ -902,7 +1700,7 @@ impl App {
             }
         }
         // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
-        let claimed = self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
+        let claimed = checks && self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
         struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, String, bool);
         impl Drop for Release<'_> {
             fn drop(&mut self) {
@@ -993,6 +1791,7 @@ impl App {
                 }
                 cache.insert(k, (green, until));
             }
+            self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
@@ -1003,11 +1802,22 @@ impl App {
             Path::new(p).parent()?.parent().map(Path::to_path_buf)
         };
         let mut repos: HashMap<StateKey, Option<RepoState>> = HashMap::new();
+        let mut unknown: std::collections::HashSet<StateKey> = Default::default();
         for (i, r) in &repo_of {
             let k = (r.clone(), base_of(*i));
-            if verdict.get(i) == Some(&true) && !repos.contains_key(&k) {
-                let st = self.worktree_state(r, k.1.as_deref(), deadline);
-                repos.insert(k, st);
+            if verdict.get(i) == Some(&true) && !repos.contains_key(&k) && !unknown.contains(&k) {
+                if checks {
+                    let st = self.worktree_state(r, k.1.as_deref(), deadline);
+                    repos.insert(k, st);
+                } else {
+                    // Cache-only (the board): only a known state counts. A cached failed read (`Some(None)`) is as unknown as
+                    // no entry, so a green live verdict reads `checking`, never a pass the repo state could not confirm (#107
+                    // review). A full `evidence_list` call keeps its rule: a check's verdict stands when git cannot be read.
+                    match self.worktree_state_cached(&k) {
+                        Some(Some(st)) => { repos.insert(k, Some(st)); }
+                        _ => { unknown.insert(k); }
+                    }
+                }
             }
         }
         let mut pending = 0usize;
@@ -1021,6 +1831,8 @@ impl App {
                 "fail"
             } else if has_evidence {
                 match verdict.get(&i) {
+                    // Cache-only and the repo's state is not known: not yet a pass.
+                    Some(true) if repo_of.get(&i).is_some_and(|r| unknown.contains(&(r.clone(), base_of(i)))) => { pending += 1; "checking" }
                     Some(true) => {
                         // Green evidence is current while the working tree is the tree it was verified on (POS-1.3): a tracked
                         // edit, an untracked file or a moved branch that changes the tree makes it stale; a different commit with
@@ -1046,8 +1858,14 @@ impl App {
                         // verified. Neither is `pass`, and neither is claimed stale.
                         let filtered = want_tree.is_some() && state.is_some_and(|(_, _, f)| *f);
                         let tree_unavailable = want_tree.is_some() && state.is_some_and(|(_, tree, _)| tree.is_none());
+                        // Cache-only (the board): live evidence with neither a recorded tree nor a head cannot be held against the
+                        // repo, so it is not a pass there (#107 review sweep).
+                        let nothing_to_compare = !checks && want_tree.is_none() && want_head.is_none() && !unreadable && repo_of.contains_key(&i);
                         // Evidence whose tree cannot be read is never assumed current either (a green check proves the file, not the tree).
-                        if stale { "stale" } else if filtered || tree_unavailable || (unreadable && state.is_some()) { "unverified" } else { "pass" }
+                        if stale { "stale" }
+                        else if filtered || tree_unavailable || (unreadable && state.is_some()) { "unverified" }
+                        else if nothing_to_compare { pending += 1; "checking" }
+                        else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }
@@ -1155,6 +1973,14 @@ impl App {
         Ok(out)
     }
 
+    /// The cached repo state for `key`, if it is still fresh: `None` when nothing is cached (never runs git).
+    fn worktree_state_cached(&self, key: &StateKey) -> Option<Option<RepoState>> {
+        let g = lock(&self.worktree_state);
+        let (at, st) = g.get(key)?;
+        let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
+        (at.elapsed() < ttl).then(|| st.clone())
+    }
+
     /// `(HEAD, tree id)` of `repo`: the commit, and the whole-tree id of its working tree (tracked edits and untracked
     /// files, the run's own `data/walkthroughs` output left out) computed as `vajra-verify-work.sh` records
     /// `git.worktreeTree`. The tree is `None` when it cannot be computed in time. `None` overall when git fails or times
@@ -1203,6 +2029,7 @@ impl App {
         // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
         if st.is_some() || budget >= WORKTREE_STATE_TIMEOUT {
             lock(&self.worktree_state).insert(key, (std::time::Instant::now(), st.clone()));
+            self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         st
     }
@@ -1239,12 +2066,8 @@ impl App {
         Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
-    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
-    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
-    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
-    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
-    /// the run repo's HEAD.
-    pub fn worktree_info(&self, worker: &str) -> Res {
+    /// `(worktree, run repo)` of a worker, both resolved; refused for anything that is not a crew worktree.
+    pub(super) fn crew_worktree(&self, worker: &str) -> Result<(PathBuf, PathBuf), Value> {
         if !bus::valid_stream_id(&worker_stream(worker)) {
             return Err(invalid("worker", "not a worker id"));
         }
@@ -1264,6 +2087,16 @@ impl App {
         if !wt.is_dir() {
             return Err(refuse());
         }
+        Ok((wt, repo))
+    }
+
+    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
+    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
+    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
+    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
+    /// the run repo's HEAD.
+    pub fn worktree_info(&self, worker: &str) -> Res {
+        let (wt, repo) = self.crew_worktree(worker)?;
         let git = |dir: &Path, args: &[&str]| -> Option<String> {
             let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
             (o.exit() == Some(0)).then(|| o.stdout.trim().to_string())
@@ -1313,12 +2146,22 @@ impl App {
         ctl(lock(&self.control).message_worker(Actor::Human, worker, text))
     }
 
+    /// `control_message` that refuses unless the worker is still on attempt `expect`, checked under the control lock.
+    pub(super) fn control_message_expecting(&self, worker: &str, text: &str, expect: Option<u64>) -> Res {
+        ctl(lock(&self.control).message_worker_expecting(Actor::Human, worker, text, expect))
+    }
+
     pub fn control_redirect(&self, worker: &str, text: &str) -> Res {
         ctl(lock(&self.control).redirect_worker(Actor::Human, worker, text))
     }
 
     pub fn control_stop(&self, worker: &str, reason: Option<&str>) -> Res {
         ctl(lock(&self.control).stop_worker(Actor::Human, worker, reason))
+    }
+
+    /// `control_stop` that refuses unless the worker is still on attempt `expect`, checked under the control lock.
+    pub(super) fn control_stop_expecting(&self, worker: &str, reason: Option<&str>, expect: Option<u64>) -> Res {
+        ctl(lock(&self.control).stop_worker_expecting(Actor::Human, worker, reason, expect))
     }
 
     pub fn confirm_stop(&self, action_id: &str) -> Res {
@@ -1517,7 +2360,12 @@ impl App {
     /// hashes" (`verify-digest`), so it stays the only HMAC key holder. Result `{slug, integrity, text?}` where
     /// integrity is `ok`, `no_report`, `integrity_failed`, `not_text` or `unknown` (too large / could not run).
     pub fn read_report(&self, slug: &str) -> Res {
-        self.read_report_with(slug, &|_| {}, &|| {})
+        self.read_report_with(slug, &|_| {}, &|| {}).map(|mut v| {
+            if let Some(m) = v.as_object_mut() {
+                m.remove(VERIFIED_KEY);
+            }
+            v
+        })
     }
 
     /// `seam` is passed to the held reader and is also called with `"check:report"` right before the report check;
@@ -1589,7 +2437,7 @@ impl App {
         if bridge.find_jq().is_none() {
             return unknown(reason("jq_missing", None, None));
         }
-        let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
+        let o = match bridge.run(&Request::VerifyDigest { input: input.as_bytes().to_vec() }) {
             Ok(o) => o,
             Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };
@@ -1614,25 +2462,47 @@ impl App {
         // "ok" is published once, only after every check that applies has passed (plain `verify` also fails a
         // recorded report that is missing or edited), so a concurrent listing can never see a partial success.
         seam("check:report");
+        // The record hash (6i export): the sha256 of the exact digest lines the script just accepted, so a reader on this
+        // Mac can match an export to the record it came from. It carries no key material.
+        // `VERIFIED_KEY`: the campaign, features and progress exactly as checked here, for the proof label and its
+        // write-ledger check (6i). `read_report` drops it.
+        let progress = String::from_utf8_lossy(&h.progress).into_owned();
+        let record = |v: Res| {
+            v.map(|mut v| {
+                v["record_sha256"] = json!(hex_digest(input.as_bytes()));
+                v[VERIFIED_KEY] = json!({"campaign": campaign, "features": features, "progress": progress});
+                v
+            })
+        };
         let want = campaign.get("reportSha256").and_then(Value::as_str).unwrap_or("");
         if want.is_empty() {
             self.settle(slug, "ok", ticket);
-            return verdict("no_report", None);
+            return record(verdict("no_report", None));
         }
         let Some(report) = h.report else { return bad(self) };
         if hex_digest(&report) != want {
             return bad(self);
         }
         self.settle(slug, "ok", ticket);
-        match String::from_utf8(report) {
+        record(match String::from_utf8(report) {
             Ok(t) => verdict("ok", Some(t)),
             Err(_) => verdict("not_text", None),
-        }
+        })
     }
 
     pub fn take_over(&self, stream: &str, on: bool) -> Res {
         self.sup.set_take_over(stream, on).map_err(|e| fail("session_error", e))?;
         Ok(json!({"stream": stream, "take_over": on}))
+    }
+
+    /// The repository roots a terminal may open in: the run directories of the runs this app started or resumed in this
+    /// process (the in-memory map, never `runs.jsonl`, which a worker can write). Each root's own `.claude/worktrees/*`
+    /// folders are allowed too (see `terminal::policy::place`). ADR-15 replaces this with the project records.
+    pub fn terminal_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = lock(&self.runs).values().map(|r| r.cwd.clone()).collect();
+        roots.sort();
+        roots.dedup();
+        roots
     }
 
     pub fn active_runs(&self) -> Res {
@@ -1731,6 +2601,17 @@ fn evidence_outcome(o: &Output, home: &Path) -> Outcome {
     }
 }
 
+/// The answer of every `provider_key_*` command: a `KeyState` or a fixed error. Never echoes input.
+fn key_state(account: &str, r: Result<bool, crate::providers::keychain::Error>) -> Res {
+    match r {
+        Ok(saved) => serde_json::to_value(crate::providers::contract::KeyState { account: account.into(), saved }).map_err(|e| fail("internal", e)),
+        Err(e) => Err(fail(e.code(), e.detail())),
+    }
+}
+
+/// `read_report_with`'s internal answer: the campaign and progress bytes its check verified (never sent to the UI).
+pub(super) const VERIFIED_KEY: &str = "_verified";
+
 fn invalid(field: &str, reason: &str) -> Value {
     json!({"error": "invalid_args", "detail": format!("{field}: {reason}")})
 }
@@ -1752,12 +2633,58 @@ fn project_slug(cwd: &Path) -> String {
     cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
+/// The largest run index the start-up prune reads whole; a bigger one skips the prune.
+const PRUNE_INDEX_CAP: u64 = 64 << 20;
+
+/// The control session dirs start-up pruning keeps besides the live ones: every session the whole run index names
+/// (launch and Lead sessions), and every Lead session recorded under `<control>/lead/<run>/lead_session`. `None` when
+/// the index can't be read whole: then nothing is pruned (a missed name would remove a dir a resume needs).
+fn control_keep(data: &Path) -> Option<std::collections::HashSet<String>> {
+    let mut keep = std::collections::HashSet::new();
+    for e in runindex::entries_all(&data.join("runs.jsonl"), PRUNE_INDEX_CAP).ok()? {
+        keep.insert(e.session_id);
+        keep.extend(e.lead_session_id);
+    }
+    // The guarded run records keep their sessions whatever the index says (#179 codex P1): a worker that drops a run
+    // from `runs.jsonl` must not get its control dir, nonce and acknowledged stops deleted. Each run's own session
+    // (`session`, written by `record_run_pinned`) and its Lead's (`lead_session`) are kept. A record that exists but
+    // can't be read whole (a link, an oversized file, an unreadable entry) prunes nothing at all, and neither does one
+    // that isn't exactly a canonical session id once trimmed (#179 review): a lossy decode of invalid UTF-8, or any
+    // other text, would keep a name that matches no dir while the real session's dir was deleted.
+    let lead = data.join("control").join("lead");
+    match std::fs::read_dir(&lead) {
+        Ok(rd) => {
+            for d in rd {
+                let d = d.ok()?;
+                for name in ["session", "lead_session"] {
+                    match crate::control::fsx::read_nofollow_capped(&d.path().join(name), 256) {
+                        Ok(b) => {
+                            let id = String::from_utf8(b).ok()?;
+                            let id = id.trim();
+                            if !ids::valid_session_id(id) {
+                                return None;
+                            }
+                            keep.insert(id.to_string());
+                        }
+                        // No such record, or the entry is no run dir: nothing to keep from it.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {}
+                        Err(_) => return None,
+                    }
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    Some(keep)
+}
+
 fn lines_json(lines: &[bus::Line]) -> Vec<Value> {
     lines.iter().map(|l| json!({"seq": l.seq, "text": &*l.text})).collect()
 }
 
-fn node_json(n: &Node) -> Value {
-    json!({
+fn node_json(n: &Node, diff_of: &dyn Fn(&str) -> Option<Value>) -> Value {
+    let mut v = json!({
         "id": n.id,
         "kind": format!("{:?}", n.kind).to_lowercase(),
         "title": n.title,
@@ -1766,14 +2693,28 @@ fn node_json(n: &Node) -> Value {
         "role": n.engine_id.as_deref().map(crate::crew::names::ui_name),
         "status": n.status.as_str(),
         "overlays": n.overlays,
-        "children": n.children.iter().map(node_json).collect::<Vec<_>>(),
-    })
+        "provider": n.provider,
+        "children": n.children.iter().map(|c| node_json(c, diff_of)).collect::<Vec<_>>(),
+    });
+    // A worker's change count, once counted; the field is left out (not null) while there is none. A core worker's
+    // count comes with its ticket.
+    if let Some(diff) = n.diff.clone().or_else(|| n.id.strip_prefix("agent:").and_then(diff_of)) {
+        v["diff"] = diff;
+    }
+    if let Some(c) = &n.controls {
+        v["controls"] = c.clone();
+    }
+    v
 }
 
 /// Wait up to `wait` for bus events, coalesce for `COALESCE`, and return the
 /// `changed` payload, or `None` when nothing happened.
 pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     let first = sub.recv_timeout(wait)?;
+    // A bare wake changes nothing the UI shows: the loop just looks again, at once.
+    if first == Event::Wake && sub.is_empty() {
+        return None;
+    }
     std::thread::sleep(COALESCE);
     let mut streams = BTreeSet::new();
     let mut snapshot_needed = false;
@@ -1782,23 +2723,121 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
             streams.insert(stream.to_string());
         }
         Event::SnapshotNeeded => snapshot_needed = true,
+        Event::Wake => {}
     };
     add(first);
     while let Some(e) = sub.try_recv() {
         add(e);
     }
+    if streams.is_empty() && !snapshot_needed {
+        return None;
+    }
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+/// How often the app's loop looks at live runs (worker refresh, run reaping, App Nap).
+pub const LIVE_WAIT: Duration = Duration::from_secs(1);
+/// With nothing running the loop waits on the bus, waking on its own only this often: one housekeeping turn (a finished
+/// worker that became safe to close, say its branch was pushed, is closed then), never a per-second timer.
+pub const IDLE_WAIT: Duration = Duration::from_secs(5 * 60);
+/// After the last run ends, housekeeping (automatic close of finished workers, reaping) goes on this long.
+pub const AFTER_RUN: Duration = Duration::from_secs(120);
+
+/// The app loop's pace: busy while a run is live and for `AFTER_RUN` after the last one ended, else at rest.
+pub struct Pace {
+    last_live: Option<Instant>,
+}
+
+impl Pace {
+    /// A fresh pace starts busy: launch gets one `AFTER_RUN` window of housekeeping, so finished workers left from the
+    /// last session are closed without waiting for a run.
+    pub fn new(now: Instant) -> Self {
+        Pace { last_live: Some(now) }
+    }
+
+    /// Whether this turn does housekeeping, and how long the next wait is.
+    pub fn next(&mut self, live: bool, now: Instant) -> (bool, Duration) {
+        if live {
+            self.last_live = Some(now);
+        }
+        let busy = self.last_live.is_some_and(|t| now.saturating_duration_since(t) < AFTER_RUN);
+        (busy, if busy { LIVE_WAIT } else { IDLE_WAIT })
+    }
+}
+
+mod worker_diff;
+pub mod workers;
+mod claude_canary;
+pub mod plan;
+pub mod record;
+mod record_app;
+pub mod record_ledger;
+pub mod runproto;
+pub mod charter;
+pub mod run_lead;
+mod lead_start;
+mod recover;
+pub mod labs;
+pub mod verify;
+pub mod phases;
+pub mod runlog;
+pub mod runlog_store;
+mod runlog_app;
+pub use runlog_app::answered as run_log_answered;
+#[cfg(test)]
+mod runlog_tests;
+pub mod worker_host;
+mod instance;
+mod arrivals;
+mod caps;
+mod closeout;
+pub use closeout::WorktreeTerminals;
+pub use proposals::StartOptions;
+mod orchestrator;
+mod proposals;
+mod seat_env;
+pub mod seat_start;
 mod inbox;
+mod projects;
 mod wfresult;
 mod decide;
 mod lead;
+mod board;
+mod lead_acts;
 mod runindex;
 mod runview;
+pub mod proof;
+mod proof_app;
+mod evidence_approval;
+mod state;
+pub use state::Envelope;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod state_tests;
+
+/// The preflight answer: the checks' rows, then a refused projects folder's row. A refused projects folder is shown
+/// (what, where, what to do) and holds up starting a run: every start reads the project store to find the run's project
+/// (FG-02c), so it would only be refused (#106 review).
+fn preflight_json(rows: &[preflight::Row], projects_row: Option<Value>) -> Value {
+    let mut ok = preflight::start_enabled(rows);
+    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
+    if let Some(row) = projects_row {
+        out.push(row);
+        ok = false;
+    }
+    json!({"rows": out, "start_enabled": ok})
+}
+
+/// Tests: make `dir` (created if needed) a project in the store under `data`, as the window's "Add project" does.
+/// Returns its `p_` id. Idempotent: the same folder again is the same project.
+#[cfg(test)]
+pub(crate) fn test_project(data: &Path, home: &Path, dir: &Path) -> String {
+    std::fs::create_dir_all(dir).unwrap();
+    paths::ensure_private_dir(data).unwrap();
+    crate::projects::store::Store::open(data, home).unwrap().add(dir, true).unwrap().project().id.clone()
+}
 
 /// The namespaced task id (`<run_id>.<task>`) and round of a workflow label such as `task.t1.r2`; `(None, None)` for
 /// a label that names no task (`verify.r1`, `kb.search`). The workflow namespaces ids as `${RUN}.${id}`.
@@ -1811,3 +2850,5 @@ fn task_meta(run_id: &str, label: &str) -> (Option<String>, Option<u32>) {
     let round = parts.rev().find_map(|p| p.strip_prefix('r').and_then(|n| n.parse().ok()));
     (Some(format!("{run_id}.{id}")), round)
 }
+
+mod preferences;

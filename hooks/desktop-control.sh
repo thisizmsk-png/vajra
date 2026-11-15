@@ -14,6 +14,10 @@
 #   hookSpecificOutput.additionalContext, audited, acked, and removed.
 # PreToolUse: a matching stop blocks the call (exit 2, reason on stderr).
 #
+# Workers are subagents (agent_id set). A Claude core worker (design 16.7) is a top-level session: it takes the
+# entries whose match is exactly {"session": <its session id>}, which the core writes only for core workers. Any
+# other main session exits 0 at once, as before.
+#
 # Fail-open: a missing control dir, a bad session_id, a malformed payload or
 # a missing jq all exit 0 with no output. The guard (pre-tool-use.sh) is a
 # separate hook and still fails closed on its own. Only a matched stop exits 2.
@@ -67,8 +71,8 @@ SID_RE='^[A-Za-z0-9-]{8,128}$'
 [[ "$SID" =~ $SID_RE ]] || exit 0
 D="$ROOT/$SID"
 [ -d "$D" ] || exit 0
-# A main session (no agent_id) never matches a worker entry.
-[ -n "$AID" ] || exit 0
+# A main session (no agent_id) never matches a worker entry. It goes on only as a core worker (design 16.7, the
+# check after match_entry below): a top-level session whose own dir holds an entry the core keyed by its session id.
 
 TOOL_S="${TOOL//[^A-Za-z0-9_.:-]/}"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -166,7 +170,10 @@ MATCH_JQ='
   | select($want == "stop" or ((.expires | s) as $x
            | ($x | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$")) and $x > $now))
   | select($want == "stop" or ((.source | s) as $src | ["human", "human-via-desktop", "lead-via-desktop"] | index($src)))
-  | if ($m.agent_id | s) != "" then
+  | if $aid == "" then
+      # A main session matches only a core worker entry: match is exactly {"session": <its own session id>}.
+      (if ($m | keys) == ["session"] and ($m.session | s) == $sid then "\($id) \($k) ok" else empty end)
+    elif ($m.agent_id | s) != "" then
       (if $m.agent_id == $aid then "\($id) \($k) ok" else empty end)
     elif ($m.cwd | s) != "" then
       "\($id) \($k) cwd \($m.cwd | gsub("[\r\n]"; ""))"
@@ -175,9 +182,18 @@ MATCH_JQ='
     else empty end
 '
 M_ID="" M_KIND=""
+# A core worker's queue entry over 64 KiB is never delivered (text is capped at 4000 chars, so a real one is far smaller).
+CORE_MAX_BYTES=65536
 match_entry() { # file want(stop|deliver) -> sets M_ID, M_KIND; rc 0 on match
-  local out mode rest c
-  out="$(jq -rs --arg want "$2" --arg now "$NOW" --arg aid "$AID" --arg at "$ATYPE" "$MATCH_JQ" "$1" 2>/dev/null)" || return 1
+  local out mode rest c sz
+  # A core worker reads only regular files: never a FIFO (a read would hang) and never through a symlink.
+  if [ -z "$AID" ]; then [ -f "$1" ] && [ ! -L "$1" ] || return 1; fi
+  if [ -z "$AID" ] && [ "$2" = deliver ]; then
+    sz="$(wc -c < "$1")" || return 1
+    sz="${sz//[^0-9]/}"
+    [ -n "$sz" ] && [ "$sz" -le "$CORE_MAX_BYTES" ] || return 1
+  fi
+  out="$(jq -rs --arg want "$2" --arg now "$NOW" --arg aid "$AID" --arg at "$ATYPE" --arg sid "$SID" "$MATCH_JQ" "$1" 2>/dev/null)" || return 1
   [ -n "$out" ] || return 1
   read -r M_ID M_KIND mode rest <<<"$out"
   [ "$mode" = ok ] && return 0
@@ -185,6 +201,44 @@ match_entry() { # file want(stop|deliver) -> sets M_ID, M_KIND; rc 0 on match
   c="$(cd "$rest" 2>/dev/null && pwd -P)"
   [ -n "$c" ] && [ "$c" = "$PCWD" ]
 }
+
+# A main session becomes a core worker when its own dir holds a stop, or an unexpired queue entry, matching
+# {"session": <its session id>}. Anything else (no such entry, a malformed or oversized one, a FIFO or a symlink)
+# keeps today's exit 0. grep reads only the regular files (a FIFO would hang it) and picks those that name the session
+# id (cheap); match_entry then checks each one exactly.
+core_worker() {
+  local f files=()
+  for f in "$D"/stops/*.json "$D"/queue/*.json; do
+    [ -f "$f" ] && [ ! -L "$f" ] && files[${#files[@]}]="$f"
+  done
+  [ "${#files[@]}" -gt 0 ] || return 1
+  while IFS= read -r f; do
+    case "$f" in
+      "$D"/stops/*) match_entry "$f" stop && return 0 ;;
+      "$D"/queue/*) match_entry "$f" deliver && return 0 ;;
+    esac
+  done < <(grep -lF -- "\"$SID\"" "${files[@]}" 2>/dev/null)
+  return 1
+}
+# Once a core worker, always one for this session: the marker keeps the nonce echo check and the tag warning on
+# between entries (bhishma #150). It holds the session id; a symlink, another owner or another id is not trusted.
+# It never makes an entry match: delivery and stop still need a session entry.
+CORE_MARK="$D/core-worker"
+core_marked() {
+  local s=""
+  [ -f "$CORE_MARK" ] && [ ! -L "$CORE_MARK" ] && [ -O "$CORE_MARK" ] || return 1
+  IFS= read -r s < "$CORE_MARK" || [ -n "$s" ] || return 1
+  [ "$s" = "$SID" ]
+}
+mark_core() {
+  local tmp="$D/.core-worker.$$.tmp"
+  printf '%s\n' "$SID" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CORE_MARK" 2>/dev/null && return 0
+  rm -f "$tmp"; return 1
+}
+if [ -z "$AID" ] && ! core_marked; then
+  core_worker || exit 0
+  mark_core || true
+fi
 
 case "$EV" in
   PreToolUse)

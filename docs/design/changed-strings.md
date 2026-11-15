@@ -136,3 +136,264 @@ Polish pass (stacked on PR #39).
 | Terminal | Home campaign rows | short tag; replaces the visible "Started outside this app. Continue it from your terminal.", which stays as the tooltip and for screen readers |
 | Workers; N of M done | Crew details for the Lead, a run or a task | new; per-status counts of the workers under the selection |
 | (Goal column removed) | History | the goal now leads the Campaign cell, with the slug under it |
+
+Shell B frame (T4, wave 1).
+
+| String | Where | Note |
+|---|---|---|
+| Director-General | view tab, project column card, palette | new; the UI name for the project's orchestrator (owner, 2026-11-08). Code ids stay `orchestrator`/`orch` |
+| Leading run ID / No run active | Director-General card | new; honest until the core's orchestrator contract (C3) lands |
+| N of M | Director-General card meter | criteria passing; "N of M criteria passing" for screen readers |
+| 1 needs you / N need you | project tab pill | new |
+| Stopped / Failed | project tab | the newest campaign's state |
+| Unsorted | project tab, last | new; tooltip "Runs started outside the app, or before it recorded their folder. Nothing is moved until you sort them." |
+| Add project | title bar + button | tooltip "Start a run in another folder; the folder becomes a project" |
+| Search or jump | title bar ⌘K field | was "Search or run" in the sidebar |
+| Board / Review | view tabs | Review is the old Run screen; `#/run` still opens it |
+| Workers; N of M active | project column | new |
+| Workers appear once a run starts | project column, no run | new |
+| Sessions; Search NAME sessions | project column | new; the search shows past four sessions |
+| Today / Yesterday / Fri 6 Nov / Earlier; "1 done", "1 stopped" | session day groups | new |
+| Backlog / Running / Review / Done; Needs you; Only what needs you | Board | new |
+| Read-only: cards move when the work and its checks do | Board | new |
+| Plan to approve / Question; N of M criteria | Board cards | new |
+| No campaign in this project yet; Start a run from the Director-General view; its tasks appear here. | Board, empty | new |
+| Campaign, Criteria, Workers, Folder, Worktree, Branch; N more in Review | Inspector | new |
+| No runs active / 1 run active / N runs active | status bar | new |
+| Phone not connected | status bar | new; opens Settings > Mobile |
+| Providers / Models and capacity / Mobile / Notifications / Appearance / Keyboard / Diagnostics, each with a one-line lede | Settings sections | new; only Providers (the real checks) and Keyboard are built, the rest say "Not built yet" |
+| Show or hide the project column / inspector; Go to project 1 to 9 | Settings > Keyboard, palette | new |
+| VIEW, PROJECT - Vajra | window title | was "SCREEN - Vajra" |
+| Project column / Inspector | status-bar and view-tab toggles (accessible name) | one constant name; aria-pressed carries the state. "Show/Hide …" stays in the tooltip and the palette commands (#86 review) |
+| (removed) "This screen is not built yet.", "Main" nav label, "Vajra" brand | old sidebar | the static nav sidebar is gone |
+| Could not read which folder each run used, so this project's runs cannot be listed. | Home inside a project, campaign list | new; shown with Try again when resume targets fail, instead of an empty project (#86 review) |
+
+"Lead" stays for now (orchestrator, 2026-11-08): the run-scoped "Lead" in the Crew tree, Review and the palette keeps
+its name until FG-02 replaces the run Lead with the per-project orchestrator. Those surfaces then become
+"Director-General" too, so nothing is renamed twice. Every user-facing label of the per-project orchestrator says
+"Director-General"; code and the contract keep `orchestrator`.
+
+Director-General conversation (FG-02, wave 2).
+
+| String | Where | Note |
+|---|---|---|
+| Director-General; Conversation N; New conversation | conversation header | new; the generation number answers "what does it remember" (ADR-15 §2.5) |
+| Waiting for a question / Answering a question / A run of this project is going | header state | the core's reason, sentence case |
+| You / Director-General / Tools used / Problem | transcript turn labels | new; tool use folds into "Tools used" |
+| Ask the Director-General; Ask about this project, or what to build next; Send; Stop answering | composer | new; ⌘↵ sends |
+| No questions yet; Ask what is happening in this project, or what should be built next. It can propose a run; only you can start it. | empty conversation | new |
+| The Director-General can talk once this project has a run started from this app. Start a run yourself; then you can ask it about the work. | project with no run | new; honest until the commands are keyed by project |
+| The Director-General is still answering. Ask again when it finishes, or stop it. | `lead_busy` | new |
+| Start a run?; Needs you; What the crew will be asked; Base; Fix rounds; From conversation N; Start run; Dismiss | run proposal card | new; the ask is shown in full, exactly as it will run |
+| The Director-General proposes; nothing runs until you start it. | above proposals | new (ADR-15 D4) |
+| Sent. Waiting for Vajra to confirm. / Run started. It shows on the board. / Dismissed. Nothing ran. / This proposal changed after you saw it. Nothing started; read it again. / No answer came back. Check the board before you try again. / Not done: REASON | proposal outcome | new; never says done before the core does (ADR-15 §3.2) |
+| Start a run yourself | header link; the launcher's own view (`#/p/<id>/launch`) | the Director-General view was the launcher in T4 |
+
+FG-08 settings (owner review).
+
+All new settings copy lives in `S.preferences` in `app/ui/strings.ts`; section titles and ledes live in
+`S.settings.sections`. Provider labels name integration targets only. The unavailable adapter label uses
+parentheses, not an em dash. Notification delivery retains its existing true preference default; item text
+starts off and OS permission remains separate.
+
+| String | Where | Note |
+|---|---|---|
+| General / Default editor and shell for supported new opens. Active sessions keep their settings. | Settings section | new section |
+| Choose global defaults or override them for this project. | Settings lede | saved preferences replace placeholder copy |
+| Graphite, in dark or light. Follow the system or choose an appearance. | Appearance lede | system or explicit choice |
+| Default agent and task capacity. Project overrides apply to new work; native capabilities and system limits still apply. | Models and capacity lede | new-launch scope |
+| Preference scope / Global defaults / Saved preferences / Overrides for NAME. Changes apply only after Save. | scope and landmark | project name is dynamic |
+| Global default / Project override / Unsaved change / Use global FIELD | fields | shows value source and inherit action |
+| Save or discard changes before switching scope. | scope | scope selector disabled while dirty |
+| Reading preferences… / Reload preferences / Save preferences / Discard changes / Reset this scope / Saved. | lifecycle/actions | reset touches selected scope only |
+| Theme / Follow system / Dark / Light | Appearance | saved choices |
+| Default editor / System default / Editor CLI / Terminal shell / Login shell / /bin/sh / /bin/bash / /bin/zsh | General | bounded choices; adapter consumption follows |
+| Launch preferences are saved for supported new opens. Running sessions keep their launch settings. | General hint | no action on save |
+| Default agent / Claude Code / Codex CLI (availability check required) | provisional provider selector | integration targets; replaced by provider track |
+| Model: MODEL. Additional agent and model selection requires a supported adapter. / Native CLI default | Models | honest unavailable controls |
+| Concurrent workers / Fix rounds / Read-only guard caps: N active run, M workers per run. Preferences cannot raise these limits. | Models and capacity | counts from read-only caps |
+| Defaults apply to new tasks. System limits and native permissions still apply. | capacity hint | active runs retain settings |
+| OS notifications / Include item text | Notifications | independent delivery/text preferences |
+| Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply. | Notifications hint | no implied OS grant |
+| Search shortcut / Settings shortcut | Keyboard | bounded remapping; remaining shortcuts unchanged |
+| Action STATE · ID · REASON / Retry same action | receipts | reason suffix only when present; retry retains ID |
+| The core returned unsupported preferences. Update the desktop and reload. / Preferences could not be read. The saved file was preserved. | read errors | no automatic destructive reset |
+| The action outcome is not confirmed. Retry the same action or reload to review. / Save outcome is unconfirmed. Retry the same action or reload to review. | uncertain action | no fresh action ID |
+| Preferences changed in another window. Reload and review before saving again. | conflict | no silent retry |
+| Action STATE. Reload and review the saved values before another action. / Unsupported preferences response. Reload before another action. | receipt/recovery errors | no new write before review |
+| The saved agent or model needs a supported adapter. Choose the native CLI default in Settings before starting. | launcher | prevents unsupported adapter fallback |
+
+Terminal dock (standalone component, `app/ui/src/terminal/`).
+
+| String | Where | Note |
+|---|---|---|
+| Terminal, Terminals, New terminal, Hide terminal, Terminal here | dock bar and the "Terminal here" action | new |
+| The shell ended. / The shell ended with code N. / The shell was stopped. | banner over an ended terminal | new |
+| Start a new shell | button on an ended terminal | new |
+| No terminals are open. A terminal runs your own shell in this project folder, as you. It is not sandboxed and agents cannot see it. | empty state | new; states plainly that it is outside the guard |
+| This folder is not a project or one of its worktrees, so a terminal cannot start there. (and the other open errors) | error state | new; one line per core error code |
+| The shell is not reading input right now. What you typed was dropped. | transient note | new |
+
+FG-09 providers in the UI (Settings > Providers, Start, Resume, Run, Crew).
+
+| String | Where | Note |
+|---|---|---|
+| Default agent / Claude Code / Codex CLI (availability check required) | Models and capacity | removed; the one provider choice is now "Agent for new runs" under Providers |
+| Agent for new runs | Settings > Providers | new; replaces "Default agent", scoped global or per project |
+| New runs in this scope use this agent. A run keeps the agent it started on, and Resume continues on it. | under the choice | new |
+| NAME (not installed) / NAME (not tested with this version) | agent choices | new; not installed cannot be chosen, untested stays selectable |
+| Agents on this Mac / Checking the agent CLIs / Could not check the agent CLIs. | provider panel | new |
+| This build cannot read the agent check from the core. Update the desktop app. / The agent check answered something this build cannot read. | provider panel errors | new (another schema major, or a malformed answer) |
+| Version, Path, Login, Not read, Not on your PATH, Tested, Not tested with this version, Version not compared, Tested with RANGE | provider facts | new |
+| Signed in / Signed out / Could not tell / Not installed | login state | new; the CLI's own check |
+| Sign in with NAME itself. Vajra never handles the login. | signed out | new |
+| KEY is set where Vajra was opened. Vajra does not pass it to NAME; runs use your NAME login. | billing note | new; a variable name only, never a value |
+| Available: LIST. / Stop waits for the next tool call. / Stop ends the process. | what a provider can do | new |
+| Attach terminal, Transcript, Inspect, Message, Redirect, Stop, Resume, Vajra workflow, Start | disabled controls, with the provider's own reason beside each | new |
+| NAME does not support this. | an off control with no reason from the core | new |
+| Runs on NAME | Start, Run, Crew | new; shown only for a provider other than Claude |
+| NAME is not installed, so this run cannot start. Install it, or choose another agent in Settings, Providers. | Start | new; Start is off, nothing else is tried |
+| The saved agent "ID" is not one this build can run. Choose another in Settings, Providers. | Start | new |
+| NAME is not installed, so this run cannot be resumed here. | Resume, beside the disabled button | new |
+| Model: MODEL. Choosing a model needs a supported adapter. The agent is chosen under Providers. | Models and capacity | changed from "Additional agent and model selection requires a supported adapter." |
+| The saved model needs a supported adapter. Choose the native CLI default in Settings before starting. | launcher | changed: an agent other than Claude no longer blocks Start |
+| NAME cannot take a message while it runs. / NAME cannot be redirected while it runs. / NAME has no inspect step Vajra can read. / NAME does not write a transcript Vajra can read. / NAME does not run the Vajra workflow, so there is no crew to show. / Stop ends the NAME process. There is no hand-off at the next tool call. / NAME is not installed. / This build cannot run NAME. | limit codes (providers.md stable codes) | new; the core's own sentence shows only for a code not in this list |
+| Uses your Claude Code login / Uses your Codex login | login route codes | new |
+| The login check did not finish in time, so Vajra cannot tell. / The login check answered something Vajra could not read, so it cannot tell. | login detail codes | new |
+
+Settings keyboard (PR 100 review).
+
+| String | Where | Note |
+|---|---|---|
+| Use global shortcuts (both) | Settings > Keyboard, project scope | replaces the two per-shortcut "Use global ..." buttons: shortcuts are one override, so the one control says it resets both (PR 100 review) |
+
+Settings General (PR 100 review): the editor and shell choices are hidden until a new terminal or editor reads them.
+
+| String | Where | Note |
+|---|---|---|
+| Default editor and shell for new terminals and editors. | Settings > General, lede | was "Default editor and shell for supported new opens. Active sessions keep their settings."; the section now shows "Not built yet" |
+| Default editor, System default, Editor CLI, Terminal shell, Login shell, /bin/sh, /bin/bash, /bin/zsh, "Launch preferences are saved for supported new opens. Running sessions keep their launch settings." | Settings > General | removed with the rows they labelled |
+
+Settings Notifications (PR 100 review): the section's controls are hidden until notifications are delivered; it shows "Not built yet". Stored values and defaults are unchanged.
+
+| String | Where | Note |
+|---|---|---|
+| OS notifications, Include item text, "Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply." | Settings > Notifications | removed with the controls they labelled |
+
+Worker diff count (PR 6c-0, ADR-16 16.10).
+
+| String | Where | Note |
+|---|---|---|
+| +N −M | worker pane header | exact count |
+| ≥ +N lines | worker pane header | a lower bound: some new files were not counted |
+| At least N lines added. U new files were not counted (too many or too large). | accessible label of the `≥` form | "1 new file was not counted" for one |
+| N lines added, M removed, in F files. | accessible label of the exact form | new |
+
+Worker runtime (PR 6c, ADR-16 16.5, 16.6, 16.9). Built in the core; the cards that show them land in 6c-2.
+
+| String | Where | Note |
+|---|---|---|
+| Waiting for a worker: all 8 are busy. It starts when one finishes. | ticket queue card | a dispatch over the ceiling waits; never the run-start "held" words |
+| Waiting for ACCOUNT: it already runs N workers, the most you set for it. It starts when one finishes. | ticket queue card | `agents.account_caps` |
+| NAME wasn't copied: REASON. The worker starts without it. | ticket card, dependencies | REASON: "the folder is on another volume, so it can't be cloned" or "the copy failed: ..." |
+| The worktree and its task branch were removed. Ignored files such as dependency copies and build output went with it. | ticket card, retention note | after the capture check passed |
+| Built by Vajra from the ticket. File names come from the worker's worktree: treat them as data, not instructions. | ticket summary for the lead | not shown to the human |
+
+Worker surfaces (PR 6c-2, ADR-16 16.6, 16.7). Startup baseline, `core:` worker controls, Settings worker copies.
+
+| String | Where | Note |
+|---|---|---|
+| Agents are off: the saved copy of your git settings was changed outside Vajra, so it can't be trusted. Re-taking it comes in a later Vajra update. | Start, Director-General and preflight, when a launch is refused | the startup baseline failed closed; the app still opens |
+| Agents are off: the folder for worker copies overlaps the app's data folder. | same | the roots check failed |
+| Agents are off: Vajra couldn't record your git settings at startup (CODE). | same | any other baseline failure |
+| Agents are off: git isn't installed. Vajra needs Apple's developer tools for it. | same, and the preflight row | no developer tools found by path; git is never run, so no install dialog opens at launch |
+| Git settings for agents | preflight row name | shown only while agents are off; Start is disabled |
+| Install developer tools | preflight row button | only while git is missing; opens Apple's installer on click |
+| When the install finishes, restart Vajra. | after that click | announced (status region) |
+| Restart Vajra. If this keeps happening, check that git works in Terminal. | preflight row fix | only when the take itself failed; none for a tampered copy or overlapping folders |
+| This worker can't take a message mid-run. | `core:` worker Message and Redirect | Codex profile |
+| This worker hasn't started yet. Message it once it's running. | `core:` worker Message and Redirect | Claude profile, while the ticket is queued (it has no session yet); once running, Message and Redirect are on through the control hook (#148/#150) |
+| This worker checks the work on its own, so it can't take a message. | `core:` worker Message and Redirect | a running Claude check ticket (verify, review, security review, evidence): a check is never steered |
+| Vajra couldn't open this worker's message channel. Stop it and run it again to message it. | `core:` worker Message and Redirect | a running Claude task whose control dir couldn't be opened before it started |
+| Stop ends this worker at once; its uncommitted work stays in its worktree. | `core:` worker Stop note | both profiles (group kill); hidden once Stop is off |
+| This worker has finished. | `core:` worker Message, Redirect and Stop | any profile, once the ticket ended (done, failed or stopped): all three are off |
+| Changes / No changes yet. / and N more file(s) | Crew, `core:` worker pane | its changed files from the core's diff count; at most 200 listed |
+| Controls / Message for this worker / Message / Redirect / Stop | Crew, `core:` worker pane | Message and Redirect are off with the core's reason (above) when its harness can't take one |
+| Sent. It reaches the worker at its next step. / Not sent: WHY | after Message or Redirect | announced (status region) |
+| Stop this worker? | Stop confirm dialog title | the body is the Stop note |
+| Stopped. / Not stopped: WHY | after Stop | announced (status region) |
+| This worker's controls aren't available. | Crew, `core:` worker pane | the node's controls were missing or malformed: nothing is offered |
+| Worker copies | Settings > General panel title | new |
+| Each worker edits its own copy of your repo. A copy stays until its work is merged, or until you discard it. | panel lede | |
+| N copies, up to SIZE on disk. | panel size line | "1 copy" for one; allocated space |
+| N copies, at least SIZE on disk. Too many files to count them all. | panel size line | the walk stopped at its entry cap (1,000,000), so SIZE is a lower bound |
+| Copies share unchanged files with your repo where the disk allows, so the real space used is often less. | under the size line | copy-on-write clones count in full |
+| No worker copies on disk. | panel, empty | Clean up is off |
+| Clean up | panel button | |
+| Removes only copies whose work is merged and that hold nothing else. Copies with unmerged work stay. | beside the button | |
+| Removed N copies. / Nothing removed: no copy is proven merged with nothing else in it. | after Clean up | announced (status region) |
+| Could not measure the copies. / Could not clean up. | panel errors | |
+
+Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a missing or broken CLI shows the vendor's own commands and docs address as text.
+
+| String | Where | Note |
+|---|---|---|
+| Set up | panel title | |
+| Agent CLIs Vajra knows how to find. Install a missing one with its vendor's own steps, then sign in with the CLI itself. Vajra never handles the login. | panel lede | |
+| Looking for agent CLIs / Could not look for the agent CLIs. | loading and error | |
+| This build cannot read the setup check from the core. Update the desktop app. / The setup check answered something this build cannot read. | contract errors | |
+| Installed / Installed. Vajra can't run it as an agent yet. / Broken / Install it yourself | row state | the second is ADR-16 N5 |
+| It is on your PATH but did not report a version. Reinstall it with the vendor's steps. | broken row | Repair in step 1 is the vendor's steps |
+| Run one of these in a terminal. One-click install comes after a security review of each source. | install-it-yourself row | |
+| Homebrew / npm / Vendor script | command labels | |
+| Docs / "NAME install steps" | visible and accessible label of the vendor docs address | shown as text, not a link |
+| "Sign in to NAME" / Opens the CLI's own sign-in in a terminal tab. | sign-in button and hint | |
+| "Sign in: NAME" | terminal tab label | never saved in the tab layout |
+| Vajra engine scripts / Installed / Not installed / Run this in a terminal to install them. | engine-scripts row | detection only (ADR-16 N13) |
+| Phone not connected / Not built yet (removed) | status bar; Settings > Mobile, Notifications, Diagnostics | the button and the three empty sections are hidden until they work; the section titles and ledes stay in strings.ts for their return |
+| "run" for "campaign", "workers" for "crew" (Start a run / What should the workers do? / Runs / Past runs / Workers) | every screen | wording only; code ids, routes and file names keep the old words |
+| Claude Code / Engine self-check / Safety hooks / OS sandbox / Git / Python 3 / OpenSSL / Run workflow | check names in the pre-flight list | a check with no plain name shows as the core sent it |
+| Ready / Question (were ready / question) | Review, task list status | task statuses the list had no wording for now use the shared status words, so every status has one casing |
+| A run cannot start until the failing check below passes. / ...the failing checks below pass. | beside the disabled Start run button | shown only when the checks are what blocks a start; the button points to it for screen readers |
+| Engine id (row removed) | Crew, details of a run, task or check | Only a worker's own pane shows the engine id now, as DESIGN.md says. No wording changed. |
+| A run cannot start until the checks below finish. | beside the disabled Start run button | shown when the checks could not run at all; the button points to it for screen readers |
+| Checked at 2:03:34 AM (was 02:03:34 AM) | "Checked at" and "Tried again at" lines | the hour is no longer padded; seconds stay so two checks in one minute read differently |
+| "MODEL via PROVIDER" (was the two joined by a middle dot), for example "Default model via Claude Code", "DeepSeek V3.2 via OpenRouter" | every place a model is named with its provider: project column, Board, Review, Crew, worker header, proposal, the model pickers, Settings > Providers | DESIGN.md bans meta strings joined with middle dots; one helper writes the pair |
+| "BILLING, KEY NAME ..." (was joined by a middle dot), for example "Billing: can't tell, OPENAI_API_KEY set in the CLI config" | billing line under a proposed worker | same rule |
+| Back to NAME / Back | top of the Settings section list | the visible way out of Settings, which shows no view tabs; opens the project's Director-General view |
+| Goal, as the workers will be asked (was What the workers will be asked) / Threads / "N threads: 2 Backend, 1 Docs" | Director-General plan card | the threads line counts the proposal's workers by owner; the table below keeps model, effort and why |
+| Ping rule / "At most N pings an hour. Arrivals within M min are one ping. On for ..." / Change / Save rule / Most pings in an hour / Group arrivals within / Don't group / "M min" / Ping me for / Decisions / Questions / Blocked tasks (with one-line hints) / The rule only decides when you are pinged... / Saved. New arrivals follow this rule. / The ping rule could not be read... | top of the Inbox | the rule is global; it cannot start or approve anything |
+| Recent pings / No pings since Vajra opened. / Pinged / Not pinged | Inbox, under the rule | session only |
+| "A decision needs you in P" / "A worker has a question in P" / "A task is blocked in P" / "N things need you: ..." | ping toast and the recent-pings list | counts and project names only, never an item's text |
+| "Pinged because your rule is on for ..." / "Grouped: they arrived within M min of the first." / "Held until now: you allow N pings an hour." / "Not pinged: notifications are off." / "Not pinged: your rule is off for ..." | under every ping and every quiet arrival | why it pinged, or why not |
+| Run to start / Review in Director-General | Inbox card for a run the Director-General proposes | it starts only from the Director-General view |
+
+6d2d: why an ended core run can't be resumed (the `why` codes from `core_runs`). Not shown yet: the core run card
+that shows them lands in its own PR, which runs the anti-slop gate. Proposed wording, for approval:
+
+| String | Where | Note |
+|---|---|---|
+| The project folder is gone, so this run can't continue. | run card, `cwd_missing` | |
+| The lead's agent CLI isn't installed any more. Install it, then try again. | run card, `provider_not_installed` | |
+| This provider can't lead a run yet. | run card, `lead_unverified` | the harness A lead stays off until it is spiked |
+| This run's seats can't be read, so it can't continue. | run card, `seats_unreadable` | |
+| This run's plan can't be read, so it can't continue. | run card, `plan_unreadable` | |
+| The app closed while this run was going. | run card, ended `lead_lost` with reason `app_restarted` | |
+| This run's lead couldn't start. | run card, ended `lead_lost` with reason `start_failed` | the start was recorded, then the lead never launched |
+
+One-click install (ADR-17 17b). Only a source that passed its security review gets the sheet; every other row keeps the step-1 wording and has no Install button.
+
+| String | Where | Note |
+|---|---|---|
+| Not installed. Install it in one click, or run one of these in a terminal. | missing row, verified source | |
+| The last install didn't match what was approved. / The last install couldn't be undone. / The last upgrade failed partway. / The last upgrade ran too long and was stopped. + "Repair it, or reinstall it with the vendor's steps." | broken row after a one-click install | the Broken mark's reason (bhishma condition 1) |
+| "Plan a one-click install of NAME" / Checking the pinned package and your tools / Could not plan the install. | row button, loading, error | planning installs nothing |
+| "One-click install: NAME" | sheet title | |
+| Command / From / Version / Tools / Installs into / Registry for its scope / Also installs or upgrades / Needs admin | sheet fields | the exact argv; the tarball shows as "<verified tarball>" |
+| owned by you | tool row | a tool in a Homebrew prefix the user owns (condition 4) |
+| Your npm config (.npmrc) applies to this install. / The tool folder it uses belongs to you, not to the system. / Homebrew installs its current version, not a pinned one. / Your Homebrew settings (brew.env) apply to this install. | sheet notes | conditions 5 and 6 |
+| This folder belongs to the system, so installing needs admin rights. / belongs to another user. / You can't write to this folder. / has too many files to check. + "Run the command yourself in a terminal." | needs-admin line | no Install button then (ADR-17 rule 5) |
+| "Install NAME" / "Repair NAME" / Installs exactly this. If anything changes before it runs, you'll be asked again. | consent button and hint | Repair on a broken row |
+| Installing / "NAME install output" | while running; accessible label of the live output | the `setup-<id>` stream |
+| Installed / The install failed. Nothing changed. / The install didn't match what was approved, so it was removed again. / The install couldn't be confirmed or undone. It stays marked Broken until a clean install. | result | |
+| Install-it-yourself reasons: not reviewed, unpinned packages, install scripts, package didn't match its pin, no npm, no Homebrew, no ready-built package, script doesn't check its download; otherwise "This one can't be installed in one click here." Each ends "Install it yourself with the steps above." | sheet, when the core answers manual | |

@@ -2,13 +2,19 @@ name: perf
 
 # Per-merge memory check for Vajra Desktop (H0). PRs: idle x3. Main: idle x3 plus a 10 minute growth slope.
 # Blocking: the first macOS run measured idle at 170.9 MiB, so a regression fails the check.
+# TEMPORARY (owner, 13 Nov): restore perf jobs on every PR once batch-3 is on main.
+# Until then the perf jobs (memory, postload, typing-lag) run only on PRs whose base is main, on pushes to main, on the
+# nightly schedule and by hand (workflow_dispatch), so the gate still guards main. A PR into an integration branch gets
+# the test jobs in ci.yml only. To restore: delete the `branches: [main]` line under pull_request.
 on:
   push:
     branches: [main]
     paths: ["app/**", ".github/workflows/perf.yml"]
   pull_request:
+    branches: [main]
     types: [opened, synchronize, reopened, labeled]
     paths: ["app/**", ".github/workflows/perf.yml"]
+  workflow_dispatch:
   schedule:
     - cron: "17 5 * * *"
 
@@ -34,7 +40,9 @@ jobs:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
       - name: Gate unit tests
-        run: python3 -m unittest discover -s app/bench/ci
+        run: |
+          python3 -m unittest discover -s app/bench/ci
+          python3 -m unittest discover -s app/bench/ade
       - name: Build the app
         working-directory: app/ui
         run: |
@@ -65,6 +73,54 @@ jobs:
             idle.json
             growth.json
 
+  # Typing lag with 5 agents streaming a fake load, keystroke to paint in the runner's real Chrome: p95 must be at or under
+  # 50 ms (app/ui/scripts/typing-lag.mjs). Report-only for its first week (see the step). Measured 17-22 ms locally.
+  # The jsdom test (app/ui/tests/typingLag.test.tsx) stays as a fast first check and is report-only (continue-on-error).
+  typing-lag:
+    if: github.event.action != 'labeled'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        working-directory: app/ui
+        run: npm ci --no-audit --no-fund
+      - name: Typing lag, jsdom (report only)
+        working-directory: app/ui
+        continue-on-error: true
+        env:
+          VAJRA_LAG_GATE: "1"
+        run: npx vitest run tests/typingLag.test.tsx
+      # REPORT-ONLY until 2026-11-20. It checks what streaming ADDS at p95 over the idle control (budget 20 ms), not an
+      # absolute figure: the runner's own rendering costs about 69 ms with nothing streaming. The first runner run (13 Nov)
+      # added about 120 ms, so expect this to fail until the transcript's layout cost is fixed (see the profile step). Remove
+      # continue-on-error from 20 Nov if a week of runs shows the delta is stable.
+      - name: Typing lag gate, real browser
+        working-directory: app/ui
+        continue-on-error: true
+        run: |
+          npx vite build -c vite.lag.config.ts
+          node scripts/typing-lag.mjs --gate --out "$RUNNER_TEMP/typing-lag.json"
+          echo '### Typing lag (real Chrome, 5 agents streaming)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const r=require(process.argv[1]);delete r.keys_ms;console.log(JSON.stringify(r,null,1))' "$RUNNER_TEMP/typing-lag.json" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      # Where the main thread's time goes on this runner, streaming against idle (Chrome's CPU profiler). Report only, always.
+      - name: Typing lag profile (report only)
+        working-directory: app/ui
+        continue-on-error: true
+        run: |
+          node scripts/typing-lag.mjs --profile --out "$RUNNER_TEMP/typing-lag-profile.json"
+          echo '### Typing lag profile: self time in ms, streaming vs idle' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const r=require(process.argv[1]);const m=new Map(r.top_self_time_idle.map(t=>[t.name,t.ms]));for(const t of r.top_self_time_streaming)console.log(String(t.ms).padStart(8),String(m.get(t.name)??"-").padStart(8),t.name)' "$RUNNER_TEMP/typing-lag-profile.json" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
   # Post-load idle (a scripted 10,000-line stream, then idle at +2 and +10 minutes): a second build plus ~15 minutes, so it
   # does not run on every PR. It runs on push to main, nightly, on a PR that changes app/ui/** or app/bench/**, or when the
   # PR has the "perf" label. Reported only (warnings and the job summary); it never fails the check.
@@ -86,7 +142,7 @@ jobs:
         run: |
           run=false
           case "$EVENT" in
-            push|schedule) run=true ;;
+            push|schedule|workflow_dispatch) run=true ;;
             pull_request)
               case ",$LABELS," in *,perf,*) run=true ;; esac
               if git diff --name-only "$BASE"...HEAD | grep -qE '^app/(ui|bench)/'; then run=true; fi ;;

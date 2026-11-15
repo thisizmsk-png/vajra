@@ -27,6 +27,7 @@
 #   vajra-campaign.sh close [slug] [--status done|abandoned]
 #   vajra-campaign.sh report --campaign slug --bytes N --check FNV32 --base64 B64
 #   vajra-campaign.sh archive-evidence <slug> <evidence-dir> <head> <setup-json>
+#   vajra-campaign.sh unlock <slug> --if-stale
 #
 # Exit codes: 0 ok, 1 error, 2 usage, 3 signature/integrity failure.
 # Bash 3.2 compatible (macOS /bin/bash).
@@ -45,7 +46,6 @@ VAJRA_DIR="${HOME}/.claude/vajra"
 ROOT="${VAJRA_DIR}/campaigns"
 KEY_FILE="${VAJRA_DIR}/.hmac-key"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ACTIVE_FILE="${ROOT}/.active"
 SCHEMA="vajra.campaign/v1"
 
 die()   { echo "vajra-campaign: $*" >&2; exit 1; }
@@ -64,12 +64,45 @@ sanitize_slug() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | tr -s '-' | sed 's/^-*//; s/-*$//' | cut -c1-64
 }
 
+# N17 (ADR-16 16.5a): Vajra Desktop marks a campaign whose evidence ran outside the Vajra guard at create, in the two
+# parts only create sets: the slug ends -og, or the goal starts with the marker. Either one counts, and a goal that
+# can't be read counts too (when unsure, show the label).
+OG_MARK="[evidence ran outside the Vajra guard]"
+OG_LABEL="evidence ran outside the guard"
+og_marked() {
+  case "$1" in *-og) return 0 ;; esac
+  local g; g="$(jq -r '.goal // ""' "$2/campaign.json" 2>/dev/null)" || return 0
+  case "$g" in "$OG_MARK"*) return 0 ;; esac
+  return 1
+}
+
 valid_feature_id() {
   printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 }
 
 sha256_file() { "$OPENSSL" dgst -sha256 -r < "$1" | awk '{print $1}'; }
 sha256_str()  { printf '%s' "$1" | "$OPENSSL" dgst -sha256 -r | awk '{print $1}'; }
+
+# The active-campaign pointer is per repo, so two runs in different repos never see each other's campaign
+# (the SessionStart banner, `/vajra continue`, any command run without a slug). The repo is the git common dir
+# of the cwd, so every worktree of one repo shares a pointer; the key is its sha256 (first 16 hex), the same
+# project id the knowledge ledger uses. Outside a repo the key is "global". The pre-repo `.active` file is
+# never read.
+repo_key() {
+  local d
+  d="$(git -c core.fsmonitor= rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || d=""
+  # Only one absolute path counts. Git before 2.31 does not know --path-format: it echoes the option as a line of
+  # its own and still exits 0, which would give every repo root the same key (#84 review).
+  case "$d" in /*) ;; *) d="" ;; esac
+  case "$d" in *"
+"*) d="" ;; esac
+  if [ -z "$d" ]; then # git before 2.31: a relative common dir, made absolute here
+    d="$(git -c core.fsmonitor= rev-parse --git-common-dir 2>/dev/null)" || d=""
+    [ -n "$d" ] && { d="$(cd "$d" 2>/dev/null && pwd)" || d=""; }
+  fi
+  if [ -n "$d" ]; then sha256_str "$d" | cut -c1-16; else echo global; fi
+}
+ACTIVE_FILE="${ROOT}/.active-$(repo_key)"
 
 load_key() {
   if [ ! -s "$KEY_FILE" ]; then
@@ -111,7 +144,63 @@ verify_state() {
   return 0
 }
 
-LOCK=""
+LOCK=""; LOCK_PID=""; LOCK_START=""
+# The process start time, the second half of the owner's identity: a recycled pid has a different start time.
+proc_start() { TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
+# owner.json lives inside the lock dir, so every release removes it first and only then the dir (rmdir alone would fail).
+release_lock() { [ -n "$LOCK" ] || return 0; rm -f "$LOCK/owner.json" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; return 0; }
+# Reclamation and a writer's normal exit hand the lock off under one flock on <campaign>/.lock.reclaim, so the lock
+# generation an unlocker checked cannot be released and retaken underneath it. An flock dies with its holder (a SIGKILL
+# or crash frees it), so no stale mutex can strand a campaign. The helper takes the flock; in "release" mode it removes
+# the lock (owner.json first, then the dir), in "unlock" mode it execs the given command with the flock still held.
+RECLAIM_PY='
+import fcntl, json, os, sys, time
+d, wait, mode = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+try:
+    fd = os.open(d + "/.lock.reclaim", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+except OSError:
+    sys.exit(1)
+end = time.time() + wait
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except OSError:
+        if time.time() >= end:
+            sys.stderr.write("vajra-campaign: another unlock or release is running; not removed\n")
+            sys.exit(1)
+        time.sleep(0.05)
+if mode == "release":
+    # Only the generation this writer took: the helper can outlive a killed writer and wake after the lock was
+    # reclaimed and retaken, and it must then leave the new holder lock alone.
+    lk = d + "/.lock"
+    try:
+        o = json.load(open(lk + "/owner.json"))
+    except (OSError, ValueError):
+        sys.exit(0)
+    if str(o.get("pid")) != sys.argv[4] or o.get("start") != sys.argv[5]:
+        sys.exit(0)
+    try:
+        os.unlink(lk + "/owner.json")
+    except OSError:
+        pass
+    try:
+        os.rmdir(lk)
+    except OSError:
+        pass
+    sys.exit(0)
+os.set_inheritable(fd, True)
+os.environ["VAJRA_RECLAIM_HELD"] = "1"
+os.execv(sys.argv[4], sys.argv[4:])
+'
+# If the helper is unavailable or the flock stays busy the lock is left behind (its owner is gone, so
+# unlock --if-stale can clear it) rather than released unguarded.
+release_lock_serialized() {
+  [ -n "$LOCK" ] || return 0
+  [ -x "$PYTHON3" ] || { release_lock; return 0; }
+  "$PYTHON3" -I -c "$RECLAIM_PY" "${LOCK%/.lock}" 5 release "$LOCK_PID" "$LOCK_START" 2>/dev/null
+  return 0
+}
 lock() {
   local i=0
   LOCK="$1/.lock"
@@ -119,7 +208,42 @@ lock() {
     i=$((i+1)); [ "$i" -ge 100 ] && die "campaign is locked ($LOCK); remove it if no other run is active"
     sleep 0.1
   done
-  trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+  trap release_lock_serialized EXIT
+  LOCK_PID="$$"; LOCK_START="$(proc_start $$)"
+  jq -n --argjson pid "$LOCK_PID" --arg start "$LOCK_START" '{pid: $pid, start: $start}' > "$LOCK/owner.json" 2>/dev/null || true
+}
+
+# unlock <slug> --if-stale: remove a lock whose recorded owner is gone. A lock with no readable owner.json is never
+# removed (a person decides), and an owner that is still running with the same start time keeps it.
+cmd_unlock() {
+  local slug="" stale=0 pid start cur
+  while [ $# -gt 0 ]; do case "$1" in --if-stale) stale=1; shift ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
+  [ -n "$slug" ] && [ "$stale" -eq 1 ] || usage
+  [ "$(sanitize_slug "$slug")" = "$slug" ] || die "invalid campaign slug: $slug"
+  DIR="${ROOT}/${slug}"; [ -d "$DIR" ] || die "campaign not found: $slug"
+  LOCK="$DIR/.lock"
+  # Take the reclaim flock for the whole check-and-delete: the helper re-runs this command with it held.
+  if [ -z "${VAJRA_RECLAIM_HELD:-}" ]; then
+    [ -x "$PYTHON3" ] || die "python3 is required for unlock"
+    exec "$PYTHON3" -I -c "$RECLAIM_PY" "$DIR" 10 unlock "${BASH:-/bin/bash}" "$0" unlock "$slug" --if-stale
+  fi
+  [ -e "$LOCK" ] || { echo "no lock held for $slug"; LOCK=""; return 0; }
+  { [ -d "$LOCK" ] && [ ! -L "$LOCK" ]; } || die "lock is not a plain directory ($LOCK); not removed"
+  [ -f "$LOCK/owner.json" ] && [ ! -L "$LOCK/owner.json" ] || die "lock has no owner record ($LOCK); not removed (remove it yourself if no run is active)"
+  pid="$(jq -r '.pid // empty' "$LOCK/owner.json" 2>/dev/null)"; start="$(jq -r '.start // empty' "$LOCK/owner.json" 2>/dev/null)"
+  case "$pid" in ""|*[!0-9]*) die "lock owner record is unreadable ($LOCK); not removed" ;; esac
+  [ -n "$start" ] || die "lock owner record is unreadable ($LOCK); not removed"
+  cur="$(proc_start "$pid")"
+  if [ -z "$cur" ]; then
+    # ps shows nothing: dead, unless the pid still answers (ps itself failed), which is treated as live.
+    kill -0 "$pid" 2>/dev/null && die "lock owner $pid may still be running; not removed"
+  elif [ "$cur" = "$start" ]; then
+    die "lock owner $pid is still running; not removed"
+  fi
+  release_lock || true
+  [ ! -e "$LOCK" ] || die "lock could not be removed ($LOCK)"
+  echo "stale lock removed for $slug"
+  LOCK=""
 }
 
 active_slug() { [ -f "$ACTIVE_FILE" ] && tr -d ' \r\n' < "$ACTIVE_FILE"; }
@@ -201,16 +325,17 @@ cmd_create() {
 cmd_list() {
   [ -d "$ROOT" ] || { echo "no campaigns"; return 0; }
   load_key
-  local act d s mark sig any=0
+  local act d s mark sig og any=0
   act="$(active_slug || true)"
   for d in "$ROOT"/*/; do
     [ -d "$d" ] || continue
     d="${d%/}"; s="$(basename "$d")"; DIR="$d"; any=1
     mark=" "; [ "$s" = "$act" ] && mark="*"
     if verify_state "$d"; then sig="ok"; else sig="INVALID"; fi
-    printf '%s %-32s %-10s %6s  sig:%s  %s\n' "$mark" "$s" \
+    og=""; og_marked "$s" "$d" && og="  $OG_LABEL"
+    printf '%s %-32s %-10s %6s  sig:%s  %s%s\n' "$mark" "$s" \
       "$(jq -r '.status // "?"' "$d/campaign.json" 2>/dev/null)" "$(counts 2>/dev/null || echo '?')" "$sig" \
-      "$(jq -r '.updated // ""' "$d/campaign.json" 2>/dev/null)"
+      "$(jq -r '.updated // ""' "$d/campaign.json" 2>/dev/null)" "$og"
   done
   [ "$any" -eq 1 ] || echo "no campaigns"
 }
@@ -220,13 +345,15 @@ cmd_show() {
   while [ $# -gt 0 ]; do case "$1" in --json) json=1; shift ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
   resolve "$slug"; load_key
   local sig=true; verify_state "$DIR" || sig=false
+  local og=false; og_marked "$SLUG" "$DIR" && og=true
   if [ "$json" -eq 1 ]; then
     jq -n --slurpfile c "$DIR/campaign.json" --slurpfile f "$DIR/features.json" \
-      --arg p "$(tail -n 20 "$DIR/progress.md")" --argjson sig "$sig" \
-      '{campaign: $c[0], features: $f[0].features, progress_tail: $p, signature_valid: $sig}'
+      --arg p "$(tail -n 20 "$DIR/progress.md")" --argjson sig "$sig" --argjson og "$og" \
+      '{campaign: $c[0], features: $f[0].features, progress_tail: $p, signature_valid: $sig, evidence_outside_guard: $og}'
     return 0
   fi
   echo "campaign: $SLUG  status: $(jq -r .status "$DIR/campaign.json")  passing: $(counts)  signature: $([ "$sig" = true ] && echo ok || echo INVALID)"
+  [ "$og" = true ] && echo "label: $OG_LABEL. A pass here is never plain Verified."
   echo "goal: $(jq -r .goal "$DIR/campaign.json")"
   echo "features:"
   jq -r '.features[] | "  [\(if .passes then "x" else " " end)] \(.id)  \(.description)"' "$DIR/features.json"
@@ -482,6 +609,7 @@ case "$cmd" in
   close)      cmd_close "$@" ;;
   report)     cmd_report "$@" ;;
   archive-evidence) cmd_archive_evidence "$@" ;;
+  unlock)     cmd_unlock "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "vajra-campaign: unknown command: $cmd" >&2; usage ;;
 esac

@@ -113,7 +113,7 @@ fn inbox_age_and_order_are_per_item_and_survive_campaign_activity() {
 #[test]
 fn inbox_skips_malformed_entries_and_an_empty_inbox_is_empty() {
     let t = Tmp::new();
-    assert_eq!(t.app().inbox().unwrap(), json!({"count": 0, "items": []}));
+    assert_eq!(t.app().inbox().unwrap(), json!({"count": 0, "campaign_count": 0, "items": []}));
     t.campaign(
         "deliver-x",
         "2026-11-06T12:00:00Z",
@@ -140,6 +140,7 @@ fn inbox_origin_is_app_only_for_campaigns_the_app_launched() {
         run_id: "20261106-1200".into(),
         cwd: t.0.clone(),
         lead_session_id: None,
+        provider: None,
     };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     let inbox = app.inbox().unwrap();
@@ -165,4 +166,62 @@ fn inbox_is_read_only_and_not_a_lead_tool() {
     assert_eq!(snap(&t.0.join("data")), data_after, "a second call changes nothing");
     assert_eq!(snap(&camp), claude_before, "nothing written under ~/.claude");
     assert!(!crate::sessions::argv::LEAD_TOOLS.contains("inbox"));
+}
+
+/// A project the store knows, whose Director-General has proposed `asks` (as `proposals_tests::proposed_at`). Returns
+/// the store's project id. Everything is set up under that store id and its canonical root, never a pre-store stand-in
+/// (`project_ref`), which the FG-02c project gate refuses.
+fn propose_in(app: &App, repo: &std::path::Path, asks: &[&str]) -> String {
+    let pid = app.projects.add(repo, false).unwrap().project().id.clone();
+    let root = repo.canonicalize().unwrap();
+    app.orchestrator(&pid, &root).unwrap();
+    let mut svc = lock(&app.control);
+    svc.start_session("0f8fad5b-d9cb-469f-a165-70867728950e", "20261108-1200").unwrap();
+    svc.set_project("0f8fad5b-d9cb-469f-a165-70867728950e", &pid).unwrap();
+    svc.set_generation(&pid, 1).unwrap();
+    for a in asks {
+        svc.call_tool_for_project(&pid, 1, "propose_run", &json!({"ask": a, "base": "ea73cb05d639b945e21c667e17103e56404861a8", "rounds": 1})).unwrap();
+    }
+    pid
+}
+
+// Given 250 older items waiting in a project (past both the global 200 cut and the project's 50 cut), When its
+// Director-General proposes a run, Then the projection's `proposals` lists it, while the inbox cut stays as it was.
+#[test]
+fn a_new_proposal_is_never_cut_by_older_waiting_items() {
+    let t = Tmp::new();
+    let repo = t.0.join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let repo = repo.canonicalize().unwrap();
+    let app = t.app();
+    for i in 0..250 {
+        let slug = format!("fill-{i:03}");
+        let e = runindex::Entry { campaign: slug.clone(), session_id: "0f8fad5b-d9cb-469f-a165-70867728950e".into(), run_id: format!("20261106-{:02}{:02}", i / 60, i % 60), cwd: repo.clone(), lead_session_id: None, provider: None };
+        runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+        t.campaign(&slug, "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "filler"}]));
+    }
+    // First seen long ago: every filler sorts before the proposal made below.
+    app.inbox_at(1_000).unwrap();
+    let mine = propose_in(&app, &repo, &["fix the flaky test"]);
+    let all = app.inbox().unwrap();
+    assert_eq!(all["count"], 251);
+    assert!(!ids_of(&all).iter().any(|i| i.starts_with("proposal:")), "the global read still cuts it");
+    let ps = app.project_state(&mine, None).unwrap();
+    assert_eq!((ps["inbox"]["count"].clone(), ps["inbox"]["items"].as_array().unwrap().len()), (json!(251), 50), "the inbox cut is unchanged");
+    assert!(!ps["inbox"]["items"].as_array().unwrap().iter().any(|i| i["kind"] == "run_proposal"));
+    assert_eq!((ps["proposals"]["ok"].clone(), ps["proposals"]["count"].clone(), ps["proposals"]["more"].clone()), (json!(true), json!(1), json!(0)));
+    assert_eq!(ps["proposals"]["items"][0]["ask"], "fix the flaky test");
+    assert_eq!(ps["proposals"]["items"][0]["kind"], "run_proposal");
+}
+
+// Given more pending proposals than the cap (more than one Director-General can feed a store project), Then
+// `proposals` holds the newest 50, newest first, and counts the rest; other kinds never count.
+#[test]
+fn proposals_are_newest_first_with_their_own_cap_and_a_more_count() {
+    let items: Vec<Value> = (0..53).map(|i| json!({"id": format!("proposal:{i:02}"), "kind": "run_proposal"})).chain([json!({"id": "task:x.t1", "kind": "task"})]).collect();
+    let p = super::super::state::pending_proposals(&items.iter().collect::<Vec<_>>());
+    assert_eq!((p["ok"].clone(), p["count"].clone(), p["more"].clone(), p["items"].as_array().unwrap().len()), (json!(true), json!(53), json!(3), 50));
+    assert_eq!((p["items"][0]["id"].clone(), p["items"][49]["id"].clone()), (json!("proposal:52"), json!("proposal:03")));
+    let none = super::super::state::pending_proposals(&[]);
+    assert_eq!((none["count"].clone(), none["more"].clone(), none["items"].clone()), (json!(0), json!(0), json!([])));
 }

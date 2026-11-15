@@ -4,6 +4,8 @@ use super::*;
 
 /// How long a queued message waits for the worker's next tool call.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
+/// The most ended core workers' nonces the redactor keeps carrying (oldest out first).
+pub const RETIRED_NONCES: usize = 4096;
 /// An inflight claim with no ack after this is "delivery unknown" (5.4 step 6).
 /// Cap for files a worker can write in the control dir (acks, stops).
 pub const MAX_ACK_BYTES: u64 = 16 * 1024;
@@ -57,10 +59,41 @@ pub enum ControlError {
     NotStopped,
     /// A Lead bound to a run called a tool while that run is not the current control session.
     RunNotCurrent,
+    /// A Director-General's tool call carried an older conversation generation than the project's current one: the
+    /// process belongs to a conversation that was replaced, so it may not see or steer anything. Same wire code as a
+    /// stale worker attempt (`StaleGeneration`): the caller refreshes either way.
+    StaleLeadGeneration,
     ActionNotFound,
+    /// A stop that named the attempt it saw (`expect_generation`) found a different one at the moment of the stop.
+    StaleGeneration(u64),
+    /// The Director-General's project is archived, or gone from the store (FG-02c): it may not see or steer anything.
+    ProjectArchived,
+    ProjectMissing,
+    /// The app's projects folder was refused at open (#106 review), so no project can be checked. The detail says what is
+    /// wrong; the fix and path stay with the app's own UI (a tool result never carries a path).
+    ProjectsUnavailable(String),
     UnknownTool,
     InvalidArgs(String),
+    /// Seats the launch checks refused: one `{seat, code, detail}` for each, all in one `invalid_args` answer.
+    Refusals(Vec<Value>),
+    /// Message or Redirect to a core worker whose harness has no channel for it (16.7): why, from its profile.
+    NotSupportedByHarness(&'static str),
     Io(io::Error),
+}
+
+/// A worker the core runs itself (6c) is named `core:<ticket>`.
+pub const CORE_PREFIX: &str = "core:";
+
+/// The app's worker runtime, answering for `core:<ticket>` workers (16.7). Their controls come from the harness profile.
+pub trait CoreWorkers: Send + Sync {
+    /// The ticket's run and round while it can still be stopped: `WorkerNotFound`, or `WorkerFinished` once it ended.
+    fn live(&self, ticket: &str) -> Result<(String, u32)>;
+    /// Where a Message or Redirect for the ticket goes: its harness session id, keyed by which the control hook delivers
+    /// to a top-level session (Claude, design 16.7). Otherwise why its harness takes none (Codex), or none yet.
+    fn message_to(&self, ticket: &str) -> std::result::Result<String, &'static str>;
+    /// The profile's stop. True when it ended the ticket or asked it to end (its end is then reported through
+    /// `Service::core_ticket_ended`); false when there was nothing left to stop.
+    fn stop(&self, ticket: &str) -> bool;
 }
 
 impl ControlError {
@@ -73,16 +106,25 @@ impl ControlError {
             Self::NotPermitted => "not_permitted",
             Self::NotStopped => "not_stopped",
             Self::RunNotCurrent => "run_not_current",
+            Self::StaleLeadGeneration => "stale_generation",
             Self::ActionNotFound => "action_not_found",
+            Self::StaleGeneration(_) => "stale_generation",
+            Self::ProjectArchived => "project_archived",
+            Self::ProjectMissing => "project_missing",
+            Self::ProjectsUnavailable(_) => "projects_unavailable",
             Self::UnknownTool => "unknown_tool",
-            Self::InvalidArgs(_) => "invalid_args",
+            Self::InvalidArgs(_) | Self::Refusals(_) => "invalid_args",
+            Self::NotSupportedByHarness(_) => "not_supported_by_harness",
             Self::Io(_) => "io_error",
         }
     }
     /// The error as a tool result. I/O detail stays out (it can carry paths).
     pub fn to_json(&self) -> Value {
         match self {
-            Self::InvalidArgs(m) => json!({"error": self.code(), "detail": m}),
+            Self::InvalidArgs(m) | Self::ProjectsUnavailable(m) => json!({"error": self.code(), "detail": m}),
+            Self::Refusals(r) => json!({"error": self.code(), "detail": "some seats cannot be launched", "refusals": r}),
+            Self::StaleGeneration(g) => json!({"error": self.code(), "detail": "the worker changed attempt since you looked; refresh and try again", "current_generation": g}),
+            Self::NotSupportedByHarness(why) => json!({"error": self.code(), "detail": why}),
             _ => json!({"error": self.code()}),
         }
     }
@@ -175,6 +217,8 @@ pub(super) enum Kind {
     /// ADR-14: the human approved or rejected a plan item. Always actor human, via ui.
     Approve,
     Reject,
+    /// ADR-15 2.4: a Director-General proposed a run. Always actor Lead, via mcp; a human starts or dismisses it.
+    Propose,
 }
 
 /// Where an action is. `as_str` is the ledger and JSON name.
@@ -193,7 +237,7 @@ pub(super) enum State {
 }
 
 impl Kind {
-    pub(super) const ALL: [Kind; 9] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask, Kind::Approve, Kind::Reject];
+    pub(super) const ALL: [Kind; 10] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask, Kind::Approve, Kind::Reject, Kind::Propose];
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Kind::List => "list",
@@ -205,6 +249,7 @@ impl Kind {
             Kind::Ask => "ask",
             Kind::Approve => "approve",
             Kind::Reject => "reject",
+            Kind::Propose => "propose",
         }
     }
     pub(super) fn parse(k: &str) -> Option<Kind> {
@@ -270,6 +315,10 @@ pub struct AskRecord<'a> {
     pub state: AskState,
     pub text: Option<&'a str>,
     pub reason: Option<&'a str>,
+    /// The Director-General's project and conversation the ask went to (FG-02c); `None` only in the service's tests.
+    pub project: Option<(&'a str, u32)>,
+    /// The ended turn's token receipt (`vajra.token_receipt/1`), written on the `done` line, or on the `failed` line of a turn that ran and errored.
+    pub tokens: Option<&'a serde_json::Value>,
 }
 
 /// A human decision on a plan item (ADR-14).
