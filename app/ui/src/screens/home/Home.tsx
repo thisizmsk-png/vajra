@@ -80,7 +80,7 @@ export function Home() {
   const pickedRepo = route.params.repo;
   // `pick` is a fresh value for every pick, so choosing the same folder again, after the field was edited, still applies.
   const pickId = route.params.pick;
-  useEffect(() => { if (pickedRepo) setD((x) => (x.repo === pickedRepo ? x : { ...x, repo: pickedRepo })); }, [pickedRepo, pickId]);
+  useEffect(() => { if (pickedRepo) { setAddPath(""); setD((x) => (x.repo === pickedRepo ? x : { ...x, repo: pickedRepo })); } }, [pickedRepo, pickId]);
   // The preference scope whose defaults the form holds, or which the user has edited (PR 100 review): switching projects
   // applies the next project's defaults once its own view arrives, and an edit keeps them only within its scope.
   const scope = preferenceScope(project);
@@ -95,7 +95,12 @@ export function Home() {
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
   const [addPath, setAddPath] = useState(""); // set when Start was refused because the folder is not a project yet
-  const set = (k: keyof Draft) => (v: string) => { if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope; setD((x) => ({ ...x, [k]: v })); };
+  const set = (k: keyof Draft) => (v: string) => {
+    if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope;
+    // The "Add this folder" offer names the folder Start refused: a different folder in the field is a new question.
+    if (k === "repo" && v.trim() !== addPath) setAddPath("");
+    setD((x) => ({ ...x, [k]: v }));
+  };
   const errs = validate(d);
   const unsupported = !!prefs.view && prefs.view.effective.model !== "";
   // FG-09: the effective `agent` is the provider Start asks for. The provider check runs each CLI's status command, so it is

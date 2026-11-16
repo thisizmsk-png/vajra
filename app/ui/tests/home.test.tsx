@@ -183,6 +183,22 @@ describe("Home", () => {
     await waitFor(() => expect(f.calls.filter((c) => c.cmd === "act_start_run").length).toBe(2));
   });
 
+  it("the add-this-folder offer goes away when the folder field changes, so it never adds a folder that is no longer in the form", async () => {
+    const f = await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      act_start_run: (a?: Record<string, unknown>) => { throw { error: "not_a_project", detail: "This folder is not a project. Add it as a project first.", action: "add_project", path: a?.cwd }; },
+      project_add: () => ({ outcome: "created", project: {} }),
+    });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/old");
+    fill(S.home.ask, "do it");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    await screen.findByRole("button", { name: S.home.addFolder });
+    fill(S.home.repo, "/new");
+    expect(screen.queryByRole("button", { name: S.home.addFolder })).toBeNull();
+    expect(f.calls.some((c) => c.cmd === "project_add")).toBe(false);
+  });
+
   it("does not start with an empty ask: names the field, calls nothing (AC-1.1.2)", async () => {
     const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
     await screen.findByText("registered");
