@@ -65,6 +65,9 @@ pub struct EngineRow {
     /// The one-click engine install may be offered (`setup_plan` with id `engine`): only once the security review has
     /// verified it in the catalog (C7), and not while an install is running. The plan decides fresh, update or Repair.
     pub one_click: bool,
+    /// Why the Terminal line can't install from the bundled engine, when the user can fix it: `leftover_folder` (the
+    /// skills folder exists with no installer in it; remove it and the bundled line is offered). Null otherwise.
+    pub reason: Option<&'static str>,
 }
 
 /// The engine-scripts row: `installed` is the file detection, `installing` whether the install lock is held now,
@@ -85,6 +88,7 @@ pub fn engine_row(installed: bool, installing: bool, interrupted: bool, marks: &
         command: cat.map(|c| c.engine_scripts.manual_command.clone()).unwrap_or_default(),
         state,
         one_click: !installing && cat.is_some_and(|c| c.engine_scripts.verified()),
+        reason: None,
     }
 }
 

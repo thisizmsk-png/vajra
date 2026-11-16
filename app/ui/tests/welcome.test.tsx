@@ -139,6 +139,16 @@ describe("welcome: the seven states in the design", () => {
     expect(within(rowHead(W.agent.title)).getByText(W.agent.readySummary("Claude Code", "2.1.323"))).toBeTruthy();
     expect(screen.getByText(W.finish(1))).toBeTruthy();
     expect(startButton().getAttribute("aria-disabled")).toBe("true");
+    expect(screen.queryByText(W.engine.leftover)).toBeNull();
+  });
+
+  it("5 engine missing with a leftover folder: says to move it to the Trash, and still shows the line", async () => {
+    const leftover = { ...setup("installed", false), engine: { installed: false, command: "bash ~/.claude/skills/vajra/scripts/install.sh", state: "missing", one_click: false, reason: "leftover_folder" } };
+    boot({ pre: { rows: GIT_OK, start_enabled: true }, claude: "installed", login: "signed_in", extra: { setup_list: () => leftover } });
+    fireEvent.click((await screen.findAllByRole("radio"))[0]);
+    await waitFor(() => expect(rowHead(W.engine.title).getAttribute("aria-expanded")).toBe("true"));
+    expect(screen.getByText(W.engine.leftover)).toBeTruthy();
+    expect(screen.getByLabelText(W.engine.lines).textContent).toContain("bash ~/.claude/skills/vajra/scripts/install.sh");
   });
 
   it("6 ready: the three rows collapse, the ask gets focus, Start run sends the same call Start a run sends", async () => {

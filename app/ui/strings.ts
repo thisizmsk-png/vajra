@@ -172,7 +172,8 @@ export const S = {
       copied: "Copied",
       copyFailed: "Copy didn't work. Select the lines and copy them yourself.",
       lines: "Line to paste into Terminal",
-      changes: "The script makes a folder for Vajra's records, with a key file inside it, and adds Vajra's safety hooks to Claude Code's settings. It does not install any agent.",
+      leftover: "There is already a vajra folder in Claude Code's skills folder (~/.claude/skills/vajra), but it has no install script. It may be left from an earlier try. Move it to the Trash, and this step shows the line that installs the copy that came with this app.",
+      changes: "If you don't have the engine yet, the line first checks the copy that came with this app and puts it in Claude Code's skills folder. Then it runs the engine's install script, which makes a folder for Vajra's records, with a key file inside it, and adds Vajra's safety hooks to Claude Code's settings. It does not install any agent.",
     },
     ask: {
       title: "First run",
@@ -972,6 +973,7 @@ export const S = {
     engine: "Vajra engine scripts",
     engineState: { installed: "Installed", missing: "Not installed", broken: "Broken", installing: "Installing" } as Record<string, string>,
     engineHint: "Run this in a terminal to install them.",
+    engineLeftover: "There is already a vajra folder in Claude Code's skills folder (~/.claude/skills/vajra), but it has no install script. Move it to the Trash, and this row shows the line that installs the copy that came with this app.",
     engineBroken: "The last engine install couldn't be confirmed or undone. Runs stay off until a clean install. Repair it here.",
     engineInstalling: "The engine is being installed. Runs start again when it finishes.",
     // A start refused by check 6 (the start-run card): what is wrong, then where to fix it.

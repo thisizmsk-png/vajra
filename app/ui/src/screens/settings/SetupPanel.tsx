@@ -244,6 +244,7 @@ function Engine({ engine, reload }: { engine: SetupList["engine"]; reload: () =>
       {engine.state === "installing" && <p className="v-setup__status" aria-live="polite"><Text as="span" variant="body-sm" muted>{C.engineInstalling}</Text></p>}
       {engine.state !== "installed" && engine.state !== "installing" && (
         <div className="v-setup__steps">
+          {engine.reason === "leftover_folder" && <Text variant="body-sm">{C.engineLeftover}</Text>}
           <Text variant="body-sm" muted>{C.engineHint}</Text>
           <code className="v-prov__path">{engine.command}</code>
         </div>

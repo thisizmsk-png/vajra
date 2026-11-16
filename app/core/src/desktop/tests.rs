@@ -5709,6 +5709,36 @@ fn the_engine_install_is_gated_in_plan_consent_and_run() {
     assert_eq!(l["engine"]["state"], "missing", "{l}");
 }
 
+/// Red team G2 M1: with one-click off, the Terminal line the Engine row and the checks show installs from the engine
+/// bundled in the app, not from a skills-folder copy a clean Mac doesn't have, and never ends in a Claude Code command.
+#[test]
+fn the_terminal_line_installs_from_the_bundled_engine_on_a_clean_mac() {
+    use crate::providers::install::engine::{manual, Pin};
+    let t = Tmp::new();
+    let _ = fs::remove_dir_all(t.home().join(".claude/skills/vajra"));
+    let app = t.app();
+    let res = Path::new(env!("CARGO_MANIFEST_DIR")).join("gen");
+    app.set_resources(res.clone());
+    let fallback = crate::providers::catalog::catalog().unwrap().engine_scripts.manual_command.clone();
+    let want = manual::line(&t.home(), Some(&res), &Pin::built(), &fallback).command;
+    if Pin::built().tree_ok {
+        assert!(want.starts_with("echo '") && want.contains("shasum -a 256 -c") && want.contains(&res.join("engine/engine.tgz").display().to_string()), "{want}");
+    } else {
+        assert_eq!(want, fallback, "an unpinned build (stale manifest on a feature branch) keeps the catalog line");
+    }
+    let l = app.setup_list().unwrap();
+    assert_eq!(l["engine"]["command"], want.as_str(), "{l}");
+    assert_eq!(l["engine"]["reason"], Value::Null, "{l}");
+    let pre = app.preflight().unwrap();
+    let workflow = pre["rows"].as_array().unwrap().iter().find(|r| r["name"] == "workflow").unwrap();
+    assert_eq!(workflow["fix"], want.as_str(), "{workflow}");
+    // bhishma on #283: a folder left at the skills folder with no installer gets the catalog line and a plain reason.
+    fs::create_dir_all(t.home().join(".claude/skills/vajra/workflows")).unwrap();
+    let l = app.setup_list().unwrap();
+    assert_eq!(l["engine"]["command"], fallback.as_str(), "{l}");
+    assert_eq!(l["engine"]["reason"], "leftover_folder", "{l}");
+}
+
 // ---------------------------------------------------------------- ADR 16.6 at startup
 
 /// A stored baseline copy with no anchor: `take_or_load` calls it tampered, so the app opens with agents off.

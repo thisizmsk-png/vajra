@@ -62,6 +62,12 @@ pub const CLAUDE_MISSING: &str =
     "not found on your login-shell PATH or in ~/.local/bin, ~/.claude/local, /opt/homebrew/bin, /usr/local/bin";
 
 pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
+    run_with(allow, bridge, dirs, INSTALL_CMD)
+}
+
+/// `run`, with `install` as the engine's install line: the app passes the one that installs from its bundled engine
+/// (`providers::install::engine::manual`), so a clean Mac is never told to run a copy it doesn't have.
+pub fn run_with(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf], install: &str) -> Vec<Row> {
     let mut rows = Vec::new();
 
     rows.push(match find_on_path("claude", dirs) {
@@ -84,9 +90,9 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
         Ok(o) if o.truncated => row("vajra doctor", false, "output over the cap", "/vajra doctor"),
         Ok(_) => row("vajra doctor", false, format!("FAIL: {}", fails.join("; ")), "/vajra doctor"),
         Err(BridgeError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            row("vajra doctor", false, "The Vajra engine scripts are not installed yet.", INSTALL_CMD)
+            row("vajra doctor", false, "The Vajra engine scripts are not installed yet.", install)
         }
-        Err(e) => row("vajra doctor", false, e.to_string(), INSTALL_CMD),
+        Err(e) => row("vajra doctor", false, e.to_string(), install),
     });
 
     let hooks: Vec<&str> = text.lines().filter(|l| l.contains("hook registered:")).collect();
@@ -94,7 +100,7 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
     rows.push(if !hooks.is_empty() && missing == 0 {
         row("hooks registered", true, format!("yes ({} events)", hooks.len()), "")
     } else {
-        row("hooks registered", false, "The Vajra safety hooks are not registered with Claude Code.", INSTALL_CMD)
+        row("hooks registered", false, "The Vajra safety hooks are not registered with Claude Code.", install)
     });
 
     // Advisory: never blocks Start, but never reads as a pass unless the doctor said PASS.
@@ -111,12 +117,8 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
     rows.push(if allow.resolve(wf).is_ok() {
         row("workflow", true, "vajra-deliver.js installed", "")
     } else {
-        row(
-            "workflow",
-            false,
-            "~/.claude/workflows/vajra-deliver.js is missing",
-            &format!("{INSTALL_CMD} then /vajra doctor"),
-        )
+        // The install line copies the workflows itself; the fix is a shell line only, never a Claude Code command.
+        row("workflow", false, "~/.claude/workflows/vajra-deliver.js is missing", install)
     });
     rows
 }
