@@ -14,6 +14,7 @@ import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { useCurrentProject } from "../../projects/current";
 import { FolderField } from "../FolderField";
+import { useNotGit } from "../useNotGit";
 import { PreflightList } from "../PreflightList";
 import { ProviderControls, limitText, useProviders } from "../ProviderControls";
 import { toInput, validate } from "./validate";
@@ -109,7 +110,9 @@ export function Home() {
   const blocked = !agent || agent === "claude" || !providers.list ? ""
     : !chosen ? S.providers.startUnknown(agent)
     : !chosen.installed ? S.providers.startBlocked(chosen.name) : "";
-  const ready = pre.state === "ok" && pre.data.start_enabled && (!prefs.connected || !!prefs.view) && !unsupported && !blocked;
+  // A folder that is not a git repository has no HEAD to run from: it is named under the field and Start stays off.
+  const notGit = useNotGit(d.repo);
+  const ready = pre.state === "ok" && pre.data.start_enabled && (!prefs.connected || !!prefs.view) && !unsupported && !blocked && !notGit;
 
   // A ref, not the busy state: a second Cmd+Return in the same tick still sees busy as null.
   const inFlight = useRef(false);
@@ -168,7 +171,7 @@ export function Home() {
   // A core that does not answer fails every read on this screen for one reason. The checks panel says it once, with
   // the retry; the preferences line would say it again in other words.
   const coreDown = pre.state === "error" && pre.down;
-  const why = checksBlock ? S.home.startNeedsChecks(failing) : pre.state === "error" ? S.home.startNeedsAnswer : "";
+  const why = notGit ? S.folder.startNeedsRepo : checksBlock ? S.home.startNeedsChecks(failing) : pre.state === "error" ? S.home.startNeedsAnswer : "";
   const repoName = basename(d.repo);
 
   return (
@@ -194,7 +197,7 @@ export function Home() {
               <Input type="textarea" rows={3} label={S.home.ask} placeholder={S.home.ask} value={d.ask} onChange={set("ask")} error={err("ask")} />
             </div>
             <div className="v-launch__row">
-              <div className="v-launch__repo"><FolderField label={S.home.repo} hint={S.home.repoHint} value={d.repo} onChange={set("repo")} error={err("repo")} /></div>
+              <div className="v-launch__repo"><FolderField label={S.home.repo} hint={S.home.repoHint} value={d.repo} onChange={set("repo")} error={err("repo") ?? (notGit ? S.folder.notGit : undefined)} /></div>
               <div className="v-launch__base"><Input label={S.home.base} hint={S.home.baseHint} value={d.base} onChange={set("base")} error={err("base")} /></div>
               <div className="v-launch__rounds">
                 {/* The fieldset's legend names the group for screen readers; this is the same word for the eye. */}

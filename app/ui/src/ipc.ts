@@ -439,6 +439,8 @@ export const api = {
   /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
   /** The project that owns a folder by the core's identity rules (symlink, linked worktree), else `p_unsorted`. Read only. */
   projectForFolder: (path: string) => call<{ project_id: string }>("project_for_folder", { path }),
+  /** Whether an absolute folder is a git repository, by the same rule the project store uses. Read only; a run needs one. */
+  folderIsGit: (path: string) => call<{ git: boolean }>("folder_is_git", { path }),
   /** The system folder picker (D5): one folder's absolute path, or null when the person cancels. The dialog plugin's
    *  `open` is the only plugin command the main window is granted. */
   chooseFolder: (title: string, defaultPath?: string) =>

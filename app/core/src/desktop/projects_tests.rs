@@ -194,3 +194,25 @@ fn a_folder_resolves_to_its_project_through_a_symlink_and_a_linked_worktree() {
     assert_eq!(err(app.project_for_folder("relative/dir"))["error"], "invalid_args");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn folder_is_git_says_whether_a_folder_is_a_repository_and_refuses_what_is_not_a_folder() {
+    let (root, app) = setup("isgit");
+    let git = repo(&root, "src/alpha");
+    assert_eq!(app.folder_is_git(&git).unwrap()["git"], true);
+    let plain = root.join("home/src/plain");
+    fs::create_dir_all(&plain).unwrap();
+    assert_eq!(app.folder_is_git(plain.to_str().unwrap()).unwrap()["git"], false);
+    // A `.git` that is only a claim (an empty folder, a file pointing elsewhere) is not a repository.
+    let claim = root.join("home/src/claim");
+    fs::create_dir_all(claim.join(".git")).unwrap();
+    assert_eq!(app.folder_is_git(claim.to_str().unwrap()).unwrap()["git"], false);
+    // Read only: asking registers nothing.
+    assert_eq!(app.project_list(false).unwrap()["projects"].as_array().unwrap().len(), 0);
+    assert_eq!(err(app.folder_is_git("relative/dir"))["error"], "invalid_args");
+    assert_eq!(err(app.folder_is_git("/no/such/folder"))["error"], "invalid_args");
+    let file = root.join("home/src/file.txt");
+    fs::write(&file, "x").unwrap();
+    assert_eq!(err(app.folder_is_git(file.to_str().unwrap()))["error"], "invalid_args");
+    let _ = fs::remove_dir_all(root);
+}

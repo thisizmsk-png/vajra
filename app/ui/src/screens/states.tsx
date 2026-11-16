@@ -7,7 +7,14 @@ import { errorText, isIpcError } from "../ipc";
  * What to say about a failed call. The core answers with a code and a detail, shown small under a plain title; a
  * rejection that is not the core's answer means the core did not answer at all, which gets its own plain words.
  */
-export const problemDetail = (e: unknown): string => (isIpcError(e) ? errorText(e) : S.states.noAnswer);
+export const problemDetail = (e: unknown): string => (isIpcError(e) ? errorText(e) : isUnknownCommand(e) ? S.states.unknownCommand : S.states.noAnswer);
+
+/** The core answered, and said it has no such command ("Command x not found", or the permission check's "x not allowed. Command not found"). That is a
+ *  version mismatch, not a core that is slow to start, so it must not read as "did not answer". */
+export const isUnknownCommand = (e: unknown): boolean => {
+  const text = typeof e === "string" ? e : e instanceof Error ? e.message : "";
+  return /^Command \S+ not found\b/.test(text) || /\bnot allowed\. Command not found\b/.test(text);
+};
 
 // Seconds stay: two checks inside one minute must read differently, or the second looks like a dead click. The hour
 // is not padded ("2:03:34 AM", not "02:03:34 AM").

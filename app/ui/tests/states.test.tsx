@@ -24,6 +24,13 @@ describe("problem text", () => {
     expect(problemDetail("command crew failed")).toBe(S.states.noAnswer);
     expect(problemDetail(new Error("boom"))).toBe(S.states.noAnswer);
   });
+
+  it("says a missing command is a version mismatch, not a core that did not answer", () => {
+    for (const e of ["Command provider_agents not found", "provider_agents not allowed. Command not found", new Error("Command provider_agents not found")]) {
+      expect(problemDetail(e)).toBe(S.states.unknownCommand);
+      expect(problemDetail(e)).not.toContain("did not answer");
+    }
+  });
 });
 
 describe("Crew states", () => {

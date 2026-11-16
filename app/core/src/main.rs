@@ -231,6 +231,11 @@ fn project_for_folder(app: State<'_, App>, path: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn folder_is_git(app: State<'_, App>, path: String) -> Res {
+    app.folder_is_git(&path)
+}
+
+#[tauri::command(async)]
 fn project_discover(app: State<'_, App>, extra: Option<Vec<String>>) -> Res {
     app.project_discover(&extra.unwrap_or_default())
 }
@@ -322,6 +327,17 @@ fn provider_accounts(app: State<'_, App>) -> Res {
 
 /// Stored API keys (D3). The key arrives once, goes to the Keychain through stdin, and is never sent back: every answer
 /// is `{account, saved}`.
+/// Per-project agent settings (default, per-role choice, allowed set), read from and saved to the preferences store.
+#[tauri::command(async)]
+fn provider_agents(app: State<'_, App>, project_id: String) -> Res {
+    app.provider_agents(&project_id)
+}
+
+#[tauri::command(async)]
+fn provider_agents_save(app: State<'_, App>, project_id: String, agents: Value) -> Res {
+    app.provider_agents_save(&project_id, agents)
+}
+
 #[tauri::command(async)]
 fn provider_key_saved(app: State<'_, App>, account_id: String) -> Res {
     app.provider_key_saved(&account_id)
@@ -895,6 +911,8 @@ fn main() {
             resume_run,
             provider_list,
             provider_accounts,
+            provider_agents,
+            provider_agents_save,
             setup_list,
             setup_sign_in,
             setup_plan,
@@ -948,6 +966,7 @@ fn main() {
             app_info,
             project_list,
             project_for_folder,
+            folder_is_git,
             project_discover,
             project_add,
             project_rename,
