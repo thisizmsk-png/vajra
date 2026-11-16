@@ -164,7 +164,7 @@ fn a_validly_signed_write_the_core_didnt_make_passes_the_campaign_check_but_neve
 #[test]
 fn an_approval_line_the_core_didnt_write_never_reads_verified_approved() {
     use crate::desktop::evidence_approval::{progress_line, Ask};
-    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()], network: false };
+    let ask = Ask { run_id: RUN.into(), round: 1, commit: "0".repeat(40), seat: "verifier".into(), account: "openai".into(), commands: vec!["npm test".into()], network: false, repo: "/tmp/no-repo/.git".into() };
     let Some((_t, app, _held)) = recorded_then(|app| {
         app.record_run_seats(RUN, &json!({"campaign_slug": slug(), "evidence_trust": "guarded_by_approval"})).unwrap();
         let now = std::time::SystemTime::now();

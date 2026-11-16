@@ -7,6 +7,7 @@
 //!
 //! Temp HOME, data dir and repo under /tmp; no key anywhere (the gateway home holds no key and the fake never calls
 //! out). The supervisor kills every lead and worker by its process group, and `Drop` shuts the lead down.
+#![allow(clippy::disallowed_methods)] // test code: the app's own spawns go through the spawn lock
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

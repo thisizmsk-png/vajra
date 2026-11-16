@@ -45,6 +45,9 @@ pub struct Reconciled {
     pub reused: usize,
     /// Survivors whose record could not be written back to the ledger: the next start cannot try them again.
     pub unrecorded: usize,
+    /// Records whose pid is still held but that can't be proven ours or gone (#248 L1): never signalled, kept for the
+    /// next start.
+    pub not_proven: usize,
     /// Worker tickets written `app_crashed`.
     pub tickets: usize,
     /// Core runs written ended `lead_lost`/`app_restarted`.
@@ -82,9 +85,20 @@ pub fn record_started(data: &Path, run: &str, project: &str, cwd: &Path, lead_ac
     write(data, run, CORE_FILE, &json!({"v": 1, "project": project, "cwd": cwd, "lead_account": lead_account}))
 }
 
-/// The accepted plan, as `RunProtocol::plan_record` gives it.
+/// The accepted plan, as `RunProtocol::plan_record` gives it. Durable when it returns `Ok`: a temp file, fsynced, then
+/// renamed over `plan.json`, then the run's folder fsynced, and each parent fsynced after its child is opened, so a
+/// run folder made earlier without a sync (a first run) can't be lost with the plan in it (#275 review).
+/// `RunProtocol` calls it as part of accepting a plan.
 pub fn record_plan(data: &Path, run: &str, plan: &Value) -> std::io::Result<()> {
-    write(data, run, PLAN_FILE, plan)
+    // `run_dir` checks the run id; the walk below repeats its steps, holding each parent to sync it.
+    drop(run_dir(data, run, true)?);
+    let top = Pinned::open(data, false)?;
+    let runs = top.child("runs", false)?;
+    top.sync()?;
+    let d = runs.child(run, false)?;
+    runs.sync()?;
+    d.write_atomic(PLAN_FILE, &serde_json::to_vec(plan).map_err(std::io::Error::other)?)?;
+    d.sync()
 }
 
 /// How the run ended. The first end recorded stays: a later one (a crash reconcile after a clean end) changes nothing.
@@ -110,6 +124,7 @@ pub fn reconcile(data: &Path, ledger: &Ledger) -> Reconciled {
                 out.survived += 1;
                 out.unrecorded += 1;
             }
+            Ended::NotProven => out.not_proven += 1,
         }
         if ended == Ended::Reused {
             continue;

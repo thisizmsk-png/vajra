@@ -105,11 +105,23 @@ struct LeadCheck {
     marker: PathBuf,
     codex_home: PathBuf,
     since: std::time::SystemTime,
+    /// Passes still to run after the first `Applied` (#241 re-check L2): the check isn't dropped at once.
+    after_applied: Option<u8>,
 }
 
 /// How long a plain Codex Lead may run before its first turn is read back. It may wait on the user first (Codex asks
 /// whether to trust a new folder), so this is generous; past it, a Lead whose session file never showed is ended.
 pub const LEAD_PROOF_WAIT: Duration = Duration::from_secs(10 * 60);
+
+/// #241 L2: with no sessions folder in the Codex home at all, the Lead's session file is landing somewhere the core
+/// doesn't look (a layout change, or a sessions folder moved by the user's config). A minute is enough for Codex to have
+/// made the folder; past it, the Lead is ended with that reason instead of running unchecked for `LEAD_PROOF_WAIT`.
+pub const LEAD_NO_SESSIONS_WAIT: Duration = Duration::from_secs(60);
+
+/// #241 re-check L2: after `Applied`, the read-back keeps looking this many more passes (about a second each). Any
+/// unmarked first turn in the project, a cap overflow, or the marked file vanishing or failing, then ends the Lead.
+/// Narrows the race against a same-user process outside the sandbox; it is still a race, not a proof.
+pub const LEAD_RECHECKS: u8 = 5;
 
 /// A run session started (or resumed) by this app.
 #[derive(Clone, Debug)]
@@ -260,7 +272,8 @@ pub struct App {
     proof_ledger: Option<proof::Ledger>,
     /// N20 (bhishma M1 on #226): the asks this app made and the answers a person gave, per run, for the app's lifetime
     /// only. The file is display; a consume needs this too, so a record written by hand (or kept over a restart) is void.
-    approvals: Mutex<HashMap<String, evidence_approval::Held>>,
+    /// Shared with the evidence ticket's `ApprovalDesk` (6i), never copied.
+    approvals: Arc<Mutex<HashMap<String, evidence_approval::Held>>>,
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
@@ -367,6 +380,14 @@ pub struct App {
     events: Arc<arrivals::Hub>,
     /// One-click install consents (ADR-17 rule 4): tokens in memory only, one run per harness at a time.
     consents: crate::providers::install::consent::Consents,
+    /// The app bundle's resources folder (Tauri's resource dir), where the packed engine is (D7). `None` until the
+    /// window sets it; the engine install is then not offered (`engine_not_bundled`).
+    resources: Mutex<Option<PathBuf>>,
+    /// D7 (Codex P1 on #213): an engine install and a user terminal's open exclude each other in this app. The install
+    /// holds it for writing for its whole run; an open holds it for reading while it starts the shell. Neither waits.
+    engine_excl: std::sync::RwLock<()>,
+    /// D7: whether any user terminal is live or opening. Set by main.rs, which owns the terminal registry.
+    terminals_live: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// ADR 16.6: the global git baseline (taken first thing in `open`) and the worker runtime, built on first use.
     workers: Arc<worker_host::WorkerHost>,
 }
@@ -449,7 +470,7 @@ impl App {
             provider_dirs: None,
             #[cfg(test)]
             proof_ledger: None,
-            approvals: Mutex::new(HashMap::new()),
+            approvals: Arc::new(Mutex::new(HashMap::new())),
             provider_cache: Mutex::new(None),
             keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
@@ -495,6 +516,9 @@ impl App {
             log_anchors: Default::default(),
             closeout: closeout::Store::open(data),
             consents: Default::default(),
+            resources: Mutex::new(None),
+            engine_excl: Default::default(),
+            terminals_live: Mutex::new(None),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -511,7 +535,13 @@ impl App {
         }
     }
 
+    /// On a Mac that has never run Claude Code `~/.claude` does not exist yet. That is a normal first launch, not an
+    /// error: the empty folder is made (the one Claude Code makes itself) and the checks then say what is not installed.
+    /// Only a truly absent path is created; a dangling link or a file stays an error.
     fn allow(&self) -> Result<Allowlist, Value> {
+        if matches!(std::fs::symlink_metadata(&self.claude), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+            std::fs::create_dir_all(&self.claude).map_err(|e| fail("claude_dir_missing", e))?;
+        }
         Allowlist::new(&self.claude, &self.data).map_err(|e| fail("claude_dir_missing", e))
     }
 
@@ -541,7 +571,7 @@ impl App {
         // reusing an id would keep that record's Lead session and approval-only marker for a different run.
         let recorded = |id: &str| self.data.join("control").join("lead").join(id).symlink_metadata().is_ok();
         // `deliver-{id}` is the workflow's default campaign name (`CAMPAIGN = RESUME || deliver-${RUN}` in workflows/vajra-deliver.js).
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id);
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id) || self.campaign_name_held(id);
         let pick = (0..120u64)
             .map(|k| now + 60 * k)
             .map(|t| (t, ids::run_id_at(t)))
@@ -549,6 +579,23 @@ impl App {
             .ok_or_else(|| fail("run_id_exhausted", "no unused run id in the next 120 minutes; check runs.jsonl"))?;
         lock(&self.issued).insert(pick.1.clone());
         Ok(pick)
+    }
+
+    /// Plan #217 L2: is either campaign name a run under `id` would get (`deliver-<id>`, or `deliver-<id>-og` for an
+    /// outside-guard run) already present in the campaigns folder, in any form? Read without following a link
+    /// (`symlink_metadata`), so a plain file, a dangling link, a link to anywhere and a folder with planted files all
+    /// count, and so does a case variant (the disk is case-insensitive). Run ids are predictable minutes, so an agent can
+    /// make a future run's folder before the run exists; such an id is never issued, and the workflow only ever creates
+    /// its campaign folder fresh (its init refuses one that exists). The core never creates the folder itself: the
+    /// workflow's init must be the one to. An unreadable campaigns folder counts as held (fail closed).
+    fn campaign_name_held(&self, id: &str) -> bool {
+        let Ok(allow) = self.allow() else { return true };
+        let dir = allow.campaigns_dir();
+        let held = |name: String| match dir.join(name).symlink_metadata() {
+            Ok(_) => true,
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        };
+        held(format!("deliver-{id}")) || held(format!("deliver-{id}-og"))
     }
 
     // ---------------------------------------------------------------- start
@@ -613,13 +660,14 @@ impl App {
         if self.workers.install_action().is_none() {
             return Err(fail("not_needed", "git is already installed"));
         }
-        let child = std::process::Command::new("/usr/bin/xcode-select")
-            .arg("--install")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| fail("spawn_failed", e))?;
+        let child = crate::spawnlock::spawn(
+            std::process::Command::new("/usr/bin/xcode-select")
+                .arg("--install")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .map_err(|e| fail("spawn_failed", e))?;
         // It returns once the dialog is up; reaped off the caller.
         std::thread::spawn(move || {
             let mut child = child;
@@ -834,18 +882,49 @@ impl App {
                 lock(&self.lead_checks).remove(&stream);
                 continue;
             }
-            let found = crate::providers::effective::codex_rollouts_since(&c.codex_home, c.since);
-            let verdict = match codex_lead_verdict(&found, &c.want, &c.marker) {
-                LeadVerdict::Pending if c.since.elapsed().is_ok_and(|e| e >= LEAD_PROOF_WAIT) => {
-                    LeadVerdict::NotApplied("the Lead's Codex session file never showed its first turn, so its Vajra profile can't be shown in force".into())
+            use crate::providers::effective::{LEAD_FILES_CAP, lead_rollouts};
+            let found = lead_rollouts(&c.codex_home, c.since);
+            let waited = |d: Duration| c.since.elapsed().is_ok_and(|e| e >= d);
+            let verdict = if found.created > LEAD_FILES_CAP {
+                // #241 re-check L1: fail closed. A Lead launch has no reason to see this many new Codex sessions in its
+                // read-back window, and judging only the newest would let a flood push the Lead's real file out of view.
+                LeadVerdict::NotApplied(format!("more than {LEAD_FILES_CAP} Codex sessions started since the Lead did, so its own session can't be picked out to check its Vajra profile"))
+            } else {
+                match codex_lead_verdict(&found.files, &c.want, &c.marker) {
+                    // After Applied, a pass that no longer finds the marked file means it vanished or changed.
+                    LeadVerdict::Pending if c.after_applied.is_some() => {
+                        LeadVerdict::NotApplied("the Lead's Codex session file vanished or changed right after its Vajra profile was shown in force".into())
+                    }
+                    LeadVerdict::Pending if !found.sessions_seen && waited(LEAD_NO_SESSIONS_WAIT) => LeadVerdict::NotApplied(
+                        "Codex keeps its session files somewhere Vajra doesn't look (no sessions folder in the Codex home), so the Lead's Vajra profile can't be shown in force".into(),
+                    ),
+                    LeadVerdict::Pending if waited(LEAD_PROOF_WAIT) => {
+                        LeadVerdict::NotApplied("the Lead's Codex session file never showed its first turn, so its Vajra profile can't be shown in force".into())
+                    }
+                    v => v,
                 }
-                v => v,
             };
             match verdict {
                 LeadVerdict::Pending => {}
                 LeadVerdict::Applied => {
-                    lock(&self.lead_checks).remove(&stream);
-                    self.note("lead_profile_applied", &[]);
+                    let mut checks = lock(&self.lead_checks);
+                    match c.after_applied {
+                        None => {
+                            if let Some(e) = checks.get_mut(&stream) {
+                                e.after_applied = Some(LEAD_RECHECKS);
+                            }
+                            drop(checks);
+                            self.note("lead_profile_applied", &[]);
+                        }
+                        Some(0) | Some(1) => {
+                            checks.remove(&stream);
+                        }
+                        Some(n) => {
+                            if let Some(e) = checks.get_mut(&stream) {
+                                e.after_applied = Some(n - 1);
+                            }
+                        }
+                    }
                 }
                 LeadVerdict::NotApplied(why) => {
                     lock(&self.lead_checks).remove(&stream);
@@ -924,6 +1003,7 @@ impl App {
         // ADR 16.6: no agent launches without the startup git baseline.
         self.workers.refuse()?;
         let _one = lock(&self.launching);
+        let _quiet = self.engine_quiet()?;
         // A session whose process is already running is never launched again: `start_session` would replace its live control
         // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
         // its control session. Checked under the launching lock, before anything is read or changed (#80 review).
@@ -1058,7 +1138,108 @@ impl App {
         }
         let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
         let marks = crate::providers::install::marks::Marks::at(&self.data);
-        serde_json::to_value(crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks)).map_err(|e| fail("internal", e))
+        let mut l = crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks);
+        use crate::providers::install::engine::flow;
+        l.engine = crate::providers::setup::engine_row(engine, flow::installing(&self.home), flow::interrupted(&self.data), &marks);
+        serde_json::to_value(l).map_err(|e| fail("internal", e))
+    }
+
+    /// Set the app bundle's resources folder (where the packed engine is). The window does this once at start.
+    pub fn set_resources(&self, dir: PathBuf) {
+        *lock(&self.resources) = Some(dir);
+    }
+
+    /// D7, bhishma C7: the engine install is on only once the security review verified it in the catalog. Checked by
+    /// `setup_plan`, `setup_consent` and `setup_run` alike, in the core.
+    fn engine_gate() -> bool {
+        crate::providers::catalog::catalog().is_ok_and(|c| c.engine_scripts.verified())
+    }
+
+    /// The terminal registry's liveness check (main.rs owns the registry). D7: the engine install counts a live user
+    /// terminal as the engine being in use.
+    pub fn set_terminals_live(&self, live: Arc<dyn Fn() -> bool + Send + Sync>) {
+        *lock(&self.terminals_live) = Some(live);
+    }
+
+    /// Held by a user terminal while it opens. None while an engine install runs: the open is refused, so no shell
+    /// starts on an engine that is being replaced (Codex P1 on #213).
+    pub fn terminal_open_guard(&self) -> Option<std::sync::RwLockReadGuard<'_, ()>> {
+        match self.engine_excl.try_read() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// A run launch's share of the engine exclusion (Codex P1 on #213): held from the launch's checks until the run
+    /// is counted, so an engine install can't start between them, and no run launches while an install runs.
+    pub(super) fn engine_quiet(&self) -> Result<std::sync::RwLockReadGuard<'_, ()>, Value> {
+        self.terminal_open_guard().ok_or_else(|| fail("engine_installing", "the engine is being installed; start again when Set up finishes"))
+    }
+
+    /// Fails closed: with no terminal registry wired the engine cannot see user terminals, so it counts as in use.
+    fn terminals_live(&self) -> bool {
+        let live = lock(&self.terminals_live).clone();
+        live.is_none_or(|f| f())
+    }
+
+    /// Hand `f` the engine install's view of this app: the home, data and resources folders, the compiled-in pin, the
+    /// system tools and what counts as busy (C8: an active run, any live session but a Setup one, an open campaign, a
+    /// live user terminal).
+    fn with_engine<R>(&self, f: impl FnOnce(&crate::providers::install::engine::flow::Machine) -> R) -> Result<R, &'static str> {
+        use crate::providers::install::engine::{flow, Pin};
+        let resources = lock(&self.resources).clone().ok_or("engine_not_bundled")?;
+        let (pin, tools) = (Pin::built(), flow::Tools::system());
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        let busy = || self.active_run_count() > 0 || self.sup.any_running_besides_setup() || flow::campaign_open(&self.home) || self.terminals_live();
+        Ok(f(&flow::Machine { home: &self.home, data: &self.data, resources: &resources, pin: &pin, tools: &tools, uid, busy: &busy }))
+    }
+
+    /// `setup_plan` for the engine: the plan, or why it is Install it yourself. Read only.
+    fn engine_plan(&self) -> Res {
+        use crate::providers::install::engine::flow;
+        let manual = |code: &str| serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": flow::ID, "manual": code });
+        if !Self::engine_gate() {
+            return Ok(manual("source_not_verified"));
+        }
+        Ok(match self.with_engine(flow::plan) {
+            Ok(flow::Offer::Plan(p)) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": flow::ID, "plan": serde_json::to_value(&p.plan).map_err(|e| fail("internal", e))? }),
+            Ok(flow::Offer::Manual(code)) | Err(code) => manual(code),
+        })
+    }
+
+    /// `setup_run` for the engine: one run at a time, the plan recomputed and required to hash the same as the consent,
+    /// then the install under the engine env (HOME pinned, the four root PATH folders only), streamed on `setup-engine`.
+    fn engine_run(&self, token: &str) -> Res {
+        use crate::providers::install::{engine::flow, env, marks::Marks, run};
+        if !Self::engine_gate() {
+            return Err(fail("source_not_verified", "the engine install is Install it yourself"));
+        }
+        let _running = self.consents.begin(flow::ID).map_err(|e| fail(e.code(), "setup refused"))?;
+        // No user terminal may open while the engine is replaced; one that is opening now makes this refuse instead.
+        let _excl = match self.engine_excl.try_write() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(fail("engine_in_use", "a terminal is opening")),
+        };
+        let audit = self.claude.join("vajra/audit.log");
+        let done = self
+            .with_engine(|m| {
+                let prep = match flow::plan(m) {
+                    flow::Offer::Plan(p) => p,
+                    flow::Offer::Manual(code) => return Err(code),
+                };
+                self.consents.take(token, flow::ID, &prep.plan.hash, std::time::Instant::now()).map_err(|e| e.code())?;
+                let env = env::engine_env(m.home, |k| std::env::var_os(k));
+                let marks = Marks::at(m.data);
+                let ctx = run::Ctx { sup: &self.sup, env: &env, marks: &marks, audit: &audit, timeout: flow::TIMEOUT, current: &|| None };
+                let check = flow::session_check(&env);
+                Ok(flow::run(m, &ctx, &prep, &check))
+            })
+            .and_then(|r| r)
+            .map_err(|c| fail(c, "setup refused"))?;
+        Ok(serde_json::json!({ "stream": run::stream(flow::ID), "report": done.report, "case": done.case, "backup": done.backup }))
     }
 
     /// `setup_plan` (`vajra.setup_plan/1`): the one-click plan for catalog harness `id` (ADR-17 rule 3: the exact
@@ -1066,6 +1247,9 @@ impl App {
     /// why it is "Install it yourself". Installs nothing; npm's pack folder is private and removed before this answers.
     pub fn setup_plan(&self, id: &str) -> Res {
         use crate::providers::install::flow;
+        if id == crate::providers::install::engine::flow::ID {
+            return self.engine_plan();
+        }
         let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
         let answer = |r: Result<Value, &str>| match r {
             Ok(plan) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "plan": plan }),
@@ -1082,7 +1266,13 @@ impl App {
     /// `setup_consent`: the user clicked Install on the plan whose hash is `hash`. A single-use token bound to {id,
     /// hash}, valid for two minutes; it is never logged or stored.
     pub fn setup_consent(&self, id: &str, hash: &str) -> Res {
-        crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if id == crate::providers::install::engine::flow::ID {
+            if !Self::engine_gate() {
+                return Err(fail("source_not_verified", "the engine install is Install it yourself"));
+            }
+        } else {
+            crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        }
         if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(fail("bad_hash", "a plan hash is 64 hex digits"));
         }
@@ -1093,6 +1283,9 @@ impl App {
     /// streams on `setup-<id>`, is checked on every exit, rolled back or marked Broken, and audited. Blocks until done.
     pub fn setup_run(&self, id: &str, token: &str) -> Res {
         use crate::providers::install::{flow, run};
+        if id == crate::providers::install::engine::flow::ID {
+            return self.engine_run(token);
+        }
         let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
         if !h.verified() {
             return Err(fail("source_not_verified", "this harness is Install it yourself"));
@@ -1253,6 +1446,11 @@ impl App {
             Some(t) => t,
             None => self.fresh_run_id(ids::unix_now())?,
         };
+        // Plan #217 L2: checked again just before the launch, for the window since the pick. A fresh run's folder is
+        // always the workflow's own new one, never one made beforehand (a resume names its existing campaign).
+        if input.campaign.is_none() && self.campaign_name_held(&run_id) {
+            return Err(fail("run_id_taken", "a campaign folder for this run id appeared before the start; start again"));
+        }
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let workers = input.max_in_flight;
@@ -1276,7 +1474,7 @@ impl App {
                 let a = profiles::codex_run_lead_argv(&codex, &input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)?;
                 // The pty supervisor passes no CODEX_HOME (`sessions::ENV_ALLOW`), so the Lead's Codex writes under ~/.codex.
                 let want = profiles::CodexWant { cwd: project, ticket_tmp: tmp, network: false, deny };
-                *check.borrow_mut() = Some(LeadCheck { want, marker, codex_home: self.home.join(".codex"), since: std::time::SystemTime::now() });
+                *check.borrow_mut() = Some(LeadCheck { want, marker, codex_home: self.home.join(".codex"), since: std::time::SystemTime::now(), after_applied: None });
                 Ok(a)
             }
         }, false, workers)?;
@@ -2418,6 +2616,11 @@ impl App {
         if !features.get("features").is_some_and(Value::is_array) {
             return bad(self);
         }
+        // The digest covers only the file contents, so an intact signed campaign copied into another campaign's folder
+        // keeps a valid signature. The slug it carries must be the one asked for, as the script's verify requires.
+        if campaign.get("slug").and_then(Value::as_str) != Some(slug) {
+            return bad(self);
+        }
         let sig: Vec<u8> = h.sig.iter().copied().filter(|b| !matches!(b, b' ' | b'\r' | b'\n')).collect();
         if sig.len() != 64 || !sig.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
             return bad(self);
@@ -2808,7 +3011,8 @@ mod runindex;
 mod runview;
 pub mod proof;
 mod proof_app;
-mod evidence_approval;
+pub mod evidence_approval;
+pub mod delivery;
 mod state;
 pub use state::Envelope;
 
@@ -2822,7 +3026,7 @@ mod state_tests;
 /// (FG-02c), so it would only be refused (#106 review).
 fn preflight_json(rows: &[preflight::Row], projects_row: Option<Value>) -> Value {
     let mut ok = preflight::start_enabled(rows);
-    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
+    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix, "advisory": r.advisory, "checked": r.checked})).collect();
     if let Some(row) = projects_row {
         out.push(row);
         ok = false;

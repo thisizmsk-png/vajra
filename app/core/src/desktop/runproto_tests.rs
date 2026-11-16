@@ -100,7 +100,7 @@ impl Workers for FakeWorkers {
         let wt = self.fast.load(Ordering::SeqCst).then(|| PathBuf::from(format!("/wt/{id}")));
         let t = Tick {
             id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, replayed: false,
-            worktree: wt,
+            worktree: wt, files: Vec::new(),
         };
         b.insert(id.clone(), (t, spec, seat));
         Ok(id)
@@ -699,6 +699,15 @@ fn the_stuck_lead_question_comes_only_after_a_failed_round_and_kills_nothing() {
     assert_eq!(r.p.card().questions, [Question::StuckLead]);
     assert!(r.w.kills.lock().unwrap().is_empty() && r.status().is_none(), "the core never kills for this");
     r.p.keep_going();
+    // A human seat pick while the lead is quiet is not lead activity (#275): the question still comes on time.
+    r.clock.advance(899);
+    assert!(r.p.pick_seat("t1", "w1").is_ok());
+    r.p.tick();
+    assert!(r.p.card().questions.is_empty());
+    r.clock.advance(1);
+    r.p.tick();
+    assert_eq!(r.p.card().questions, [Question::StuckLead], "the pick pushed the stuck-lead question back");
+    r.p.keep_going();
     assert!(r.p.card().questions.is_empty());
     r.clock.advance(899);
     r.p.tick();
@@ -754,7 +763,7 @@ fn a_green_round_ends_verified_without_finish_run_and_nothing_overrides_it() {
     r.round_done(&["t1", "t2", "t3"]);
     let tk = r.p.integrate(1).unwrap();
     assert_eq!(tk, "r1.round.r1");
-    r.gate.answer(RoundVerdict::Passed);
+    r.gate.answer(verified());
     assert_eq!(r.await_round(1).outcome.as_deref(), Some("passed"));
     assert_eq!(r.status(), Some(RunStatus::Verified));
     assert_eq!(code(r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() })).0, RUN_DELIVERED);
@@ -1253,7 +1262,55 @@ fn result(passed: bool, rejected: bool) -> RoundResult {
     RoundResult {
         passed, rejected, failing: vec![], blocking: vec![], feedback: BTreeMap::new(), end: None,
         checks: vec![json!({"kind": "security_review", "slot": "w9", "harness": "codex", "account": "codex", "shared_with_writer": false})],
+        delivered: None,
     }
+}
+
+/// A passed round, and what its delivery phase answered (6i).
+fn delivered_round(d: Option<Delivered>) -> Rig {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Checked(RoundResult { delivered: d, ..result(true, false) }));
+    r.await_round(1);
+    r
+}
+
+/// The gate's answer for a passed round whose delivery verified every step (6i).
+fn verified() -> RoundVerdict {
+    let ok = Delivered { verified: true, reason: "round 1 passed".into(), steps: vec![] };
+    RoundVerdict::Checked(RoundResult { delivered: Some(ok), ..result(true, false) })
+}
+
+#[test]
+fn the_legacy_passed_answer_is_not_verified_because_it_carries_no_delivery() {
+    // bhishma L2 on e7d83d2: no gate sends it today, but if one did, a pass with no evidence must not read verified.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Passed);
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("passed"), "the gate's checks did pass");
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert_eq!(r.p.card().reason.as_deref(), Some("the gate passed in round 1, but this run has no evidence check"));
+}
+
+#[test]
+fn a_passed_gate_is_verified_only_when_its_delivery_says_every_step_passed() {
+    let ok = Delivered { verified: true, reason: "round 1 passed and its evidence was checked".into(), steps: vec![json!({"step": "verify", "ok": true})] };
+    let r = delivered_round(Some(ok));
+    assert_eq!(r.status(), Some(RunStatus::Verified));
+    assert_eq!(r.p.card().reason.as_deref(), Some("round 1 passed and its evidence was checked"));
+    // A delivery that stopped at a step is not verified, with that step's reason; the gate's pass alone never counts.
+    let bad = Delivered { verified: false, reason: "Signing the evidence: Vajra's signing key isn't usable".into(), steps: vec![] };
+    let r = delivered_round(Some(bad));
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert_eq!(r.p.card().reason.as_deref(), Some("Signing the evidence: Vajra's signing key isn't usable"));
+    // The tasks the gate saw carry each one's close: the task graph id, its commit and the branch its ticket ran on.
+    let i = r.gate.inputs.lock().unwrap()[0].clone();
+    assert_eq!(i.closes.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["r1.t1", "r1.t2", "r1.t3"]);
+    assert!(i.closes.iter().all(|c| c.branch == format!("vajra/r1/task-{}-r1", c.id.trim_start_matches("r1.")) && !c.commit.is_empty()), "{:?}", i.closes);
 }
 
 #[test]
@@ -1404,7 +1461,7 @@ fn a_rejected_round_ends_the_run_rejected() {
 }
 
 #[test]
-fn a_passed_gate_is_still_not_verified_until_the_delivery_phase() {
+fn a_passed_gate_with_no_delivery_phase_is_not_verified() {
     let r = rig();
     r.p.plan_tasks(plan1()).unwrap();
     r.round_done(&["t1", "t2", "t3"]);
@@ -1414,7 +1471,7 @@ fn a_passed_gate_is_still_not_verified_until_the_delivery_phase() {
     assert_eq!(rt.outcome.as_deref(), Some("passed"));
     assert_eq!(rt.result.as_ref().unwrap()["passed"], true);
     assert_eq!(r.status(), Some(RunStatus::NotVerified));
-    assert!(r.p.card().reason.unwrap().contains("the gate passed"));
+    assert_eq!(r.p.card().reason.as_deref(), Some("the gate passed in round 1, but this run has no evidence check"));
     assert_eq!(r.p.card().checks[0]["harness"], "codex", "the card names who ran each check");
 }
 
@@ -1487,7 +1544,7 @@ fn a_verified_run_logs_its_events_in_order_and_its_last_anchor_is_signed() {
     r.p.plan_tasks(plan1()).unwrap();
     r.round_done(&["t1", "t3", "t2"]);
     r.p.integrate(1).unwrap();
-    r.gate.answer(RoundVerdict::Passed);
+    r.gate.answer(verified());
     let _ = r.await_round(1);
     r.p.flush_record();
     let k = kinds(&log);
@@ -1727,4 +1784,101 @@ fn a_check_ticket_asked_for_after_the_run_ended_never_starts() {
 fn the_runs_writer_limit_is_handed_to_the_runtime() {
     let r = rig();
     assert_eq!(*crate::lock(&r.w.limits), [("r1".to_string(), 4)]);
+}
+
+// ---------------------------------------------------------------- the plan store (codex L1 on #176)
+
+/// A plan store that keeps every plan written to it, and fails while `fail` is set (an injected disk error).
+#[derive(Default)]
+struct Kept {
+    plans: Mutex<Vec<Value>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+fn kept(r: Rig) -> (Rig, Arc<Kept>) {
+    let k = Arc::new(Kept::default());
+    let s = k.clone();
+    let store: PlanStore = Arc::new(move |plan: &Value| {
+        if s.fail.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected: no space left on device"));
+        }
+        crate::lock(&s.plans).push(plan.clone());
+        Ok(())
+    });
+    let Rig { p, w, gate, clock } = r;
+    (Rig { p: p.with_plan_store(store), w, gate, clock }, k)
+}
+
+#[test]
+fn an_accepted_plan_is_saved_before_plan_tasks_acknowledges_it() {
+    let (r, k) = kept(rig());
+    assert!(crate::lock(&k.plans).is_empty(), "nothing is saved before a plan is accepted");
+    r.p.plan_tasks(plan1()).unwrap();
+    // The saved plan is the accepted one, whole, by the time the lead hears it was accepted.
+    assert_eq!(crate::lock(&k.plans).last(), Some(&r.p.plan_record()));
+    assert_eq!(crate::lock(&k.plans).last().unwrap()["round"], 1);
+}
+
+#[test]
+fn a_plan_that_cannot_be_saved_is_refused_and_ends_the_run_before_dispatch() {
+    let (r, k) = kept(rig_with("tidy the export", default_seats(), Limits::default(), false));
+    k.fail.store(true, Ordering::SeqCst);
+    let mut p = plan1();
+    p.tasks[2].touches_security = true;
+    let (c, why) = code(r.p.plan_tasks(p));
+    assert_eq!(c, RECORD_FAILED, "{why}");
+    assert!(why.contains("no space left"), "{why}");
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    // Nothing went out for the unsaved plan: no seat question, no ticket.
+    assert!(r.p.card().questions.is_empty(), "{:?}", r.p.card().questions);
+    assert!(r.p.dispatch_worker("t1").is_err());
+    assert!(crate::lock(&r.w.tickets).is_empty());
+    // The ended run takes no seat pick, so the refused plan is never written by one.
+    k.fail.store(false, Ordering::SeqCst);
+    assert!(r.p.pick_seat("t3", "w1").is_err());
+    assert!(crate::lock(&k.plans).is_empty(), "the refused plan was saved");
+}
+
+#[test]
+fn a_seat_pick_that_cannot_be_saved_is_undone_and_the_question_stays() {
+    let (r, k) = kept(rig_with("tidy the export", default_seats(), Limits::default(), false));
+    let mut p = plan1();
+    p.tasks[2].touches_security = true;
+    r.p.plan_tasks(p).unwrap();
+    k.fail.store(true, Ordering::SeqCst);
+    let (c, why) = code(r.p.pick_seat("t3", "w1"));
+    assert_eq!(c, RECORD_FAILED, "{why}");
+    assert_eq!(r.p.card().questions, [Question::PickSeat { task: "t3".into(), role: "backend".into() }]);
+    assert_eq!(r.p.dispatch_worker("t3").unwrap(), Dispatched::Held { task: "t3".into() });
+    assert_eq!(r.p.plan_record()["tasks"][2]["seat_pick"], Value::Null);
+    // Saved, the same pick counts, and the saved plan carries it.
+    k.fail.store(false, Ordering::SeqCst);
+    r.p.pick_seat("t3", "w1").unwrap();
+    assert_eq!(crate::lock(&k.plans).last().unwrap()["tasks"][2]["seat_pick"], "w1");
+    assert!(matches!(r.p.dispatch_worker("t3").unwrap(), Dispatched::Ticket { .. }));
+}
+
+#[test]
+fn a_security_flag_the_diff_raised_is_saved_or_the_rounds_checks_never_start() {
+    let seats = vec![seat("w1", "backend", false), seat("w3", "frontend", false)];
+    // Saved: the kept plan carries the flag the diff raised.
+    let (r, k) = kept(rig_with("tidy the export", seats.clone(), Limits::default(), false));
+    crate::lock(&r.w.paths).insert(1, Some(vec!["src/auth/session.rs".into()]));
+    r.p.plan_tasks(plan1()).unwrap();
+    assert_eq!(crate::lock(&k.plans).last().unwrap()["security"], false);
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    assert_eq!(crate::lock(&k.plans).last().unwrap()["security"], true);
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(1);
+    // Unsaved: the run ends and the gate never sees the round.
+    let (r, k) = kept(rig_with("tidy the export", seats, Limits::default(), false));
+    crate::lock(&r.w.paths).insert(1, Some(vec!["src/auth/session.rs".into()]));
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    k.fail.store(true, Ordering::SeqCst);
+    r.p.integrate(1).unwrap();
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert!(r.p.card().reason.as_deref().is_some_and(|w| w.contains("couldn't be saved")), "{:?}", r.p.card().reason);
+    assert!(r.gate.inputs.lock().unwrap().is_empty(), "the round's checks started");
 }

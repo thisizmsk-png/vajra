@@ -479,6 +479,18 @@ if (WANT_BASE && !(/^[0-9a-f]{40}$/.test(pre.out.base) && pre.out.base.startsWit
 const BASE = WANT_BASE ? pre.out.base : pre.out.head
 const ORIGIN = !given(A.base) && recorded ? recorded.origin : BASE
 if (recorded && !given(A.base)) log(`resuming on ${recorded.branch} @ ${recorded.commit}`)
+// bhishma #217 M1: a fresh run's campaign must be the one its own create just made. The create refuses a folder that
+// already exists (one planted before the run, under a predictable run id); carrying on would write this run's tasks,
+// evidence and report into it. So a failed create on a fresh run ends the run here, before any write. A resume's
+// progress line only notes the resume, so its failure stays a risk in the report.
+if (!pre.out.campaign_ok && !resumed) {
+  return {
+    status: 'error', node: 'preflight',
+    error: `the campaign ${CAMPAIGN} could not be created, so this run stopped before writing anything ` +
+      `(the folder may already exist; a fresh run never uses one it did not create): ` + oneLine(pre.out.campaign_output, 300),
+    artifacts: { understanding },
+  }
+}
 if (!pre.out.campaign_ok) campaignNotes.push('campaign record failed at start: ' + oneLine(pre.out.campaign_output, 300))
 
 // 2. Plan

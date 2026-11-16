@@ -250,6 +250,99 @@ describe("one-click install", () => {
   });
 });
 
+// D7: the engine row. Off until the security review turns the catalog gate on; then the same sheet, with its own facts.
+const ENGINE_HASH = "d".repeat(64);
+const TGZ = "e".repeat(64);
+const ENGINE_PLAN = {
+  schema: "vajra.setup_plan/1",
+  id: "engine",
+  plan: {
+    id: "engine",
+    method: "engine_bundle",
+    command: ["/bin/bash", "/Users/me/.claude/skills/vajra/scripts/install.sh", "--no-hooks"],
+    tools: [],
+    source: "Bundled with Vajra Desktop",
+    version: "0.6.3",
+    target: "/Users/me/.claude/skills/vajra",
+    pin: { kind: "engine", tgz_sha256: TGZ, build: "release", case: "update", old_version: "0.6.2", old_root: [1, 2], workflows: ["vajra-deliver.js"], home: "/Users/me", differs: 3 },
+    needs_admin: null,
+    notes: ["no_hooks", "copies_workflows", "creates_key"],
+    scope_registry: null,
+    deps: [],
+    hash: ENGINE_HASH,
+  },
+};
+const engineOn = { ...LIST, engine: { installed: true, command: LIST.engine.command, state: "installed", one_click: true } };
+
+describe("engine row", () => {
+  it("shows a Broken engine plainly, with the terminal command, and reads an unknown state as missing", async () => {
+    panel({ ...LIST, engine: { ...LIST.engine, state: "broken", one_click: false } });
+    const r = await rowOf(C.engine);
+    expect(r.getByText(C.engineState.broken)).toBeTruthy();
+    expect(r.getByText(C.engineBroken)).toBeTruthy();
+    expect(r.getByText(LIST.engine.command)).toBeTruthy();
+    const odd = parseSetupList({ ...LIST, engine: { installed: true, command: "x", state: "magic", one_click: true } });
+    expect(odd.ok && odd.value.engine).toEqual({ installed: false, command: "x", state: "missing", one_click: false });
+  });
+
+  it("offers no engine install while the gate is off or an install is running", async () => {
+    panel({ ...LIST, engine: { ...LIST.engine, state: "installing", one_click: true } });
+    const r = await rowOf(C.engine);
+    expect(r.getByText(C.engineInstalling)).toBeTruthy();
+    expect(r.queryByRole("button", { name: C.enginePlan })).toBeNull();
+    cleanup();
+    panel();
+    await rowOf(C.engine);
+    expect(screen.queryByRole("button", { name: C.enginePlan })).toBeNull();
+  });
+
+  it("shows what the engine install changes and consents on the plan's hash", async () => {
+    const ipc = fakeIpc({
+      setup_list: engineOn,
+      setup_plan: ENGINE_PLAN,
+      setup_consent: { token: TOKEN },
+      setup_run: { stream: "setup-engine", report: { outcome: "installed", reason: null, exit: 0, version: "0.6.3" }, case: "update", backup: "backup-20261112T201500Z" },
+      tail: { lines: [{ seq: 1, text: "installed" }], gap: false, head_seq: 1, spill_start: null, spill_end: null },
+    });
+    setTransport(ipc.transport);
+    render(<SetupPanel />);
+    fireEvent.click((await rowOf(C.engine)).getByRole("button", { name: C.enginePlan }));
+    const s = within(await screen.findByRole("region", { name: C.engineSheetTitle }));
+    expect(s.getByText(ENGINE_PLAN.plan.command.join(" "))).toBeTruthy();
+    expect(s.getByText(C.engineCase.update)).toBeTruthy();
+    expect(s.getByText("0.6.2")).toBeTruthy();
+    expect(s.getByText(C.engineDiffers(3))).toBeTruthy();
+    expect(s.getByText(TGZ)).toBeTruthy();
+    expect(s.getByText("vajra-deliver.js")).toBeTruthy();
+    expect(s.getByText(C.engineNote.no_hooks)).toBeTruthy();
+    expect(s.getByText(C.engineNote.creates_key)).toBeTruthy();
+    expect(s.getByText(C.engineRestart)).toBeTruthy();
+    expect(s.queryByText(C.field.tools)).toBeNull();
+    fireEvent.click(s.getByRole("button", { name: C.engineVerb.update }));
+    await waitFor(() => expect(s.getByText(C.outcome.installed)).toBeTruthy());
+    expect(s.getByText(C.engineBackup("backup-20261112T201500Z"))).toBeTruthy();
+    expect(ipc.calls.find((c) => c.cmd === "setup_consent")!.args).toEqual({ id: "engine", hash: ENGINE_HASH });
+    expect(ipc.calls.find((c) => c.cmd === "setup_run")!.args).toEqual({ id: "engine", token: TOKEN });
+    expect(document.body.innerHTML).not.toContain(TOKEN);
+  });
+
+  it("says why the engine install is install it yourself, in the engine's own words", async () => {
+    const ipc = fakeIpc({ setup_list: engineOn, setup_plan: { schema: "vajra.setup_plan/1", id: "engine", manual: "engine_in_use" } });
+    setTransport(ipc.transport);
+    render(<SetupPanel />);
+    fireEvent.click((await rowOf(C.engine)).getByRole("button", { name: C.enginePlan }));
+    await waitFor(() => expect(screen.getByText(C.engineManual.engine_in_use)).toBeTruthy());
+  });
+
+  it("refuses an engine plan whose pin is malformed, so the sheet never guesses", async () => {
+    const { parseSetupPlan } = await import("../src/setupContract");
+    expect(parseSetupPlan(ENGINE_PLAN).ok).toBe(true);
+    for (const pin of [{ ...ENGINE_PLAN.plan.pin, case: "sideways" }, { ...ENGINE_PLAN.plan.pin, tgz_sha256: "x" }, { ...ENGINE_PLAN.plan.pin, differs: -1 }, null]) {
+      expect(parseSetupPlan({ ...ENGINE_PLAN, plan: { ...ENGINE_PLAN.plan, pin } }).ok).toBe(false);
+    }
+  });
+});
+
 describe("parseSetupPlan", () => {
   it("refuses a plan without a 64-hex hash or with a non-text command", async () => {
     const { parseSetupPlan } = await import("../src/setupContract");

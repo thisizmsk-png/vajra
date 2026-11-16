@@ -283,7 +283,7 @@ pub fn detect(shell: &Path, home: &Path, timeout: Duration) -> Option<Vec<PathBu
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn().ok()?;
+    let mut child = crate::spawnlock::spawn(&mut cmd).ok()?;
     let pid = child.id() as libc::pid_t;
     let mut stdout = child.stdout.take()?;
     let mut out = Vec::new();

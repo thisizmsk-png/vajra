@@ -2,6 +2,7 @@
 //! in the process's argv or environment, and a call goes stdio -> socket -> registry -> protocol. The peer check
 //! passes for the server when it descends from the lead (a `/bin/sh` the test starts, the server's parent) and refuses
 //! it when the lead is another process. Temp HOME and data dir only; every child is killed in a `Drop` guard.
+#![allow(clippy::disallowed_methods)] // test code: the app's own spawns go through the spawn lock
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};

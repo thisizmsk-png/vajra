@@ -10,7 +10,7 @@ export function PreflightList({ rows }: { rows: Preflight["rows"] }) {
     <ul className="v-home__checks">
       {rows.map((r) => (
         <li key={r.name}>
-          <StatusDot status={r.ok ? "pass" : "fail"} />
+          <StatusDot status={r.ok ? "pass" : r.checked === false ? "unknown" : "fail"} />
           <span>{Object.prototype.hasOwnProperty.call(S.home.checkNames, r.name) ? S.home.checkNames[r.name] : r.name}</span>
           <Text variant="body-sm" muted>{r.detail}</Text>
           {!r.ok && r.fix && <code className="v-home__fix">{r.fix}</code>}

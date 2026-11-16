@@ -301,22 +301,18 @@ impl UsageSource for CurlSource {
         if let Some(home) = self.keys.home() {
             producer.env("HOME", home);
         }
-        let mut producer = producer
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+        let mut producer = crate::spawnlock::spawn(producer.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())).ok()?;
         let pipe = producer.stdout.take()?;
-        let curl = Command::new(&self.curl)
-            // -q first: never read a .curlrc (it could add a proxy or another header to a request that carries a key).
-            .args(["-q", "-sS", "--fail", "--proto", "=https", "--max-time", "10", "-H", "@-", "--", &self.url])
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .stdin(Stdio::from(pipe))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
+        let curl = crate::spawnlock::spawn(
+            Command::new(&self.curl)
+                // -q first: never read a .curlrc (it could add a proxy or another header to a request that carries a key).
+                .args(["-q", "-sS", "--fail", "--proto", "=https", "--max-time", "10", "-H", "@-", "--", &self.url])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::from(pipe))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        );
         let mut curl = match curl {
             Ok(c) => c,
             Err(_) => {

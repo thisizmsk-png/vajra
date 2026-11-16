@@ -131,6 +131,10 @@ verify_state() {
   local d="$1" want got
   for f in campaign.json features.json progress.md state.sig; do [ -f "$d/$f" ] || return 1; done
   jq -e . "$d/campaign.json" >/dev/null 2>&1 || return 1
+  # bhishma #217 L1: the signed record names its own folder. A signed campaign copied whole into another campaign's
+  # folder keeps a valid signature (the digest covers only the file contents), so the slug it carries must be the
+  # folder's name, or it is not this campaign.
+  [ "$(jq -r '.slug // ""' "$d/campaign.json" 2>/dev/null)" = "$(basename "$d")" ] || return 1
   jq -e '.features | type == "array"' "$d/features.json" >/dev/null 2>&1 || return 1
   want="$(tr -d ' \r\n' < "$d/state.sig")"
   got="$(state_digest "$d" | hmac_stdin)"
@@ -308,7 +312,15 @@ cmd_create() {
   DIR="${ROOT}/${SLUG}"
   [ -e "$DIR" ] && die "campaign already exists: $SLUG"
   load_key
-  mkdir -p "$DIR/checkpoints" || die "cannot create $DIR"
+  # Plan #217 L2: the check above is only a fast path. The claim is this one mkdir with no -p: it creates the folder
+  # or fails, and it never follows a link at the name, so a folder, file or link planted at any moment before it
+  # (another process racing this create) is refused and left as it is. Nothing is written until the claim succeeds.
+  mkdir -p "$ROOT" || die "cannot create $ROOT"
+  if ! mkdir "$DIR" 2>/dev/null; then
+    { [ -e "$DIR" ] || [ -L "$DIR" ]; } && die "campaign already exists: $SLUG"
+    die "cannot create $DIR"
+  fi
+  mkdir "$DIR/checkpoints" || die "cannot create $DIR/checkpoints"
   lock "$DIR"
   local t; t="$(now)"
   jqw "$DIR/features.json" -n --argjson f "$feats" '{features: $f}'

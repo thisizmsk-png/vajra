@@ -82,6 +82,11 @@ impl Pinned {
         crate::control::fsx::DirHandle::from_file(File::from(self.0.try_clone()?)).names()
     }
 
+    /// Every entry name as bytes, UTF-8 or not (no `.` or `..`).
+    pub fn raw_names(&self) -> io::Result<Vec<Vec<u8>>> {
+        crate::control::fsx::DirHandle::from_file(File::from(self.0.try_clone()?)).raw_names()
+    }
+
     fn openat(&self, name: &str, flags: libc::c_int, mode: libc::mode_t) -> io::Result<File> {
         let n = cstr(name)?;
         // SAFETY: the directory descriptor and name are valid; the result is owned immediately.
@@ -181,5 +186,11 @@ impl Pinned {
             unsafe { libc::unlinkat(self.0.as_raw_fd(), t.as_ptr(), 0) };
         }
         res
+    }
+
+    /// Flush the folder itself, so a rename done in it (`write_atomic`) survives a crash.
+    pub fn sync(&self) -> io::Result<()> {
+        // SAFETY: a valid descriptor of a folder this value owns.
+        cvt(unsafe { libc::fsync(self.0.as_raw_fd()) }).map(|_| ())
     }
 }

@@ -128,13 +128,15 @@ pub struct Tick {
     pub replayed: bool,
     /// The ticket's worktree once it has one (the task graph's `claim --worktree`).
     pub worktree: Option<PathBuf>,
+    /// The files its commit changed (a task's close on the evidence names them, 6i).
+    pub files: Vec<String>,
 }
 
 impl From<TicketView> for Tick {
     fn from(v: TicketView) -> Self {
         Tick {
             id: v.id, state: v.state, outcome: v.outcome, reason: v.reason, commit: v.commit, attempt: v.attempt, elapsed_s: v.elapsed_s,
-            queue_position: v.queue_position, replayed: false, worktree: v.worktree,
+            queue_position: v.queue_position, replayed: false, worktree: v.worktree, files: v.files,
         }
     }
 }
@@ -228,7 +230,8 @@ pub enum RoundVerdict {
 /// The round ticket's result (16.5a): `{passed, failing, blocking, feedback, rejected}`, plus who ran each check.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct RoundResult {
-    /// The gate passed. Until 6i adds the delivery phase the run then ends `not_verified`.
+    /// The gate passed. The run is then `verified` only when `delivered` says so; with no delivery phase it ends
+    /// `not_verified`.
     pub passed: bool,
     pub failing: Vec<String>,
     pub blocking: Vec<Value>,
@@ -240,6 +243,29 @@ pub struct RoundResult {
     pub checks: Vec<Value>,
     /// The round can't be checked at all (no seat for a phase): the run ends `not_verified` with this reason.
     pub end: Option<String>,
+    /// After a pass: the delivery phase's end (6i, `delivery.rs`). `None` when the gate has no delivery phase.
+    pub delivered: Option<Delivered>,
+}
+
+/// How the delivery phase ended (6i). `verified` only when every step passed: the evidence ran, was signed and checked,
+/// every task closed on it, every criterion passed, the archive, close and report were written and the record verified.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Delivered {
+    pub verified: bool,
+    /// Plain words for the run card: what was delivered, or the step that failed and why.
+    pub reason: String,
+    /// Each step that ran, in order: `{step, ok}` (and `why` when it failed).
+    pub steps: Vec<Value>,
+}
+
+/// A task as its close on the evidence needs it: the commit its last ticket made, that ticket's branch and its files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskClose {
+    /// The task graph's id (`<run>.<task>`).
+    pub id: String,
+    pub commit: String,
+    pub branch: String,
+    pub changed: Vec<String>,
 }
 
 /// One integrated round, as the gate needs it.
@@ -256,6 +282,8 @@ pub struct RoundInput {
     pub security: bool,
     /// The seats that ran this run's security tasks (the security reviewer is preferred on another harness, N15).
     pub security_writers: Vec<WorkerSeat>,
+    /// Every task's close, in plan order (6i). A task with no usable commit is missing, and the delivery refuses.
+    pub closes: Vec<TaskClose>,
 }
 
 /// The round's checks, run by the core on a clean integration (16.5a): `phases::CoreGate`.
@@ -551,7 +579,13 @@ struct Inner {
     record: Option<Arc<dyn RunRecord>>,
     /// The run's hash-chained log (W2), anchored into the record. `None` only in tests of the rules alone.
     log: Option<Arc<RunLog>>,
+    /// Where an accepted plan is kept for the resume charter (`plan.json`), written durably as part of acceptance.
+    /// `None` only in tests of the rules alone.
+    plan_store: Option<PlanStore>,
 }
+
+/// Writes the accepted plan (`RunProtocol::plan_record`'s form) durably, or says why it couldn't.
+pub type PlanStore = Arc<dyn Fn(&Value) -> std::io::Result<()> + Send + Sync>;
 
 /// One run's protocol. Cheap to clone.
 #[derive(Clone)]
@@ -615,7 +649,16 @@ impl RunProtocol {
         let st = St { last_call: now, started: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
         // The waves the lead is given are only advice; the runtime holds the limit however dispatch is called.
         workers.limit_writers(&cfg.run, cfg.max_in_flight);
-        RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new(), record: None, log: None }))
+        RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new(), record: None, log: None, plan_store: None }))
+    }
+
+    /// The run with the store its accepted plans are kept in (codex L1 on #176). Called once, before the protocol is
+    /// shared. Each plan is written there before `plan_tasks` acknowledges it, so nothing is dispatched for a plan a
+    /// crash could lose.
+    pub fn with_plan_store(self, store: PlanStore) -> Self {
+        let mut inner = Arc::try_unwrap(self.0).unwrap_or_else(|_| panic!("with_plan_store is called before the protocol is shared"));
+        inner.plan_store = Some(store);
+        RunProtocol(Arc::new(inner))
     }
 
     /// The run with its signed record (6h). Called once, before the protocol is shared.
@@ -1036,7 +1079,15 @@ impl RunProtocol {
         }
         match self.check_plan(st, &input) {
             Ok(accepted) => {
-                let out = self.accept(st, input, accepted);
+                // Not kept is not accepted (codex L1 on #176): the run ends here, and nothing is acknowledged or
+                // dispatched for a plan the resume charter would not find.
+                let out = match self.accept(st, input, accepted) {
+                    Ok(out) => out,
+                    Err(why) => {
+                        Self::finalize(st, RunStatus::NotVerified, format!("the accepted plan couldn't be saved: {why}"));
+                        return refuse(RECORD_FAILED, format!("the accepted plan couldn't be saved, so the run has ended: {why}"));
+                    }
+                };
                 // Round 1 registers the campaign and the task graph before anything is dispatched. It runs under the
                 // protocol lock: no worker exists yet, so only the lead's own calls wait. A failure ends the run here.
                 if r == 1
@@ -1123,7 +1174,10 @@ impl RunProtocol {
         sanitise(s, &self.0.cfg.redact)
     }
 
-    fn accept(&self, st: &mut St, p: PlanInput, merged: Vec<PlanTask>) -> PlanAccepted {
+    /// Apply the checked plan and keep it in the plan store, before any seat question, the plan's log line or the
+    /// acknowledgement goes out (only a stale question's answered line is logged earlier). An error is the store's:
+    /// the caller ends the run.
+    fn accept(&self, st: &mut St, p: PlanInput, merged: Vec<PlanTask>) -> Result<PlanAccepted, String> {
         let r = p.round;
         let clean = |t: &PlanTask| PlanTask { title: self.text(&t.title), brief: self.text(&t.brief), ..t.clone() };
         if r == 1 {
@@ -1176,23 +1230,24 @@ impl RunProtocol {
                 Question::PickSeat { task: t.spec.id.clone(), role: t.spec.owner_role.clone() }
             })
             .collect();
+        st.round = r;
+        self.keep_plan(st)?;
         for q in picks {
             self.ask(st, q);
         }
-        st.round = r;
         self.record_replan(st, r, &before, &rework);
         let round = st.rounds.entry(r).or_default();
         round.planned = true;
         round.rework = rework.clone();
         self.log(LogKind::PlanAccepted { round: r, tasks: rework });
         let specs = st.specs();
-        PlanAccepted {
+        Ok(PlanAccepted {
             round: r,
             order: plan::topo(&specs),
             waves: plan::waves(&specs, Some(self.0.cfg.max_in_flight as usize)),
             security_tasks: st.tasks.iter().filter(|t| t.security).map(|t| t.spec.id.clone()).collect(),
             held,
-        }
+        })
     }
 
     // ------------------------------------------------------------ dispatch_worker
@@ -1436,7 +1491,14 @@ impl RunProtocol {
             Ok(_) if st.status.is_some() => self.release(st),
             Ok(Integrated { head, paths }) => {
                 // The owner's M2 rule: the diff flags the run whatever the plan's words. Sticky; unreadable paths flag.
-                st.security |= paths.is_none_or(|p| p.iter().any(|f| security_named(f)));
+                let flagged = !st.security && paths.is_none_or(|p| p.iter().any(|f| security_named(f)));
+                st.security |= flagged;
+                // The kept plan carries the flag, so a resume can't lose it: unsaved, the round's checks never start.
+                if flagged && let Err(why) = self.keep_plan(&st) {
+                    Self::finalize(&mut st, RunStatus::NotVerified, format!("the accepted plan couldn't be saved: {why}"));
+                    self.release(st);
+                    return Ok(ticket);
+                }
                 st.last_good = Some((r, head.clone()));
                 self.log(LogKind::Integrated { round: r, ok: true, head: Some(head.clone()), why: None });
                 self.log(LogKind::ChecksStarted { round: r });
@@ -1554,9 +1616,21 @@ impl RunProtocol {
                 }
             }
         }
+        // Each task's close on the evidence (6i): the commit its last ticket made, on the branch the core's git writer
+        // made for that ticket, with the files it changed.
+        let closes = order
+            .iter()
+            .filter_map(|id| st.task(id))
+            .filter_map(|t| {
+                let (tr, tk, _) = t.tickets.last()?;
+                let commit = self.result(st, t)?;
+                let changed = self.0.workers.view(tk).map(|v| v.files).unwrap_or_default();
+                Some(TaskClose { id: self.tid(&t.spec.id), commit, branch: format!("vajra/{}/task-{}-r{tr}", self.0.cfg.run, t.spec.id), changed })
+            })
+            .collect();
         RoundInput {
             run: self.0.cfg.run.clone(), round: r, head, base: self.0.cfg.base.clone(), criteria: st.criteria.clone(), tasks, security: st.security,
-            security_writers,
+            security_writers, closes,
         }
     }
 
@@ -1582,8 +1656,10 @@ impl RunProtocol {
         if st.status.is_none() {
             match v {
                 RoundVerdict::Passed => {
+                    // The legacy answer carries no delivery, so it is never verified (bhishma L2 on e7d83d2): the same
+                    // as a typed pass with no delivery phase.
                     st.rounds.entry(r).or_default().checks = Checks::Passed;
-                    Self::finalize(&mut st, RunStatus::Verified, format!("round {r} passed"));
+                    Self::finalize(&mut st, RunStatus::NotVerified, format!("the gate passed in round {r}, but this run has no evidence check"));
                 }
                 RoundVerdict::Failed { feedback } => self.round_failed(&mut st, r, feedback),
                 RoundVerdict::Checked(x) => {
@@ -1597,7 +1673,13 @@ impl RunProtocol {
                         Self::finalize(&mut st, RunStatus::Rejected, format!("a review rejected the approach in round {r}"));
                     } else if x.passed {
                         round.checks = Checks::Passed;
-                        Self::finalize(&mut st, RunStatus::NotVerified, format!("the gate passed in round {r}; this version of Vajra doesn't run the evidence check yet"));
+                        // Verified only from the delivery phase's own answer, every step passed (6i). Anything else,
+                        // including no delivery phase at all, is not verified with its reason.
+                        match x.delivered {
+                            Some(d) if d.verified => Self::finalize(&mut st, RunStatus::Verified, d.reason),
+                            Some(d) => Self::finalize(&mut st, RunStatus::NotVerified, d.reason),
+                            None => Self::finalize(&mut st, RunStatus::NotVerified, format!("the gate passed in round {r}, but this run has no evidence check")),
+                        }
                     } else {
                         self.round_failed(&mut st, r, x.feedback);
                     }
@@ -1711,12 +1793,24 @@ impl RunProtocol {
     pub fn pick_seat(&self, task: &str, slot: &str) -> Result<(), Refusal> {
         let mut st = self.lock();
         let out = (|| {
+            // An ended run takes no pick: after a refused save its tasks may be a plan that was never kept, and a
+            // pick's save would write that plan (bhishma LATER-b on this fix). The limits are enforced, but a pick is
+            // the human's, not lead activity: `last_call` is left alone so the stuck-lead wait keeps its time (#275).
+            self.enforce(&mut st);
+            if let Some((s, _)) = &st.status {
+                return refuse(RUN_ENDED, format!("the run has ended ({}), so a seat can no longer be picked", json!(s).as_str().unwrap_or_default()));
+            }
             let role = st.task(task).map(|t| t.spec.owner_role.clone()).ok_or(Refusal { code: INVALID, reason: format!("unknown task {}", plan_id(task)) })?;
             if !self.writer_seats(&role).any(|s| s.slot == slot) {
                 return refuse(INVALID, format!("seat {} has no {role} role", plan_id(slot)));
             }
-            if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == task) {
-                t.pick = Some(slot.to_string());
+            let before = st.tasks.iter_mut().find(|t| t.spec.id == task).map(|t| t.pick.replace(slot.to_string()));
+            // The pick is kept in the saved plan before it counts: unsaved, it is undone and the question stays open.
+            if let Err(why) = self.keep_plan(&st) {
+                if let (Some(t), Some(old)) = (st.tasks.iter_mut().find(|t| t.spec.id == task), before) {
+                    t.pick = old;
+                }
+                return refuse(RECORD_FAILED, format!("the seat pick couldn't be saved: {why}"));
             }
             self.answered(&mut st, LogSource::Human, |q| matches!(q, Question::PickSeat { task: t, .. } if t == task));
             Ok(())
@@ -1843,6 +1937,19 @@ impl RunProtocol {
     /// The accepted plan, as the guarded `plan.json` keeps it for the resume charter (6d2) and memory (6j).
     pub fn plan_record(&self) -> Value {
         let st = self.lock();
+        self.plan_value(&st)
+    }
+
+    /// Write the plan as it stands to the plan store, durably (temp file, fsync, rename), under the protocol lock: the
+    /// caller acts on the change only once this returns `Ok`. A no-op without a store or before round 1.
+    fn keep_plan(&self, st: &St) -> Result<(), String> {
+        match &self.0.plan_store {
+            Some(store) if st.round > 0 => store(&self.plan_value(st)).map_err(|e| e.to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    fn plan_value(&self, st: &St) -> Value {
         let tasks: Vec<Value> = st.tasks.iter().map(|t| json!({"task": t.spec, "security": t.security, "seat_pick": t.pick})).collect();
         json!({"v": 1, "run": self.0.cfg.run, "round": st.round, "criteria": st.criteria, "tasks": tasks, "decisions": st.decisions, "protected_actions": st.protected, "security": st.security})
     }

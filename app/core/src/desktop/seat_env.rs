@@ -64,7 +64,7 @@ impl SeatEnv {
             .iter()
             .filter_map(|s| launch::launchable_marked(self.route_for(project), &s.choice, s.kind, &agents, &probe, &keys, &marks).err().map(|r| (s.seat.clone(), r)))
             .collect();
-        if let Err(r) = launch::engine_ready(&self.home) {
+        if let Err(r) = launch::engine_ready(&self.home, &self.data, &marks) {
             out.push(("engine".into(), r));
         }
         out

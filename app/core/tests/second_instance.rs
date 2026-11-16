@@ -2,6 +2,7 @@
 //! the start-up sweep kills processes that started before the app, so the second app here is a fresh process (this
 //! test binary run again) that opens after the worker started. Without the worktree folder's instance lock it would
 //! sweep that worker. Temp HOME and data folders only; the worker is killed and reaped at the end whatever happens.
+#![allow(clippy::disallowed_methods)] // test code: the app's own spawns go through the spawn lock
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -95,6 +95,12 @@ impl Marks {
         self.update(|s| (s.broken.remove(id).is_some(), ()))
     }
 
+    /// The reason `id` is Broken, whatever its path or version, never clearing it (bhishma C9: the engine's mark ends
+    /// only with a passing engine install, not because someone edited `package.json`).
+    pub fn any(&self, id: &str) -> Option<String> {
+        self.read().broken.get(id).map(|m| m.reason.clone())
+    }
+
     /// The reason `id` is still Broken, when the binary at `path` and its `version` are the ones that were marked. A
     /// different binary or version clears the mark for good. The check and the clear are one locked step, so a mark
     /// set meanwhile for the new binary is never cleared by a stale comparison.
