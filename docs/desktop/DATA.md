@@ -1,6 +1,6 @@
 # What Vajra Desktop reads, writes and sends
 
-Plain answers, checked against the code on `ao/integration/batch-3`. Each claim names the file that does it. Where a claim
+Plain answers, checked against the code on `ao/integration/batch-5`. Each claim names the file that does it. Where a claim
 is not true yet, it says so. This describes the macOS app in `app/`; the Claude Code skill is covered by
 [SECURITY.md](../../SECURITY.md).
 
@@ -11,11 +11,11 @@ is not true yet, it says so. This describes the macOS app in `app/`; the Claude 
   else that leaves your Mac is done by the tools it launches (Claude Code, Codex, `gh`) under your own sign-ins.
 - There is no telemetry, analytics, crash upload or auto-update code in the app. See "Nothing else leaves" for what that
   rests on, and what it cannot cover.
-- The guard and the Claude Code sandbox protect Claude workers that Claude Code's own campaign starts; the app's own Claude
-  worker dispatch is off at this base. **Codex seats run outside the Vajra guard today**, and the app says so on the card.
+- The guard and the Claude Code sandbox protect Claude workers. **Codex seats run outside the Vajra guard**, with your own
+  Codex setup, and the app says so on the card. Vajra makes no claim that a Codex worker is kept from reading the signing key.
 
-**Keep this page in step with the code.** It cites batch-3. Re-check it when #216 (the Codex profile) or #224 (in-app Claude
-workers, and the S4 proof) lands, because both change claims here.
+**Keep this page in step with the code.** It cites batch-5. Re-check it whenever the Codex profile, the Claude worker
+settings or the seat card text changes.
 
 ## What it reads
 
@@ -64,9 +64,9 @@ a log or this process's memory; only four usage numbers are kept. No key saved m
 do; that is the point of the app. Vajra does not add a proxy or forward your keys. Sessions see `PATH, HOME, LANG, TERM, USER,
 SHELL` (`app/core/src/sessions/mod.rs`, `ENV_ALLOW`), and a launch may add three more, from a fixed list
 (`EXTRA_ENV_ALLOW` in the same file): `CODEX_HOME` (a Vajra-owned one for a gateway seat), `CLAUDE_CONFIG_DIR`, and a
-per-ticket `TMPDIR`. None of them is a key. A Codex worker's network follows its seat's setting
-(`sandbox_workspace_write.network_access`), and the card says "Internet on for this worker" when it is on
-(`app/core/src/adapter/profiles.rs`, `app/core/src/desktop/seat_start.rs`). Three more things leave your Mac that are easy to miss:
+per-ticket `TMPDIR`. None of them is a key. A Codex worker's sandbox internet follows its seat's network switch (the
+`network` setting of its per-launch profile), and the card says "Internet on for this worker" when it is on
+(`app/core/src/adapter/profiles.rs`, `app/core/src/desktop/seat_start.rs`). Your own Codex web search setting is not changed. Three more things leave your Mac that are easy to miss:
 
 - **A Codex gateway seat sends its prompts and code to OpenRouter**, under the key you saved (`app/core/src/providers/codex_home.rs`,
   `DEFAULT_BASE_URL`).
@@ -102,12 +102,12 @@ doctor passes and reports Claude Code's OS sandbox as active with its write-deny
 says "Asking the Director-General needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry."
 (`app/core/src/desktop/lead.rs`, `doctor_ok`, `SANDBOX_NEEDED`).
 
-**Claude workers.** Two cases, and only the first is true at this base:
-
-- Workers that Claude Code's own campaign starts (the Vajra skill's workflow) run with the Vajra guard.
-- **The app's own Claude worker dispatch is off at this base.** It stays off until the flag for Claude Code spike S4 passes
-  (`CLAUDE_WORKER_S4_PASSED` is `false` in `app/core/src/adapter/profiles.rs`) and #224 lands, which also changes how those
-  workers load settings and use the sandbox. This page needs updating when they do.
+**Claude workers.** They run with the Vajra guard, in Claude Code's sandbox, with `--setting-sources ""` so no settings file
+of yours can widen that sandbox (`app/core/src/adapter/profiles.rs`). From your own Claude Code settings file a worker keeps
+only your default model and a fixed list of model-routing variables (a gateway or cloud-provider base URL and model names).
+Keys, tokens, proxy variables, permissions, hooks and MCP servers are not carried, so your Claude Code MCP servers do not load
+for a worker (`CLAUDE_NOTE` in `app/core/src/desktop/seat_start.rs`). The same guard also runs on workers that Claude Code's
+own campaign starts (the Vajra skill's workflow).
 
 Under the guard, a worker is blocked from dangerous or self-modifying commands, writes to the
 skill's files and settings, and the ways it knows of to read the signing key. The list is in
@@ -115,30 +115,35 @@ skill's files and settings, and the ways it knows of to read the signing key. Th
 be complete, and **the OS sandbox is the enforced boundary, which is opt-in** (`/sandbox` in Claude Code, or
 `scripts/enable-sandbox.sh`). The first-run checks show whether it is on (`preflight.rs`).
 
-**Codex workers.** Codex's own `workspace-write` sandbox applies, so a worker can write in its worktree only
-(`app/core/src/sessions/argv.rs`, `app/core/src/adapter/profiles.rs`). **That is the whole of it, with two caveats:** the
-worker's network follows its seat's setting (`sandbox_workspace_write.network_access`), so it may have internet; and your own
-Codex MCP servers and `notify` hook run outside that sandbox, with the worker (`CODEX_WARNING` in
-`app/core/src/desktop/seat_start.rs`). The Vajra guard does not run on Codex workers.
+**Codex workers.** Each launch gets a fresh Codex permission profile that Vajra builds (`codex_profile_overrides` in
+`app/core/src/adapter/profiles.rs`). It lets the worker read the disk, write only in its worktree and its ticket temp folder,
+and hides the Vajra state folder and the app data folder, as defense in depth. Three things follow:
+
+- The sandbox's internet follows the seat's network switch. Your own Codex web search setting is not changed.
+- Codex keeps your own setup: your MCP servers, hooks, plugins and `notify` setting stay on and run with the worker,
+  outside that sandbox (`CODEX_WORKER_USER` in the same file, and `CODEX_WARNING` in `app/core/src/desktop/seat_start.rs`).
+- **Vajra makes no claim that a Codex worker cannot read the signing key.** Your own tools run outside the profile, so the
+  profile cannot promise it. The Vajra guard does not run on Codex workers.
 
 ## What is not guarded, and why
 
-- **Codex seats run outside the Vajra guard.** The seat card says: "Runs outside the Vajra guard. Can read your files,
-  including Vajra's signing key. With that key it could fake Vajra's records and approvals, not only test results. It can
-  write only in its worktree. Your own Codex tools (MCP servers, notify) run with it, outside its sandbox."
-  (`app/core/src/desktop/seat_start.rs`, `CODEX_WARNING`). A per-launch Codex profile that denies the Vajra folders is
-  open work (pull request #216) and is **not merged**, so do not rely on it yet.
+- **Codex seats run outside the Vajra guard.** The seat card says: "Runs outside the Vajra guard, with your own Codex
+  settings. Your Codex tools (MCP servers, hooks, plugins, notify) run with it, outside its sandbox. Its sandbox's internet
+  follows this seat's switch. Web search and your Codex tools (MCP, hooks, notify) aren't limited by it. It isn't guarded
+  against reading Vajra's signing key, and with that key it could fake Vajra's records and approvals, not only test results."
+  (`app/core/src/desktop/seat_start.rs`, `CODEX_WARNING`). The per-launch profile hides the Vajra folders, but Vajra does not
+  count a Codex run as guarded and does not say the key is out of its reach. The owner chose this on 13 Nov 2026: Codex
+  keeps your extras, and no key claim is made.
 - **Codex on a ChatGPT login is the case where that cannot be proven.** For a Codex seat on your ChatGPT sign-in, the app
   cannot check the settings your workspace may manage in the cloud, and `codex login status` does not say which plan you
   are on, so a workspace login cannot be told from a personal one. The owner's decision (13 Nov 2026) is that such a seat
   launches, is marked not guarded, and shows that reason on its card, instead of refusing every ChatGPT login. API-key
-  logins and the gateway route stay checkable. This lands with #216 (the constant `CODEX_CLOUD_REFUSES_LAUNCH` there flips
-  it to refusing). Until #216 merges, every Codex seat carries the warning above.
+  logins and the gateway route stay checkable. Every Codex seat carries the warning above.
 - **The signing key is guarded, not yet sandboxed.** The proof record says so: "Checked by Vajra on this Mac. The signing
   key is guarded, not yet sandboxed." A record whose evidence ran outside the guard says that too, and the app does not
   call any record more than that (`app/core/src/desktop/proof.rs`, `record_note`). The skill's knowledge ledger and practice
   log are hash-chained with that key (`SECURITY.md`); the Desktop action ledger is append-only but not hash-chained.
 - **The Claude Code sandbox is opt-in.** Without it, the guard is the only layer on a Claude worker, and the guard can be
   talked around by a command it cannot see (`SECURITY.md`, "What is not guaranteed").
-- **Your own tools run with the agents.** On each seat card the app notes that your Claude Code MCP servers, or your Codex
-  MCP servers and `notify` hook, run with it (`CLAUDE_NOTE`, `CODEX_WARNING`).
+- **Your own tools run with Codex.** On a Codex seat card the app notes that your MCP servers, hooks, plugins and `notify`
+  setting run with it (`CODEX_WARNING`). A Claude worker does not load your Claude Code MCP servers (`CLAUDE_NOTE`).
