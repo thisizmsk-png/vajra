@@ -39,7 +39,7 @@ const recordText = (i: RunProof["integrity"]) =>
   i === "ok" || i === "no_report" || i === "not_text" ? L.recordOk : i === "integrity_failed" ? L.recordFailed : L.recordUnknown;
 
 /** The run's label, its signed record and the export (6i). The label and every word of the export come from the core. */
-export function Proof({ slug, starting = false }: { slug: string; starting?: boolean }) {
+export function Proof({ slug, starting = false }: { slug: string; starting?: boolean | null }) {
   const { project } = useCurrentProject();
   const [proof, setProof] = useState<RunProof | null>(null);
   const [err, setErr] = useState("");
@@ -124,13 +124,13 @@ export function Proof({ slug, starting = false }: { slug: string; starting?: boo
   return (
     <Section title={L.title}>
       {/* `not_found` reads as "not ready" only for a run that is still starting; an unknown campaign keeps its error. */}
-      {err && !(early && starting) && (
+      {err && !(early && starting !== false) && (
         <div role="alert">
           <Text variant="body-sm">{L.failed} {err}</Text>
           <Button size="sm" variant="ghost" onClick={() => setAttempt((n) => n + 1)}>{S.states.retry}</Button>
         </div>
       )}
-      {early && starting && !proof && <Text variant="body-sm" muted>{L.notReady}</Text>}
+      {early && starting !== false && !proof &&<Text variant="body-sm" muted>{L.notReady}</Text>}
       {!proof && !err && <Text variant="body-sm" muted>{L.loading}</Text>}
       {proof && (
         <div className="v-proof">

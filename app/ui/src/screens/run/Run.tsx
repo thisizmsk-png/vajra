@@ -43,18 +43,21 @@ export function Run() {
   const [notFound, setNotFound] = useState(false);
   /** Whether this slug is a run the app has started and that is still active. `not_found` only reads as "not ready" for
    *  such a run: for a stale or unknown campaign it stays an error (nothing is coming). */
-  const [starting, setStarting] = useState(false);
+  const [starting, setStarting] = useState<boolean | null>(null);
+  // Unknown (null) until the first answer, and reset only when the slug changes: a not_found answer must never flip it
+  // back to "not starting" while the question is asked again (that drew the error alert for a moment, every early run).
+  useEffect(() => { setStarting(null); }, [slug]);
   useEffect(() => {
     let live = true;
-    setStarting(false);
     if (!slug) return;
     api.activeRuns().then(
       (a) => { if (live) setStarting((a.runs as { campaign?: string }[]).some((r) => r.campaign === slug)); },
-      () => undefined,
+      () => { if (live) setStarting(false); },
     );
     return () => { live = false; };
   }, [slug, notFound]);
-  const notReady = notFound && starting;
+  // While unknown, a not_found reads as "not ready" (never as the alert); only a known "not starting" keeps the error.
+  const notReady = notFound && starting !== false;
   /** Rows whose check has not run yet: the core checks a bounded amount per call, so ask again until none are left. */
   const [pending, setPending] = useState(0);
   /** The chosen criterion by identity (task + criterion), not list position: statuses change while polling and reorder the list. */

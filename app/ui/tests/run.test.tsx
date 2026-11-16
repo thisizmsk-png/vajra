@@ -313,6 +313,34 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(screen.queryByText(S.run.proof.notReady)).toBeNull();
   });
 
+  // Review of #281 (MUST): active_runs answers AFTER the evidence and proof calls; no alert may ever appear for a run that is starting.
+  it("a starting run never flashes the read-error alert, even when active_runs answers after the evidence call", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const notFound = (detail: string) => () => { throw { error: "not_found", detail }; };
+    let release: (v: unknown) => void = () => undefined;
+    const active = new Promise((r) => { release = r; });
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "", graph: { tasks: [], waves: 0 } }),
+      active_runs: () => active,
+      evidence_list: notFound("no tasks for this campaign"),
+      run_proof: notFound("campaign.json unreadable"),
+    });
+    setTransport(f.transport);
+    const seen: number[] = [];
+    const obs = new MutationObserver(() => seen.push(screen.queryAllByRole("alert").length));
+    obs.observe(document.body, { childList: true, subtree: true });
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "evidence_list")).toBe(true));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "run_proof")).toBe(true));
+    await screen.findByText(S.run.notReady);
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    await act(async () => { release({ count: 1, runs: [{ run_id: "20261116-0900", campaign: "camp", stream: "s", session_id: "u" }] }); await new Promise((r) => setTimeout(r, 30)); });
+    obs.disconnect();
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    expect(screen.getByText(S.run.notReady)).toBeTruthy();
+    expect(Math.max(0, ...seen)).toBe(0);
+  });
+
   // Red team M2: the approval card and the log must not share a key.
   it("the approval card and the run log are not rendered twice, and React sees no duplicate key", async () => {
     window.location.hash = "#/run?slug=camp";
