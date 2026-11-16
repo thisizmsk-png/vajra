@@ -104,7 +104,8 @@ says "Asking the Director-General needs the Claude Code sandbox. Run /sandbox in
 
 **Claude workers.** They run with the Vajra guard, in Claude Code's sandbox, with `--setting-sources ""` so no settings file
 of yours can widen that sandbox (`app/core/src/adapter/profiles.rs`). From your own Claude Code settings file a worker keeps
-only your default model and a fixed list of model-routing variables (a gateway or cloud-provider base URL and model names).
+your default model, a fixed list of model-routing variables (a gateway or cloud-provider base URL and model names), and the
+sandbox read denies you set there.
 Keys, tokens, proxy variables, permissions, hooks and MCP servers are not carried, so your Claude Code MCP servers do not load
 for a worker (`CLAUDE_NOTE` in `app/core/src/desktop/seat_start.rs`). The same guard also runs on workers that Claude Code's
 own campaign starts (the Vajra skill's workflow).
