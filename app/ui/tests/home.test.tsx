@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Home } from "../src/screens/home/Home";
@@ -258,9 +258,11 @@ describe("Home", () => {
     fill(S.home.repo, "/r");
     fill(S.home.ask, "do it");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
-    const msg = await screen.findByText(held.detail);
-    expect(msg.textContent).not.toMatch(/run_held/);
-    fireEvent.click(screen.getByRole("button", { name: S.home.stop }));
+    // The refusal names the holding run in plain words, with its own Stop in the alert; the raw code is never shown.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(S.home.heldBy("20261116-1840"));
+    expect(alert.textContent).not.toMatch(/run_held/);
+    fireEvent.click(within(alert).getByRole("button", { name: S.home.stop }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "stop_run" && c.args?.runId === "20261116-1840")).toBe(true));
     await waitFor(() => expect(screen.queryByText(S.home.liveRun("20261116-1840"))).toBeNull());
     expect(screen.queryByText(held.detail)).toBeNull();

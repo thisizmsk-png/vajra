@@ -109,6 +109,7 @@ export function Home() {
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
+  const [held, setHeld] = useState(false); // Start was refused because a run is already going in this project
   const [addPath, setAddPath] = useState(""); // set when Start was refused because the folder is not a project yet
   const set = (k: keyof Draft) => (v: string) => {
     if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope;
@@ -132,6 +133,7 @@ export function Home() {
     : !chosen.installed ? S.providers.startBlocked(chosen.name) : "";
   // A folder that is not a git repository has no HEAD to run from: it is named under the field and Start stays off.
   const notGit = useNotGit(d.repo);
+  const holder = live.state === "ok" ? live.data[0] : undefined;
   const ready = pre.state === "ok" && pre.data.start_enabled && (!prefs.connected || !!prefs.view) && !unsupported && !blocked && !notGit;
 
   // A ref, not the busy state: a second Cmd+Return in the same tick still sees busy as null.
@@ -146,6 +148,10 @@ export function Home() {
       go("run", { slug: r.campaign, id: r.run_id, stream: r.stream });
     } catch (e) {
       setFail(problemDetail(e));
+      // A start held by a run already going: look the run up so the message names it and offers Stop.
+      const isHeld = isIpcError(e) && e.error === "run_held";
+      setHeld(isHeld);
+      if (isHeld) reloadLive();
       // The core's own answer for a folder that is not a project: one click adds it, instead of a dead end.
       setAddPath(isIpcError(e) && e.error === "not_a_project" ? (typeof e.path === "string" && e.path ? e.path : d.repo.trim()) : "");
       setBusy(null);
@@ -262,7 +268,8 @@ export function Home() {
             </div>
             {fail && (
               <div role="alert" className="v-launch__fail">
-                <Text variant="body-sm">{fail}</Text>
+                <Text variant="body-sm">{held && holder ? S.home.heldBy(holder.run_id) : fail}</Text>
+                {held && holder && <Button size="sm" onClick={() => void stopRun(holder.run_id)} busy={stopping === holder.run_id}>{S.home.stop}</Button>}
                 {addPath && <Button size="sm" onClick={() => void addFolder()} busy={busy === "add"}>{S.home.addFolder}</Button>}
               </div>
             )}

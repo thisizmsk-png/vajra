@@ -503,6 +503,7 @@ export const S = {
     liveRuns: "Running now",
     liveRun: (id: string) => `Run ${id}`,
     liveRunNote: "Still running. A project runs one at a time, so stop it to start another.",
+    heldBy: (id: string) => `Run ${id} is still going in this project. Stop it to start a new one.`,
     stop: "Stop run",
     stopping: "Stopping",
     stopFailed: "Could not stop the run.",
