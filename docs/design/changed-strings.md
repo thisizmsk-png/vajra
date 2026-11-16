@@ -416,3 +416,11 @@ One-click engine install (D7, ADR-17 item 10 step 2). The engine row gets the sa
 | "Your edited copy was kept in ~/.claude/.vajra-install/NAME." | result, when the old copy had been changed | C5 |
 | Install-it-yourself reasons: not reviewed yet, no engine bundled, engine not pinned, bundled engine missing / doesn't match / can't be read (reinstall Vajra Desktop), in use by a run or session, missing /bin/bash, /usr/bin/jq or /usr/bin/openssl, your own copy (for example a git checkout), ~/.claude/vajra not as the engine left it, a workflow that is a link, not enough disk space, ~/.claude not writable, another engine install running | sheet, when the core answers manual | each says what to do next |
 | The Vajra engine scripts aren't installed. Set them up in Settings > Providers > Set up. / The installed Vajra engine is a version this app wasn't tested with. Update it in Settings > Providers > Set up. / The last engine install couldn't be undone cleanly. Repair it in Settings > Providers > Set up. / The engine is being installed. Start again when Set up finishes. | start-run card, when check 6 refuses | replaces the shell command (E8) |
+
+Engine Terminal line (red team G2 M1). A downloaded app has no engine in the skills folder yet, so the old line failed on a clean Mac.
+
+| String | Where | Note |
+|---|---|---|
+| The Terminal line itself | Welcome Engine step, Settings > Providers > Set up engine row, and the fix on the Engine self-check, Safety hooks and Run workflow checks | Built by the core. With a pinned bundle and no copy in the skills folder yet, it checks the bundled engine's sha256 against this build, unpacks it into the skills folder and runs its installer. Otherwise it is the catalog's own command. |
+| (removed) "then /vajra doctor" | Run workflow check fix | That is a Claude Code command, not a shell line. The fix is now the install line only. |
+| If you don't have the engine yet, the line first checks the copy that came with this app and puts it in Claude Code's skills folder. Then it runs the engine's install script, which makes a folder for Vajra's records, with a key file inside it, and adds Vajra's safety hooks to Claude Code's settings. It does not install any agent. | Welcome Engine step, under the line | the first sentence is new |

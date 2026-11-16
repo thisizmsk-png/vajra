@@ -602,7 +602,7 @@ impl App {
 
     pub fn preflight(&self) -> Res {
         let allow = self.allow()?;
-        let rows = preflight::run(&allow, &self.bridge, &preflight::path_dirs());
+        let rows = preflight::run_with(&allow, &self.bridge, &preflight::path_dirs(), &self.engine_line());
         let mut out = preflight_json(&rows, self.projects_row());
         if let (Some(row), Some(list)) = (self.workers.preflight_row(), out["rows"].as_array_mut()) {
             list.push(row);
@@ -1157,7 +1157,16 @@ impl App {
         let mut l = crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks);
         use crate::providers::install::engine::flow;
         l.engine = crate::providers::setup::engine_row(engine, flow::installing(&self.home), flow::interrupted(&self.data), &marks);
+        l.engine.command = self.engine_line();
         serde_json::to_value(l).map_err(|e| fail("internal", e))
+    }
+
+    /// The Terminal line that installs the engine by hand (red team G2 M1): from the engine bundled in this app when
+    /// the build pinned it, else the catalog's command.
+    fn engine_line(&self) -> String {
+        let fallback = crate::providers::catalog::catalog().map_or_else(|_| preflight::INSTALL_CMD.to_string(), |c| c.engine_scripts.manual_command.clone());
+        let resources = lock(&self.resources).clone();
+        crate::providers::install::engine::manual::line(&self.home, resources.as_deref(), &crate::providers::install::engine::Pin::built(), &fallback)
     }
 
     /// Set the app bundle's resources folder (where the packed engine is). The window does this once at start.

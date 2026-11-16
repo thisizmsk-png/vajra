@@ -10,6 +10,7 @@ pub mod fsat;
 pub mod place;
 pub mod workflows;
 pub mod flow;
+pub mod manual;
 
 /// What this binary was built with: the bundled engine's sha256, version and whether every file matched its manifest
 /// (`tree_ok`), how big it is unpacked, and whether the build was a release.

@@ -276,13 +276,18 @@ fn preflight_doctor_fail_lists_failures() {
 }
 
 #[test]
-fn preflight_missing_workflow_shows_install_then_doctor() {
+fn preflight_missing_workflow_shows_only_the_install_line() {
     let e = env_with(DOCTOR_OK, false);
     let rows = preflight::run(&e.allow, &e.bridge, std::slice::from_ref(&e.bin));
     let w = get(&rows, "workflow");
     assert!(!w.ok);
     assert!(w.detail.contains("vajra-deliver.js"));
-    assert_eq!(w.fix, "bash ~/.claude/skills/vajra/scripts/install.sh then /vajra doctor");
+    // A shell line only: "/vajra doctor" is a Claude Code command, not something Terminal can run (red team G2 M1).
+    assert_eq!(w.fix, preflight::INSTALL_CMD);
+    assert!(!w.fix.contains("/vajra doctor"));
+    // The app passes its own line (the one that installs from the bundled engine); every install fix uses it.
+    let rows = preflight::run_with(&e.allow, &e.bridge, std::slice::from_ref(&e.bin), "LINE");
+    assert_eq!(get(&rows, "workflow").fix, "LINE");
 }
 
 #[test]

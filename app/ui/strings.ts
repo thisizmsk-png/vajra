@@ -172,7 +172,7 @@ export const S = {
       copied: "Copied",
       copyFailed: "Copy didn't work. Select the lines and copy them yourself.",
       lines: "Line to paste into Terminal",
-      changes: "The script makes a folder for Vajra's records, with a key file inside it, and adds Vajra's safety hooks to Claude Code's settings. It does not install any agent.",
+      changes: "If you don't have the engine yet, the line first checks the copy that came with this app and puts it in Claude Code's skills folder. Then it runs the engine's install script, which makes a folder for Vajra's records, with a key file inside it, and adds Vajra's safety hooks to Claude Code's settings. It does not install any agent.",
     },
     ask: {
       title: "First run",
