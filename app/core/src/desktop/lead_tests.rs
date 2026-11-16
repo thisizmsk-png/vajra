@@ -1935,3 +1935,88 @@ fn a_location_recorded_under_two_different_keys_refuses_the_ask() {
     let e = app.other_project_roots(RUN_ID, &t.repo());
     assert!(e.is_err(), "two projects at one location refuse: {e:?}");
 }
+
+/// #186 L1: a Claude Code file that is swapped while it answers `--version` gives no answer: the version would be the
+/// old file's and the spawn would run the new one. The same file, unchanged, answers with its pin.
+#[test]
+fn a_claude_binary_swapped_while_it_answers_its_version_gives_no_version() {
+    let d = std::env::temp_dir().join(format!("vajra-lead-binpin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let bin = d.join("claude");
+    let write = |body: &str| {
+        std::fs::write(&bin, body).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write("#!/bin/sh\necho '2.1.296 (Claude Code)'\n");
+    let env = [("PATH", OsString::from("/usr/bin:/bin"))];
+    let (v, pin) = claude_version(&bin, &env).unwrap();
+    assert_eq!(v, "2.1.296 (Claude Code)");
+    assert!(pin.still(&bin));
+    // It renames a copy of itself over its own path before answering.
+    write("#!/bin/sh\ncp \"$0\" \"$0.new\" && mv \"$0.new\" \"$0\"\necho '2.1.296 (Claude Code)'\n");
+    match claude_version(&bin, &env) {
+        Err(LeadError::GuardMissing(m)) => assert_eq!(m, CLAUDE_CHANGED),
+        other => panic!("a swapped file must give no version: {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+type SpawnSeam = (PathBuf, &'static str, Box<dyn Fn(&Path) + Send>);
+/// Test seam (#186 L1): run by the Director-General's launch right before a pin recheck, at `"selftest"` (each self-test
+/// turn) or `"launch"` (the real ask), for the test whose fake claude is at that path (tests run in parallel).
+static BETWEEN_PROBE_AND_SPAWN: Mutex<Vec<SpawnSeam>> = Mutex::new(Vec::new());
+
+pub(super) fn between_probe_and_spawn(bin: &Path, at: &str) {
+    let g = lock(&BETWEEN_PROBE_AND_SPAWN);
+    if let Some((_, _, seam)) = g.iter().find(|(p, a, _)| p == bin && *a == at) {
+        seam(bin);
+    }
+}
+
+/// Renames a copy of the file over it: the same bytes (it would still answer the same version), a new inode.
+fn swap_at(bin: &Path, at: &'static str) {
+    lock(&BETWEEN_PROBE_AND_SPAWN).push((
+        bin.to_path_buf(),
+        at,
+        Box::new(|p: &Path| {
+            let tmp = p.with_extension("swap");
+            std::fs::copy(p, &tmp).unwrap();
+            std::fs::rename(&tmp, p).unwrap();
+        }),
+    ));
+}
+
+fn changed_on_disk(e: &Value) {
+    assert_eq!(code(e), "lead_guard_missing", "{e}");
+    assert!(e["detail"].as_str().unwrap_or("").contains(CLAUDE_CHANGED), "{e}");
+}
+
+/// #186 L1: a Claude Code file swapped after the version probe and before a self-test turn is never run as that turn,
+/// and the Director-General is never started.
+#[test]
+fn a_claude_binary_swapped_before_the_self_test_spawn_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    swap_at(&t.bin("claude"), "selftest");
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    changed_on_disk(&e);
+    assert_eq!(t.count("selftest.count"), 0, "the swapped file never ran as the self-test");
+    assert_eq!(t.count("ask.count"), 0, "the Director-General never started");
+    assert!(t.ledger().is_empty() && idle(&app));
+}
+
+/// #186 L1: a Claude Code file swapped after the self-test passed and before the real launch is never started, and the
+/// ask is recorded as failed.
+#[test]
+fn a_claude_binary_swapped_before_the_director_general_launch_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    swap_at(&t.bin("claude"), "launch");
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    changed_on_disk(&e);
+    assert_eq!(t.count("selftest.count"), 1, "the self-test ran the pinned file");
+    assert_eq!(t.count("ask.count"), 0, "the swapped file never ran as the Director-General");
+    assert_eq!(t.ask_states(), ["queued:", "failed:lead_guard_missing"]);
+    assert!(idle(&app));
+}

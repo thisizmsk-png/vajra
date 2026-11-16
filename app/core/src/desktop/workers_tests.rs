@@ -1034,6 +1034,75 @@ fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() 
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
 }
 
+type SpawnSeam = Box<dyn Fn(&Path) + Send>;
+/// Test seam (#186 L1): run by `one_attempt` after its last version probe and before the spawn, for the rig whose
+/// Claude binary is at that path (tests run in parallel; each rig's binary has its own path).
+static BETWEEN_PROBE_AND_SPAWN: Mutex<Vec<(PathBuf, SpawnSeam)>> = Mutex::new(Vec::new());
+
+pub(super) fn between_probe_and_spawn(claude: &Path) {
+    let g = crate::lock(&BETWEEN_PROBE_AND_SPAWN);
+    if let Some((_, seam)) = g.iter().find(|(p, _)| p == claude) {
+        seam(claude);
+    }
+}
+
+fn swap_between_probe_and_spawn(claude: &Path, seam: impl Fn(&Path) + Send + 'static) {
+    crate::lock(&BETWEEN_PROBE_AND_SPAWN).push((claude.to_path_buf(), Box::new(seam)));
+}
+
+/// #186 L1: the Claude Code file is asked its version, then spawned. A file swapped in between (by rename, even with
+/// the same bytes, or rewritten in place) is refused before the spawn, and the harness never runs as a worker.
+#[test]
+fn a_claude_binary_swapped_between_its_version_probe_and_the_spawn_is_refused() {
+    // Renamed over: a new file (new inode) with the very same bytes, so it would still answer the proven version.
+    let r = rig("claude-swapped", Opts::default());
+    let bin = r.rt.0.cfg.claude.clone();
+    swap_between_probe_and_spawn(&bin, |p| {
+        let tmp = p.with_extension("swap");
+        std::fs::copy(p, &tmp).unwrap();
+        std::fs::rename(&tmp, p).unwrap();
+    });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_changed")), "{v:?}");
+    assert!(!r.d.join("log").exists(), "the swapped file never ran as a worker");
+    // Rewritten in place: the same inode, new contents.
+    let r = rig("claude-rewritten", Opts::default());
+    let bin = r.rt.0.cfg.claude.clone();
+    swap_between_probe_and_spawn(&bin, |p| {
+        let mut body = std::fs::read(p).unwrap();
+        body.extend_from_slice(b"\n# swapped\n");
+        std::fs::write(p, body).unwrap();
+    });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_changed")), "{v:?}");
+    assert!(!r.d.join("log").exists(), "the rewritten file never ran as a worker");
+    // The control: the same rig with a seam that changes nothing runs to the end.
+    let r = rig("claude-unswapped", Opts::default());
+    swap_between_probe_and_spawn(&r.rt.0.cfg.claude.clone(), |_| {});
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+/// The pin itself: a rename over the path, an in-place rewrite and a removal each break it; a re-stat doesn't.
+#[test]
+fn a_binary_pin_holds_only_for_the_same_unchanged_file() {
+    let d = tmpdir("binpin");
+    let p = d.join("claude");
+    std::fs::write(&p, b"#!/bin/sh\necho 1\n").unwrap();
+    let pin = BinPin::of(&p).unwrap();
+    assert!(pin.still(&p), "the same file still holds");
+    let other = d.join("other");
+    std::fs::copy(&p, &other).unwrap();
+    std::fs::rename(&other, &p).unwrap();
+    assert!(!pin.still(&p), "same bytes, new inode");
+    let pin = BinPin::of(&p).unwrap();
+    std::fs::write(&p, b"#!/bin/sh\necho 2\n").unwrap();
+    assert!(!pin.still(&p), "same inode, rewritten");
+    let pin = BinPin::of(&p).unwrap();
+    std::fs::remove_file(&p).unwrap();
+    assert!(!pin.still(&p), "gone: fail closed");
+}
+
 /// A stand-in for a new Claude Code build: `--version` says 9.9.9; with ANTHROPIC_BASE_URL set (the self-test) it
 /// talks to the stub and refuses data-dir writes the way the guard and deny rules do (or, `leaky`, lets an Edit
 /// through); without it (a real worker run) it starts and edits like the shell fake. Each self-test is counted.

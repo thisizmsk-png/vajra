@@ -31,6 +31,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::caps::{self, Wait};
+use super::lead::BinPin;
 use crate::adapter::Engine;
 use crate::adapter::profiles::{self, ClaudeWorker, CodexWant, RoleKind, WorkerLaunch, WriterTools};
 use crate::bus::{Bus, Line};
@@ -1131,14 +1132,16 @@ impl WorkerRuntime {
         };
         let sid = format!("core-{seq}-a{n}");
         let spec = SpawnSpec { argv: l.argv.clone(), cwd: t.wt.clone(), rows: 40, cols: 160, redact: l.redact.clone(), extra_env: l.env.clone() };
+        let mut pin: Option<BinPin> = None;
         if let Some(f) = &l.flag {
             if profiles::verify_claude_worker_flag(f).is_err() {
                 return Attempt::End(Outcome::Failed, profiles::PROFILE_NOT_APPLIED.into(), None);
             }
             // #186 codex: the same Launch serves every attempt, and the CLI can update in place during an attempt or
             // the retry backoff, so the binary is asked again right before each spawn.
-            if let Err(reason) = Launch::claude_proven(&self.0.cfg) {
-                return Attempt::End(Outcome::Failed, reason.into(), None);
+            match Launch::claude_proven(&self.0.cfg) {
+                Ok(p) => pin = Some(p),
+                Err(reason) => return Attempt::End(Outcome::Failed, reason.into(), None),
             }
         }
         let session = l.session_id.clone().unwrap_or_else(|| sid.clone());
@@ -1150,6 +1153,15 @@ impl WorkerRuntime {
         let spawned_at = procsweep::now_stamp();
         let run = crate::lock(&self.0.book).tickets.get(id).map(|e| e.view.run.clone());
         let who = crate::sessions::OwnedAs { kind: Some(crate::owned::Kind::Worker), run, ticket: Some(id.to_string()) };
+        #[cfg(test)]
+        tests::between_probe_and_spawn(&self.0.cfg.claude);
+        // #186 L1: the file the supervisor is about to exec is the one the version probe asked, checked last thing. A
+        // window is left between this stat and the exec inside `spawn_owned` (microseconds, no probe in it); only a
+        // check inside the supervisor's spawn would close it.
+        if pin.is_some_and(|p| !p.still(&self.0.cfg.claude)) {
+            eprintln!("vajra: {}", super::lead::CLAUDE_CHANGED);
+            return Attempt::End(Outcome::Failed, profiles::CLAUDE_CHANGED.reason.into(), None);
+        }
         if self.0.sup.spawn_owned(&sid, spec, Some(tag), who).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
@@ -1875,26 +1887,34 @@ impl Launch {
     /// cached by path, as the Lead's self-test does: a CLI updated in place is a new build), must be one S4 proved with
     /// today's flag shape, or (canary A) one this Mac's self-test proved. A version probe that fails, times out or
     /// prints nothing is refused (`claude_unproven`); a self-test that fails is refused (`claude_selftest_failed`).
-    fn claude_proven(cfg: &Config) -> Result<(), &'static str> {
+    /// #186 L1: returns the pin of the file that answered the version probe; `one_attempt` checks it again right before
+    /// `spawn_owned`. A file that changed while it was asked is refused (`claude_changed`). A pass from S4's list or a
+    /// cached self-test is a proof for the version, not a re-test of this pinned file.
+    fn claude_proven(cfg: &Config) -> Result<BinPin, &'static str> {
         let refused = profiles::CLAUDE_UNPROVEN.reason;
+        let changed = profiles::CLAUDE_CHANGED.reason;
         let dir = cfg.claude.parent().ok_or(refused)?;
         let path = std::env::join_paths([dir, std::path::Path::new("/usr/bin"), std::path::Path::new("/bin")]).map_err(|_| refused)?;
         let env = [("PATH", path), ("HOME", cfg.home.clone().into_os_string())];
-        let probe = || {
-            let v = super::lead::claude_version(&cfg.claude, &env);
-            let v = v.map_err(|e| eprintln!("vajra: could not ask Claude Code for its version ({e:?}); Claude workers stay off")).ok()?;
-            Some(v.trim().to_string()).filter(|v| !v.is_empty())
+        let ask = || match super::lead::claude_version(&cfg.claude, &env) {
+            Ok((v, pin)) => Some(v.trim().to_string()).filter(|v| !v.is_empty()).map(|v| (v, pin)).ok_or(refused),
+            Err(e) => {
+                eprintln!("vajra: could not ask Claude Code for its version ({e:?}); Claude workers stay off");
+                Err(if matches!(&e, crate::control::lead::LeadError::GuardMissing(m) if m == super::lead::CLAUDE_CHANGED) { changed } else { refused })
+            }
         };
-        let version = probe().ok_or(refused)?;
+        let (version, pin) = ask()?;
+        // The self-test's re-ask counts only if the same file answers it.
+        let probe = || ask().ok().filter(|(_, p)| *p == pin).map(|(v, _)| v);
         // The installed guard's own bytes are part of the shape: a guard that differs from what S4 proved is unproven.
         let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&cfg.home)).map_err(|e| {
             eprintln!("vajra: the installed Vajra guard can't be checked ({e}); Claude workers stay off");
             refused
         })?;
-        if profiles::claude_worker_proven(&version, &shape).is_ok() {
-            return Ok(());
+        if profiles::claude_worker_proven(&version, &shape).is_err() {
+            super::claude_canary::proven_here(&cfg.claude, &cfg.home, &cfg.data, &version, &shape, &probe)?;
         }
-        super::claude_canary::proven_here(&cfg.claude, &cfg.home, &cfg.data, &version, &shape, &probe)
+        Ok(pin)
     }
 
     /// `opened` is called with the worker's session id as soon as its steering channel exists, before any later step

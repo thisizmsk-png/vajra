@@ -136,6 +136,13 @@ pub const CLAUDE_UNPROVEN: Unsupported = Unsupported {
     detail: "Vajra hasn't verified this Claude Code version with its worker settings yet. Use a verified version, or a Codex worker.",
 };
 
+/// #186 L1: the Claude Code file changed between a worker's version check and its spawn (an update, or a swap).
+/// Nothing ran; the next dispatch asks the new file afresh.
+pub const CLAUDE_CHANGED: Unsupported = Unsupported {
+    reason: "claude_changed",
+    detail: "Claude Code changed on disk between Vajra's version check and the worker's start, so the worker wasn't started. Try again.",
+};
+
 /// What `claude_worker_flag_shape` hashes: the worker flag file and the worker argv, both built by the real builders
 /// over fixed placeholders (paths, session id, prompt, a writer's full tool list). The same on every machine and for
 /// every ticket, and changed by any change to the deny-rule tables, the hooks, the flag's fields, or the argv flags S4
