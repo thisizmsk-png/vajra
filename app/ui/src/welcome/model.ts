@@ -51,7 +51,8 @@ export const agentReady = (a: AgentInfo): boolean => agentSignedIn(a) || agentUn
 /** Installed but signed out is the one state a click fixes. */
 export const agentSignedOut = (a: AgentInfo): boolean => a.row.state === "installed" && a.login === "signed_out";
 
-export function derive(i: { repos: Repos; picked: Picked; tools: Tools; agents: Read<AgentInfo[]>; engine: Read<boolean> }): Model {
+/** `notGit`: the folder just offered is not a git repository, so nothing was added and the row says what to do. */
+export function derive(i: { repos: Repos; picked: Picked; tools: Tools; agents: Read<AgentInfo[]>; engine: Read<boolean>; notGit?: boolean }): Model {
   const list = Array.isArray(i.agents) ? i.agents : null;
   const toolsOk = i.tools !== "missing";
   const ready = list?.find(agentSignedIn) ?? list?.find(agentUnsure);
@@ -65,6 +66,7 @@ export function derive(i: { repos: Repos; picked: Picked; tools: Tools; agents: 
 
   const folder: Check = proj
     ? { kind: "pass", word: C.word.pass, summary: C.folder.pickedSummary(i.picked!.name, i.picked!.root) }
+    : i.notGit ? need(S.folder.notGit)
     : need(i.repos.at === "found" ? C.folder.found(i.repos.list.length) : i.repos.at === "none" ? C.folder.none : i.repos.at === "failed" ? C.folder.failed : C.folder.looking);
 
   const agent: Check = toolsOk && agentOk

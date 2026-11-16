@@ -40,6 +40,7 @@ export function Welcome({ onAdded, onStarted }: { onAdded: () => void; onStarted
   const [provs, setProvs] = useState<{ list: ProviderInfo[] | null; failed: boolean; done: boolean }>({ list: null, failed: false, done: false });
   const [addBusy, setAddBusy] = useState(false);
   const [addErr, setAddErr] = useState("");
+  const [notGit, setNotGit] = useState(false);
   const [manual, setManual] = useState<{ at: number; id: number | null } | null>(null);
   const [ask, setAsk] = useState("");
   const [askErr, setAskErr] = useState("");
@@ -92,7 +93,7 @@ export function Welcome({ onAdded, onStarted }: { onAdded: () => void; onStarted
   }, [setup.list, setup.error, provs]);
   const engineRead: Read<boolean> = setup.error ? "failed" : setup.list ? setup.list.engine.installed : "loading";
   const tools = toolsOf(pre);
-  const m = derive({ repos, picked, tools, agents, engine: engineRead });
+  const m = derive({ repos, picked, tools, agents, engine: engineRead, notGit });
 
   // Coming back to the window, or a sign-in tab closing, is when a check can have changed. An event, not a timer.
   const settled = m.ready === 3;
@@ -123,6 +124,15 @@ export function Welcome({ onAdded, onStarted }: { onAdded: () => void; onStarted
     setAddBusy(true);
     setAddErr("");
     try {
+      // A run needs a git repository. Say so before anything is added: a plain folder would otherwise pass this row and
+      // become the first project with a Base of HEAD it does not have. A check that cannot be made does not block.
+      const g = await api.folderIsGit(path).then((v) => v?.git, () => undefined);
+      if (g === false) {
+        setNotGit(true);
+        setAddErr(S.folder.notGit);
+        return;
+      }
+      setNotGit(false);
       const r = await api.projectAdd(path);
       setPicked({ id: r.project.id, name: r.project.name, root: r.project.root ?? path });
       let bad = 0;

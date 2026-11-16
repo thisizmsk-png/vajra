@@ -84,6 +84,21 @@ impl App {
         Ok(json!({"project_id": id}))
     }
 
+    /// Whether a folder is a git repository, by the store's own rule (`identity::git_common_dir`: the folder's own `.git`,
+    /// or a linked worktree whose back-link holds). A run needs one: it has a HEAD to start from and branches to work on.
+    /// Read only, and nothing is run. `{git: bool}`; a folder that does not exist or is not a folder is `invalid_args`.
+    pub fn folder_is_git(&self, path: &str) -> Res {
+        let p = std::path::Path::new(path);
+        if !p.is_absolute() {
+            return Err(invalid("path", "must be an absolute folder path"));
+        }
+        let canon = std::fs::canonicalize(p).map_err(|_| invalid("path", "folder not found"))?;
+        if !canon.is_dir() {
+            return Err(invalid("path", "not a folder"));
+        }
+        Ok(json!({"git": crate::projects::identity::git_common_dir(&canon).is_some()}))
+    }
+
     pub fn project_add(&self, path: &str, confirm_nested: bool) -> Res {
         let p = std::path::Path::new(path);
         if !p.is_absolute() {

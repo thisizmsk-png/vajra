@@ -48,6 +48,49 @@ describe("validate", () => {
   });
 });
 
+describe("Home launcher: a folder that is not a git repository", () => {
+  const go = (replies: Record<string, unknown>) => open({ preflight: rows(true), list_campaigns: { campaigns: [] }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, act_start_run: started, ...replies });
+  it("names what to do under the folder field and keeps Start off", async () => {
+    const f = await go({ folder_is_git: { git: false } });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/Users/me/empty");
+    fill(S.home.ask, "ship it");
+    expect(await screen.findByText(S.folder.notGit, { selector: "p, span, div" }, { timeout: 2000 })).toBeTruthy();
+    expect(f.calls.find((c) => c.cmd === "folder_is_git")?.args).toEqual({ path: "/Users/me/empty" });
+    const start = screen.getByRole("button", { name: S.home.startButton });
+    expect(start.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(start);
+    expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
+  });
+  it("Start pressed before the field's check has answered still refuses a non-repository and starts nothing", async () => {
+    const f = await go({ folder_is_git: { git: false } });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/Users/me/empty");
+    fill(S.home.ask, "ship it");
+    // No wait: the 300 ms debounce has not fired, so the field has not said anything yet.
+    expect(screen.queryByText(S.folder.notGit)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "folder_is_git")).toBe(true));
+    expect((await screen.findAllByRole("alert")).some((a) => a.textContent === S.folder.notGit)).toBe(true);
+    expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
+  });
+  it("a git repository and a core without the check both leave Start on", async () => {
+    await go({ folder_is_git: { git: true } });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/Users/me/app");
+    await new Promise((r) => setTimeout(r, 450));
+    expect(screen.queryByText(S.folder.notGit)).toBeNull();
+    expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).not.toBe("true");
+    cleanup();
+    await go({});
+    await screen.findByText("registered");
+    fill(S.home.repo, "/Users/me/app");
+    await new Promise((r) => setTimeout(r, 450));
+    expect(screen.queryByText(S.folder.notGit)).toBeNull();
+    expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).not.toBe("true");
+  });
+});
+
 describe("Home start envelope", () => {
   const T = "p_01JC3H0000000000000000000A";
   const stored = { schema: "vajra.project/1", id: T, name: "Harbor", root: "/src/api", root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 1 };

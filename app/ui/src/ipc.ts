@@ -13,7 +13,7 @@ import { S } from "../strings";
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
 export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" && e !== null && typeof (e as IpcError).error === "string";
 
-const PLAIN = new Set(["agents_off", "lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing", "run_held"]);
+const PLAIN = new Set(["not_a_git_repo", "agents_off", "lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing", "run_held"]);
 
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
@@ -446,6 +446,8 @@ export const api = {
   /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
   /** The project that owns a folder by the core's identity rules (symlink, linked worktree), else `p_unsorted`. Read only. */
   projectForFolder: (path: string) => call<{ project_id: string }>("project_for_folder", { path }),
+  /** Whether an absolute folder is a git repository, by the same rule the project store uses. Read only; a run needs one. */
+  folderIsGit: (path: string) => call<{ git: boolean }>("folder_is_git", { path }),
   /** The system folder picker (D5): one folder's absolute path, or null when the person cancels. The dialog plugin's
    *  `open` is the only plugin command the main window is granted. */
   chooseFolder: (title: string, defaultPath?: string) =>
