@@ -364,6 +364,7 @@ export function installFixture(mode = "") {
       if (cmd === "provider_key_save" || cmd === "provider_key_replace") { setKey(String(args?.accountId), true); return null; }
       if (cmd === "provider_key_remove") { setKey(String(args?.accountId), false); return null; }
       if (cmd === "provider_base_url_save") { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === args?.accountId ? { ...a, base_url: String(args?.baseUrl) } : a) }; return null; }
+      if (cmd === "folder_is_git") return { git: true };
       if (cmd === "provider_agents") return agents;
       if (cmd === "provider_agents_save") { agents = { schema: AGENTS.schema, ...(args?.agents as object) }; return agents; }
       const r = (mode === "empty" || welcome ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd] ?? setupReplies[cmd];

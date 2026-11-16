@@ -25,6 +25,7 @@ export const S = {
   },
   states: {
     noAnswer: "The app's core did not answer. It may still be starting; try again in a moment, and if it keeps happening, quit and reopen Vajra.",
+    unknownCommand: "This version of the app's core does not have that feature. Update Vajra; reopening it will not help.",
     retry: "Try again",
     loading: "Loading",
     checkedAt: (time: string) => `Checked at ${time}`,
@@ -740,6 +741,9 @@ export const S = {
     chooseLabel: "Choose the repository folder",
     title: "Choose the repository folder",
     failed: "The folder picker did not open. Paste the folder's path instead.",
+    /** A run needs a git repository; shown on the welcome, the launcher and Add project when a folder is not one. */
+    notGit: "This folder is not a git repository. Run git init, or choose another folder.",
+    startNeedsRepo: "Start needs a git repository folder.",
   },
   history: {
     title: "History",

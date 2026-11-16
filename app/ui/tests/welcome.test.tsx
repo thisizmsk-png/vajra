@@ -104,6 +104,37 @@ describe("welcome: the seven states in the design", () => {
     await waitFor(() => expect(f.calls.find((c) => c.cmd === "project_add")?.args).toMatchObject({ path: "/Users/me/new-app" }));
   });
 
+  it("2b a pasted folder that is not a git repository is refused: Needs you with what to do, and nothing is added", async () => {
+    boot({ discover: { found: [], truncated: false }, extra: { folder_is_git: { git: false } } });
+    await screen.findByText(W.folder.noneBody);
+    fireEvent.change(screen.getByLabelText(W.folder.pathLabel), { target: { value: "/Users/me/empty" } });
+    fireEvent.click(screen.getByRole("button", { name: W.folder.usePath }));
+    const row = rowHead(W.folder.title);
+    expect(await within(row).findByText(S.folder.notGit)).toBeTruthy();
+    expect(within(row).getByText(W.word.warn)).toBeTruthy();
+    expect(within(row).queryByText(W.word.pass)).toBeNull();
+    expect((await screen.findAllByRole("alert")).some((a) => a.textContent === S.folder.notGit)).toBe(true);
+    expect(f.calls.find((c) => c.cmd === "folder_is_git")?.args).toEqual({ path: "/Users/me/empty" });
+    expect(f.calls.some((c) => c.cmd === "project_add")).toBe(false);
+    expect(screen.getByText(W.finish(3))).toBeTruthy();
+    expect(startButton().getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("2c a git repository still passes, and a check that cannot be made never blocks", async () => {
+    boot({ discover: { found: [], truncated: false }, extra: { folder_is_git: { git: true } } });
+    await screen.findByText(W.folder.noneBody);
+    fireEvent.change(screen.getByLabelText(W.folder.pathLabel), { target: { value: "/Users/me/new-app" } });
+    fireEvent.click(screen.getByRole("button", { name: W.folder.usePath }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "project_add")).toBe(true));
+    cleanup();
+    // An older core has no folder_is_git: the fake answers unknown_command, and the folder is added as before.
+    boot({ discover: { found: [], truncated: false } });
+    await screen.findByText(W.folder.noneBody);
+    fireEvent.change(screen.getByLabelText(W.folder.pathLabel), { target: { value: "/Users/me/new-app" } });
+    fireEvent.click(screen.getByRole("button", { name: W.folder.usePath }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "project_add")).toBe(true));
+  });
+
   it("3 scan failed: says what failed in words, and the folder picker still works", async () => {
     boot({ extra: { project_discover: () => { throw { error: "io_error", detail: "the folder list could not be read" }; } } });
     expect(await screen.findByText(W.folder.failedTitle)).toBeTruthy();
