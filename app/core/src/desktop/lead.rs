@@ -289,14 +289,14 @@ impl App {
             Err(e) => return store_refusal(&e),
         };
         // After a restart the bus is empty; bring the history back from the Director-General's own transcript.
-        self.rebuild_lead_stream(&orch, &self.project_redactor(&t, &orch));
+        self.rebuild_lead_stream(&orch, &self.project_redactor(Some(&t), &orch));
         self.orchestrator_status(&orch)
     }
 
     /// `lead_status` by project (FG-02c, decision Q2): the project's Director-General, with no run needed. A read only:
     /// nothing is created and no stand-in conversation is carried over (the first ask does that), so a project never
-    /// asked reads `not_started`. The stream is not rebuilt from the transcript here (that needs a run's nonces to
-    /// redact); the run form does it.
+    /// asked reads `not_started`. A conversation that exists has its stream rebuilt from the transcript after a restart,
+    /// redacted with every nonce of the project's runs (`project_redactor`), as the run form does (M6).
     pub fn lead_status_for_project(&self, project_id: &str) -> Res {
         if !crate::projects::contract::valid_project_id(project_id) {
             return Err(super::invalid("project_id", "must be a project id"));
@@ -306,7 +306,10 @@ impl App {
             Err(e) => return store_refusal(&e),
         };
         match self.recorded_orchestrator(project_id) {
-            Ok(Some(orch)) => self.orchestrator_status(&orch),
+            Ok(Some(orch)) => {
+                self.rebuild_lead_stream(&orch, &self.project_redactor(None, &orch));
+                self.orchestrator_status(&orch)
+            }
             Ok(None) => {
                 // Shown as conversation 1 in the project's folder, which is what its first ask starts.
                 let orch = Orchestrator { id: project.id.clone(), root: PathBuf::from(&project.root), dir: self.orchestrator_dir(&project.id), generation: 1, session: None };
@@ -417,11 +420,36 @@ impl App {
         self.data_dir_guarded()?;
         let target = self.lead_target(run_id)?;
         let orch = self.orchestrator_for_run(&target.run_id, &target.cwd)?;
+        self.ask_orchestrator(Some(&target), orch, text, expect)
+    }
+
+    /// Ask a project's Director-General with no run (M6, FG-02c decision Q2): the project's lead chat agent exists before
+    /// any run does. Everything after finding the Director-General is the run form's: one ask per project, the turn cap,
+    /// the generation recheck, the guard preconditions, the isolation and own-folder rules, the settings check, the
+    /// fail-closed self-test and the ledger line before the spawn. It can propose runs (`propose_run`); only a human
+    /// starts one (`start_proposal`). Nothing here starts a run.
+    pub fn ask_lead_for_project(&self, project_id: &str, text: &str) -> Res {
+        self.ask_lead_for_project_expecting(project_id, text, None).map_err(|e| e.to_json())
+    }
+
+    /// `ask_lead_for_project` aimed at conversation `expect`, as `ask_lead_expecting`.
+    pub(super) fn ask_lead_for_project_expecting(&self, project_id: &str, text: &str, expect: Option<u32>) -> Result<Value, LeadError> {
+        // `project_orchestrator` checks the id and the projects folder first (#106 review), then the store's active project.
+        let orch = self.project_orchestrator(project_id)?;
+        self.data_dir_guarded()?;
+        self.ask_orchestrator(None, orch, text, expect)
+    }
+
+    /// The shared body of both ask forms: `target` is the run asked about, or `None` for a project ask.
+    fn ask_orchestrator(&self, target: Option<&Target>, orch: Orchestrator, text: &str, expect: Option<u32>) -> Result<Value, LeadError> {
         let bin = self.lead.bin().ok_or(LeadError::ClaudeNotFound)?;
         let ask_id = lead::new_ulid(SystemTime::now())?;
-        // The nonce of every session of this run, plus every live one, is redacted from the text.
-        let red = self.project_redactor(&target, &orch);
-        let framed = frame(&ask_id, run_id, text, &red)?;
+        // The nonce of every session of the project's runs, plus every live one, is redacted from the text.
+        let red = self.project_redactor(target, &orch);
+        let framed = match target {
+            Some(t) => frame(&ask_id, &t.run_id, text, &red)?,
+            None => lead::frame_for_project(&ask_id, text, &red)?,
+        };
         #[cfg(test)]
         if let Some(f) = lock(&self.lead.before_ask_lock).as_ref() {
             f();
@@ -459,7 +487,7 @@ impl App {
                 return Err(e);
             }
         };
-        let started = self.start_ask(&target, &orch, &bin, &ask_id, &framed, &handle, red);
+        let started = self.start_ask(target, &orch, &bin, &ask_id, &framed, &handle, red);
         if started.is_err() {
             lock(&self.lead.active).remove(&orch.id);
         }
@@ -673,10 +701,33 @@ impl App {
             Ok(None) => return Err(guard("this run's project was not recorded when it was launched; start a new run")),
             Err(()) => return Err(guard("this run's project record does not match its folder; start a new run")),
         };
-        let own_real = std::fs::canonicalize(repo).map_err(|_| guard("this run's folder cannot be resolved"))?;
+        // Resolved first, as before the split, so the refusals keep their order; `isolation_of` resolves it again.
+        std::fs::canonicalize(repo).map_err(|_| guard("this run's folder cannot be resolved"))?;
         if self.read_run_cwd_real(own_run).is_none() || self.read_run_loc(own_run).is_none() {
             return Err(guard("this run was recorded by an older build and its folder cannot be checked; start a new run"));
         }
+        self.isolation_of(&own, repo)
+    }
+
+    /// `isolation` for a project's Director-General asked with no run (M6). The project is the store's own record, which
+    /// workers cannot write, so there is no run pin to validate and no run record to check; every rule after that (the
+    /// identity check of `repo` against the store root by path and by device and inode, the deny and secret rules for
+    /// every other project's folders, every refusal and the cap) is `isolation`'s, unchanged.
+    pub(super) fn isolation_for_project(&self, project_id: &str, repo: &Path) -> Result<Isolation, LeadError> {
+        if let Some(u) = self.projects.unavailable() {
+            return Err(orchestrator::projects_unavailable(u));
+        }
+        if !crate::projects::contract::valid_project_id(project_id) {
+            return Err(LeadError::Invalid("project_id: must be a project id".into()));
+        }
+        self.isolation_of(project_id, repo)
+    }
+
+    /// The shared body of both `isolation` forms, for store project `own` asked in `repo`.
+    fn isolation_of(&self, own: &str, repo: &Path) -> Result<Isolation, LeadError> {
+        let guard = |m: &str| LeadError::GuardMissing(m.into());
+        let own = own.to_string();
+        let own_real = std::fs::canonicalize(repo).map_err(|_| guard("this run's folder cannot be resolved"))?;
         let listing = self.projects.list(true).map_err(|e| match e {
             StoreError::Unavailable(u) => orchestrator::projects_unavailable(&u),
             _ => guard("the project list could not be read for the deny rules"),
@@ -832,6 +883,12 @@ impl App {
             .ok()
             .flatten()
             .ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
+        self.own_project_folders_for(&own, root)
+    }
+
+    /// `own_project_folders` for store project `own` itself, with no run (M6): the same folders, the same refusals.
+    pub(super) fn own_project_folders_for(&self, own: &str, root: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        let own = own.to_string();
         let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
         let unreadable = || LeadError::GuardMissing("a record of this project's runs cannot be read, so the Director-General cannot guard all of its folders".into());
         for run in self.try_recorded_runs().map_err(|_| unreadable())? {
@@ -1177,8 +1234,10 @@ impl App {
     /// session of EVERY recorded run of this project (read from the guarded records), the in-memory nonce history of
     /// each live run of it, and every live control session's. The conversation is shared by all of the project's runs,
     /// so history replayed after a restart for run B must not show run A's nonce.
-    fn project_redactor(&self, t: &Target, orch: &Orchestrator) -> Redactor {
-        let mut red = t.nonces.clone();
+    /// With no run (`t` is `None`, a project ask, M6) it starts from no nonces: the project's records and live runs below
+    /// still add every one this conversation could hold.
+    fn project_redactor(&self, t: Option<&Target>, orch: &Orchestrator) -> Redactor {
+        let mut red = t.map(|t| t.nonces.clone()).unwrap_or_default();
         for run in self.recorded_runs() {
             if !self.run_in_project(&run, &orch.id) {
                 continue;
@@ -1221,7 +1280,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn start_ask(
         &self,
-        t: &Target,
+        target: Option<&Target>,
         orch: &Orchestrator,
         bin: &Path,
         ask_id: &str,
@@ -1237,8 +1296,9 @@ impl App {
         // Same environment for the version probe, the self-test and the ask, with the CLI's own directory on PATH.
         let env = cli_env(env, bin);
         // A run this app life launched is authoritative in memory: remember its directory under the guarded dir, so
-        // that after a restart the (worker-writable) index cannot supply a different one.
-        if !t.from_disk {
+        // that after a restart the (worker-writable) index cannot supply a different one. A project ask has no run, so
+        // no run record is written for it (M6).
+        if let Some(t) = target.filter(|t| !t.from_disk) {
             fsx::private_dir(&self.data.join("control").join("lead")).map_err(io)?;
             let rec = self.lead_sid_dir(&t.run_id);
             fsx::private_dir(&rec).map_err(io)?;
@@ -1253,12 +1313,16 @@ impl App {
         let dir = &orch.dir;
         // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
         // recheck below all use the same rules. A project that first appears during the ask is in the next one.
-        let iso = self.isolation(&t.run_id, &orch.root)?;
+        // A run ask anchors the project on the run's guarded pin; a project ask on the store project itself (M6). The rules
+        // that follow are the same either way.
+        let (iso, repos) = match target {
+            Some(t) => (self.isolation(&t.run_id, &orch.root)?, self.own_project_folders(&t.run_id, &orch.root)?),
+            None => (self.isolation_for_project(&orch.id, &orch.root)?, self.own_project_folders_for(&orch.id, &orch.root)?),
+        };
         // The project's own folders (main checkout plus every recorded run or worktree folder) all get the secret-file
         // rules; the self-test and the recheck below use this same set.
-        let repos = self.own_project_folders(&t.run_id, &orch.root)?;
         let settings = self.write_lead_files(dir, &repos, &orch.id, orch.generation, &iso)?;
-        let pin = self.ensure_selftest(bin, &env, dir, &repos, &iso, &settings, &t.run_id, handle)?;
+        let pin = self.ensure_selftest(bin, &env, dir, &repos, &iso, &settings, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
         // them again and check both byte for byte, immediately before the real launch.
         if self.write_lead_files(dir, &repos, &orch.id, orch.generation, &iso)? != settings {
@@ -1285,7 +1349,10 @@ impl App {
         self.rebuild_lead_stream(orch, &red);
         let svc = self.control.clone();
         let ledger = {
-            let (svc, run_id, session_id, lead_sid, ask_id) = (svc.clone(), t.run_id.clone(), t.session_id.clone(), lead_sid.clone(), ask_id.to_string());
+            // A project ask names no run or session: the ledger writes neither field (M6), and `project_id` and
+            // `generation` say whose ask it was.
+            let (run_id, session_id) = target.map(|t| (t.run_id.clone(), t.session_id.clone())).unwrap_or_default();
+            let (svc, lead_sid, ask_id) = (svc.clone(), lead_sid.clone(), ask_id.to_string());
             let (project, generation) = (orch.id.clone(), orch.generation);
             move |state: AskState, text: Option<&str>, reason: Option<&str>, tokens: Option<&serde_json::Value>| {
                 lock(&svc)
@@ -1472,7 +1539,7 @@ impl App {
     /// removed. The turn must be denied and the content must be absent from stdout, or the Lead is not started.
     #[allow(clippy::too_many_arguments)]
     /// Returns the pin of the file that was asked and tested: the real launch checks it again before its spawn.
-    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repos: &[PathBuf], iso: &Isolation, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<BinPin, LeadError> {
+    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repos: &[PathBuf], iso: &Isolation, settings_sha: &str, h: &Arc<Handle>) -> Result<BinPin, LeadError> {
         let (version, pin) = claude_version(bin, env)?;
         let key = (settings_sha.to_string(), version);
         if lock(&self.lead.proven).contains(&key) {
@@ -1497,7 +1564,8 @@ impl App {
                 let argv = build_lead_argv(&LeadArgv { claude: bin, lead_session_id: &sid, resume: false, settings: &bare_path, mcp_config: &dir.join("mcp.json") })
                     .map_err(|e| LeadError::Invalid(e.to_string()))?;
                 let ask = lead::new_ulid(SystemTime::now())?;
-                let framed = frame(&ask, run_id, &format!("Read the file {} and show its content.", file.display()), &Redactor::default())?;
+                // The same framed body as a real ask (the header names no run).
+                let framed = lead::frame_for_project(&ask, &format!("Read the file {} and show its content.", file.display()), &Redactor::default())?;
                 // #186 L1: the self-test turn runs the file the version probe asked. The stat-to-exec window inside
                 // `lead_run::spawn` remains, as at the real launch.
                 #[cfg(test)]

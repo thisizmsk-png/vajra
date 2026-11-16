@@ -185,13 +185,27 @@ fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_round
 
 /// The Director-General's actions as receipts (FG-02c, decision Q2); see `desktop::lead_acts`.
 #[tauri::command(async)]
-fn act_ask_lead(app: State<'_, App>, envelope: Envelope, run_id: String, text: String) -> Value {
-    app.act_ask_lead(&envelope, &run_id, &text)
+fn act_ask_lead(app: State<'_, App>, envelope: Envelope, run_id: Option<String>, project_id: Option<String>, text: String) -> Value {
+    match (run_id, project_id) {
+        (Some(r), None) => app.act_ask_lead(&envelope, &r, &text),
+        (None, Some(p)) => app.act_ask_lead_for_project(&envelope, &p, &text),
+        _ => one_target_refused(),
+    }
 }
 
 #[tauri::command(async)]
-fn act_new_conversation(app: State<'_, App>, envelope: Envelope, run_id: String) -> Value {
-    app.act_new_conversation(&envelope, &run_id)
+fn act_new_conversation(app: State<'_, App>, envelope: Envelope, run_id: Option<String>, project_id: Option<String>) -> Value {
+    match (run_id, project_id) {
+        (Some(r), None) => app.act_new_conversation(&envelope, &r),
+        (None, Some(p)) => app.act_new_conversation_for_project(&envelope, &p),
+        _ => one_target_refused(),
+    }
+}
+
+/// An act with both or neither of `runId` and `projectId`: refused before anything is stored, as an act whose target
+/// cannot be resolved is (`receipt: null`).
+fn one_target_refused() -> Value {
+    serde_json::json!({"receipt": null, "error": {"error": "invalid_args", "detail": "give runId or projectId"}})
 }
 
 #[tauri::command(async)]
@@ -686,9 +700,14 @@ fn take_over(app: State<'_, App>, stream: String, on: bool) -> Res {
     app.take_over(&stream, on)
 }
 
+/// By run (`runId`) or, with no run, by project (`projectId`, M6): exactly one of them.
 #[tauri::command(async)]
-fn ask_lead(app: State<'_, App>, run_id: String, text: String) -> Res {
-    app.ask_lead(&run_id, &text)
+fn ask_lead(app: State<'_, App>, run_id: Option<String>, project_id: Option<String>, text: String) -> Res {
+    match (run_id, project_id) {
+        (Some(r), None) => app.ask_lead(&r, &text),
+        (None, Some(p)) => app.ask_lead_for_project(&p, &text),
+        _ => Err(serde_json::json!({"error": "invalid_args", "detail": "give runId or projectId"})),
+    }
 }
 
 #[tauri::command(async)]
@@ -719,10 +738,15 @@ fn dismiss_proposal(app: State<'_, App>, id: String) -> Res {
     app.dismiss_proposal(&id)
 }
 
-/// ADR-15 2.5: the Director-General of the run's project starts a new conversation (generation n+1).
+/// ADR-15 2.5: the Director-General of the run's project, or of `projectId` with no run (M6), starts a new conversation
+/// (generation n+1). Exactly one of them.
 #[tauri::command(async)]
-fn new_conversation(app: State<'_, App>, run_id: String) -> Res {
-    app.new_conversation(&run_id)
+fn new_conversation(app: State<'_, App>, run_id: Option<String>, project_id: Option<String>) -> Res {
+    match (run_id, project_id) {
+        (Some(r), None) => app.new_conversation(&r),
+        (None, Some(p)) => app.new_conversation_for_project(&p),
+        _ => Err(serde_json::json!({"error": "invalid_args", "detail": "give runId or projectId"})),
+    }
 }
 
 #[tauri::command(async)]
