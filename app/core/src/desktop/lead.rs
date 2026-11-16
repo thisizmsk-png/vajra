@@ -1258,7 +1258,7 @@ impl App {
         // rules; the self-test and the recheck below use this same set.
         let repos = self.own_project_folders(&t.run_id, &orch.root)?;
         let settings = self.write_lead_files(dir, &repos, &orch.id, orch.generation, &iso)?;
-        self.ensure_selftest(bin, &env, dir, &repos, &iso, &settings, &t.run_id, handle)?;
+        let pin = self.ensure_selftest(bin, &env, dir, &repos, &iso, &settings, &t.run_id, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
         // them again and check both byte for byte, immediately before the real launch.
         if self.write_lead_files(dir, &repos, &orch.id, orch.generation, &iso)? != settings {
@@ -1297,6 +1297,12 @@ impl App {
         self.active_project(&orch.id)?;
         // Record first, spawn second: if the ledger cannot take the line, the Lead is never started.
         ledger(AskState::Queued, Some(framed.text()), None, None)?;
+        // #186 L1: the file about to run is the one the version probe asked and the self-test proved.
+        if !pin.still(bin) {
+            let e = LeadError::GuardMissing(CLAUDE_CHANGED.into());
+            let _ = ledger(AskState::Failed, None, Some(e.code()), None);
+            return Err(e);
+        }
         let child = match lead_run::spawn(&argv, &orch.root, &env, framed, handle) {
             Ok(c) => {
                 // Its `--mcp` server is a Service client: the harness becomes a recorded root before it can make a tool
@@ -1461,11 +1467,12 @@ impl App {
     /// runs before the first real ask: a random file under the data dir, covered by a generated rule, with the hooks
     /// removed. The turn must be denied and the content must be absent from stdout, or the Lead is not started.
     #[allow(clippy::too_many_arguments)]
-    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repos: &[PathBuf], iso: &Isolation, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
-        let version = claude_version(bin, env)?;
+    /// Returns the pin of the file that was asked and tested: the real launch checks it again before its spawn.
+    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repos: &[PathBuf], iso: &Isolation, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<BinPin, LeadError> {
+        let (version, pin) = claude_version(bin, env)?;
         let key = (settings_sha.to_string(), version);
         if lock(&self.lead.proven).contains(&key) {
-            return Ok(());
+            return Ok(pin);
         }
         let fail = |why: &str| LeadError::GuardMissing(format!("startup self-test: {why}"));
         let canary_dir = dir.join("canary").join(nonce::random_hex(8)?);
@@ -1487,6 +1494,9 @@ impl App {
                     .map_err(|e| LeadError::Invalid(e.to_string()))?;
                 let ask = lead::new_ulid(SystemTime::now())?;
                 let framed = frame(&ask, run_id, &format!("Read the file {} and show its content.", file.display()), &Redactor::default())?;
+                if !pin.still(bin) {
+                    return Err(LeadError::GuardMissing(CLAUDE_CHANGED.into()));
+                }
                 let child = lead_run::spawn(&argv, dir, env, &framed, h)?;
                 let mut probe = Probe { raw: String::new() };
                 // The self-test is bounded like an ask, but never longer than two minutes.
@@ -1510,7 +1520,7 @@ impl App {
         let _ = std::fs::remove_dir_all(&canary_dir);
         result?;
         lock(&self.lead.proven).insert(key);
-        Ok(())
+        Ok(pin)
     }
 
     // ---------------------------------------------------------------- history after a restart
@@ -1567,12 +1577,41 @@ fn cli_env(mut env: Vec<(&'static str, OsString)>, bin: &Path) -> Vec<(&'static 
     env
 }
 
+/// #186 L1: the identity of the Claude Code file a version probe asked, so the spawn after the probe runs that same
+/// file. Taken through symlinks (an update that repoints the link changes it). The device and inode catch a file
+/// swapped by rename; the size, mtime and ctime catch one rewritten in place (ctime can't be set back from user space).
+/// macOS has no `fexecve`, and the CLI may be a script, so the file is pinned and checked rather than run by handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct BinPin {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl BinPin {
+    pub(super) fn of(bin: &Path) -> std::io::Result<BinPin> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(bin)?;
+        Ok(BinPin { dev: m.dev(), ino: m.ino(), size: m.size(), mtime: (m.mtime(), m.mtime_nsec()), ctime: (m.ctime(), m.ctime_nsec()) })
+    }
+
+    /// The file at `bin` is still the one pinned. A file that is gone or unreadable is not (fail closed).
+    pub(super) fn still(&self, bin: &Path) -> bool {
+        BinPin::of(bin).is_ok_and(|p| p == *self)
+    }
+}
+
 /// `claude --version` under the Lead's own environment, asked of the executable on every ask. Never cached by path: a
-/// CLI updated in place must get its own self-test, because deny-rule semantics depend on the version.
-pub(super) fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Result<String, LeadError> {
+/// CLI updated in place must get its own self-test, because deny-rule semantics depend on the version. Returns the
+/// pin of the file that answered: it is taken before the probe and must still hold after it, or the answer may be
+/// another file's (#186 L1). The caller checks the pin again right before its spawn.
+pub(super) fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Result<(String, BinPin), LeadError> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let bad = || LeadError::GuardMissing("claude --version failed".into());
+    let pin = BinPin::of(bin).map_err(|_| bad())?;
     let mut child = crate::spawnlock::spawn(
         Command::new(bin).arg("--version").env_clear().envs(env.iter().map(|(k, v)| (*k, v))).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0),
     )
@@ -1598,8 +1637,14 @@ pub(super) fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Re
     if let Some(so) = child.stdout.take() {
         let _ = so.take(4096).read_to_string(&mut out);
     }
-    Ok(out.trim().to_string())
+    if !pin.still(bin) {
+        return Err(LeadError::GuardMissing(CLAUDE_CHANGED.into()));
+    }
+    Ok((out.trim().to_string(), pin))
 }
+
+/// The refusal when the Claude Code file changed between its version probe and its spawn (#186 L1).
+pub(super) const CLAUDE_CHANGED: &str = "Claude Code changed on disk between Vajra's version check and its start; nothing was started";
 
 /// The settings file on disk must be exactly what the core generated (and private). Anything else is a tamper.
 pub(super) fn verify_settings_file(path: &Path, want: &str) -> Result<(), LeadError> {

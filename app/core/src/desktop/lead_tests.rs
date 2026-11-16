@@ -1935,3 +1935,29 @@ fn a_location_recorded_under_two_different_keys_refuses_the_ask() {
     let e = app.other_project_roots(RUN_ID, &t.repo());
     assert!(e.is_err(), "two projects at one location refuse: {e:?}");
 }
+
+/// #186 L1: a Claude Code file that is swapped while it answers `--version` gives no answer: the version would be the
+/// old file's and the spawn would run the new one. The same file, unchanged, answers with its pin.
+#[test]
+fn a_claude_binary_swapped_while_it_answers_its_version_gives_no_version() {
+    let d = std::env::temp_dir().join(format!("vajra-lead-binpin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let bin = d.join("claude");
+    let write = |body: &str| {
+        std::fs::write(&bin, body).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write("#!/bin/sh\necho '2.1.296 (Claude Code)'\n");
+    let env = [("PATH", OsString::from("/usr/bin:/bin"))];
+    let (v, pin) = claude_version(&bin, &env).unwrap();
+    assert_eq!(v, "2.1.296 (Claude Code)");
+    assert!(pin.still(&bin));
+    // It renames a copy of itself over its own path before answering.
+    write("#!/bin/sh\ncp \"$0\" \"$0.new\" && mv \"$0.new\" \"$0\"\necho '2.1.296 (Claude Code)'\n");
+    match claude_version(&bin, &env) {
+        Err(LeadError::GuardMissing(m)) => assert_eq!(m, CLAUDE_CHANGED),
+        other => panic!("a swapped file must give no version: {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
