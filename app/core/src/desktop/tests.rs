@@ -118,6 +118,18 @@ fn a_live_run_can_be_stopped_and_then_stops_holding_its_project() {
 }
 
 #[test]
+fn stop_returns_only_once_a_run_that_ignores_hangup_is_really_gone() {
+    // A silent run that ignores SIGHUP is only ended by the forced kill after the grace; Stop must not report success
+    // while the run is still live, with no extra wait from the caller (a silent exit emits no changed event).
+    let t = Tmp::new();
+    let app = t.app();
+    live_run(&t, &app, "2c4a7e11-9f3b-4d5a-8b6c-1a2b3c4d5e6f", "20261116-1900", &["sh", "-c", "trap '' HUP; sleep 30"]);
+    assert_eq!(app.active_runs().unwrap()["count"], 1);
+    assert_eq!(app.stop_run("20261116-1900").unwrap()["stopped"], 1);
+    assert_eq!(app.active_runs().unwrap()["count"], 0, "the stopped run is already gone when Stop returns");
+}
+
+#[test]
 fn a_run_that_exited_holds_nothing_and_cannot_be_stopped() {
     // A crash or a quit leaves a stale record, not a hold: only a live session counts, and Stop refuses a dead run.
     let t = Tmp::new();

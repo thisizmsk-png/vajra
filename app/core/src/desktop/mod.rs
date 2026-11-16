@@ -2754,6 +2754,13 @@ impl App {
         for s in &sessions {
             self.sup.kill(s).map_err(|e| fail("io_error", e))?;
         }
+        // `kill` returns after SIGKILL without waiting for the reader to reap the child: wait here, bounded, so Stop
+        // never reports success for a run that is still listed as live. A session that is gone is stopped.
+        for s in &sessions {
+            if matches!(self.sup.wait(s, STOP_WAIT), Ok(None)) {
+                return Err(fail("still_running", "the run did not end; try Stop again"));
+            }
+        }
         self.reap_runs();
         Ok(json!({"run_id": run_id, "stopped": sessions.len()}))
     }
@@ -2772,6 +2779,9 @@ impl App {
 }
 
 // -------------------------------------------------------------------- helpers
+
+/// How long `stop_run` waits for a killed session to be reaped before it says the run is still going.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// Recent transcript bytes kept for the Lead's `inspect_worker`.
 const INSPECT_BYTES: usize = 16 * 1024;

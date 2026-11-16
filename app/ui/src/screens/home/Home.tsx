@@ -313,7 +313,8 @@ export function Home() {
               <div className="v-panel__body">
                 {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
                 {camps.state === "error" && <Problem title={campsFailed} detail={camps.text} retry={retryCamps} />}
-                {camps.state === "ok" && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
+                {/* Not while a live run is listed above: that run is a run, it just has no campaign record yet. */}
+                {camps.state === "ok" && live.state !== "loading" && shownLive.length === 0 && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
               </div>
             ) : null}
             {camps.state === "ok" && camps.data.length > 0 && (

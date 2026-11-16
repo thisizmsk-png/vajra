@@ -273,6 +273,8 @@ describe("Home", () => {
     await screen.findByText("registered");
     // The run is listed (it has no campaign record yet, so the campaign list is empty) and can be stopped.
     expect(await screen.findByText(S.home.liveRun("20261116-1840"))).toBeTruthy();
+    // The panel never says there are no runs while it shows the run that holds the project.
+    expect(screen.queryByText(S.home.campaignsEmpty)).toBeNull();
     fill(S.home.repo, "/r");
     fill(S.home.ask, "do it");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
