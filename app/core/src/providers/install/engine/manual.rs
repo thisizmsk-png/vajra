@@ -1,8 +1,12 @@
 //! The Terminal line for installing the engine by hand (red team G2 M1). A downloaded app has no engine in the skills
 //! folder yet, so a line that runs the installer from there fails on a clean Mac. When this build pinned its bundled
 //! engine, the line installs from that copy instead: it checks the copy's sha256 against the hash compiled into this
-//! binary, unpacks it into the skills folder, then runs its installer. Built-in macOS tools only (`shasum`, `tar`,
-//! `bash`), so nothing is downloaded and no repository is cloned.
+//! binary, unpacks it into a skills folder it has just made, then runs its installer. Built-in macOS tools only, each by
+//! its absolute system path (never found through PATH), so nothing is downloaded and no repository is cloned.
+//!
+//! What the line guarantees: the bundle matches this build's pin when it is read, and the folder it unpacks into did
+//! not exist when it was pasted (a plain `mkdir`, no `-p`: a folder, file or symlink already there stops it). It is not
+//! the one-click path: no held fds, no re-hash around the installer, no lock (bhishma on #283).
 
 use std::path::Path;
 
@@ -11,23 +15,29 @@ use super::flow::INSTALLER;
 use super::place::SKILL;
 use super::Pin;
 
-/// The skill folder as the line names it.
-fn skill_dir() -> String {
-    format!("~/.claude/skills/{SKILL}")
+/// The line to show, and whether a leftover folder is in the way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    pub command: String,
+    /// The skills folder exists but holds no installer (left by an earlier try, or something else): the user should
+    /// remove it, then the bundled line is offered. The catalog's command is shown meanwhile.
+    pub leftover: bool,
 }
 
-/// The line to show, given the user's home, the app's resources folder (None before the window sets it) and this
-/// build's pin. `fallback` is the catalog's own command: it is kept when the skill folder already holds an installer
-/// (a copy is there, so its own installer is the one to run) or a git checkout, and when there is no pinned bundle.
-pub fn line(home: &Path, resources: Option<&Path>, pin: &Pin, fallback: &str) -> String {
-    bundled(home, resources, pin).unwrap_or_else(|| fallback.to_string())
-}
-
-fn bundled(home: &Path, resources: Option<&Path>, pin: &Pin) -> Option<String> {
+/// The line, given the user's home, the app's resources folder (None before the window sets it) and this build's pin.
+/// `fallback` is the catalog's own command. It is kept whenever the skills folder exists in any form (a copy runs its
+/// own installer; nothing is ever unpacked over what is there) and when there is no pinned bundle.
+pub fn line(home: &Path, resources: Option<&Path>, pin: &Pin, fallback: &str) -> Line {
     let skill = home.join(".claude/skills").join(SKILL);
-    if std::fs::symlink_metadata(skill.join(INSTALLER)).is_ok() || std::fs::symlink_metadata(skill.join(".git")).is_ok() {
-        return None;
+    if std::fs::symlink_metadata(&skill).is_ok() {
+        // `metadata` follows a symlinked folder to the copy it points at, as the catalog's command would.
+        let has_installer = std::fs::metadata(skill.join(INSTALLER)).is_ok_and(|m| m.is_file());
+        return Line { command: fallback.to_string(), leftover: !has_installer };
     }
+    Line { command: bundled(resources, pin).unwrap_or_else(|| fallback.to_string()), leftover: false }
+}
+
+fn bundled(resources: Option<&Path>, pin: &Pin) -> Option<String> {
     if !pin.tree_ok || pin.sha256.len() != 64 || !pin.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -36,17 +46,22 @@ fn bundled(home: &Path, resources: Option<&Path>, pin: &Pin) -> Option<String> {
         return None;
     }
     let tgz = tgz.to_str().filter(|p| quotable(p))?;
-    let dir = skill_dir();
+    let dir = format!("~/.claude/skills/{SKILL}");
     Some(format!(
-        "echo '{sha}  {tgz}' | shasum -a 256 -c && mkdir -p {dir} && tar -xzf '{tgz}' -C {dir} && bash {dir}/{INSTALLER}",
+        "echo '{sha}  {tgz}' | /usr/bin/shasum -a 256 -c && /bin/mkdir -p ~/.claude/skills && /bin/mkdir {dir} && /usr/bin/tar -xzf '{tgz}' -C {dir} && /bin/bash {dir}/{INSTALLER}",
         sha = pin.sha256
     ))
 }
 
 /// A path that is safe inside single quotes on one pasted line, and in a `shasum -c` line: absolute, with no quote,
-/// backslash or control character (a pasted newline would run what follows it).
+/// backslash or control character (a pasted newline would run what follows it), and nothing that renders invisibly or
+/// reorders the line: Unicode line and paragraph separators, bidi controls and zero-width marks.
 fn quotable(p: &str) -> bool {
-    p.starts_with('/') && !p.chars().any(|c| c == '\'' || c == '\\' || c.is_control())
+    p.starts_with('/') && !p.chars().any(|c| c == '\'' || c == '\\' || c.is_control() || invisible(c))
+}
+
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
 }
 
 #[cfg(test)]

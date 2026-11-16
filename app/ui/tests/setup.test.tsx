@@ -282,7 +282,23 @@ describe("engine row", () => {
     expect(r.getByText(C.engineBroken)).toBeTruthy();
     expect(r.getByText(LIST.engine.command)).toBeTruthy();
     const odd = parseSetupList({ ...LIST, engine: { installed: true, command: "x", state: "magic", one_click: true } });
-    expect(odd.ok && odd.value.engine).toEqual({ installed: false, command: "x", state: "missing", one_click: false });
+    expect(odd.ok && odd.value.engine).toEqual({ installed: false, command: "x", state: "missing", one_click: false, reason: null });
+  });
+
+  it("says to remove a leftover folder, keeps only the known reason, and fits the bundled line", async () => {
+    panel({ ...LIST, engine: { ...LIST.engine, state: "missing", one_click: false, reason: "leftover_folder" } });
+    const r = await rowOf(C.engine);
+    expect(r.getByText(C.engineLeftover)).toBeTruthy();
+    expect(r.getByText(LIST.engine.command)).toBeTruthy();
+    const read = (engine: object) => { const p = parseSetupList({ ...LIST, engine: { ...LIST.engine, ...engine } }); return p.ok ? p.value.engine : null; };
+    expect(read({ reason: "something_else" })?.reason).toBeNull();
+    expect(read({ reason: "leftover_folder", installed: true, state: "installed" })?.reason).toBeNull();
+    // The core's bundled line names the app's engine copy twice, so a long app path stays under the engine cap.
+    const app = `/Applications/${"Vajra Desktop ".repeat(18)}.app/Contents/Resources/engine/engine.tgz`;
+    const line = `echo '${"a".repeat(64)}  ${app}' | /usr/bin/shasum -a 256 -c && /bin/mkdir -p ~/.claude/skills && /bin/mkdir ~/.claude/skills/vajra && /usr/bin/tar -xzf '${app}' -C ~/.claude/skills/vajra && /bin/bash ~/.claude/skills/vajra/scripts/install.sh`;
+    expect(line.length).toBeGreaterThan(300);
+    expect(read({ command: line })?.command).toBe(line);
+    expect(read({ command: "x".repeat(1025) })).toBeNull();
   });
 
   it("offers no engine install while the gate is off or an install is running", async () => {
