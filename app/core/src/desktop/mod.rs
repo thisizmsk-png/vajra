@@ -1049,9 +1049,25 @@ impl App {
         let stream = format!("run-{session_id}");
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
-        let spawned = argv(&nonce).and_then(|argv| {
+        let spawned = argv(&nonce).and_then(|mut argv| {
+            // #186 L1: a Claude launch (a classic run, its resume, an approve-resume) runs the file chosen here. The bare
+            // word is resolved once, on the dirs the supervisor's PATH is made of, pinned, and passed as an absolute
+            // argv[0]; the supervisor checks the pin again right before the exec. Identity only, no version gate.
+            let pin = if engine == Engine::Claude && argv.first().map(String::as_str) == Some("claude") {
+                let dirs = self.provider_dirs.clone().unwrap_or_else(crate::vajra::preflight::path_dirs);
+                let bin = crate::vajra::preflight::find_on_path("claude", &dirs).ok_or_else(|| fail("spawn_failed", "claude was not found on your PATH"))?;
+                let pin = crate::sessions::BinPin::of(&bin).map_err(|e| fail("spawn_failed", e))?;
+                argv[0] = bin.to_str().ok_or_else(|| fail("spawn_failed", "the claude path is not UTF-8"))?.to_string();
+                Some(pin)
+            } else {
+                None
+            };
             let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone(), extra_env: Vec::new() };
-            self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
+            let r = match pin {
+                Some(pin) => self.sup.spawn_pinned(&stream, spec, pin),
+                None => self.sup.spawn(&stream, spec),
+            };
+            r.map_err(|e| fail(if e == crate::sessions::SessionError::BinaryChanged { crate::adapter::profiles::CLAUDE_CHANGED.reason } else { "spawn_failed" }, e))
         });
         if let Err(e) = spawned {
             lock(&self.control).end_session(session_id);

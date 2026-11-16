@@ -408,6 +408,42 @@ fn a_codex_lead_is_read_back_with_the_deny_list_it_was_launched_with() {
     }
 }
 
+type SpawnSeam = Box<dyn Fn(&Path) + Send>;
+/// Test seam (#186 L1): run by a Claude lead's launch after its pin and before the spawn, for the rig whose fake claude
+/// is at that path (tests run in parallel).
+static BETWEEN_PIN_AND_SPAWN: Mutex<Vec<(PathBuf, SpawnSeam)>> = Mutex::new(Vec::new());
+
+pub(super) fn between_pin_and_spawn(claude: &Path) {
+    let g = crate::lock(&BETWEEN_PIN_AND_SPAWN);
+    if let Some((_, seam)) = g.iter().find(|(p, _)| p == claude) {
+        seam(claude);
+    }
+}
+
+/// #186 L1: a Claude lead's binary renamed over between its pin and the spawn (the same bytes, a new inode) is never
+/// run: the launch fails with `claude_changed` and the run ends `lead_lost`. The same rig with nothing swapped launches.
+#[test]
+fn a_claude_lead_binary_swapped_between_its_pin_and_the_spawn_is_refused() {
+    let r = rig("pinswap", "exit", Duration::from_secs(10));
+    crate::lock(&BETWEEN_PIN_AND_SPAWN).push((
+        r.lead.0.env.claude.clone(),
+        Box::new(|p: &Path| {
+            let tmp = p.with_extension("swap");
+            std::fs::copy(p, &tmp).unwrap();
+            std::fs::rename(&tmp, p).unwrap();
+        }),
+    ));
+    let e = r.lead.start().unwrap_err();
+    assert!(e.0.starts_with(profiles::CLAUDE_CHANGED.reason), "{}", e.0);
+    assert_eq!(launches(&r), 0, "the swapped file never ran");
+    assert_eq!(r.lead.proto().card().status, Some(RunStatus::LeadLost));
+    let r = rig("pinkeep", "exit", Duration::from_secs(10));
+    crate::lock(&BETWEEN_PIN_AND_SPAWN).push((r.lead.0.env.claude.clone(), Box::new(|_: &Path| {})));
+    r.lead.start().unwrap();
+    wait_launched(&r);
+    assert_eq!(launches(&r), 1, "an unchanged file launches");
+}
+
 /// bhishma L2 on #174: the lead dir is read back in under the denied data dir, so a lead dir whose path leads out of
 /// the data dir is never launched.
 #[test]
