@@ -137,6 +137,10 @@ export function Home() {
   // for no generation check, so what the person sees is unchanged: the run opens, or the refusal shows.
   const startViaReceipt = async () => {
     const cwd = d.repo.trim();
+    // The field's own check may still be pending (a quick paste then Cmd+Return), so ask again before anything starts.
+    // A check that fails does not block; the core still refuses what it cannot start.
+    const g = await api.folderIsGit(cwd).then((v) => v?.git, () => undefined);
+    if (g === false) throw { error: "not_a_git_repo", detail: S.folder.notGit };
     // The effective agent preference goes with it, as a direct start sends it: a provider that cannot start is refused, never swapped.
     const r = await api.actStartRun({ action_id: newActionId(), project_id: await storeProject(cwd), expect_generation: null }, { ...toInput(d), ...(agent ? { provider: agent } : {}) }, cwd);
     if (r.receipt?.state === "done" && r.result) return r.result;

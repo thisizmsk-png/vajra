@@ -62,6 +62,18 @@ describe("Home launcher: a folder that is not a git repository", () => {
     fireEvent.click(start);
     expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
   });
+  it("Start pressed before the field's check has answered still refuses a non-repository and starts nothing", async () => {
+    const f = await go({ folder_is_git: { git: false } });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/Users/me/empty");
+    fill(S.home.ask, "ship it");
+    // No wait: the 300 ms debounce has not fired, so the field has not said anything yet.
+    expect(screen.queryByText(S.folder.notGit)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "folder_is_git")).toBe(true));
+    expect((await screen.findAllByRole("alert")).some((a) => a.textContent === S.folder.notGit)).toBe(true);
+    expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
+  });
   it("a git repository and a core without the check both leave Start on", async () => {
     await go({ folder_is_git: { git: true } });
     await screen.findByText("registered");

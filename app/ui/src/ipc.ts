@@ -13,7 +13,7 @@ import { S } from "../strings";
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
 export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" && e !== null && typeof (e as IpcError).error === "string";
 
-const PLAIN = new Set(["agents_off", "lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing"]);
+const PLAIN = new Set(["not_a_git_repo", "agents_off", "lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing"]);
 
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
