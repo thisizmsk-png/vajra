@@ -207,7 +207,9 @@ impl App {
             project: project.into(), run: run.into(), repo: repo.clone(), base, ask: input.ask.clone(), seats, max_in_flight: input.max_in_flight,
             limits: Limits { rounds: input.max_rounds, ..Limits::default() }, redact: Redactor::default(),
         };
-        let proto = RunProtocol::new(cfg, Arc::new(CoreWorkers { rt, gw }), gate, Arc::new(SystemClock::default())).with_record(record);
+        let (data, id) = (self.data.clone(), run.to_string());
+        let store: super::runproto::PlanStore = Arc::new(move |plan| super::recover::record_plan(&data, &id, plan));
+        let proto = RunProtocol::new(cfg, Arc::new(CoreWorkers { rt, gw }), gate, Arc::new(SystemClock::default())).with_record(record).with_plan_store(store);
         // The first launch writes the run's token and rotates this placeholder, which no client holds.
         self.run_leads.register(run, proto.clone(), crate::control::sha256::digest(crate::control::nonce::random_hex(32).map_err(|e| fail("io", e))?.as_bytes()));
         let env = self.lead_env(project, &repo)?;

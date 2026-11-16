@@ -474,6 +474,46 @@ fn a_run_past_its_limit_is_killed_and_fails() {
     assert!(!base.join(SLUG).join("evidence.json").exists());
 }
 
+/// Cleanup signals the group while the leader is still unreaped (codex L2 on #234): when the script has ended, the
+/// final group signal finds the leader a zombie of that very process, so its pid, and the group number, can't have
+/// been handed to an unrelated process. On a timeout the leader is still running then. Either way it is reaped after.
+#[test]
+fn the_leader_stays_unreaped_through_the_final_group_signal() {
+    if !macos() {
+        return eprintln!("skipped: sandbox-exec");
+    }
+    let t = Tmp::new("unreaped");
+    let (script, base, home, common) = (fake(&t, "ok", BUNDLE, "exit 2"), base(&t), t.home(), t.0.join("repo.git"));
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(u32, bool, bool)>::new()));
+    let log = seen.clone();
+    super::GROUP_HOOK.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |pid: u32| {
+            // SAFETY: signal 0 only checks that the pid names a process (a zombie counts).
+            let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+            log.borrow_mut().push((pid, crate::procid::zombie_stamp(pid).is_some(), alive));
+        }))
+    });
+    let cmds = vec!["true".to_string()];
+    let ended = go(&t, &evidence_run(&script, &base, &cmds, &common, &home));
+    let slow = vec!["sleep 30".to_string()];
+    let mut r = evidence_run(&script, &base, &slow, &common, &home);
+    r.limit = Duration::from_millis(500);
+    let timed_out = go(&t, &r);
+    super::GROUP_HOOK.with(|h| *h.borrow_mut() = None);
+    assert!(matches!(ended, RunOutcome::Ran { passed: true, .. }), "{ended:?}");
+    assert_eq!(timed_out, RunOutcome::Failed("the evidence check ran past its time limit".into()));
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 2, "one group signal per run: {seen:?}");
+    let (pid, zombie, alive) = seen[0];
+    assert!(zombie && alive, "the ended script's leader {pid} is an unreaped zombie at the group signal");
+    let (pid, zombie, alive) = seen[1];
+    assert!(!zombie && alive, "the timed-out leader {pid} still runs at the group signal");
+    // Both are reaped once `run` returns: the pid no longer names our child.
+    for &(pid, ..) in seen.iter() {
+        assert!(!super::exited_unreaped(pid).unwrap_or(false), "leader {pid} was left unreaped");
+    }
+}
+
 #[test]
 fn a_run_and_a_sign_refuse_a_walkthrough_base_through_a_link() {
     let t = Tmp::new("link");

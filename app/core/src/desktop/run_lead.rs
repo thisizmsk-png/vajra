@@ -87,8 +87,6 @@ struct State {
     stopping: bool,
     /// Why the run ended on the lead's side, when it did.
     ended: Option<String>,
-    /// The plan last written to the run's `plan.json` (6d2d), so it is written again only when it changes.
-    plan_written: Option<Value>,
 }
 
 /// Why a lead launch failed before or as it started.
@@ -343,23 +341,13 @@ impl RunLead {
         !crate::lock(&self.0.state).stopping && self.0.proto.card().status.is_none()
     }
 
-    /// Keep the run's `plan.json` the accepted plan (the resume charter's source after a crash). Only an accepted plan
-    /// (round 1 or later) is written, and only when it changed since the last write.
-    fn keep_plan(&self) {
-        let plan = self.0.proto.plan_record();
-        if plan["round"].as_u64().unwrap_or(0) == 0 || crate::lock(&self.0.state).plan_written.as_ref() == Some(&plan) {
-            return;
-        }
-        if super::recover::record_plan(&self.0.env.data, &self.0.run, &plan).is_ok() {
-            crate::lock(&self.0.state).plan_written = Some(plan);
-        }
-    }
+    // The run's `plan.json` (the resume charter's source after a crash) is not written here: the protocol's plan store
+    // writes it durably as part of accepting a plan, before the lead is told (codex L1 on #176).
 
     fn watch_one(&self, sid: &str, lead: LeadProc) -> Watched {
         let start = Instant::now();
         let mut applied = false;
         loop {
-            self.keep_plan();
             if let Ok(Some(x)) = self.0.sup.wait(sid, POLL) {
                 // A lead the shutdown killed is stopped, not an exit the run decides on.
                 if crate::lock(&self.0.state).stopping {
