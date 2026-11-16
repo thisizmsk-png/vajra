@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertDialog, Badge, Button, Input, Section, Text } from "../../../components/ui/base";
 import { S } from "../../../strings";
-import { api, errorText, newActionId, onChanged } from "../../ipc";
+import { api, errorText, isIpcError, newActionId, onChanged } from "../../ipc";
 import type { ProofLabel, RunProof } from "../../ipc";
 import { useCurrentProject } from "../../projects/current";
+import { problemDetail } from "../states";
 
 const L = S.run.proof;
 /** The Run view's own pending-row poll interval, and a cap (about a minute) so a stuck check stops asking. */
@@ -38,10 +39,12 @@ const recordText = (i: RunProof["integrity"]) =>
   i === "ok" || i === "no_report" || i === "not_text" ? L.recordOk : i === "integrity_failed" ? L.recordFailed : L.recordUnknown;
 
 /** The run's label, its signed record and the export (6i). The label and every word of the export come from the core. */
-export function Proof({ slug }: { slug: string }) {
+export function Proof({ slug, starting = false }: { slug: string; starting?: boolean | null }) {
   const { project } = useCurrentProject();
   const [proof, setProof] = useState<RunProof | null>(null);
   const [err, setErr] = useState("");
+  const [early, setEarly] = useState(false);
+  const [attempt, setAttempt] = useState(0); // Try again re-runs the read
   const [why, setWhy] = useState(false);
   const [note, setNote] = useState("");
   const [pr, setPr] = useState("");
@@ -51,7 +54,7 @@ export function Proof({ slug }: { slug: string }) {
   const seq = useRef(0);
 
   useEffect(() => {
-    setProof(null); setErr(""); setNote(""); setWhy(false);
+    setProof(null); setErr(""); setEarly(false); setNote(""); setWhy(false);
     // `run_proof` runs the record check (a script), and `changed` comes in bursts: at most one call is in flight, and
     // any events during it queue a single rerun.
     const mine = ++seq.current;
@@ -69,10 +72,14 @@ export function Proof({ slug }: { slug: string }) {
         .then(
           (p) => {
             if (mine !== seq.current) return;
-            setProof(p); setErr("");
+            setProof(p); setErr(""); setEarly(false);
             if (p.pending && retries < RETRY_MAX && !queued) { retries++; timer = setTimeout(load, RETRY_MS); }
           },
-          (e) => { if (mine === seq.current) setErr(errorText(e)); },
+          (e) => {
+            if (mine !== seq.current) return;
+            // `not_found` is a run whose campaign record is not written yet: it reads as "not ready", and the next change retries.
+            setErr(problemDetail(e)); setEarly(isIpcError(e) && e.error === "not_found");
+          },
         )
         .finally(() => {
           inFlight = false;
@@ -82,7 +89,7 @@ export function Proof({ slug }: { slug: string }) {
     load();
     const off = onChanged(() => { retries = 0; load(); });
     return () => { seq.current++; clearTimeout(timer); off(); };
-  }, [slug]);
+  }, [slug, attempt]);
 
   const finished = proof !== null && proof.label !== "in_progress";
   const exportReason = !proof ? "" : !proof.export ? L.exportOff : !finished ? L.notFinished : "";
@@ -116,7 +123,14 @@ export function Proof({ slug }: { slug: string }) {
 
   return (
     <Section title={L.title}>
-      {err && <div role="alert"><Text variant="body-sm">{L.failed} {err}</Text></div>}
+      {/* `not_found` reads as "not ready" only for a run that is still starting; an unknown campaign keeps its error. */}
+      {err && !(early && starting !== false) && (
+        <div role="alert">
+          <Text variant="body-sm">{L.failed} {err}</Text>
+          <Button size="sm" variant="ghost" onClick={() => setAttempt((n) => n + 1)}>{S.states.retry}</Button>
+        </div>
+      )}
+      {early && starting !== false && !proof &&<Text variant="body-sm" muted>{L.notReady}</Text>}
       {!proof && !err && <Text variant="body-sm" muted>{L.loading}</Text>}
       {proof && (
         <div className="v-proof">

@@ -592,6 +592,7 @@ export const S = {
     pick: "Choose a run in History to see its evidence.",
     none: "This run has no acceptance criteria yet.",
     failed: "Could not read the evidence.",
+    notReady: "Not ready yet. The criteria appear once the run has planned its tasks.",
     allPass: "All criteria pass",
     summary: (n: number, m: number) => `${n} of ${m} criteria pass`,
     status: { pass: "Pass", fail: "Fail", not_run: "Not run", unverified: "Unverified evidence", checking: "Checking", stale: "Stale" },
@@ -656,6 +657,7 @@ export const S = {
       title: "Proof",
       loading: "Checking the signed record",
       failed: "Could not read the run's proof.",
+      notReady: "Not ready yet. The signed record is written once the run has started.",
       label: {
         verified: "Verified",
         verified_approved: "Verified (check commands approved by you)",
