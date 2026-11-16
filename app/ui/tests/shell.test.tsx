@@ -300,6 +300,49 @@ describe("Shell B frame (FG-03)", () => {
     expect(ipc.calls.some((c) => c.cmd === "plugin:dialog|open")).toBe(true);
   });
 
+  // F-G2-1: the picked folder was only typed into the field, so the core refused the run: "This folder is not a project".
+  it("Add project registers the picked folder as a project, and a run then starts in it", async () => {
+    const ID = "p_01JC3H0000000000000000000B";
+    const root = "/Users/me/code/app";
+    const added: { id: string; root: string }[] = [];
+    const project = () => ({ schema: "vajra.project/1", id: ID, name: "app", root, root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 1 });
+    const prefs = { schema: "vajra.preferences/1", rev: 0, project_id: null, caps: { active_runs: 1, workers_per_run: 16, editable: false }, global: { ...DEFAULT_PREFERENCES }, overrides: {}, effective: { ...DEFAULT_PREFERENCES }, sources: Object.fromEntries(Object.keys(DEFAULT_PREFERENCES).map((k) => [k, "global"])) };
+    boot("#/orch?new=1", {
+      ...EMPTY,
+      preferences_read: (a?: Record<string, unknown>) => (a?.projectId ? Promise.reject(new Error("invalid_project")) : prefs),
+      preflight: { rows: [], start_enabled: true },
+      "plugin:dialog|open": root,
+      project_list: () => ({ projects: added.map(project), skipped: 0, truncated: false }),
+      project_add: (a?: Record<string, unknown>) => { added.push({ id: ID, root: String(a?.path) }); return { outcome: "created", project: project() }; },
+      project_for_folder: (a?: Record<string, unknown>) => ({ project_id: added.some((p) => p.root === a?.path) ? ID : "p_unsorted" }),
+      // The core's own rule: a run in a folder that is not a project is refused.
+      act_start_run: (a?: Record<string, unknown>) => {
+        if (!added.some((p) => p.root === a?.cwd)) throw { error: "not_a_project", detail: "This folder is not a project. Add it as a project first.", action: "add_project", path: a?.cwd };
+        return { receipt: { state: "done" }, result: { campaign: "deliver-1", run_id: "r1", stream: "s1" } };
+      },
+    });
+    await screen.findByRole("heading", { name: S.home.start });
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "project_add" && c.args?.path === root)).toBe(true));
+    await waitFor(() => expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe(root));
+    fireEvent.change(screen.getByLabelText(S.home.ask), { target: { value: "fix the bug" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: S.home.startButton }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "act_start_run")).toBe(true));
+    const start = ipc.calls.find((c) => c.cmd === "act_start_run")!.args as { envelope: { project_id: string }; cwd: string };
+    expect(start.envelope.project_id).toBe(ID);
+    expect(start.cwd).toBe(root);
+    await waitFor(() => expect(window.location.hash).toContain("slug=deliver-1"));
+    expect(screen.queryByText("This folder is not a project. Add it as a project first.")).toBeNull();
+  });
+
+  it("a folder the core refuses still fills the field, and Add project does not break", async () => {
+    boot("#/orch?new=1", { ...EMPTY, "plugin:dialog|open": "/Users/me", project_add: () => { throw { error: "refused_folder", detail: "that folder cannot be a project" }; } });
+    await screen.findByRole("heading", { name: S.home.start });
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect((screen.getByLabelText(S.home.repo) as HTMLInputElement).value).toBe("/Users/me"));
+  });
+
   it("cancelling the picker leaves everything as it was", async () => {
     boot("#/orch?new=1", { ...EMPTY, "plugin:dialog|open": null });
     await screen.findByRole("heading", { name: S.home.start });

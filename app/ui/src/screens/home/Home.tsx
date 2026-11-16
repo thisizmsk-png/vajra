@@ -50,7 +50,7 @@ export function Home() {
   const prefs = usePreferences();
   // Inside a project the folder is the project's, and the list is the project's own campaigns (FG-03).
   const { project } = useCurrentProject();
-  const { projects } = useProjects();
+  const { projects, reload: reloadProjects } = useProjects();
   // The core decides which project owns a folder (a symlink or a linked worktree is its project too); a core that
   // cannot answer falls back to a literal match on a registered root, else the Unsorted bucket.
   const storeProject = async (cwd: string): Promise<string> => {
@@ -80,7 +80,7 @@ export function Home() {
   const pickedRepo = route.params.repo;
   // `pick` is a fresh value for every pick, so choosing the same folder again, after the field was edited, still applies.
   const pickId = route.params.pick;
-  useEffect(() => { if (pickedRepo) setD((x) => (x.repo === pickedRepo ? x : { ...x, repo: pickedRepo })); }, [pickedRepo, pickId]);
+  useEffect(() => { if (pickedRepo) { setAddPath(""); setD((x) => (x.repo === pickedRepo ? x : { ...x, repo: pickedRepo })); } }, [pickedRepo, pickId]);
   // The preference scope whose defaults the form holds, or which the user has edited (PR 100 review): switching projects
   // applies the next project's defaults once its own view arrives, and an edit keeps them only within its scope.
   const scope = preferenceScope(project);
@@ -94,7 +94,13 @@ export function Home() {
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
-  const set = (k: keyof Draft) => (v: string) => { if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope; setD((x) => ({ ...x, [k]: v })); };
+  const [addPath, setAddPath] = useState(""); // set when Start was refused because the folder is not a project yet
+  const set = (k: keyof Draft) => (v: string) => {
+    if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope;
+    // The "Add this folder" offer names the folder Start refused: a different folder in the field is a new question.
+    if (k === "repo" && v.trim() !== addPath) setAddPath("");
+    setD((x) => ({ ...x, [k]: v }));
+  };
   const errs = validate(d);
   const unsupported = !!prefs.view && prefs.view.effective.model !== "";
   // FG-09: the effective `agent` is the provider Start asks for. The provider check runs each CLI's status command, so it is
@@ -123,8 +129,24 @@ export function Home() {
       go("run", { slug: r.campaign, id: r.run_id, stream: r.stream });
     } catch (e) {
       setFail(problemDetail(e));
+      // The core's own answer for a folder that is not a project: one click adds it, instead of a dead end.
+      setAddPath(isIpcError(e) && e.error === "not_a_project" ? (typeof e.path === "string" && e.path ? e.path : d.repo.trim()) : "");
       setBusy(null);
       inFlight.current = false;
+    }
+  };
+  const addFolder = async () => {
+    const path = addPath;
+    setBusy("add");
+    try {
+      await api.projectAdd(path);
+      reloadProjects();
+      setAddPath("");
+      setFail(S.home.addedFolder);
+    } catch (e) {
+      setFail(problemDetail(e));
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -168,7 +190,8 @@ export function Home() {
   // A core that does not answer fails every read on this screen for one reason. The checks panel says it once, with
   // the retry; the preferences line would say it again in other words.
   const coreDown = pre.state === "error" && pre.down;
-  const why = checksBlock ? S.home.startNeedsChecks(failing) : pre.state === "error" ? S.home.startNeedsAnswer : "";
+  // An empty ask is also said beside Start (the ask box can be scrolled out of sight), not only on the box.
+  const why = checksBlock ? S.home.startNeedsChecks(failing) : pre.state === "error" ? S.home.startNeedsAnswer : shown && errs.ask ? errs.ask : "";
   const repoName = basename(d.repo);
 
   return (
@@ -216,7 +239,12 @@ export function Home() {
                 <Kbd keys={START_KEYS} decorative />
               </Button>
             </div>
-            {fail && <div role="alert" className="v-launch__fail"><Text variant="body-sm">{fail}</Text></div>}
+            {fail && (
+              <div role="alert" className="v-launch__fail">
+                <Text variant="body-sm">{fail}</Text>
+                {addPath && <Button size="sm" onClick={() => void addFolder()} busy={busy === "add"}>{S.home.addFolder}</Button>}
+              </div>
+            )}
           </form>
 
           <section className="v-home__checks" aria-label={S.home.preflight}>

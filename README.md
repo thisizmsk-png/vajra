@@ -128,11 +128,12 @@ is not guarded: [docs/desktop/DATA.md](docs/desktop/DATA.md). In short:
 - The app's own code makes one outbound call, and only if you saved an OpenRouter key: a usage read, at most once a
   minute. It has no telemetry, analytics, crash upload or updater code. Claude Code, Codex and `gh` send what they always
   send, under your sign-ins.
-- Claude workers that Claude Code's own campaign starts run under the Vajra guard, and the OS sandbox (opt-in) is the real
-  boundary. The app's own Claude worker dispatch is off at this base, until the S4 spike passes and #224 lands.
-- **Codex workers run outside the Vajra guard today** and can read the signing key; their cards say so. They write only in
-  their worktree, but their network follows the seat setting and your own Codex MCP servers and `notify` hook run outside
-  that sandbox. Until the per-launch Codex profile (#216) merges, do not treat a Codex seat as guarded.
+- Claude workers run under the Vajra guard, in Claude Code's sandbox. A worker keeps your default model and model routing.
+  Your other Claude Code settings and MCP servers do not load for it.
+- **Codex workers run outside the Vajra guard.** They keep your own Codex setup: your MCP servers, hooks, plugins and
+  `notify` setting. Those tools run with the worker, outside its sandbox. Vajra gives each launch a sandbox profile that
+  writes only in the worktree and hides the Vajra folders, as defense in depth. Its internet follows the seat's network
+  switch. **Vajra makes no claim that a Codex worker cannot read the signing key.** The seat card says it is not guarded.
 
 ## Using it
 

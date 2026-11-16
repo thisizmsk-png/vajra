@@ -268,6 +268,151 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(items[5].textContent).toContain(S.run.phaseState.pending);
   });
 
+  // F-G2-4 / F-G2-5: the first seconds of a run, before it has a run id, tasks or a campaign record.
+  it("early in a run (no run id yet): no approval card, no log, no read errors, and Evidence and Proof say not ready", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const notFound = (detail: string) => () => { throw { error: "not_found", detail }; };
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "", graph: { tasks: [], waves: 0 } }),
+      // The app started this run and it is still active: that is what makes not_found mean "not yet".
+      active_runs: { count: 1, runs: [{ run_id: "20261116-0900", campaign: "camp", stream: "s", session_id: "u" }] },
+      evidence_list: notFound("no tasks for this campaign"),
+      run_proof: notFound("campaign.json unreadable"),
+      // What the real core answers to an empty id; none of these may be asked.
+      evidence_approval: () => { throw { error: "invalid_args", detail: "run_id: not a run id" }; },
+      run_log_since: () => { throw { error: "invalid_args", detail: "not a run id" }; },
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await screen.findByText(S.run.notReady);
+    await screen.findByText(S.run.proof.notReady);
+    expect(f.calls.some((c) => c.cmd === "evidence_approval")).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "run_log_since")).toBe(false);
+    expect(screen.queryByText(S.run.approval.title)).toBeNull();
+    expect(screen.queryByText(S.run.failed, { exact: false })).toBeNull();
+    expect(screen.queryByText(S.run.proof.failed, { exact: false })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  // Review of #281: not_found also means "unknown campaign". Only a run the app is still starting reads as not ready.
+  it("an unknown or stale campaign keeps its read errors: not_found is not 'not ready' unless the run is still starting", async () => {
+    window.location.hash = "#/run?slug=gone";
+    const notFound = (detail: string) => () => { throw { error: "not_found", detail }; };
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "", graph: { tasks: [], waves: 0 } }),
+      active_runs: { count: 0, runs: [] },
+      evidence_list: notFound("no tasks for this campaign"),
+      run_proof: notFound("campaign.json unreadable"),
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "active_runs")).toBe(true));
+    expect(await screen.findByText(/Could not read the evidence/)).toBeTruthy();
+    expect(await screen.findByText(/Could not read the run's proof/)).toBeTruthy();
+    expect(screen.queryByText(S.run.notReady)).toBeNull();
+    expect(screen.queryByText(S.run.proof.notReady)).toBeNull();
+  });
+
+  // Review of #281 (MUST): active_runs answers AFTER the evidence and proof calls; no alert may ever appear for a run that is starting.
+  it("a starting run never flashes the read-error alert, even when active_runs answers after the evidence call", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const notFound = (detail: string) => () => { throw { error: "not_found", detail }; };
+    let release: (v: unknown) => void = () => undefined;
+    const active = new Promise((r) => { release = r; });
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "", graph: { tasks: [], waves: 0 } }),
+      active_runs: () => active,
+      evidence_list: notFound("no tasks for this campaign"),
+      run_proof: notFound("campaign.json unreadable"),
+    });
+    setTransport(f.transport);
+    const seen: number[] = [];
+    const obs = new MutationObserver(() => seen.push(screen.queryAllByRole("alert").length));
+    obs.observe(document.body, { childList: true, subtree: true });
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "evidence_list")).toBe(true));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "run_proof")).toBe(true));
+    await screen.findByText(S.run.notReady);
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    await act(async () => { release({ count: 1, runs: [{ run_id: "20261116-0900", campaign: "camp", stream: "s", session_id: "u" }] }); await new Promise((r) => setTimeout(r, 30)); });
+    obs.disconnect();
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    expect(screen.getByText(S.run.notReady)).toBeTruthy();
+    expect(Math.max(0, ...seen)).toBe(0);
+  });
+
+  // Review of #281: a failed active-runs lookup is not proof the campaign is not starting.
+  it("a failed active-runs lookup leaves a not-found read as not ready, never as an alert", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const notFound = (detail: string) => () => { throw { error: "not_found", detail }; };
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "", graph: { tasks: [], waves: 0 } }),
+      active_runs: () => { throw new Error("no core"); },
+      evidence_list: notFound("no tasks for this campaign"),
+      run_proof: notFound("campaign.json unreadable"),
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "active_runs")).toBe(true));
+    await screen.findByText(S.run.notReady);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    expect(screen.getByText(S.run.proof.notReady)).toBeTruthy();
+  });
+
+  // Red team M2: the approval card and the log must not share a key.
+  it("the approval card and the run log are not rendered twice, and React sees no duplicate key", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const warn = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "20261116-0900" }),
+      evidence_list: list([]),
+      evidence_approval: { state: "none" },
+      run_proof: new Error("x"),
+      run_log_since: { entries: [], head_seq: 0 },
+      active_runs: { count: 0, runs: [] },
+    });
+    setTransport(f.transport);
+    const { rerender } = render(<Run />);
+    await screen.findByText(S.run.log.title);
+    rerender(<Run />);
+    expect(screen.getAllByText(S.run.log.title)).toHaveLength(1);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("same key"))).toBe(false);
+    warn.mockRestore();
+  });
+
+  // Red team M3: with the core down, a worded error and a way to retry, not "unexpected error".
+  it("with the core down, Evidence and Proof say the core did not answer and offer Try again", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const down = () => { throw new Error("no core"); };
+    const f = fakeIpc({ run_overview: overview({ run_id: "" }), evidence_list: down, run_proof: down, active_runs: { count: 0, runs: [] } });
+    setTransport(f.transport);
+    render(<Run />);
+    const retries = await screen.findAllByRole("button", { name: S.states.retry });
+    expect(retries.length).toBeGreaterThanOrEqual(2);
+    expect((await screen.findAllByText(S.states.noAnswer, { exact: false })).length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(/unexpected error/i)).toBeNull();
+    const count = (cmd: string) => f.calls.filter((c) => c.cmd === cmd).length;
+    const [ev, pr] = [count("evidence_list"), count("run_proof")];
+    for (const b of retries) fireEvent.click(b);
+    await waitFor(() => { expect(count("evidence_list")).toBeGreaterThan(ev); expect(count("run_proof")).toBeGreaterThan(pr); });
+  });
+
+  it("with a run id it asks for the approval and the log, once each", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "20261116-0900" }),
+      evidence_list: list([]),
+      evidence_approval: { state: "none" },
+      run_proof: new Error("x"),
+      run_log_since: { entries: [], head_seq: 0 },
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "evidence_approval")).toBe(true));
+    expect(f.calls.filter((c) => c.cmd === "evidence_approval").every((c) => c.args?.runId === "20261116-0900")).toBe(true);
+  });
+
   it("shows the Fix round, with the limit only when it is known (AC-4.1.2)", async () => {
     await openOverview(overview({ timeline: { phases: phases("Fix", { round: 2, max_rounds: null }), current: "Fix", status: "active" } }));
     expect(screen.getByText(/round 2$/)).toBeTruthy();
