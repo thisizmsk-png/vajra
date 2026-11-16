@@ -507,6 +507,8 @@ export const S = {
     passing: (n: number, m: number) => `${n} of ${m} passing`,
     errRepo: "Enter the repository folder.",
     errAsk: "Describe what the workers should do.",
+    addFolder: "Add this folder as a project",
+    addedFolder: "Added. Press Start run again.",
     errBase: "Enter a branch or commit.",
     errRounds: "Fix rounds must be 1, 2 or 3.",
     errInFlight: "Use a number from 1 to 16.",

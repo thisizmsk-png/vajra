@@ -116,8 +116,13 @@ function Frame() {
   const pickCount = useRef(0);
   const addProject = () => {
     api.chooseFolder(S.folder.title).then(
-      (picked) => {
-        if (typeof picked === "string" && picked) { go("orch", { new: "1", repo: picked, pick: `${Date.now()}-${++pickCount.current}` }, null); setAdding(true); }
+      async (picked) => {
+        if (typeof picked !== "string" || !picked) return;
+        // Add project must add the project: a folder that only fills the launcher's field is "not a project" when Start
+        // asks the core to run in it. A folder the core refuses (nested, home, ...) still fills the field, and Start says why.
+        try { await api.projectAdd(picked); P.reload(); } catch { /* the launcher's Start reports it */ }
+        go("orch", { new: "1", repo: picked, pick: `${Date.now()}-${++pickCount.current}` }, null);
+        setAdding(true);
       },
       () => { go("orch", { new: "1" }, null); setAdding(true); },
     );
