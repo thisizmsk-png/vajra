@@ -136,8 +136,8 @@ pub const CLAUDE_UNPROVEN: Unsupported = Unsupported {
     detail: "Vajra hasn't verified this Claude Code version with its worker settings yet. Use a verified version, or a Codex worker.",
 };
 
-/// #186 L1: the Claude Code file changed between the version check and the spawn (an update, or a swap). Nothing ran;
-/// the next dispatch asks the new file afresh.
+/// #186 L1: the Claude Code file changed between a worker's version check and its spawn (an update, or a swap).
+/// Nothing ran; the next dispatch asks the new file afresh.
 pub const CLAUDE_CHANGED: Unsupported = Unsupported {
     reason: "claude_changed",
     detail: "Claude Code changed on disk between Vajra's version check and the worker's start, so the worker wasn't started. Try again.",

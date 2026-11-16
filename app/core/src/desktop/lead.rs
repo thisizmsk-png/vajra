@@ -1297,7 +1297,11 @@ impl App {
         self.active_project(&orch.id)?;
         // Record first, spawn second: if the ledger cannot take the line, the Lead is never started.
         ledger(AskState::Queued, Some(framed.text()), None, None)?;
-        // #186 L1: the file about to run is the one the version probe asked and the self-test proved.
+        // #186 L1: the file about to run is the one the version probe asked and the self-test proved. A window is left
+        // between this stat and the exec inside `lead_run::spawn` (microseconds, no probe in it); only a check inside
+        // the spawn itself would close it.
+        #[cfg(test)]
+        tests::between_probe_and_spawn(bin, "launch");
         if !pin.still(bin) {
             let e = LeadError::GuardMissing(CLAUDE_CHANGED.into());
             let _ = ledger(AskState::Failed, None, Some(e.code()), None);
@@ -1494,6 +1498,10 @@ impl App {
                     .map_err(|e| LeadError::Invalid(e.to_string()))?;
                 let ask = lead::new_ulid(SystemTime::now())?;
                 let framed = frame(&ask, run_id, &format!("Read the file {} and show its content.", file.display()), &Redactor::default())?;
+                // #186 L1: the self-test turn runs the file the version probe asked. The stat-to-exec window inside
+                // `lead_run::spawn` remains, as at the real launch.
+                #[cfg(test)]
+                tests::between_probe_and_spawn(bin, "selftest");
                 if !pin.still(bin) {
                     return Err(LeadError::GuardMissing(CLAUDE_CHANGED.into()));
                 }
@@ -1581,6 +1589,12 @@ fn cli_env(mut env: Vec<(&'static str, OsString)>, bin: &Path) -> Vec<(&'static 
 /// file. Taken through symlinks (an update that repoints the link changes it). The device and inode catch a file
 /// swapped by rename; the size, mtime and ctime catch one rewritten in place (ctime can't be set back from user space).
 /// macOS has no `fexecve`, and the CLI may be a script, so the file is pinned and checked rather than run by handle.
+///
+/// Scope: checked before a worker's `spawn_owned` and before the Director-General's self-test and real launch only.
+/// The run lead, classic campaign sessions and approve-resume spawn Claude unpinned (a follow-up). Limits: only the
+/// named file is pinned, not a script CLI's interpreter or what it imports; a cached self-test proof is reused for a
+/// pin of the same version, not re-proved for this file; on a filesystem with 1 s timestamps (HFS+) an in-place,
+/// same-size rewrite within the same second as the pin goes unseen (a rename over the path still changes the inode).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct BinPin {
     dev: u64,

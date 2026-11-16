@@ -1155,7 +1155,9 @@ impl WorkerRuntime {
         let who = crate::sessions::OwnedAs { kind: Some(crate::owned::Kind::Worker), run, ticket: Some(id.to_string()) };
         #[cfg(test)]
         tests::between_probe_and_spawn(&self.0.cfg.claude);
-        // #186 L1: the file the supervisor is about to exec is the one the version probe asked, checked last thing.
+        // #186 L1: the file the supervisor is about to exec is the one the version probe asked, checked last thing. A
+        // window is left between this stat and the exec inside `spawn_owned` (microseconds, no probe in it); only a
+        // check inside the supervisor's spawn would close it.
         if pin.is_some_and(|p| !p.still(&self.0.cfg.claude)) {
             eprintln!("vajra: {}", super::lead::CLAUDE_CHANGED);
             return Attempt::End(Outcome::Failed, profiles::CLAUDE_CHANGED.reason.into(), None);
@@ -1885,8 +1887,9 @@ impl Launch {
     /// cached by path, as the Lead's self-test does: a CLI updated in place is a new build), must be one S4 proved with
     /// today's flag shape, or (canary A) one this Mac's self-test proved. A version probe that fails, times out or
     /// prints nothing is refused (`claude_unproven`); a self-test that fails is refused (`claude_selftest_failed`).
-    /// #186 L1: returns the pin of the file that answered (and was self-tested); the spawn checks it again right before
-    /// it starts the worker. A file that changed while it was asked is refused (`claude_changed`).
+    /// #186 L1: returns the pin of the file that answered the version probe; `one_attempt` checks it again right before
+    /// `spawn_owned`. A file that changed while it was asked is refused (`claude_changed`). A pass from S4's list or a
+    /// cached self-test is a proof for the version, not a re-test of this pinned file.
     fn claude_proven(cfg: &Config) -> Result<BinPin, &'static str> {
         let refused = profiles::CLAUDE_UNPROVEN.reason;
         let changed = profiles::CLAUDE_CHANGED.reason;
