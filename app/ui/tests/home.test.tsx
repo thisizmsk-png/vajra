@@ -160,6 +160,29 @@ describe("Home", () => {
     expect(screen.queryByText(S.home.startNeedsChecks(1))).toBeNull();
   });
 
+  it("a folder that is not a project: Start says so and one click adds it, then a start works", async () => {
+    const added: string[] = [];
+    const f = await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      act_start_run: (a?: Record<string, unknown>) => {
+        if (!added.includes(String(a?.cwd))) throw { error: "not_a_project", detail: "This folder is not a project. Add it as a project first.", action: "add_project", path: a?.cwd };
+        return started;
+      },
+      project_add: (a?: Record<string, unknown>) => { added.push(String(a?.path)); return { outcome: "created", project: {} }; },
+    });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/r");
+    fill(S.home.ask, "do it");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    expect(await screen.findByText("This folder is not a project. Add it as a project first.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: S.home.addFolder }));
+    expect(await screen.findByText(S.home.addedFolder)).toBeTruthy();
+    expect(f.calls.some((c) => c.cmd === "project_add" && c.args?.path === "/r")).toBe(true);
+    expect(screen.queryByRole("button", { name: S.home.addFolder })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "act_start_run").length).toBe(2));
+  });
+
   it("does not start with an empty ask: names the field, calls nothing (AC-1.1.2)", async () => {
     const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
     await screen.findByText("registered");
