@@ -6217,3 +6217,50 @@ fn no_run_launches_while_the_engine_is_installed() {
     let _launch = app.engine_quiet().unwrap();
     assert!(app.engine_excl.try_write().is_err());
 }
+
+/// A dir holding a fake `claude` that records each start in `ran` beside it. `swap`: a seam that renames a copy over
+/// it (the same bytes, a new inode) right before the supervisor's pin recheck; otherwise a seam that does nothing.
+pub(super) fn pinned_fake_claude(dir: &Path, swap: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dir).unwrap();
+    let bin = dir.join("claude");
+    fs::write(&bin, format!("#!/bin/sh\necho ran >> '{}'\n", dir.join("ran").display())).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let seam: Box<dyn Fn(&Path) + Send> = if swap {
+        Box::new(|p: &Path| {
+            let tmp = p.with_extension("swap");
+            fs::copy(p, &tmp).unwrap();
+            fs::rename(&tmp, p).unwrap();
+        })
+    } else {
+        Box::new(|_: &Path| {})
+    };
+    lock(&crate::sessions::BEFORE_PIN_RECHECK).push((bin.clone(), seam));
+    bin
+}
+
+/// #186 L1: a classic Claude launch runs the `claude` it resolved, as an absolute argv[0]. Renamed over between that
+/// choice and the exec, it is refused with `claude_changed`, never run, and the run's control session is ended. The
+/// same launch with nothing swapped runs the resolved file.
+#[test]
+fn a_classic_claude_launch_whose_binary_is_swapped_before_the_exec_is_refused() {
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let t = Tmp::new();
+    let mut app = t.app();
+    let bin = pinned_fake_claude(&t.0.join("pinbin"), true);
+    app.provider_dirs = Some(vec![bin.parent().unwrap().to_path_buf()]);
+    let cwd = t.0.join("repo");
+    let e = app.launch(sid, "20261105-1230", "c", &cwd, |_| Ok(vec!["claude".into(), "--session-id".into(), sid.into()]), false).unwrap_err();
+    assert_eq!(code(&e), "claude_changed", "{e}");
+    assert!(!t.0.join("pinbin/ran").exists(), "the swapped file never ran");
+    assert!(lock(&app.control).nonce(sid).is_none(), "the refused launch left no control session");
+
+    let t = Tmp::new();
+    let mut app = t.app();
+    let bin = pinned_fake_claude(&t.0.join("pinbin"), false);
+    app.provider_dirs = Some(vec![bin.parent().unwrap().to_path_buf()]);
+    let cwd = t.0.join("repo");
+    app.launch(sid, "20261105-1230", "c", &cwd, |_| Ok(vec!["claude".into(), "--session-id".into(), sid.into()]), false).unwrap();
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+    assert!(t.0.join("pinbin/ran").exists(), "an unchanged file is the one that runs");
+}

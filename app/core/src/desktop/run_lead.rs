@@ -19,6 +19,7 @@ use crate::control::runreg::{self, LeadProc, RunRegistry};
 use crate::control::{fsx, sha256};
 use crate::crew::redact::Redactor;
 use crate::desktop::charter::{self, Brief};
+use crate::desktop::lead::BinPin;
 use crate::desktop::runproto::{LeadAction, LeadExit, RunProtocol, RunStatus};
 use crate::sessions::{SpawnSpec, Supervisor};
 
@@ -162,6 +163,10 @@ impl RunLead {
             prompt: &prompt, model: i.seat.model.as_deref(), effort: i.seat.effort.as_deref(), lead_dir: &dir, project: &project, server, deny: &i.deny,
             profile: &profile,
         };
+        // #186 L1: a Claude lead's binary is pinned when this launch takes it, and checked again right before the spawn.
+        // Identity only, no version gate. Taken per launch, not once per run: a restart after an update runs the
+        // updated file, as it did before the pin.
+        let mut pin: Option<BinPin> = None;
         let (mut argv, extra_env) = match i.engine {
             Engine::Codex => {
                 let gateway_home;
@@ -177,6 +182,7 @@ impl RunLead {
                 (c.argv, c.env)
             }
             Engine::Claude => {
+                pin = Some(BinPin::of(&i.env.claude).map_err(|_| LaunchFailed(format!("{}: {}", profiles::CLAUDE_CHANGED.reason, super::lead::CLAUDE_CHANGED)))?);
                 let flag = profiles::claude_lead_flag(&i.env.home, &i.env.repos, &i.env.data, &i.env.others).map_err(|e| f(&e))?;
                 let flag_path = fsx::write_atomic(&dir, "claude-lead.json", flag.as_bytes()).map_err(|e| f(&e))?;
                 let mcp = profiles::claude_lead_mcp_config(&server).map_err(|e| LaunchFailed(format!("{}: {}", e.field, e.reason)))?;
@@ -205,6 +211,13 @@ impl RunLead {
         let sid = format!("lead-{}-{n}", i.run);
         let spec = SpawnSpec { argv, cwd: dir, rows: 40, cols: 160, redact: Redactor::default(), extra_env };
         let who = crate::sessions::OwnedAs { kind: Some(crate::owned::Kind::Lead), run: Some(i.run.clone()), ticket: None };
+        #[cfg(test)]
+        tests::between_pin_and_spawn(&i.env.claude);
+        // #186 L1: the file about to run is the one this launch pinned. A window is left between this stat and the exec
+        // inside `spawn_owned` (microseconds); only a check inside the supervisor's spawn would close it.
+        if pin.is_some_and(|p| !p.still(&i.env.claude)) {
+            return Err(LaunchFailed(format!("{}: {}", profiles::CLAUDE_CHANGED.reason, super::lead::CLAUDE_CHANGED)));
+        }
         i.sup.spawn_owned(&sid, spec, None, who).map_err(|e| LaunchFailed(format!("spawn_failed: {e}")))?;
         let pid = i.sup.pid(&sid).map_err(|e| f(&e))?;
         let Some(stamp) = crate::procid::start_stamp(pid) else {

@@ -1585,37 +1585,8 @@ fn cli_env(mut env: Vec<(&'static str, OsString)>, bin: &Path) -> Vec<(&'static 
     env
 }
 
-/// #186 L1: the identity of the Claude Code file a version probe asked, so the spawn after the probe runs that same
-/// file. Taken through symlinks (an update that repoints the link changes it). The device and inode catch a file
-/// swapped by rename; the size, mtime and ctime catch one rewritten in place (ctime can't be set back from user space).
-/// macOS has no `fexecve`, and the CLI may be a script, so the file is pinned and checked rather than run by handle.
-///
-/// Scope: checked before a worker's `spawn_owned` and before the Director-General's self-test and real launch only.
-/// The run lead, classic campaign sessions and approve-resume spawn Claude unpinned (a follow-up). Limits: only the
-/// named file is pinned, not a script CLI's interpreter or what it imports; a cached self-test proof is reused for a
-/// pin of the same version, not re-proved for this file; on a filesystem with 1 s timestamps (HFS+) an in-place,
-/// same-size rewrite within the same second as the pin goes unseen (a rename over the path still changes the inode).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct BinPin {
-    dev: u64,
-    ino: u64,
-    size: u64,
-    mtime: (i64, i64),
-    ctime: (i64, i64),
-}
-
-impl BinPin {
-    pub(super) fn of(bin: &Path) -> std::io::Result<BinPin> {
-        use std::os::unix::fs::MetadataExt;
-        let m = std::fs::metadata(bin)?;
-        Ok(BinPin { dev: m.dev(), ino: m.ino(), size: m.size(), mtime: (m.mtime(), m.mtime_nsec()), ctime: (m.ctime(), m.ctime_nsec()) })
-    }
-
-    /// The file at `bin` is still the one pinned. A file that is gone or unreadable is not (fail closed).
-    pub(super) fn still(&self, bin: &Path) -> bool {
-        BinPin::of(bin).is_ok_and(|p| p == *self)
-    }
-}
+/// #186 L1: the pin lives with the supervisor (`crate::sessions::BinPin`), which rechecks it for classic launches.
+pub(super) use crate::sessions::BinPin;
 
 /// `claude --version` under the Lead's own environment, asked of the executable on every ask. Never cached by path: a
 /// CLI updated in place must get its own self-test, because deny-rule semantics depend on the version. Returns the

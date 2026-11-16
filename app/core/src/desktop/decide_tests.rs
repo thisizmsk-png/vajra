@@ -1344,3 +1344,28 @@ fn an_unreadable_decision_log_shows_the_plan_instead_of_hiding_it() {
     fs::set_permissions(&ledger, fs::Permissions::from_mode(0o600)).unwrap();
     assert!(has_plan(&b), "an unreadable decision log hid the plan: {b}");
 }
+
+/// #186 L1: an approve-resume runs the `claude` it resolved. Renamed over between that choice and the exec, the resume
+/// is refused with `claude_changed`, the file never runs and the plan stays in the inbox. Unswapped, it resumes.
+#[test]
+fn an_approve_resume_whose_claude_is_swapped_before_the_exec_is_refused_and_the_plan_stays() {
+    let t = Tmp::new();
+    let mut app = t.app();
+    let bin = crate::desktop::tests::pinned_fake_claude(&t.0.join("pinbin"), true);
+    app.provider_dirs = Some(vec![bin.parent().unwrap().to_path_buf()]);
+    let sha = ready(&t, &app);
+    let e = app.approve_plan(PLAN, &sha).unwrap_err();
+    assert_eq!(code_of(&e), "claude_changed", "{e}");
+    assert!(!t.0.join("pinbin/ran").exists(), "the swapped file never ran");
+    assert_eq!(states(&t, "approve"), ["requested", "failed"]);
+    assert!(item_ids(&app).iter().any(|i| i == PLAN), "still in the inbox");
+
+    let t = Tmp::new();
+    let mut app = t.app();
+    let bin = crate::desktop::tests::pinned_fake_claude(&t.0.join("pinbin"), false);
+    app.provider_dirs = Some(vec![bin.parent().unwrap().to_path_buf()]);
+    let sha = ready(&t, &app);
+    app.approve_plan(PLAN, &sha).unwrap();
+    app.sup.wait(&format!("run-{SID}"), std::time::Duration::from_secs(5)).unwrap();
+    assert!(t.0.join("pinbin/ran").exists(), "an unchanged file is the one that resumes");
+}

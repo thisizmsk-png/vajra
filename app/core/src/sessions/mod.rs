@@ -65,6 +65,8 @@ pub enum SessionError {
     Io(String),
     /// The ownership ledger could not record the process: it was killed, and the spawn refused.
     Ledger(String),
+    /// #186 L1: the pinned binary is not the file the launch chose (or is gone); nothing was started.
+    BinaryChanged,
 }
 
 impl std::fmt::Display for SessionError {
@@ -84,6 +86,7 @@ impl std::fmt::Display for SessionError {
             Self::Spawn(e) => write!(f, "spawn failed: {e}"),
             Self::Io(e) => write!(f, "pty i/o failed: {e}"),
             Self::Ledger(e) => write!(f, "the process could not be recorded, so it was not started: {e}"),
+            Self::BinaryChanged => f.write_str("the program changed on disk between Vajra choosing it and starting it; nothing was started"),
         }
     }
 }
@@ -166,6 +169,43 @@ pub fn scrubbed_env(get: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str
 }
 
 use crate::lock;
+
+/// #186 L1: the identity of the Claude Code file a launch chose, so the process started is that same file. Taken
+/// through symlinks (an update that repoints the link changes it). The device and inode catch a file swapped by
+/// rename; the size, mtime and ctime catch one rewritten in place (ctime can't be set back from user space). macOS has
+/// no `fexecve`, and the CLI may be a script, so the file is pinned and checked rather than run by handle.
+///
+/// Scope: a worker's spawn, the Director-General's self-test and launch, a run lead's launch, and classic campaign
+/// launches and approve-resume (`Supervisor::spawn_pinned`, checked right before the exec). Limits: only the named file
+/// is pinned, not a script CLI's interpreter or what it imports; a cached self-test proof is reused for a pin of the
+/// same version, not re-proved for this file; on a filesystem with 1 s timestamps (HFS+) an in-place, same-size
+/// rewrite within the same second as the pin goes unseen (a rename over the path still changes the inode).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BinPin {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl BinPin {
+    pub fn of(bin: &Path) -> std::io::Result<BinPin> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(bin)?;
+        Ok(BinPin { dev: m.dev(), ino: m.ino(), size: m.size(), mtime: (m.mtime(), m.mtime_nsec()), ctime: (m.ctime(), m.ctime_nsec()) })
+    }
+
+    /// The file at `bin` is still the one pinned. A file that is gone or unreadable is not (fail closed).
+    pub fn still(&self, bin: &Path) -> bool {
+        BinPin::of(bin).is_ok_and(|p| p == *self)
+    }
+}
+
+/// Test seam (#186 L1): run by `start` right before a pinned spawn's recheck, for the test whose binary is at that path.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub(crate) static BEFORE_PIN_RECHECK: Mutex<Vec<(PathBuf, Box<dyn Fn(&Path) + Send>)>> = Mutex::new(Vec::new());
 
 /// Each name at most once, each in `EXTRA_ENV_ALLOW`, each value non-empty with no NUL.
 fn extra_env_ok(env: &[(&'static str, OsString)]) -> bool {
@@ -399,7 +439,27 @@ impl Supervisor {
         }
         let mut env = user_env();
         env.extend(spec.extra_env.iter().cloned());
-        self.start(id, &spec, &env, tag, Some(who))
+        self.start(id, &spec, &env, tag, Some(who), None)
+    }
+
+    /// #186 L1: `spawn` for a classic launch whose argv[0] the caller resolved to an absolute path and pinned. The pin
+    /// is checked again right before the exec; a file that changed (or a relative argv[0]) refuses the spawn.
+    pub fn spawn_pinned(&self, id: &str, spec: SpawnSpec, pin: BinPin) -> Result<(), SessionError> {
+        if !spec.argv.first().is_some_and(|a| Path::new(a).is_absolute()) {
+            return Err(SessionError::BinaryChanged);
+        }
+        if let Some(why) = lock(&self.refuse_all).clone() {
+            return Err(SessionError::Ledger(why));
+        }
+        if id.starts_with(SETUP_STREAM) {
+            return Err(SessionError::InvalidId);
+        }
+        if !extra_env_ok(&spec.extra_env) {
+            return Err(SessionError::BadEnv);
+        }
+        let mut env = user_env();
+        env.extend(spec.extra_env.iter().cloned());
+        self.start(id, &spec, &env, None, Some(OwnedAs::default()), Some(pin))
     }
 
     /// A one-click install (ADR-17, bhishma condition 8) on bus stream `setup-<id>`: exactly the Setup env profile,
@@ -417,12 +477,13 @@ impl Supervisor {
         let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: 24, cols: 100, redact: r, extra_env: Vec::new() };
         // Not an agent: no ownership record and no agent mark, so its env is exactly the Setup profile and the crash
         // reconcile never kills an install midway.
-        self.start(id, &spec, env.vars(), None, None)
+        self.start(id, &spec, env.vars(), None, None, None)
     }
 
     /// `who`: an agent, recorded in the ownership ledger and given its mark; `None` for a one-click install.
     fn start(
         &self, id: &str, spec: &SpawnSpec, env: &[(&'static str, OsString)], tag: Option<ProviderTag>, who: Option<OwnedAs>,
+        pin: Option<BinPin>,
     ) -> Result<(), SessionError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(SessionError::ShuttingDown);
@@ -481,6 +542,19 @@ impl Supervisor {
         }
         cmd.cwd(&spec.cwd);
 
+        // #186 L1: last thing before the exec, the absolute argv[0] is still the file the launch pinned. A window of
+        // microseconds is left between this stat and the exec inside `spawn_pty` (its fork); only `fexecve`, which
+        // macOS lacks, would close it.
+        if let Some(p) = pin {
+            let bin = Path::new(&spec.argv[0]);
+            #[cfg(test)]
+            if let Some((_, seam)) = lock(&BEFORE_PIN_RECHECK).iter().find(|(b, _)| b == bin) {
+                seam(bin);
+            }
+            if !p.still(bin) {
+                return Err(SessionError::BinaryChanged);
+            }
+        }
         let child = crate::spawnlock::spawn_pty(pair.slave.as_ref(), cmd).map_err(SessionError::Spawn)?;
         // Drop our slave fd so the reader sees EOF when the child is gone.
         drop(pair.slave);
