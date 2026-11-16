@@ -134,11 +134,10 @@ and hides the Vajra state folder and the app data folder, as defense in depth. T
   (`app/core/src/desktop/seat_start.rs`, `CODEX_WARNING`). The per-launch profile hides the Vajra folders, but Vajra does not
   count a Codex run as guarded and does not say the key is out of its reach. The owner chose this on 13 Nov 2026: Codex
   keeps your extras, and no key claim is made.
-- **Codex on a ChatGPT login is the case where that cannot be proven.** For a Codex seat on your ChatGPT sign-in, the app
-  cannot check the settings your workspace may manage in the cloud, and `codex login status` does not say which plan you
-  are on, so a workspace login cannot be told from a personal one. The owner's decision (13 Nov 2026) is that such a seat
-  launches, is marked not guarded, and shows that reason on its card, instead of refusing every ChatGPT login. API-key
-  logins and the gateway route stay checkable. Every Codex seat carries the warning above.
+- **Codex on a ChatGPT login is not told apart.** For a Codex seat on your ChatGPT sign-in, the app cannot check the
+  settings your workspace may manage in the cloud, and `codex login status` does not say which plan you are on. The owner's
+  decision (13 Nov 2026) is that such a seat launches instead of being refused. **Not done yet:** the app shows no
+  ChatGPT-specific reason on the card. Every Codex seat, ChatGPT or not, gets the one generic warning above.
 - **The signing key is guarded, not yet sandboxed.** The proof record says so: "Checked by Vajra on this Mac. The signing
   key is guarded, not yet sandboxed." A record whose evidence ran outside the guard says that too, and the app does not
   call any record more than that (`app/core/src/desktop/proof.rs`, `record_note`). The skill's knowledge ledger and practice
