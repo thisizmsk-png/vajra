@@ -5689,6 +5689,26 @@ fn one_click_setup_offers_nothing_for_an_unverified_source_and_runs_nothing() {
     assert!(!format!("{:?}", app.consents).contains(&token));
 }
 
+/// D7, bhishma C7: until the catalog verifies the engine install, `setup_plan`, `setup_consent` and `setup_run` with id
+/// `engine` each refuse in the core, whatever the UI does, and nothing under HOME is created.
+#[test]
+fn the_engine_install_is_gated_in_plan_consent_and_run() {
+    let t = Tmp::new();
+    let app = t.app();
+    app.set_resources(t.home().join("no-resources"));
+    let v = app.setup_plan("engine").unwrap();
+    assert_eq!(v["manual"], "source_not_verified", "{v}");
+    assert_eq!(v["id"], "engine");
+    assert!(v.get("plan").is_none());
+    assert_eq!(code(&app.setup_consent("engine", &"a".repeat(64)).unwrap_err()), "source_not_verified");
+    assert_eq!(code(&app.setup_run("engine", &"b".repeat(32)).unwrap_err()), "source_not_verified");
+    assert!(!t.home().join(".claude/.vajra-install").exists(), "no work area was made");
+    assert!(!t.home().join(".claude/skills/vajra").exists(), "nothing was installed");
+    let l = app.setup_list().unwrap();
+    assert_eq!(l["engine"]["one_click"], false, "{l}");
+    assert_eq!(l["engine"]["state"], "missing", "{l}");
+}
+
 // ---------------------------------------------------------------- ADR 16.6 at startup
 
 /// A stored baseline copy with no anchor: `take_or_load` calls it tampered, so the app opens with agents off.
@@ -6144,4 +6164,56 @@ fn a_codex_lead_with_a_readable_vajra_dir_is_ended() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!app.sup.is_running(&stream).unwrap(), "a readable Vajra dir ends the Lead");
+}
+
+#[test]
+fn a_live_user_terminal_counts_as_the_engine_being_in_use() {
+    use std::sync::atomic::AtomicBool;
+    let t = Tmp::new();
+    let app = t.app();
+    app.set_resources(t.home().join("res"));
+    assert!(app.with_engine(|m| (m.busy)()).unwrap(), "no terminal registry wired fails closed: the engine is in use");
+    let live = Arc::new(AtomicBool::new(true));
+    let l = live.clone();
+    app.set_terminals_live(Arc::new(move || l.load(Ordering::SeqCst)));
+    assert!(app.with_engine(|m| (m.busy)()).unwrap(), "a live terminal makes the engine busy");
+    live.store(false, Ordering::SeqCst);
+    assert!(!app.with_engine(|m| (m.busy)()).unwrap(), "once every terminal ends the engine is free");
+}
+
+#[test]
+fn a_terminal_opening_and_an_engine_install_exclude_each_other() {
+    let t = Tmp::new();
+    let app = t.app();
+    {
+        let _open = app.terminal_open_guard().expect("no install runs, so a terminal may open");
+        assert!(app.engine_excl.try_write().is_err(), "an install cannot start while a terminal opens");
+    }
+    {
+        let _install = app.engine_excl.try_write().unwrap();
+        assert!(app.terminal_open_guard().is_none(), "no terminal opens while the engine is replaced");
+    }
+    assert!(app.terminal_open_guard().is_some());
+}
+
+/// Codex P1 on #213: no run launches while the engine install holds its exclusion, classic or seated, and an install
+/// can't take it while a launch is between its checks and the run being counted.
+#[test]
+fn no_run_launches_while_the_engine_is_installed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    let p0 = app.launch_project(&r[0]).unwrap().1.id;
+    let input = crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 2, campaign: None, provider: None };
+    {
+        let _install = app.engine_excl.try_write().unwrap();
+        let e = app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, Engine::Claude, 2).unwrap_err();
+        assert_eq!(code(&e), "engine_installing", "{e}");
+        let e = app.start_lead_run(&p0, input, r[0].to_str().unwrap(), "20261112-0901").unwrap_err();
+        assert_eq!(code(&e), "engine_installing", "{e}");
+    }
+    assert!(!app.sup.is_running(&format!("run-{}", SIDS[0])).unwrap_or(false), "nothing was launched");
+    // A launch holds its share until it returns: an install can't start in between.
+    let _launch = app.engine_quiet().unwrap();
+    assert!(app.engine_excl.try_write().is_err());
 }

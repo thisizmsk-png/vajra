@@ -47,6 +47,19 @@ pub fn setup_env(tool_dirs: &[PathBuf], get: impl Fn(&str) -> Option<OsString>) 
     SetupEnv(vars)
 }
 
+/// The engine install's env (D7, bhishma C7): the Setup env's scrubbed variables, but HOME is exactly `home` (the
+/// folder the plan showed, not whatever HOME the app inherited) and PATH is only the four root-owned folders, never a
+/// Homebrew or user folder. No proxy is needed: nothing is downloaded.
+pub fn engine_env(home: &std::path::Path, get: impl Fn(&str) -> Option<OsString>) -> SetupEnv {
+    let path = OsString::from("/usr/bin:/bin:/usr/sbin:/sbin");
+    let home = home.as_os_str().to_os_string();
+    SetupEnv(crate::sessions::scrubbed_env(|k| match k {
+        "PATH" => Some(path.clone()),
+        "HOME" => Some(home.clone()),
+        _ => get(k).filter(usable),
+    }))
+}
+
 /// The redactor for a `setup-<id>` stream: the proxy value and its credentials are replaced wherever they appear.
 pub fn redactor(env: &SetupEnv) -> Redactor {
     let mut r = Redactor::default();

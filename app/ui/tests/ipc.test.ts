@@ -154,6 +154,17 @@ describe("typed ipc", () => {
     expect(errorText({ error: "projects_unavailable", detail })).toBe(detail);
   });
 
+  it("points a start refused for the engine to Set up, not a shell command (D7)", () => {
+    const refused = (code: string) => ({ error: "worker_unavailable", detail: "some seats cannot be launched", refusals: [{ seat: "w1", code: "harness_missing", detail: "x" }, { seat: "engine", code, detail: "core words" }] });
+    for (const code of ["engine_missing", "engine_unsupported", "engine_broken", "engine_installing"]) {
+      const t = errorText(refused(code));
+      expect(t).toContain(code === "engine_installing" ? "Set up finishes" : "Settings > Providers > Set up");
+      expect(t).not.toContain("install.sh");
+    }
+    expect(errorText(refused("engine_unknown_code"))).toBe("worker_unavailable: some seats cannot be launched");
+    expect(errorText({ error: "worker_unavailable", detail: "d", refusals: [{ seat: "w1", code: "harness_missing" }] })).toBe("worker_unavailable: d");
+  });
+
   it("shows the sandbox message as one friendly line", () => {
     const msg = "Asking the Director-General needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
     expect(errorText({ error: "lead_guard_missing", detail: msg })).toBe(msg);

@@ -27,7 +27,11 @@ export interface SetupRow {
   one_click: boolean;
 }
 
-export interface SetupList { rows: SetupRow[]; engine: { installed: boolean; command: string } }
+/** The engine-scripts row (D7). An unknown state reads as missing; `one_click` holds only for a known state. */
+export type EngineState = "installed" | "missing" | "broken" | "installing";
+const ENGINE_STATES: readonly EngineState[] = ["installed", "missing", "broken", "installing"];
+export interface EngineRow { installed: boolean; command: string; state: EngineState; one_click: boolean }
+export interface SetupList { rows: SetupRow[]; engine: EngineRow }
 
 type O = Record<string, unknown>;
 const obj = (v: unknown): v is O => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -61,7 +65,11 @@ export function parseSetupList(v: unknown): ParseResult<SetupList> {
     if (!p) return { ok: false, reason: "invalid", detail: "row" };
     rows.push(p);
   }
-  return { ok: true, value: { rows, engine: { installed: v.engine.installed, command: v.engine.command } } };
+  const known = ENGINE_STATES.includes(v.engine.state as EngineState);
+  // An older core sends no state: read it from `installed`. An unknown one reads as missing, never as installed.
+  const state: EngineState = v.engine.state === undefined ? (v.engine.installed ? "installed" : "missing") : known ? (v.engine.state as EngineState) : "missing";
+  const engine: EngineRow = { installed: v.engine.installed && state === "installed", command: v.engine.command, state, one_click: (known || v.engine.state === undefined) && state !== "installing" && v.engine.one_click === true };
+  return { ok: true, value: { rows, engine } };
 }
 
 // `setup_plan` (`vajra.setup_plan/1`): the one-click plan, or why it is install it yourself. Only these fields are kept.
@@ -81,7 +89,10 @@ export interface SetupPlan {
   scope_registry: string | null;
   deps: string[];
   hash: string;
+  /** The engine install's pinned facts (method `engine_bundle`), shown on its sheet. Null for a harness plan. */
+  engine: EnginePin | null;
 }
+export interface EnginePin { case: string; old_version: string | null; tgz_sha256: string; build: string; workflows: string[]; differs: number | null }
 export type PlanAnswer = { kind: "plan"; plan: SetupPlan } | { kind: "manual"; code: string };
 
 const texts = (v: unknown, n: number, max = 4096): string[] | null =>
@@ -110,7 +121,24 @@ function plan(v: unknown): SetupPlan | null {
     if (!obj(v.needs_admin) || !text(v.needs_admin.path, 4096) || !text(v.needs_admin.reason, 32)) return null;
     admin = { path: v.needs_admin.path, reason: v.needs_admin.reason };
   }
-  return { id: v.id, method: v.method, command, tools, source: source ?? "", version: version ?? "", target: target ?? "", needs_admin: admin, notes, scope_registry: scope, deps, hash: v.hash };
+  let engine: EnginePin | null = null;
+  if (v.method === "engine_bundle") {
+    engine = enginePin(v.pin);
+    if (!engine) return null;
+  }
+  return { id: v.id, method: v.method, command, tools, source: source ?? "", version: version ?? "", target: target ?? "", needs_admin: admin, notes, scope_registry: scope, deps, hash: v.hash, engine };
+}
+
+const CASES = ["fresh", "update", "repair", "downgrade"];
+
+/** The engine pin: an unknown case or a malformed field refuses the whole plan, so the sheet never guesses. */
+function enginePin(v: unknown): EnginePin | null {
+  if (!obj(v) || v.kind !== "engine" || !CASES.includes(v.case as string) || typeof v.tgz_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(v.tgz_sha256) || !text(v.build, 16)) return null;
+  const old = optText(v.old_version, 64);
+  const workflows = Array.isArray(v.workflows) && v.workflows.length === 0 ? [] : texts(v.workflows, 32, 128);
+  const differs = v.differs === null || v.differs === undefined ? null : Number.isInteger(v.differs) && (v.differs as number) >= 0 ? (v.differs as number) : undefined;
+  if (old === undefined || !workflows || differs === undefined) return null;
+  return { case: v.case as string, old_version: old, tgz_sha256: v.tgz_sha256, build: v.build, workflows, differs };
 }
 
 export function parseSetupPlan(v: unknown): ParseResult<PlanAnswer> {
@@ -123,7 +151,7 @@ export function parseSetupPlan(v: unknown): ParseResult<PlanAnswer> {
 
 export type RunOutcome = "installed" | "failed" | "rolled_back" | "broken";
 const OUTCOMES: readonly RunOutcome[] = ["installed", "failed", "rolled_back", "broken"];
-export interface RunReport { outcome: RunOutcome; reason: string | null; exit: number | null; version: string | null }
+export interface RunReport { outcome: RunOutcome; reason: string | null; exit: number | null; version: string | null; /** Engine only: the folder an edited copy was kept in. */ backup: string | null }
 
 /** `setup_run`: an unknown outcome reads as broken, never as installed. */
 export function parseSetupRun(v: unknown): RunReport | null {
@@ -133,5 +161,7 @@ export function parseSetupRun(v: unknown): RunReport | null {
   const version = optText(r.version, 64);
   if (reason === undefined || version === undefined) return null;
   const outcome = OUTCOMES.includes(r.outcome as RunOutcome) ? (r.outcome as RunOutcome) : "broken";
-  return { outcome, reason, exit: typeof r.exit === "number" ? r.exit : null, version };
+  // A backup is one plain folder name under the work area, nothing else.
+  const backup = typeof v.backup === "string" && /^backup-[A-Za-z0-9._-]{1,80}$/.test(v.backup) ? v.backup : null;
+  return { outcome, reason, exit: typeof r.exit === "number" ? r.exit : null, version, backup };
 }

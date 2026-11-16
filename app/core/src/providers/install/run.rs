@@ -43,7 +43,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         match self {
             Outcome::Installed => "installed",
             Outcome::Failed => "failed",
@@ -63,7 +63,7 @@ pub struct Report {
 }
 
 impl Report {
-    fn new(outcome: Outcome, reason: Option<&'static str>, exit: Option<u32>) -> Self {
+    pub(crate) fn new(outcome: Outcome, reason: Option<&'static str>, exit: Option<u32>) -> Self {
         Self { outcome, reason, exit, version: None }
     }
 }
@@ -94,7 +94,7 @@ fn write_fresh(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf>
 }
 
 /// Spawn on the setup stream and wait. `Ok(None)`: it ran past the timeout and was stopped.
-fn spawn_wait(ctx: &Ctx, id: &str, argv: Vec<String>, cwd: &Path) -> Result<Option<u32>, &'static str> {
+pub(crate) fn spawn_wait(ctx: &Ctx, id: &str, argv: Vec<String>, cwd: &Path) -> Result<Option<u32>, &'static str> {
     let s = stream(id);
     ctx.sup.spawn_setup(&s, argv, cwd, ctx.env, Redactor::default()).map_err(|_| "spawn_failed")?;
     match ctx.sup.wait(&s, ctx.timeout) {

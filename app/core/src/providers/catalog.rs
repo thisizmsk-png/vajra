@@ -55,6 +55,21 @@ pub struct SignIn {
 #[serde(deny_unknown_fields)]
 pub struct EngineScripts {
     pub manual_command: String,
+    /// The same three verified fields as a harness (D7, bhishma C7), all or none. Until the security review signs off
+    /// the engine install, they are null and the engine row stays "Install it yourself".
+    #[serde(default)]
+    pub source_verified_by: Option<String>,
+    #[serde(default)]
+    pub source_verified_on: Option<String>,
+    #[serde(default)]
+    pub verification_ref: Option<String>,
+}
+
+impl EngineScripts {
+    /// The security review verified the bundled engine install, so a one-click install may be offered.
+    pub fn verified(&self) -> bool {
+        self.source_verified_by.is_some() && self.source_verified_on.is_some() && self.verification_ref.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -192,17 +207,35 @@ fn npm_package(s: &str) -> bool {
     plain(name) && name.bytes().all(|b| !b.is_ascii_uppercase())
 }
 
+/// A `YYYY-MM-DD` date.
+fn ymd(d: &str) -> bool {
+    d.len() == 10 && d.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() })
+}
+
 pub fn validate(c: &Catalog) -> Result<(), CatalogError> {
     if c.schema != CATALOG_SCHEMA {
         return bad(format!("schema {:?}", c.schema));
     }
-    if !shown(&c.engine_scripts.manual_command) {
+    let es = &c.engine_scripts;
+    if !shown(&es.manual_command) {
         return bad("engine_scripts.manual_command");
+    }
+    // bhishma C7: the engine's verified fields are all set or all null.
+    let set = [es.source_verified_by.is_some(), es.source_verified_on.is_some(), es.verification_ref.is_some()].iter().filter(|b| **b).count();
+    if set != 0 && set != 3 {
+        return bad("engine_scripts: the verified fields are all set or all null");
+    }
+    if es.verification_ref.as_deref().is_some_and(|r| !https(r)) || es.source_verified_on.as_deref().is_some_and(|d| !ymd(d)) || es.source_verified_by.as_deref().is_some_and(|b| !shown(b)) {
+        return bad("engine_scripts: verified fields");
     }
     for (i, h) in c.harnesses.iter().enumerate() {
         let e = |what: &str| bad(format!("{}: {what}", h.id));
         if !plain(&h.id) || c.harnesses[..i].iter().any(|o| o.id == h.id) {
             return e("id is not a unique plain name");
+        }
+        // The engine's own id: `setup_*` treat it as the engine, so no harness may take it (bhishma C7).
+        if h.id == crate::providers::install::engine::flow::ID {
+            return e("the id engine is reserved for the engine scripts");
         }
         if !shown(&h.name) {
             return e("name");
@@ -225,7 +258,7 @@ pub fn validate(c: &Catalog) -> Result<(), CatalogError> {
         if h.source_verified_by.is_some() && !h.verified() {
             return e("a verified entry needs source_verified_on and verification_ref");
         }
-        if h.source_verified_on.as_deref().is_some_and(|d| d.len() != 10 || !d.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() })) {
+        if h.source_verified_on.as_deref().is_some_and(|d| !ymd(d)) {
             return e("source_verified_on must be YYYY-MM-DD");
         }
         if h.methods.is_empty() {

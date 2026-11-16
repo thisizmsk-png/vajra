@@ -163,6 +163,20 @@ fn an_ended_shell_is_listed_as_not_alive_until_its_tab_is_closed() {
 }
 
 #[test]
+fn any_live_is_true_while_a_shell_runs_and_false_once_it_ends() {
+    let f = Fixture::new("anylive");
+    let t = f.terminals();
+    assert!(!t.any_live());
+    let (info, out) = open_root(&t, &f);
+    assert!(t.any_live(), "an open shell keeps the engine install off");
+    t.write(info.id, b"exit 0\n").unwrap();
+    assert_eq!(out.exit(5), Some(Some(0)));
+    assert!(!t.any_live(), "an ended shell no longer holds the engine");
+    t.close(info.id).unwrap();
+    assert!(!t.any_live());
+}
+
+#[test]
 fn close_kills_the_shell_and_what_it_started_in_the_background() {
     let f = Fixture::new("close");
     let t = f.terminals();

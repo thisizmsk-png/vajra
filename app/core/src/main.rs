@@ -464,6 +464,11 @@ fn term_err(e: vajra_desktop::terminal::TermError) -> serde_json::Value {
     serde_json::json!({"error": e.code(), "detail": e.to_string()})
 }
 
+/// A terminal open refused because the engine is being installed right now (D7).
+fn engine_busy() -> serde_json::Value {
+    serde_json::json!({"error": "engine_installing", "detail": "the engine is being installed; open the terminal when Set up finishes"})
+}
+
 fn term_value(i: &vajra_desktop::terminal::TermInfo) -> serde_json::Value {
     serde_json::to_value(i).unwrap_or_default()
 }
@@ -479,6 +484,8 @@ fn term_open(
     cols: u16,
     on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Res {
+    // D7: no shell starts while the engine is being replaced.
+    let Some(_quiet) = app.terminal_open_guard() else { return Err(engine_busy()) };
     let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
     // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid)
@@ -527,6 +534,7 @@ fn setup_sign_in(
     on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Res {
     let cmd = app.setup_sign_in_command(&id)?;
+    let Some(_quiet) = app.terminal_open_guard() else { return Err(engine_busy()) };
     let i = terms.open_sign_in(&cmd, rows, cols, term_sink(on_event)).map_err(term_err)?;
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid)
         && own.record
@@ -805,6 +813,13 @@ fn main() {
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))
         .setup(move |a| {
             let handle = a.handle().clone();
+            // The packed engine (D7) is a bundle resource; without a resource dir the engine install is not offered.
+            if let Ok(dir) = handle.path().resource_dir() {
+                handle.state::<App>().set_resources(dir);
+            }
+            // The engine install counts a live user terminal as the engine being in use (D7, Codex P1 on #213).
+            let terms_handle = handle.clone();
+            handle.state::<App>().set_terminals_live(std::sync::Arc::new(move || terms_handle.state::<Terminals>().any_live()));
             // Receipts notify on their own: an action with no bus output still moves the projection.
             let sink_handle = handle.clone();
             handle.state::<App>().set_change_sink(Box::new(move |p| {
