@@ -2,8 +2,9 @@ name: perf
 
 # Per-merge memory check for Vajra Desktop (H0). PRs: idle x3. Main: idle x3 plus a 10 minute growth slope.
 # Blocking: the first macOS run measured idle at 170.9 MiB, so a regression fails the check.
-# The perf jobs (memory, postload, typing-lag) run on every pull request that changes app code (whatever its base branch),
-# on pushes to main, on the nightly schedule and by hand (workflow_dispatch).
+# The memory and typing-lag jobs run on every pull request that changes app code (whatever its base branch). The postload job
+# starts on the same pull requests but only measures when the PR changes the UI or benchmark folders or has the "perf" label
+# (see its own comment below). All three also run on pushes to main, on the nightly schedule and by hand (workflow_dispatch).
 on:
   push:
     branches: [main]
