@@ -45,12 +45,26 @@ fn bundled(resources: Option<&Path>, pin: &Pin) -> Option<String> {
     if !std::fs::symlink_metadata(&tgz).is_ok_and(|m| m.file_type().is_file()) {
         return None;
     }
-    let tgz = tgz.to_str().filter(|p| quotable(p))?;
+    command(tgz.to_str()?, &pin.sha256)
+}
+
+/// The longest engine command the setup list may carry: `parseSetupList` (setupContract.ts) refuses the whole list
+/// past it. Counted here in UTF-8 bytes, which is never fewer than the UI's UTF-16 count, so a line that fits here
+/// fits there. The line names the bundle's path twice, so an app installed at a very deep path gets the catalog line
+/// instead of a list the UI can't read (Codex P2 on #283).
+pub const MAX_COMMAND: usize = 1024;
+
+/// The bundled line for the tarball at `tgz` pinned to `sha256`, or None when the path can't be quoted safely or the
+/// line would not fit the setup list.
+pub(crate) fn command(tgz: &str, sha256: &str) -> Option<String> {
+    if !quotable(tgz) {
+        return None;
+    }
     let dir = format!("~/.claude/skills/{SKILL}");
-    Some(format!(
-        "echo '{sha}  {tgz}' | /usr/bin/shasum -a 256 -c && /bin/mkdir -p ~/.claude/skills && /bin/mkdir {dir} && /usr/bin/tar -xzf '{tgz}' -C {dir} && /bin/bash {dir}/{INSTALLER}",
-        sha = pin.sha256
-    ))
+    let line = format!(
+        "echo '{sha256}  {tgz}' | /usr/bin/shasum -a 256 -c && /bin/mkdir -p ~/.claude/skills && /bin/mkdir {dir} && /usr/bin/tar -xzf '{tgz}' -C {dir} && /bin/bash {dir}/{INSTALLER}"
+    );
+    (line.len() <= MAX_COMMAND).then_some(line)
 }
 
 /// A path that is safe inside single quotes on one pasted line, and in a `shasum -c` line: absolute, with no quote,

@@ -114,9 +114,36 @@ fn a_clean_mac_gets_a_line_that_installs_from_the_bundled_engine() {
     for tool in ["shasum", "mkdir", "tar", "bash"] {
         assert_eq!(c.matches(tool).count(), c.matches(&format!("/{tool}")).count(), "{tool} by path only: {c}");
     }
-    // The setup list's contract caps the engine command at 1024 (setupContract.ts): with a 300-byte app path (the
-    // path appears twice) the line still fits.
-    assert!(c.len() - 2 * tgz.len() + 2 * 300 <= 1024, "{}", c.len());
+    assert!(c.len() <= MAX_COMMAND);
+}
+
+/// The longest bundle path whose line fits the setup list, under a real app location. Shared with the UI test.
+fn longest_fitting_path() -> String {
+    let at = |k: usize| format!("/Users/someone/Applications/{}/Vajra Desktop.app/Contents/Resources/{RESOURCE}", "d".repeat(k));
+    let sha = "a".repeat(64);
+    let k = (0..2048).take_while(|&k| command(&at(k), &sha).is_some()).last().unwrap();
+    at(k)
+}
+
+/// Codex P2 on #283: the core never sends an engine command the UI's setup-list parser refuses. A path one byte
+/// longer than the longest that fits gets the catalog line; the longest that fits is byte for byte the golden line
+/// `app/ui/tests/setup.test.tsx` passes through `parseSetupList`.
+#[test]
+fn the_longest_bundled_line_fits_the_setup_list_and_one_byte_more_falls_back() {
+    let sha = "a".repeat(64);
+    let path = longest_fitting_path();
+    let longest = command(&path, &sha).unwrap();
+    assert!(longest.len() <= MAX_COMMAND && longest.len() > MAX_COMMAND - 2, "{}", longest.len());
+    let longer = path.replacen("/Applications/", "/Applications/d", 1);
+    assert_eq!(command(&longer, &sha), None);
+    // A pinned bundle that really sits at a path too deep for the line: the catalog line, not a list the UI drops.
+    let w = World::new("deep");
+    let deep = w.root.join("d".repeat(250)).join("e".repeat(250));
+    std::fs::create_dir_all(deep.join("engine")).unwrap();
+    std::fs::copy(w.res.join(RESOURCE), deep.join(RESOURCE)).unwrap();
+    assert_eq!(line(&w.home, Some(&deep), &w.pin, FALLBACK).command, FALLBACK);
+    let golden: serde_json::Value = serde_json::from_str(include_str!("../../../../tests/fixtures/setup/engine-longest-line.json")).unwrap();
+    assert_eq!(golden["command"], longest.as_str(), "regenerate the fixture from this test if the line's shape changes");
 }
 
 #[test]
