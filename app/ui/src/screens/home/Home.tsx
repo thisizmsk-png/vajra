@@ -185,7 +185,8 @@ export function Home() {
   // A core that does not answer fails every read on this screen for one reason. The checks panel says it once, with
   // the retry; the preferences line would say it again in other words.
   const coreDown = pre.state === "error" && pre.down;
-  const why = checksBlock ? S.home.startNeedsChecks(failing) : pre.state === "error" ? S.home.startNeedsAnswer : "";
+  // An empty ask is also said beside Start (the ask box can be scrolled out of sight), not only on the box.
+  const why = checksBlock ? S.home.startNeedsChecks(failing) : pre.state === "error" ? S.home.startNeedsAnswer : shown && errs.ask ? errs.ask : "";
   const repoName = basename(d.repo);
 
   return (

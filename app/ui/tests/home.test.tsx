@@ -188,7 +188,9 @@ describe("Home", () => {
     await screen.findByText("registered");
     fill(S.home.repo, "/r");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
-    expect(await screen.findByText(S.home.errAsk)).toBeTruthy();
+    // Said on the ask box and again beside Start (F-G2-3), where the person's eyes are.
+    expect((await screen.findAllByText(S.home.errAsk)).length).toBe(2);
+    expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-describedby")).toBe("v-launch-why");
     expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
   });
 
