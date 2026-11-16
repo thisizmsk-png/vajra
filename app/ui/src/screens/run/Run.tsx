@@ -5,7 +5,7 @@ import { RunProvider } from "../ProviderControls";
 import { ProviderLine } from "../ProviderLine";
 import { parseWorkerProvider } from "../../workerProvider";
 import { S } from "../../../strings";
-import { api, errorText, onChanged } from "../../ipc";
+import { api, errorText, isIpcError, onChanged } from "../../ipc";
 import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
 import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
@@ -27,6 +27,9 @@ const provider = (t: { provider?: unknown }) => { const p = parseWorkerProvider(
 const GRAPH_H = 288;
 const LIST_H = 360;
 
+/** The id the core gives a run (`YYYYMMDD-HHMM`). Empty until the run has written its first progress note or task. */
+const hasRunId = (id: string) => /^\d{8}-\d{4}$/.test(id);
+
 const label = (s: string) => (S.run.status as Record<string, string>)[s] ?? S.run.status.not_run;
 
 /** Evidence is the Run view's default (POS-1.1). Rows render through VirtualList (only the rows in view exist) and are plain data. */
@@ -36,6 +39,8 @@ export function Run() {
   const P = useProjects();
   const [rows, setRows] = useState<EvidenceRow[] | null>(null);
   const [err, setErr] = useState("");
+  /** The core says there is no task list yet (`not_found`): a run still planning, not a failure. */
+  const [notReady, setNotReady] = useState(false);
   /** Rows whose check has not run yet: the core checks a bounded amount per call, so ask again until none are left. */
   const [pending, setPending] = useState(0);
   /** The chosen criterion by identity (task + criterion), not list position: statuses change while polling and reorder the list. */
@@ -54,13 +59,13 @@ export function Run() {
     if (!slug) return;
     const mine = ++evSeq.current;
     api.evidenceList(slug).then(
-      (r) => { if (mine !== evSeq.current) return; setRows(r.rows); setPending(r.pending ?? 0); setErr(""); },
-      (e) => { if (mine === evSeq.current) setErr(errorText(e)); },
+      (r) => { if (mine !== evSeq.current) return; setRows(r.rows); setPending(r.pending ?? 0); setErr(""); setNotReady(false); },
+      (e) => { if (mine === evSeq.current) { setErr(errorText(e)); setNotReady(isIpcError(e) && e.error === "not_found"); } },
     );
   }, [slug]);
   // A new campaign starts empty: the previous campaign's rows, pending count, error and selection are not shown under it.
   useEffect(() => {
-    setRows(null); setPending(0); setErr(""); setSel(null);
+    setRows(null); setPending(0); setErr(""); setNotReady(false); setSel(null);
     return () => { evSeq.current++; };
   }, [slug]);
   const loadOverview = useCallback(() => {
@@ -134,7 +139,9 @@ export function Run() {
       )}
       <RunProvider slug={slug} />
       {/* Keyed by run, so another run's dialog or answer never shows under this one. */}
-      {overview && <EvidenceApproval key={overview.run_id} runId={overview.run_id} />}
+      {/* Early in a run the core has no run id yet (nothing in the progress notes, no tasks): there is nothing to approve
+          and nothing to log, and asking with an empty id only produced "not a run id". */}
+      {overview && hasRunId(overview.run_id) && <EvidenceApproval key={overview.run_id} runId={overview.run_id} />}
       <Proof slug={slug} />
       <Section title={S.run.timeline}>
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
@@ -181,9 +188,10 @@ export function Run() {
         )}
       </Section>
       {/* The run's own hash-chained log, live; keyed by run so a new run starts from its kept view or from 0. */}
-      {overview && <RunLog key={overview.run_id} runId={overview.run_id} />}
+      {overview && hasRunId(overview.run_id) && <RunLog key={overview.run_id} runId={overview.run_id} />}
       <Section title={S.run.evidence}>
-        {err && <div role="alert"><Text variant="body-sm">{S.run.failed} {err}</Text></div>}
+        {err && !notReady && <div role="alert"><Text variant="body-sm">{S.run.failed} {err}</Text></div>}
+        {notReady && !rows && <Text variant="body-sm" muted>{S.run.notReady}</Text>}
         {rows && rows.length === 0 && <Text variant="body-sm" muted>{S.run.none}</Text>}
         {rows && rows.length > 0 && (
           <>

@@ -268,6 +268,45 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(items[5].textContent).toContain(S.run.phaseState.pending);
   });
 
+  // F-G2-4 / F-G2-5: the first seconds of a run, before it has a run id, tasks or a campaign record.
+  it("early in a run (no run id yet): no approval card, no log, no read errors, and Evidence and Proof say not ready", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const notFound = (detail: string) => () => { throw { error: "not_found", detail }; };
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "", graph: { tasks: [], waves: 0 } }),
+      evidence_list: notFound("no tasks for this campaign"),
+      run_proof: notFound("campaign.json unreadable"),
+      // What the real core answers to an empty id; none of these may be asked.
+      evidence_approval: () => { throw { error: "invalid_args", detail: "run_id: not a run id" }; },
+      run_log_since: () => { throw { error: "invalid_args", detail: "not a run id" }; },
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await screen.findByText(S.run.notReady);
+    await screen.findByText(S.run.proof.notReady);
+    expect(f.calls.some((c) => c.cmd === "evidence_approval")).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "run_log_since")).toBe(false);
+    expect(screen.queryByText(S.run.approval.title)).toBeNull();
+    expect(screen.queryByText(S.run.failed, { exact: false })).toBeNull();
+    expect(screen.queryByText(S.run.proof.failed, { exact: false })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("with a run id it asks for the approval and the log, once each", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "20261116-0900" }),
+      evidence_list: list([]),
+      evidence_approval: { state: "none" },
+      run_proof: new Error("x"),
+      run_log_since: { entries: [], head_seq: 0 },
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "evidence_approval")).toBe(true));
+    expect(f.calls.filter((c) => c.cmd === "evidence_approval").every((c) => c.args?.runId === "20261116-0900")).toBe(true);
+  });
+
   it("shows the Fix round, with the limit only when it is known (AC-4.1.2)", async () => {
     await openOverview(overview({ timeline: { phases: phases("Fix", { round: 2, max_rounds: null }), current: "Fix", status: "active" } }));
     expect(screen.getByText(/round 2$/)).toBeTruthy();

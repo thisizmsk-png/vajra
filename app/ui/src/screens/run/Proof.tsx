@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertDialog, Badge, Button, Input, Section, Text } from "../../../components/ui/base";
 import { S } from "../../../strings";
-import { api, errorText, newActionId, onChanged } from "../../ipc";
+import { api, errorText, isIpcError, newActionId, onChanged } from "../../ipc";
 import type { ProofLabel, RunProof } from "../../ipc";
 import { useCurrentProject } from "../../projects/current";
 
@@ -42,6 +42,7 @@ export function Proof({ slug }: { slug: string }) {
   const { project } = useCurrentProject();
   const [proof, setProof] = useState<RunProof | null>(null);
   const [err, setErr] = useState("");
+  const [early, setEarly] = useState(false);
   const [why, setWhy] = useState(false);
   const [note, setNote] = useState("");
   const [pr, setPr] = useState("");
@@ -51,7 +52,7 @@ export function Proof({ slug }: { slug: string }) {
   const seq = useRef(0);
 
   useEffect(() => {
-    setProof(null); setErr(""); setNote(""); setWhy(false);
+    setProof(null); setErr(""); setEarly(false); setNote(""); setWhy(false);
     // `run_proof` runs the record check (a script), and `changed` comes in bursts: at most one call is in flight, and
     // any events during it queue a single rerun.
     const mine = ++seq.current;
@@ -69,10 +70,14 @@ export function Proof({ slug }: { slug: string }) {
         .then(
           (p) => {
             if (mine !== seq.current) return;
-            setProof(p); setErr("");
+            setProof(p); setErr(""); setEarly(false);
             if (p.pending && retries < RETRY_MAX && !queued) { retries++; timer = setTimeout(load, RETRY_MS); }
           },
-          (e) => { if (mine === seq.current) setErr(errorText(e)); },
+          (e) => {
+            if (mine !== seq.current) return;
+            // `not_found` is a run whose campaign record is not written yet: it reads as "not ready", and the next change retries.
+            setErr(errorText(e)); setEarly(isIpcError(e) && e.error === "not_found");
+          },
         )
         .finally(() => {
           inFlight = false;
@@ -116,7 +121,8 @@ export function Proof({ slug }: { slug: string }) {
 
   return (
     <Section title={L.title}>
-      {err && <div role="alert"><Text variant="body-sm">{L.failed} {err}</Text></div>}
+      {err && !early && <div role="alert"><Text variant="body-sm">{L.failed} {err}</Text></div>}
+      {early && !proof && <Text variant="body-sm" muted>{L.notReady}</Text>}
       {!proof && !err && <Text variant="body-sm" muted>{L.loading}</Text>}
       {proof && (
         <div className="v-proof">
