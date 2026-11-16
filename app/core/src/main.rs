@@ -325,8 +325,6 @@ fn provider_accounts(app: State<'_, App>) -> Res {
     app.provider_accounts()
 }
 
-/// Stored API keys (D3). The key arrives once, goes to the Keychain through stdin, and is never sent back: every answer
-/// is `{account, saved}`.
 /// Per-project agent settings (default, per-role choice, allowed set), read from and saved to the preferences store.
 #[tauri::command(async)]
 fn provider_agents(app: State<'_, App>, project_id: String) -> Res {
@@ -338,6 +336,8 @@ fn provider_agents_save(app: State<'_, App>, project_id: String, agents: Value) 
     app.provider_agents_save(&project_id, agents)
 }
 
+/// Stored API keys (D3). The key arrives once, goes to the Keychain through stdin, and is never sent back: every answer
+/// is `{account, saved}`.
 #[tauri::command(async)]
 fn provider_key_saved(app: State<'_, App>, account_id: String) -> Res {
     app.provider_key_saved(&account_id)
