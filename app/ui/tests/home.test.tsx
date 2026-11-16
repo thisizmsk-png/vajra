@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Home } from "../src/screens/home/Home";
 import { CurrentProject } from "../src/projects/current";
-import { validate } from "../src/screens/home/validate";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { MIN_ASK, validate } from "../src/screens/home/validate";
 import { ProjectsProvider } from "../src/projects/store";
 import { PreferencesProvider } from "../src/preferences";
 import { UNSORTED_ID } from "../src/projects/adapter";
@@ -39,7 +41,16 @@ async function open(replies: Record<string, unknown>) {
 const fill = (label: string, v: string) => fireEvent.change(screen.getByLabelText(label), { target: { value: v } });
 
 describe("validate", () => {
-  const ok = { repo: "/r", ask: "do", base: "main", rounds: "2", maxInFlight: "4" };
+  const ok = { repo: "/r", ask: "do the thing now", base: "main", rounds: "2", maxInFlight: "4" };
+  it("refuses an ask under the workflow's minimum, with the minimum in the words, and takes exactly the minimum", () => {
+    for (const short of ["Yes", "do it", "  fix a bug  ", "123456789"]) expect(validate({ ...ok, ask: short }).ask).toBe(S.home.errAskShort(MIN_ASK));
+    expect(S.home.errAskShort(MIN_ASK)).toContain("10");
+    expect(validate({ ...ok, ask: "1234567890" }).ask).toBeUndefined();
+  });
+  it("the minimum is the number the deliver workflow enforces", () => {
+    const js = readFileSync(resolve(__dirname, "../../../workflows/vajra-deliver.js"), "utf8");
+    expect(js).toContain(`ASK.length < ${MIN_ASK} && !RESUME`);
+  });
   it("accepts a good draft and names each bad field", () => {
     expect(validate(ok)).toEqual({});
     expect(Object.keys(validate({ repo: " ", ask: "", base: "", rounds: "4", maxInFlight: "17" })).sort()).toEqual(["ask", "base", "maxInFlight", "repo", "rounds"]);
@@ -215,7 +226,7 @@ describe("Home", () => {
     });
     await screen.findByText("registered");
     fill(S.home.repo, "/r");
-    fill(S.home.ask, "do it");
+    fill(S.home.ask, "do it right away");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
     expect(await screen.findByText("This folder is not a project. Add it as a project first.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: S.home.addFolder }));
@@ -234,7 +245,7 @@ describe("Home", () => {
     });
     await screen.findByText("registered");
     fill(S.home.repo, "/old");
-    fill(S.home.ask, "do it");
+    fill(S.home.ask, "do it right away");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
     await screen.findByRole("button", { name: S.home.addFolder });
     fill(S.home.repo, "/new");
@@ -251,6 +262,25 @@ describe("Home", () => {
     expect((await screen.findAllByText(S.home.errAsk)).length).toBe(2);
     expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-describedby")).toBe("v-launch-why");
     expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
+  });
+
+  it("a 3-character ask is refused beside Start with the minimum shown, and nothing is called", async () => {
+    const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/r");
+    fill(S.home.ask, "Yes");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    expect((await screen.findAllByText(S.home.errAskShort(10))).length).toBe(2);
+    expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
+  });
+
+  it("a run whose workflow ended in error is listed in Runs with the workflow's message", async () => {
+    const msg = "an ask of 10+ characters is required, e.g. /vajra add a --json flag to the export command";
+    await open({ preflight: rows(true), list_campaigns: { campaigns: [] },
+      active_runs: { count: 0, runs: [] },
+      run_failures: { runs: [{ run_id: "20261116-1840", campaign: "deliver-20261116-1840", message: msg, project: null }] } });
+    expect(await screen.findByText(S.home.failedRun("20261116-1840"))).toBeTruthy();
+    expect(screen.getByText(msg)).toBeTruthy();
   });
 
   it("starts a run with the entered values and opens the Run view", async () => {
@@ -274,7 +304,7 @@ describe("Home", () => {
   it("starts once from Cmd+Return, however often it is pressed while the start is in flight", async () => {
     const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, act_start_run: () => new Promise(() => {}) });
     await screen.findByText("registered");
-    fill(S.home.repo, "/r"); fill(S.home.ask, "x");
+    fill(S.home.repo, "/r"); fill(S.home.ask, "a long enough ask");
     const ask = screen.getByLabelText(S.home.ask);
     fireEvent.keyDown(ask, { key: "Enter", metaKey: true });
     fireEvent.keyDown(ask, { key: "Enter", metaKey: true });
@@ -286,7 +316,7 @@ describe("Home", () => {
   it("shows the core's refusal and stays on Home", async () => {
     await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, act_start_run: { receipt: receipt("rejected", { reason: "invalid_args", detail: "base: is not a branch or commit in this repository" }), error: { error: "invalid_args", detail: "base: is not a branch or commit in this repository" } } });
     await screen.findByText("registered");
-    fill(S.home.repo, "/r"); fill(S.home.ask, "x");
+    fill(S.home.repo, "/r"); fill(S.home.ask, "a long enough ask");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
     expect((await screen.findByRole("alert")).textContent).toContain("is not a branch or commit");
     expect(window.location.hash).toBe("");
@@ -295,7 +325,7 @@ describe("Home", () => {
   it("shows a receipt's own refusal when the core sent no error, and a new click gets a new action id", async () => {
     const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, act_start_run: { receipt: receipt("rejected", { reason: "too_many_actions", detail: "too many recent actions; try again later" }) } });
     await screen.findByText("registered");
-    fill(S.home.repo, "/r"); fill(S.home.ask, "x");
+    fill(S.home.repo, "/r"); fill(S.home.ask, "a long enough ask");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
     expect((await screen.findByRole("alert")).textContent).toContain("too many recent actions");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));

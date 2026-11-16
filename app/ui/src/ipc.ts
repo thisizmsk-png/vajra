@@ -407,6 +407,8 @@ export const api = {
   /** The session and directory of each campaign this app started (absent: started elsewhere). */
   resumeTargets: () => call<{ targets: Record<string, ResumeTarget> }>("resume_targets"),
   activeRuns: () => call<ActiveRuns>("active_runs"),
+  /** Runs this app started whose workflow ended in error, with the reason in plain words (the core ended their session). */
+  runFailures: () => call<{ runs: { run_id: string; campaign: string; message: string; project: string | null }[] }>("run_failures"),
   /** ADR-15 2: one headless turn of the run's project's Director-General per question. The reply streams into
    *  `stream` (`orchestrator-<project>-g<generation>`). */
   askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),

@@ -1369,3 +1369,63 @@ fn an_approve_resume_whose_claude_is_swapped_before_the_exec_is_refused_and_the_
     app.sup.wait(&format!("run-{SID}"), std::time::Duration::from_secs(5)).unwrap();
     assert!(t.0.join("pinbin/ran").exists(), "an unchanged file is the one that resumes");
 }
+
+// ---- A workflow that returns an error result must not leave an idle session holding the project.
+
+fn error_result(message: &str) -> Value {
+    json!({"workflowName": "vajra-deliver", "status": "completed", "runId": "r1", "taskId": "t1", "error": null,
+        "result": {"status": "error", "node": "input", "error": message, "artifacts": {}}})
+}
+
+/// A live run as `launch` leaves it: the run indexed and recorded, its session up, its entry in the run table.
+fn live_classic(t: &Tmp, app: &App) -> String {
+    t.run(app);
+    t.live(app);
+    let stream = format!("run-{SID}");
+    lock(&app.runs).insert(stream.clone(), Run { session_id: SID.into(), run_id: RUN.into(), campaign: CAMP.into(), cwd: t.cwd(), nonces: Redactor::default() });
+    stream
+}
+
+#[test]
+fn a_workflow_error_result_ends_the_session_frees_the_project_and_shows_its_message() {
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_classic(&t, &app);
+    assert_eq!(app.active_runs().unwrap()["count"], 1, "the idle session holds the project");
+    let msg = "an ask of 10+ characters is required, e.g. /vajra add a --json flag to the export command";
+    t.result("wf_e.json", &error_result(msg));
+    // The next look at the runs ends the session, so nothing stays live and nothing holds the project.
+    assert_eq!(app.active_runs().unwrap()["count"], 0, "the errored run no longer counts as live");
+    app.sup.wait(&stream, std::time::Duration::from_secs(5)).unwrap();
+    assert!(!app.sup.is_running(&stream).unwrap_or(false));
+    let f = app.run_failures().unwrap();
+    assert_eq!(f["runs"][0]["run_id"], RUN);
+    assert_eq!(f["runs"][0]["message"], msg);
+}
+
+#[test]
+fn a_running_or_waiting_workflow_is_not_ended_as_failed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_classic(&t, &app);
+    let mut running = error_result("not yet");
+    running["status"] = json!("running");
+    t.result("wf_r.json", &running);
+    assert_eq!(app.active_runs().unwrap()["count"], 1, "a workflow still running is left alone");
+    let ask = json!({"workflowName": "vajra-deliver", "status": "completed", "result": {"status": "need_input", "node": "understand", "question": "Which one?", "artifacts": {}}});
+    t.result_at("wf_q.json", &ask, RUN, 90);
+    assert_eq!(app.active_runs().unwrap()["count"], 1, "a question is not an error: the session stays up for it");
+    assert!(app.sup.is_running(&stream).unwrap_or(false));
+    assert!(app.run_failures().unwrap()["runs"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn an_error_result_with_no_message_still_says_something() {
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    t.result("wf_e.json", &error_result(""));
+    app.active_runs().unwrap();
+    let m = app.run_failures().unwrap()["runs"][0]["message"].as_str().unwrap().to_string();
+    assert!(m.contains("no reason"), "{m}");
+}

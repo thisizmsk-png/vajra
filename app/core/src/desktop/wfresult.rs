@@ -275,6 +275,24 @@ fn waiting(env: &Env, campaign: &str) -> Option<Waiting> {
 /// current workflow: if it is still running, or failed, nothing is actionable, even when an older file holds pending
 /// approvals (fail closed while the workflow is not terminal).
 pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str, since: i64) -> Result<Option<Waiting>, WfError> {
+    Ok(current(allow, dir, since)?.and_then(|e| waiting(&e, campaign)))
+}
+
+/// The workflow ended with an error result (for example an ask it refuses): its message in plain words, from the
+/// current workflow's result only. Same fail-closed choice of "current" as `waiting_for`. Untrusted display text.
+pub fn failed_for(allow: &Allowlist, dir: &Path, since: i64) -> Result<Option<String>, WfError> {
+    Ok(current(allow, dir, since)?.and_then(|e| {
+        let r = e.result.as_ref()?;
+        if r.get("status").and_then(Value::as_str) != Some("error") {
+            return None;
+        }
+        let msg = plain(r.get("error"), TEXT_MAX);
+        Some(if msg.trim().is_empty() { "The run stopped with an error and gave no reason.".to_string() } else { msg })
+    }))
+}
+
+/// The newest finished `vajra-deliver` result at or after `since`, or `None` when it is running, ambiguous or unreadable.
+fn current(allow: &Allowlist, dir: &Path, since: i64) -> Result<Option<Env>, WfError> {
     let real = allow.resolve(dir).map_err(|_| WfError::NotAllowed)?;
     // Resolving follows symlinks, and every directory on the path is worker-writable: `<slug>/<sid>` as a link to
     // another session would show that session's finished plans under this run. Only the root may resolve elsewhere
@@ -323,11 +341,10 @@ pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str, since: i64) ->
     let Some(newest) = files.iter().map(|e| e.modified).max() else { return Ok(None) };
     // Equal newest times (a coarse filesystem clock) cannot tell which workflow is current: more than one candidate, or
     // any that is not finished, makes the result ambiguous, so nothing is offered.
-    let tied: Vec<&Env> = files.iter().filter(|e| e.modified == newest).collect();
-    if tied.len() != 1 || !tied[0].terminal {
+    if files.iter().filter(|e| e.modified == newest).count() != 1 {
         return Ok(None);
     }
-    Ok(waiting(tied[0], campaign))
+    Ok(files.into_iter().find(|e| e.modified == newest).filter(|e| e.terminal))
 }
 
 /// Strict read of one named file, for tests and the refusal contract: any unsafe file is an error, not a skip.

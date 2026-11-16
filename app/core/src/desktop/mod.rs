@@ -860,6 +860,7 @@ impl App {
     /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
         self.check_codex_leads();
+        self.end_errored_runs();
         // A launch in flight owns the session it just took; it reaps itself.
         // The guard stays bound until `reap_locked` returns, so a launch cannot install a session in between.
         let _guard = match self.launching.try_lock() {
@@ -868,6 +869,38 @@ impl App {
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
         };
         self.reap_locked();
+    }
+
+    /// A live run whose workflow has returned an error result (an ask it refuses, say) is doing nothing: its session
+    /// sits at the prompt and would hold the project for ever. Record the reason, then end the session so the hold is
+    /// released. The result file is untrusted text; it can only end the run it belongs to.
+    pub(super) fn end_errored_runs(&self) {
+        let live: Vec<(String, Run)> = lock(&self.runs).iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(s, r)| (s.clone(), r.clone())).collect();
+        if live.is_empty() {
+            return;
+        }
+        let Ok(allow) = self.allow() else { return };
+        for (stream, r) in live {
+            let Some(since) = self.read_run_started(&r.run_id) else { continue };
+            let e = runindex::Entry { campaign: r.campaign.clone(), session_id: r.session_id.clone(), run_id: r.run_id.clone(), cwd: r.cwd.clone(), lead_session_id: None, provider: None };
+            if let Ok(Some(msg)) = wfresult::failed_for(&allow, &self.workflows_dir(&e), since) {
+                self.write_run_failure(&r.run_id, &msg);
+                let _ = self.sup.kill(&stream);
+            }
+        }
+    }
+
+    /// Runs this app started whose workflow ended in error, newest last, with the reason in plain words.
+    pub fn run_failures(&self) -> Res {
+        self.reap_runs();
+        let mut out: Vec<Value> = Vec::new();
+        for e in runindex::entries(&self.data.join("runs.jsonl")).into_iter().rev().take(50) {
+            if let Some(m) = self.read_run_failure(&e.run_id) {
+                out.push(json!({"run_id": e.run_id, "campaign": e.campaign, "message": m, "project": self.pinned_project(&e.run_id)}));
+            }
+        }
+        out.reverse();
+        Ok(json!({"runs": out}))
     }
 
     /// bhishma MUST (S12): each running plain Codex Lead's first turn is read back like a worker's. Its own session file

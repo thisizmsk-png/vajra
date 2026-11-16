@@ -770,6 +770,11 @@ fn active_runs(app: State<'_, App>) -> Res {
     app.active_runs()
 }
 
+#[tauri::command(async)]
+fn run_failures(app: State<'_, App>) -> Res {
+    app.run_failures()
+}
+
 /// ADR-15 D5: the run caps (1 per project, `max_runs` in the app, the worker ceiling).
 #[tauri::command(async)]
 fn run_limits(app: State<'_, App>) -> Res {
@@ -976,6 +981,7 @@ fn main() {
             kb_search,
             take_over,
             active_runs,
+            run_failures,
             run_limits,
             set_run_limits,
             ask_lead,

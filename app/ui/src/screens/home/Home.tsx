@@ -44,7 +44,9 @@ const CAMPAIGN_STATUS: Record<string, StatusKey> = { active: "in_progress", runn
 const campaignStatus = (c: Campaign): StatusKey => CAMPAIGN_STATUS[c.status ?? ""] ?? "unknown";
 const basename = (p: string) => p.trim().replace(/\/+$/, "").split("/").pop() ?? "";
 const fetchCampaigns = () => api.listCampaigns().then((r) => r.campaigns);
-const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
+/** The live-runs read goes first: it is what makes the core notice a workflow that ended in error. A failed read shows nothing. */
+const fetchFailedRuns = () => api.activeRuns().catch(() => null).then(() => api.runFailures()).then((r) => r.runs);
+const fetchTargets =() => api.resumeTargets().then((r) => r.targets);
 
 export function Home() {
   const [route, go] = useRoute();
@@ -64,6 +66,9 @@ export function Home() {
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
   const [allCamps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
   const [targets, reloadTargets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
+  // A run whose workflow ended in error has no campaign record; the core ended its session and kept the reason. The
+  // live-runs read goes first, because that is what makes the core look for the error. A failed read shows nothing.
+  const [failedRuns] = useLoad(fetchFailedRuns, true);
   // Inside a project the folders decide which campaigns are its own. Until they are read the list is loading, and if
   // they cannot be read it says so: filtering without them would empty every project and put everything in Unsorted.
   const inProject = (t: Record<string, ResumeTarget>) => (c: Campaign) => {
@@ -271,6 +276,17 @@ export function Home() {
 
           <section className="v-panel v-home__runs" aria-labelledby="v-home-camps">
             <div className="v-panel__bar"><h2 id="v-home-camps" className="v-panel__title">{S.home.campaigns}</h2></div>
+            {failedRuns.state === "ok" && failedRuns.data.filter((r) => !project || r.project === project.id).length > 0 && (
+              <ul className="v-home__campaigns" aria-label={S.home.failedRuns}>
+                {failedRuns.data.filter((r) => !project || r.project === project.id).map((r) => (
+                  <li key={r.run_id}>
+                    <StatusDot status="failed" className="v-home__dot" />
+                    <span className="v-home__goal">{S.home.failedRun(r.run_id)}</span>
+                    <span className="v-home__slug">{r.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
             {camps.state !== "ok" || camps.data.length === 0 ? (
               <div className="v-panel__body">
                 {camps.state === "loading" && <LoadingRows label={S.states.loading} />}

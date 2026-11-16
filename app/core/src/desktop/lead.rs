@@ -73,6 +73,8 @@ const CAMPAIGN_FILE: &str = "campaign";
 const APPROVAL_ONLY_FILE: &str = "approval_only";
 /// Unix seconds when the app launched the run. The run id is only a uniqueness label (it can name a future minute).
 const STARTED_FILE: &str = "started";
+/// The plain-words reason a run's workflow ended in error (written by the core, never by a worker's say-so alone).
+const FAILED_FILE: &str = "failed";
 /// The maxInFlight a workflow run was started with (a resume counts at it, #80 review).
 const WORKERS_FILE: &str = "workers";
 /// `read_only` detail for a run this app did not launch.
@@ -670,6 +672,24 @@ impl App {
     }
 
     /// When the app launched the run (unix seconds), or `None` if it was not recorded.
+    /// Record, under the guarded control dir, why a run's workflow ended in error. Written once; the first reason stays.
+    pub(super) fn write_run_failure(&self, run_id: &str, message: &str) {
+        let dir = self.lead_sid_dir(run_id);
+        if fsx::read_nofollow(&dir.join(FAILED_FILE)).is_ok() {
+            return;
+        }
+        let _ = fsx::write_atomic(&dir, FAILED_FILE, message.as_bytes());
+    }
+
+    /// The recorded reason a run failed, if any (plain text, bounded).
+    pub(super) fn read_run_failure(&self, run_id: &str) -> Option<String> {
+        if !crate::ids::valid_run_id(run_id) {
+            return None;
+        }
+        let body = fsx::read_nofollow_capped(&self.lead_sid_dir(run_id).join(FAILED_FILE), 4096).ok()?;
+        Some(String::from_utf8_lossy(&body).chars().take(500).collect::<String>()).filter(|s| !s.trim().is_empty())
+    }
+
     pub(super) fn read_run_started(&self, run_id: &str) -> Option<i64> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(STARTED_FILE)).ok()?;
         String::from_utf8(body).ok()?.trim().parse::<i64>().ok().filter(|t| *t > 0)

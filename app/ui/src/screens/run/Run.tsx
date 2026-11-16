@@ -36,6 +36,17 @@ const label = (s: string) => (S.run.status as Record<string, string>)[s] ?? S.ru
 export function Run() {
   const [route, go] = useRoute();
   const slug = route.params.slug ?? "";
+  // The workflow of this run ended in error (for example an ask it refuses): the core ended the session and kept why.
+  const [failure, setFailure] = useState<{ run_id: string; message: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    setFailure(null);
+    if (!slug) return;
+    const look = () => void api.activeRuns().catch(() => null).then(() => api.runFailures()).then((r) => { if (live) setFailure(r.runs.find((x) => x.campaign === slug) ?? null); }, () => {});
+    look();
+    const off = onChanged(look);
+    return () => { live = false; off(); };
+  }, [slug]);
   const P = useProjects();
   const [rows, setRows] = useState<EvidenceRow[] | null>(null);
   const [err, setErr] = useState("");
@@ -152,6 +163,12 @@ export function Run() {
       {route.params.first === "1" && (
         <div className="v-run__first" role="note">
           <Text variant="body-sm">{S.welcome.done.note}</Text>
+          <Button size="sm" onClick={() => go("launch")}>{S.welcome.done.another}</Button>
+        </div>
+      )}
+      {failure && (
+        <div className="v-run__first" role="alert">
+          <Text variant="body-sm">{S.home.failedRun(failure.run_id)}. {failure.message}</Text>
           <Button size="sm" onClick={() => go("launch")}>{S.welcome.done.another}</Button>
         </div>
       )}
