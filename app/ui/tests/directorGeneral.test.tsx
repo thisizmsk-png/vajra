@@ -414,7 +414,7 @@ describe("Director-General conversation", () => {
     };
     try {
       const r = mount({}, cur({ dgRun: null }));
-      expect(screen.getByText(S.dg.noRun)).toBeTruthy();
+      expect(screen.getByText(S.dg.noProject)).toBeTruthy();
       expect(made).toEqual([]);
 
       r.rerender(<CurrentProject.Provider value={cur()}><DirectorGeneral /></CurrentProject.Provider>);
@@ -444,13 +444,74 @@ describe("Director-General conversation", () => {
     expect(composer().getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("Given a project with no run yet, Then it says so plainly and offers to start a run yourself", async () => {
+  it("Given a folder that is not a project yet and has no run, Then it says so plainly and links to the launcher", async () => {
     const f = fakeIpc({});
     setTransport(f.transport);
     render(<CurrentProject.Provider value={cur({ dgRun: null })}><DirectorGeneral /></CurrentProject.Provider>);
-    expect(screen.getByText(S.dg.noRun)).toBeTruthy();
-    expect(screen.getByRole("link", { name: S.dg.startYourself })).toBeTruthy();
+    expect(screen.getByText(S.dg.noProject)).toBeTruthy();
+    expect(screen.getByRole("link", { name: S.dg.startYourself }).getAttribute("href")).toBe("#/p/p_1/launch");
     expect(f.calls).toEqual([]);
+  });
+});
+
+// M6 (red team G2, F-G2-6): the Director-General is the project's lead chat agent before any run exists. A registered
+// project is addressed by its core id, run or none; it proposes runs, and only a human click starts one.
+describe("a project with no run (M6)", () => {
+  const registered = { ...project, id: "p_01JC3H0000000000000000000A", registered: true as const };
+  const noRun = (o: Partial<Current> = {}) => cur({ project: registered, dgRun: null, ...o });
+  const pStatus = (o: Record<string, unknown> = {}) => status({ project_id: registered.id, stream: `orchestrator-${registered.id}-g1`, generation: 1, ...o });
+
+  it("Given a registered project with no run, When the view opens, Then it reads the project's Director-General and the composer is on", async () => {
+    const { f } = mount({ lead_status: pStatus(), stream_window: win([]) }, noRun());
+    expect(await screen.findByText(S.dg.empty)).toBeTruthy();
+    expect(screen.queryByText(S.dg.noProject)).toBeNull();
+    expect(f.calls.find((c) => c.cmd === "lead_status")?.args).toEqual({ projectId: registered.id });
+    expect(composer().getAttribute("aria-disabled")).not.toBe("true");
+  });
+
+  it("Given a registered project with no run, When you ask, Then the ask goes to the project and its answer shows", async () => {
+    let asked = false;
+    const answered = win(["you\tWhat should we build first?", "lead\tA health check. I proposed a run for it."]);
+    const { f } = mount({
+      lead_status: pStatus(),
+      stream_window: () => (asked ? answered : win([])),
+      ask_lead: () => { asked = true; return { ask_id: "01JC3H0000000000000000ASK1", state: "queued", stream: `orchestrator-${registered.id}-g1`, lead_session_id: "s", project_id: registered.id, generation: 1, name: "Director-General" }; },
+    }, noRun());
+    await screen.findByText(S.dg.empty);
+    fireEvent.change(composer(), { target: { value: "What should we build first?" } });
+    fireEvent.click(screen.getByRole("button", { name: S.dg.send }));
+    await waitFor(() => expect(f.calls.find((c) => c.cmd === "ask_lead")?.args).toEqual({ projectId: registered.id, text: "What should we build first?" }));
+    // The answer lands on the project's stream, which the view follows.
+    act(() => { f.emit("changed", { streams: [`orchestrator-${registered.id}-g1`] }); });
+    expect(await screen.findByText("A health check. I proposed a run for it.")).toBeTruthy();
+    expect(f.calls.some((c) => c.cmd === "ask_lead" && "runId" in (c.args as object))).toBe(false);
+  });
+
+  it("Given its proposal, Then nothing starts until a human clicks Start, and Start sends the shown hash", async () => {
+    const item = proposal({ project_id: registered.id, generation: 1 });
+    const { f } = mount({ lead_status: pStatus(), stream_window: win([]), start_proposal: { action_id: "x", state: "delivered", run: {} } }, noRun({ proposals: [item] }));
+    const card = await screen.findByRole("article", { name: S.dg.proposal });
+    expect(within(card).getByText(item.ask!)).toBeTruthy();
+    // Opening, reading and showing the proposal start nothing.
+    expect(f.calls.some((c) => c.cmd === "start_proposal" || c.cmd === "act_start_proposal" || c.cmd === "start_run")).toBe(false);
+    fireEvent.click(within(card).getByRole("button", { name: S.dg.start }));
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "start_proposal").length).toBe(1));
+    expect(f.calls.find((c) => c.cmd === "start_proposal")?.args).toMatchObject({ id: item.id, proposalSha256: item.proposal_sha256 });
+    expect(f.calls.some((c) => c.cmd === "start_run")).toBe(false);
+  });
+
+  it("Given a registered project with no run, When you start a new conversation, Then it goes to the project", async () => {
+    const { f } = mount({ lead_status: pStatus(), stream_window: win([]), new_conversation: { project_id: registered.id, generation: 2, stream: `orchestrator-${registered.id}-g2` } }, noRun());
+    await screen.findByText(S.dg.empty);
+    fireEvent.click(screen.getByRole("button", { name: S.dg.newConversation }));
+    await waitFor(() => expect(f.calls.find((c) => c.cmd === "new_conversation")?.args).toEqual({ projectId: registered.id }));
+    expect(await screen.findByText(S.dg.generation(2))).toBeTruthy();
+  });
+
+  it("Given a registered project that also has a run, Then the view still talks to the project, not the run", async () => {
+    const { f } = mount({ lead_status: pStatus() }, noRun({ dgRun: "20261106-2140" }));
+    await screen.findByText("What is left?");
+    expect(f.calls.find((c) => c.cmd === "lead_status")?.args).toEqual({ projectId: registered.id });
   });
 });
 

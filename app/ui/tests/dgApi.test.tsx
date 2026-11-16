@@ -44,13 +44,31 @@ describe("envelope and outcomes", () => {
     expect(f.calls).toEqual([]);
   });
 
-  it("never calls the core without a run to address (interim)", async () => {
-    const f = fakeIpc({});
+  it("M6: addresses the project's Director-General by project id when there is no run", async () => {
+    const f = fakeIpc({ lead_status: {}, ask_lead: { ask_id: "k" }, new_conversation: { generation: 2 } });
     setTransport(f.transport);
     const t = { projectId: "p_X", runId: null };
-    expect((await dg.ask(t, envelope(t, actionId(), 1), "hi")).ok).toBe(false);
-    expect((await dg.newConversation(t, envelope(t, actionId(), 1))).ok).toBe(false);
-    expect(f.calls).toEqual([]);
+    await dg.status(t);
+    expect((await dg.ask(t, envelope(t, actionId(), 1), "hi")).ok).toBe(true);
+    expect((await dg.newConversation(t, envelope(t, actionId(), 1))).ok).toBe(true);
+    expect(f.calls).toEqual([
+      { cmd: "lead_status", args: { projectId: "p_X" } },
+      { cmd: "ask_lead", args: { projectId: "p_X", text: "hi" } },
+      { cmd: "new_conversation", args: { projectId: "p_X" } },
+    ]);
+  });
+
+  it("M6: prefers the project over a run, and calls nothing with neither", async () => {
+    const f = fakeIpc({ ask_lead: { ask_id: "k" } });
+    setTransport(f.transport);
+    const both = { projectId: "p_X", runId: "20261106-2140" };
+    await dg.ask(both, envelope(both, actionId(), 1), "hi");
+    expect(f.calls[0].args).toEqual({ projectId: "p_X", text: "hi" });
+    const none = { projectId: null, runId: null };
+    expect((await dg.ask(none, envelope(none, actionId(), 1), "hi")).ok).toBe(false);
+    expect((await dg.newConversation(none, envelope(none, actionId(), 1))).ok).toBe(false);
+    await expect(dg.status(none)).rejects.toMatchObject({ error: "no_project" });
+    expect(f.calls.length).toBe(1);
   });
 });
 

@@ -412,8 +412,13 @@ export const api = {
   askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),
   cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
   leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
-  /** The project's Director-General with no run (FG-02c). The stream is rebuilt after a restart only by `leadStatus`. */
+  /** The project's Director-General with no run (FG-02c, M6). Its stream is rebuilt after a restart too. */
   leadStatusForProject: (projectId: string) => call<LeadStatus>("lead_status", { projectId }),
+  /** M6: ask the project's Director-General with no run. Same turn, guards and stream as `askLead`; it can propose a
+   *  run, and only a human starts one. */
+  askLeadForProject: (projectId: string, text: string) => call<AskStarted>("ask_lead", { projectId, text }),
+  /** M6: the project's Director-General starts generation n+1 with no run. */
+  newConversationForProject: (projectId: string) => call<NewConversation>("new_conversation", { projectId }),
   /** Guarded Director-General actions (FG-02c, decision Q2): at most once per `action_id`. `envelope.project_id` is
    *  the run's project and `expect_generation` the conversation shown (`stale_generation` when it moved on). */
   actAskLead: (envelope: Envelope, runId: string, text: string) => call<ActResult<AskStarted>>("act_ask_lead", { envelope, runId, text }),

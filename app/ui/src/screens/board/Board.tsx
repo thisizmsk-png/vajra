@@ -110,7 +110,8 @@ export function Board() {
   if (!focus) {
     return (
       <div className="v-board__state">
-        <Empty title={S.board.noCampaign}>{S.board.noCampaignHint}</Empty>
+        {/* M7: straight to the launcher, never through the Director-General. */}
+        <Empty title={S.board.noCampaign} action={<Button onClick={() => go("launch")}>{S.board.startRun}</Button>}>{S.board.noCampaignHint}</Empty>
       </div>
     );
   }

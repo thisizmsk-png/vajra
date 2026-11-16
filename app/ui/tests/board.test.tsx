@@ -75,6 +75,15 @@ describe("Board", () => {
     expect(screen.getByText(S.board.noCampaign)).toBeTruthy();
   });
 
+  it("M7: the empty board links straight to this project's launcher, not to the Director-General", () => {
+    window.location.hash = "#/p/p_1/board";
+    mount(ok, { ...current, focus: null, runId: null });
+    expect(screen.getByText(S.board.noCampaignHint)).toBeTruthy();
+    expect(screen.queryByText(/Director-General/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: S.board.startRun }));
+    expect(window.location.hash).toBe("#/p/p_1/launch");
+  });
+
   it("says the project list could not be read, not that there is no campaign, and retries the list", async () => {
     const ipc = fakeIpc({});
     setTransport(ipc.transport);
