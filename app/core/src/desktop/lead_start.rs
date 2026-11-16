@@ -231,7 +231,7 @@ impl App {
                 return Err(quitting());
             }
             l.runs.insert(run.to_string(), lead.clone());
-            l.held.insert(run.to_string(), super::caps::Active { project: PathBuf::from(project), workers: input.max_in_flight });
+            l.held.insert(run.to_string(), super::caps::Active { project: PathBuf::from(project), workers: input.max_in_flight, run_id: None });
         }
         let (reg, id, runs, w, data) = (self.run_leads.clone(), run.to_string(), self.lead_runs_handle(), lead.clone(), self.data.clone());
         let watching = std::thread::Builder::new().name(format!("lead-{run}")).spawn(move || {
@@ -332,7 +332,7 @@ impl App {
     /// Test hook: a live core run for `project` with `workers`, as the run caps count it, until `end_core_run`.
     #[cfg(test)]
     pub(super) fn hold_core_run(&self, run: &str, project: &str, workers: u32) {
-        lock(&self.lead_runs.0).held.insert(run.to_string(), super::caps::Active { project: PathBuf::from(project), workers });
+        lock(&self.lead_runs.0).held.insert(run.to_string(), super::caps::Active { project: PathBuf::from(project), workers, run_id: None });
     }
 
     /// Test hook: the core run ended, as its watch thread forgets it.

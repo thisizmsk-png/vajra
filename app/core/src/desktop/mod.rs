@@ -754,7 +754,7 @@ impl App {
                 let Some(project) = self.pinned_project(&r.run_id).filter(|p| crate::projects::contract::valid_project_id(p)).map(PathBuf::from) else {
                     return Err(fail("project_not_recorded", "a run in progress has no recorded project, so a new start cannot be checked against it"));
                 };
-                v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) });
+                v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS), run_id: Some(r.run_id.clone()).filter(|id| !id.is_empty()) });
             }
             v
         };
@@ -2764,7 +2764,7 @@ impl App {
         let mut active: Vec<Value> = runs
             .iter()
             .filter(|(s, _)| self.sup.is_running(s).unwrap_or(false))
-            .map(|(s, r)| json!({"stream": s, "session_id": r.session_id, "run_id": r.run_id, "campaign": r.campaign}))
+            .map(|(s, r)| json!({"stream": s, "session_id": r.session_id, "run_id": r.run_id, "campaign": r.campaign, "project": self.pinned_project(&r.run_id)}))
             .collect();
         active.sort_by(|a, b| a["stream"].as_str().cmp(&b["stream"].as_str()));
         Ok(json!({"count": active.len(), "runs": active}))

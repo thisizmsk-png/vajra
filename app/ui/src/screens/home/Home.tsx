@@ -45,9 +45,10 @@ const campaignStatus = (c: Campaign): StatusKey => CAMPAIGN_STATUS[c.status ?? "
 const basename = (p: string) => p.trim().replace(/\/+$/, "").split("/").pop() ?? "";
 const fetchCampaigns = () => api.listCampaigns().then((r) => r.campaigns);
 const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
-type LiveRun = { run_id: string; campaign: string };
+type LiveRun = { run_id: string; campaign: string; project: string | null };
 const fetchLive = (): Promise<LiveRun[]> => api.activeRuns().then((a) =>
-  (a.runs as { run_id?: unknown; campaign?: unknown }[]).filter((r) => typeof r.run_id === "string" && r.run_id).map((r) => ({ run_id: String(r.run_id), campaign: String(r.campaign ?? "") })));
+  (a.runs as { run_id?: unknown; campaign?: unknown; project?: unknown }[]).filter((r) => typeof r.run_id === "string" && r.run_id)
+    .map((r) => ({ run_id: String(r.run_id), campaign: String(r.campaign ?? ""), project: typeof r.project === "string" ? r.project : null })));
 
 export function Home() {
   const [route, go] = useRoute();
@@ -74,7 +75,7 @@ export function Home() {
   const [stopErr, setStopErr] = useState("");
   const stopRun = async (id: string) => {
     setStopping(id); setStopErr("");
-    try { await api.stopRun(id); reloadLive(); reloadCamps(); recheck(); setFail(""); setAddPath(""); }
+    try { await api.stopRun(id); reloadLive(); reloadCamps(); recheck(); setFail(""); setHeld(""); setAddPath(""); }
     catch (e) { setStopErr(`${S.home.stopFailed} ${problemDetail(e)}`.trim()); }
     finally { setStopping(null); }
   };
@@ -109,7 +110,7 @@ export function Home() {
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
-  const [held, setHeld] = useState(false); // Start was refused because a run is already going in this project
+  const [held, setHeld] = useState(""); // the run id the core named as holding this project (project_busy), else empty
   const [addPath, setAddPath] = useState(""); // set when Start was refused because the folder is not a project yet
   const set = (k: keyof Draft) => (v: string) => {
     if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope;
@@ -133,7 +134,8 @@ export function Home() {
     : !chosen.installed ? S.providers.startBlocked(chosen.name) : "";
   // A folder that is not a git repository has no HEAD to run from: it is named under the field and Start stays off.
   const notGit = useNotGit(d.repo);
-  const holder = live.state === "ok" ? live.data[0] : undefined;
+  // Inside a project, only that project's live runs are listed; a run with no recorded project is not shown there.
+  const shownLive = live.state === "ok" ? live.data.filter((r) => !project || r.project === project.id) : [];
   const ready = pre.state === "ok" && pre.data.start_enabled && (!prefs.connected || !!prefs.view) && !unsupported && !blocked && !notGit;
 
   // A ref, not the busy state: a second Cmd+Return in the same tick still sees busy as null.
@@ -149,9 +151,9 @@ export function Home() {
     } catch (e) {
       setFail(problemDetail(e));
       // A start held by a run already going: look the run up so the message names it and offers Stop.
-      const isHeld = isIpcError(e) && e.error === "run_held";
-      setHeld(isHeld);
-      if (isHeld) reloadLive();
+      const hid = isIpcError(e) && e.error === "run_held" && e.reason === "project_busy" && typeof e.holder_run_id === "string" ? e.holder_run_id : "";
+      setHeld(hid);
+      if (hid) reloadLive();
       // The core's own answer for a folder that is not a project: one click adds it, instead of a dead end.
       setAddPath(isIpcError(e) && e.error === "not_a_project" ? (typeof e.path === "string" && e.path ? e.path : d.repo.trim()) : "");
       setBusy(null);
@@ -268,8 +270,8 @@ export function Home() {
             </div>
             {fail && (
               <div role="alert" className="v-launch__fail">
-                <Text variant="body-sm">{held && holder ? S.home.heldBy(holder.run_id) : fail}</Text>
-                {held && holder && <Button size="sm" onClick={() => void stopRun(holder.run_id)} busy={stopping === holder.run_id}>{S.home.stop}</Button>}
+                <Text variant="body-sm">{held ? S.home.heldBy(held) : fail}</Text>
+                {held && <Button size="sm" onClick={() => void stopRun(held)} busy={stopping === held}>{S.home.stop}</Button>}
                 {addPath && <Button size="sm" onClick={() => void addFolder()} busy={busy === "add"}>{S.home.addFolder}</Button>}
               </div>
             )}
@@ -292,9 +294,9 @@ export function Home() {
 
           <section className="v-panel v-home__runs" aria-labelledby="v-home-camps">
             <div className="v-panel__bar"><h2 id="v-home-camps" className="v-panel__title">{S.home.campaigns}</h2></div>
-            {live.state === "ok" && live.data.length > 0 && (
+            {shownLive.length > 0 && (
               <ul className="v-home__campaigns" aria-label={S.home.liveRuns}>
-                {live.data.map((r) => (
+                {shownLive.map((r) => (
                   <li key={r.run_id}>
                     <StatusDot status="in_progress" className="v-home__dot" />
                     <span className="v-home__goal">{S.home.liveRun(r.run_id)}</span>
