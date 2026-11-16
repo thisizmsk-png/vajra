@@ -341,6 +341,25 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(Math.max(0, ...seen)).toBe(0);
   });
 
+  // Review of #281: a failed active-runs lookup is not proof the campaign is not starting.
+  it("a failed active-runs lookup leaves a not-found read as not ready, never as an alert", async () => {
+    window.location.hash = "#/run?slug=camp";
+    const notFound = (detail: string) => () => { throw { error: "not_found", detail }; };
+    const f = fakeIpc({
+      run_overview: overview({ run_id: "", graph: { tasks: [], waves: 0 } }),
+      active_runs: () => { throw new Error("no core"); },
+      evidence_list: notFound("no tasks for this campaign"),
+      run_proof: notFound("campaign.json unreadable"),
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "active_runs")).toBe(true));
+    await screen.findByText(S.run.notReady);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    expect(screen.getByText(S.run.proof.notReady)).toBeTruthy();
+  });
+
   // Red team M2: the approval card and the log must not share a key.
   it("the approval card and the run log are not rendered twice, and React sees no duplicate key", async () => {
     window.location.hash = "#/run?slug=camp";

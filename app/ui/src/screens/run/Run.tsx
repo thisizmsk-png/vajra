@@ -52,7 +52,8 @@ export function Run() {
     if (!slug) return;
     api.activeRuns().then(
       (a) => { if (live) setStarting((a.runs as { campaign?: string }[]).some((r) => r.campaign === slug)); },
-      () => { if (live) setStarting(false); },
+      // A failed lookup proves nothing: it stays unknown (so not_found reads as "not ready"), and the next not_found change asks again.
+      () => undefined,
     );
     return () => { live = false; };
   }, [slug, notFound]);
