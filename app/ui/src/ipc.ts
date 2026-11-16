@@ -13,7 +13,7 @@ import { S } from "../strings";
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
 export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" && e !== null && typeof (e as IpcError).error === "string";
 
-const PLAIN = new Set(["agents_off", "lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing"]);
+const PLAIN = new Set(["agents_off", "lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing", "run_held"]);
 
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
@@ -407,6 +407,8 @@ export const api = {
   /** The session and directory of each campaign this app started (absent: started elsewhere). */
   resumeTargets: () => call<{ targets: Record<string, ResumeTarget> }>("resume_targets"),
   activeRuns: () => call<ActiveRuns>("active_runs"),
+  /** Stop a run this app started, by its run id. Refused for a run that is not live in this app. */
+  stopRun: (runId: string) => call<{ run_id: string; stopped: number }>("stop_run", { runId }),
   /** ADR-15 2: one headless turn of the run's project's Director-General per question. The reply streams into
    *  `stream` (`orchestrator-<project>-g<generation>`). */
   askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),

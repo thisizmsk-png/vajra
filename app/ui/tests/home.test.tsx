@@ -199,6 +199,51 @@ describe("Home", () => {
     expect(f.calls.some((c) => c.cmd === "project_add")).toBe(false);
   });
 
+  // The owner's G2 block: a live run held the project, Runs said "No runs yet", there was no Stop, and Start showed "run_held:".
+  const held = { error: "run_held", reason: "project_busy", detail: "This project already has a run going. It can start when that run finishes or is stopped." };
+  it("a held project shows its live run in Runs with a Stop, and Start says it in a sentence, never the raw code", async () => {
+    let live = [{ stream: "run-s", session_id: "s", run_id: "20261116-1840", campaign: "deliver-20261116-1840" }];
+    const f = await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      active_runs: () => ({ count: live.length, runs: live }),
+      act_start_run: () => { throw held; },
+      stop_run: () => { live = []; return { run_id: "20261116-1840", stopped: 1 }; },
+    });
+    await screen.findByText("registered");
+    // The run is listed (it has no campaign record yet, so the campaign list is empty) and can be stopped.
+    expect(await screen.findByText(S.home.liveRun("20261116-1840"))).toBeTruthy();
+    fill(S.home.repo, "/r");
+    fill(S.home.ask, "do it");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    const msg = await screen.findByText(held.detail);
+    expect(msg.textContent).not.toMatch(/run_held/);
+    fireEvent.click(screen.getByRole("button", { name: S.home.stop }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "stop_run" && c.args?.runId === "20261116-1840")).toBe(true));
+    await waitFor(() => expect(screen.queryByText(S.home.liveRun("20261116-1840"))).toBeNull());
+    expect(screen.queryByText(held.detail)).toBeNull();
+  });
+
+  it("a live run with an empty run id is not offered a Stop that could not name it", async () => {
+    await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      active_runs: { count: 1, runs: [{ stream: "run-s", session_id: "s", run_id: "", campaign: "c" }] },
+    });
+    await screen.findByText("registered");
+    expect(screen.queryByRole("button", { name: S.home.stop })).toBeNull();
+  });
+
+  it("a failed Stop says so and keeps the run listed", async () => {
+    await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      active_runs: { count: 1, runs: [{ stream: "run-s", session_id: "s", run_id: "20261116-1840", campaign: "c" }] },
+      stop_run: () => { throw { error: "not_found", detail: "that run is not running in this app" }; },
+    });
+    await screen.findByText("registered");
+    fireEvent.click(await screen.findByRole("button", { name: S.home.stop }));
+    expect(await screen.findByText(new RegExp(S.home.stopFailed))).toBeTruthy();
+    expect(screen.getByText(S.home.liveRun("20261116-1840"))).toBeTruthy();
+  });
+
   it("does not start with an empty ask: names the field, calls nothing (AC-1.1.2)", async () => {
     const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
     await screen.findByText("registered");

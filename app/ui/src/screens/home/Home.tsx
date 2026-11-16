@@ -44,6 +44,9 @@ const campaignStatus = (c: Campaign): StatusKey => CAMPAIGN_STATUS[c.status ?? "
 const basename = (p: string) => p.trim().replace(/\/+$/, "").split("/").pop() ?? "";
 const fetchCampaigns = () => api.listCampaigns().then((r) => r.campaigns);
 const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
+type LiveRun = { run_id: string; campaign: string };
+const fetchLive = (): Promise<LiveRun[]> => api.activeRuns().then((a) =>
+  (a.runs as { run_id?: unknown; campaign?: unknown }[]).filter((r) => typeof r.run_id === "string" && r.run_id).map((r) => ({ run_id: String(r.run_id), campaign: String(r.campaign ?? "") })));
 
 export function Home() {
   const [route, go] = useRoute();
@@ -63,6 +66,17 @@ export function Home() {
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
   const [allCamps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
   const [targets, reloadTargets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
+  // Runs that are live in this app, from the app's own session table: a run in its first phase has no campaign record
+  // yet, so the Runs list below can be empty while one holds the project. Each can be stopped from here.
+  const [live, reloadLive] = useLoad<LiveRun[]>(fetchLive, true);
+  const [stopping, setStopping] = useState<string | null>(null);
+  const [stopErr, setStopErr] = useState("");
+  const stopRun = async (id: string) => {
+    setStopping(id); setStopErr("");
+    try { await api.stopRun(id); reloadLive(); reloadCamps(); recheck(); setFail(""); setAddPath(""); }
+    catch (e) { setStopErr(`${S.home.stopFailed} ${problemDetail(e)}`.trim()); }
+    finally { setStopping(null); }
+  };
   // Inside a project the folders decide which campaigns are its own. Until they are read the list is loading, and if
   // they cannot be read it says so: filtering without them would empty every project and put everything in Unsorted.
   const inProject = (t: Record<string, ResumeTarget>) => (c: Campaign) => {
@@ -264,6 +278,21 @@ export function Home() {
 
           <section className="v-panel v-home__runs" aria-labelledby="v-home-camps">
             <div className="v-panel__bar"><h2 id="v-home-camps" className="v-panel__title">{S.home.campaigns}</h2></div>
+            {live.state === "ok" && live.data.length > 0 && (
+              <ul className="v-home__campaigns" aria-label={S.home.liveRuns}>
+                {live.data.map((r) => (
+                  <li key={r.run_id}>
+                    <StatusDot status="in_progress" className="v-home__dot" />
+                    <span className="v-home__goal">{S.home.liveRun(r.run_id)}</span>
+                    <span className="v-home__slug">{S.home.liveRunNote}</span>
+                    <span className="v-home__side">
+                      <Button size="sm" onClick={() => void stopRun(r.run_id)} busy={stopping === r.run_id}>{stopping === r.run_id ? S.home.stopping : S.home.stop}</Button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {stopErr && <div role="alert" className="v-panel__body"><Text variant="body-sm">{stopErr}</Text></div>}
             {camps.state !== "ok" || camps.data.length === 0 ? (
               <div className="v-panel__body">
                 {camps.state === "loading" && <LoadingRows label={S.states.loading} />}

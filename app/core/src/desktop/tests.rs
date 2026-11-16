@@ -89,6 +89,62 @@ fn pages_are_capped_at_64_kib() {
     assert_eq!(MAX_PAGE, 64 * 1024);
 }
 
+/// A live classic run in `repo`, as `launch` leaves it: a session, a run entry and its recorded project.
+fn live_run(t: &Tmp, app: &App, sid: &str, run_id: &str, argv: &[&str]) -> String {
+    let stream = format!("run-{sid}");
+    app.sup
+        .spawn(&stream, SpawnSpec { argv: argv.iter().map(|a| a.to_string()).collect(), cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default(), extra_env: Vec::new() })
+        .unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: run_id.into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
+    app.record_run(run_id, &t.0.join("repo"), sid, "c", true, 1).unwrap();
+    stream
+}
+
+#[test]
+fn a_live_run_can_be_stopped_and_then_stops_holding_its_project() {
+    // The owner's G2 block: a live run held the project, the Runs list showed nothing, and there was no way to stop it.
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_run(&t, &app, "0f8fad5b-d9cb-469f-a165-70867728950e", "20261116-1840", &["sleep", "30"]);
+    let cwd = t.0.join("repo").to_string_lossy().to_string();
+    let input = || RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    assert_eq!(app.start_run(input(), &cwd).unwrap_err()["reason"], "project_busy", "the run holds its project");
+    assert_eq!(app.active_runs().unwrap()["count"], 1);
+    let r = app.stop_run("20261116-1840").unwrap();
+    assert_eq!(r["stopped"], 1);
+    app.sup.wait(&stream, Duration::from_secs(5)).unwrap();
+    assert_eq!(app.active_runs().unwrap()["count"], 0, "a stopped run is no longer active");
+    assert!(app.within_caps(&t.0.join("repo").to_string_lossy(), 1).is_ok() || app.within_caps(&t.0.join("repo").to_string_lossy(), 1).unwrap_err()["reason"] != "project_busy", "and no longer holds the project");
+}
+
+#[test]
+fn a_run_that_exited_holds_nothing_and_cannot_be_stopped() {
+    // A crash or a quit leaves a stale record, not a hold: only a live session counts, and Stop refuses a dead run.
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_run(&t, &app, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "20261116-1818", &["true"]);
+    app.sup.wait(&stream, Duration::from_secs(5)).unwrap();
+    assert_eq!(app.active_runs().unwrap()["count"], 0);
+    let cwd = t.0.join("repo").to_string_lossy().to_string();
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    assert_ne!(app.start_run(input, &cwd).err().and_then(|e| e["reason"].as_str().map(String::from)).as_deref(), Some("project_busy"), "a dead run does not hold the project");
+    assert_eq!(app.stop_run("20261116-1818").unwrap_err()["error"], "not_found");
+}
+
+#[test]
+fn stop_run_refuses_an_empty_malformed_or_unknown_run_id() {
+    // An empty run id (a run still at its first phase has none in the overview) or any other string never reaches a process.
+    let t = Tmp::new();
+    let app = t.app();
+    live_run(&t, &app, "0f8fad5b-d9cb-469f-a165-70867728950e", "20261116-1840", &["sleep", "30"]);
+    for bad in ["", "x", "../../etc", "20261116-18400", "2026111-1840"] {
+        assert_eq!(app.stop_run(bad).unwrap_err()["error"], "invalid_args", "{bad:?}");
+    }
+    assert_eq!(app.stop_run("20250101-0000").unwrap_err()["error"], "not_found", "a well-formed id that is not live");
+    assert_eq!(app.active_runs().unwrap()["count"], 1, "nothing was stopped");
+    app.stop_run("20261116-1840").unwrap();
+}
+
 #[test]
 fn one_active_run_per_project() {
     // ADR-15 D5: a second run in the same project is held (two workflows would fight over its branches and

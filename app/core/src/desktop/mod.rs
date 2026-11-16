@@ -2735,6 +2735,29 @@ impl App {
         roots
     }
 
+    /// Stop a run this app started: end its session (SIGHUP, then SIGKILL after the grace) by its run id. Only a run that
+    /// is live in this app can be stopped: any other id (finished, unknown, malformed) is refused, so it never reaches
+    /// another process. The run leaves `active_runs` and stops holding its project once the session has exited.
+    pub fn stop_run(&self, run_id: &str) -> Res {
+        if !crate::ids::valid_run_id(run_id) {
+            return Err(invalid("run_id", "not a run id"));
+        }
+        self.reap_runs();
+        let sessions: Vec<String> = lock(&self.runs)
+            .iter()
+            .filter(|(s, r)| r.run_id == run_id && self.sup.is_running(s).unwrap_or(false))
+            .map(|(s, _)| s.clone())
+            .collect();
+        if sessions.is_empty() {
+            return Err(fail("not_found", "that run is not running in this app"));
+        }
+        for s in &sessions {
+            self.sup.kill(s).map_err(|e| fail("io_error", e))?;
+        }
+        self.reap_runs();
+        Ok(json!({"run_id": run_id, "stopped": sessions.len()}))
+    }
+
     pub fn active_runs(&self) -> Res {
         self.reap_runs();
         let runs = lock(&self.runs).clone();
