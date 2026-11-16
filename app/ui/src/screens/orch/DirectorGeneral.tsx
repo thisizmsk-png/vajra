@@ -3,9 +3,10 @@
 // idle: one status read and one stream window when the view opens, then it follows `changed` for its own stream, and
 // polls its status only while a turn is in flight.
 //
-// Every read and action goes through dgApi (FG-02c's project-keyed shapes, each action with its envelope). Until FG-02c
-// lands the core addresses these by a run of the project (`runId`), so a project with no run yet cannot be asked; the
-// view says so.
+// Every read and action goes through dgApi (FG-02c's project-keyed shapes, each action with its envelope). M6: the
+// Director-General is the project's lead chat agent before any run exists, so a registered project is asked by its id,
+// run or none. Only a folder the core has no project for yet needs a run of it; with neither, the view links to the
+// launcher.
 import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject, UIEvent } from "react";
 import type { KeyboardEvent } from "react";
@@ -37,6 +38,11 @@ const sentence = (s: string) => (s ? s.slice(0, 1).toUpperCase() + s.slice(1) : 
 
 export function DirectorGeneral() {
   const { project, dgRun, proposals = [] } = useCurrentProject();
+  // Who the view talks to (M6): a registered project by its core id, whether or not it has a run; else a run of the folder.
+  const coreProject = project?.registered ? project.id : null;
+  const runOnly = coreProject ? null : dgRun ?? null;
+  // One key for "the conversation this view is on": a switch of project or run resets the view.
+  const dgKey = coreProject ? `p:${coreProject}` : runOnly ? `r:${runOnly}` : null;
   const [st, setSt] = useState<LeadStatus | null>(null);
   const [loadErr, setLoadErr] = useState("");
   const [stream, setStream] = useState<string | null>(null);
@@ -87,18 +93,18 @@ export function DirectorGeneral() {
     }
   }, []);
 
-  // The run (so the project) the view is on now. `still(run, at)` holds while the view is on that run and nothing
-  // has switched since `at` (an epoch).
-  const onRun = useRef(dgRun);
-  onRun.current = dgRun;
-  const still = (run: string | null | undefined, at: number) => onRun.current === run && epoch.current === at;
+  // The conversation (project, or run of an unregistered folder) the view is on now. `still(key, at)` holds while the
+  // view is on it and nothing has switched since `at` (an epoch).
+  const onKey = useRef(dgKey);
+  onKey.current = dgKey;
+  const still = (key: string | null, at: number) => onKey.current === key && epoch.current === at;
   const readStatus = useCallback(async () => {
-    if (!dgRun) return;
+    if (!dgKey) return;
     const n = ++statusReads.current.asked;
     const at = epoch.current;
-    const current = () => onRun.current === dgRun && epoch.current === at && n > statusReads.current.applied;
+    const current = () => onKey.current === dgKey && epoch.current === at && n > statusReads.current.applied;
     try {
-      const s = await dg.status({ projectId: null, runId: dgRun });
+      const s = await dg.status({ projectId: coreProject, runId: runOnly });
       if (!current()) return;
       statusReads.current.applied = n;
       setSt(s);
@@ -110,7 +116,7 @@ export function DirectorGeneral() {
     } catch (e) {
       if (current()) setLoadErr(errorText(e));
     }
-  }, [dgRun, follow]);
+  }, [dgKey, coreProject, runOnly, follow]);
 
   useEffect(() => {
     setSt(null); follow(null); setGeneration(null); setLines([]); setEcho(null); setAskId(null); setAskErr("");
@@ -173,22 +179,25 @@ export function DirectorGeneral() {
 
   const available = st?.available === true;
   const canAsk = available && !busy && !sending;
-  // The core's id once it has answered with one (the T1 project id); the run serves the interim calls.
-  const target: Target = { projectId: st?.project_id ?? null, runId: dgRun ?? null };
+  // A registered project's core id; for an unregistered folder, the core's id once it has answered with one, and the run.
+  const target: Target = { projectId: coreProject ?? (runOnly ? st?.project_id ?? null : null), runId: runOnly };
+  // Commands go to the project when it is registered, else to the run: never the core's id for a run-only folder, which
+  // the status read has not proven is this view's.
+  const callTarget: Target = { projectId: coreProject, runId: runOnly };
 
   // Optimistic: the question shows at once (the composer clears its own draft) and the answer only confirms it. A refusal
   // takes the echo back and returns false, so the composer puts the text back. Returns whether the ask was taken.
   const send = async (raw: string): Promise<boolean> => {
     const text = raw.trim();
-    if (!dgRun || !text || !canAsk) return false;
-    const run = dgRun, at = epoch.current;
+    if (!dgKey || !text || !canAsk) return false;
+    const key = dgKey, at = epoch.current;
     setSending(true);
     setAskErr("");
     atEnd.current = true;
     setEcho(text);
-    const r = await dg.ask(target, envelope(target, actionId(), generation), text);
+    const r = await dg.ask(callTarget, envelope(target, actionId(), generation), text);
     setSending(false);
-    if (!still(run, at)) return false;
+    if (!still(key, at)) return false;
     if (!r.ok) { setEcho(null); setAskErr(r.outcome.text); return false; }
     setAskId(r.value.ask_id);
     if (typeof r.value.generation === "number") setGeneration(r.value.generation);
@@ -202,17 +211,17 @@ export function DirectorGeneral() {
   const onSend = useCallback((text: string) => sendRef.current(text), []);
   const cancel = async () => {
     if (!askId) return;
-    const run = dgRun, at = epoch.current;
-    const r = await dg.cancel(target, envelope(target, actionId(), null), askId);
-    if (!still(run, at)) return;
+    const key = dgKey, at = epoch.current;
+    const r = await dg.cancel(callTarget, envelope(target, actionId(), null), askId);
+    if (!still(key, at)) return;
     if (!r.ok) setAskErr(r.outcome.text);
     void readStatus();
   };
   const fresh = async () => {
-    if (!dgRun || busy) return;
-    const run = dgRun, at = epoch.current;
-    const r = await dg.newConversation(target, envelope(target, actionId(), generation));
-    if (!still(run, at)) return;
+    if (!dgKey || busy) return;
+    const key = dgKey, at = epoch.current;
+    const r = await dg.newConversation(callTarget, envelope(target, actionId(), generation));
+    if (!still(key, at)) return;
     if (!r.ok) { setAskErr(r.outcome.text); return; }
     setGeneration(r.value.generation);
     follow(r.value.stream);
@@ -223,7 +232,7 @@ export function DirectorGeneral() {
   cancelRef.current = cancel;
   const onCancel = useCallback(() => void cancelRef.current(), []);
 
-  useCommands(dgRun ? [
+  useCommands(dgKey ? [
     { id: "dg-ask", label: S.dg.ask, run: () => field.current?.focus() },
     { id: "dg-new", label: S.dg.newConversation, run: () => void fresh() },
   ] : []);
@@ -233,12 +242,14 @@ export function DirectorGeneral() {
   if (!project) return <Home />;
   const name = project?.name ?? "";
 
-  if (!dgRun) {
+  // A folder the core has no project for, and no run of it: nothing to address yet. A registered project never lands
+  // here (M6), run or none.
+  if (!dgKey) {
     return (
       <section className="v-screen v-dgv" aria-label={S.dg.title(name)}>
         <div className="v-dgv__state">
-          <Empty title={S.dg.noRun} action={<a className="v-dgv__link" href={launch}>{S.dg.startYourself}</a>}>
-            {S.dg.noRunHint}
+          <Empty title={S.dg.noProject} action={<a className="v-dgv__link" href={launch}>{S.dg.startYourself}</a>}>
+            {S.dg.noProjectHint}
           </Empty>
         </div>
         <Proposals items={proposals} target={target} />

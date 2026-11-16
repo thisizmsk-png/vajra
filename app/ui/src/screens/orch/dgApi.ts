@@ -21,7 +21,8 @@ import type { AskStarted, InboxItem, LeadStatus, NewConversation } from "../../i
 import { normRoot } from "../../projects/adapter";
 import type { ProposalOverride } from "../../accountsContract";
 
-/** Who the commands are for. `projectId` is the core's id (from its own answers); `runId` serves the interim calls. */
+/** Who the commands are for. `projectId` is the core's project id (a registered project's, or from the core's own
+ *  answers); `runId` serves only a folder the core has no project for yet. */
 export type Target = { projectId: string | null; runId: string | null };
 /** FG-11's envelope (ADR-15 §3.1). */
 export type Envelope = { action_id: string; project_id: string | null; expect_generation: number | null };
@@ -72,14 +73,19 @@ export function failure(e: unknown, changed = S.dg.receipt.changed): { outcome: 
 async function run<T>(f: () => Promise<T>): Promise<Result<T>> {
   try { return { ok: true, value: await f() }; } catch (e) { return { ok: false, ...failure(e) }; }
 }
-const noRun = () => Promise.reject({ error: "no_run", detail: S.dg.noRun });
+const noProject = () => Promise.reject({ error: "no_project", detail: S.dg.noProject });
 
+// M6: the Director-General is the project's, so a registered project is addressed by its id, run or none. A folder the
+// core has no project for yet falls back to a run of it, if there is one.
 export const dg = {
   /** The tail of a conversation's stream (a read; not keyed by run, unchanged by FG-02c). */
   window: (stream: string, rows: number) => api.streamWindow(stream, null, rows),
-  status: (t: Target): Promise<LeadStatus> => (t.runId ? api.leadStatus(t.runId) : noRun()),
-  ask: (t: Target, env: Envelope, text: string): Promise<Result<AskStarted>> => run(() => (t.runId ? api.askLead(t.runId, text) : noRun())),
-  newConversation: (t: Target, env: Envelope): Promise<Result<NewConversation>> => run(() => (t.runId ? api.newConversation(t.runId) : noRun())),
+  status: (t: Target): Promise<LeadStatus> =>
+    t.projectId ? api.leadStatusForProject(t.projectId) : t.runId ? api.leadStatus(t.runId) : noProject(),
+  ask: (t: Target, env: Envelope, text: string): Promise<Result<AskStarted>> =>
+    run(() => (t.projectId ? api.askLeadForProject(t.projectId, text) : t.runId ? api.askLead(t.runId, text) : noProject())),
+  newConversation: (t: Target, env: Envelope): Promise<Result<NewConversation>> =>
+    run(() => (t.projectId ? api.newConversationForProject(t.projectId) : t.runId ? api.newConversation(t.runId) : noProject())),
   cancel: (t: Target, env: Envelope, askId: string): Promise<Result<unknown>> => run(() => api.cancelAsk(askId)),
   startProposal: async (t: Target, env: Envelope, item: InboxItem, overrides: ProposalOverride[] = []): Promise<Outcome> => {
     if (!item.proposal_sha256) return { kind: "refused", text: S.dg.receipt.changed };

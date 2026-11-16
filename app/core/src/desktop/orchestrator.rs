@@ -403,6 +403,36 @@ impl App {
         }
         let t = self.lead_target(run_id)?;
         let found = self.orchestrator_for_run(&t.run_id, &t.cwd)?;
+        self.renew_conversation(found, expect)
+    }
+
+    /// "New conversation" by project (M6): the project's Director-General needs no run. The project must be in the store
+    /// and active; its Director-General is the one at the store's root, created on first use as an ask creates it.
+    pub fn new_conversation_for_project(&self, project_id: &str) -> Res {
+        self.new_conversation_for_project_expecting(project_id, None).map_err(|e| e.to_json())
+    }
+
+    /// `new_conversation_for_project` from conversation `expect`, as `new_conversation_expecting`.
+    pub(super) fn new_conversation_for_project_expecting(&self, project_id: &str, expect: Option<u32>) -> Result<Value, LeadError> {
+        let found = self.project_orchestrator(project_id)?;
+        self.renew_conversation(found, expect)
+    }
+
+    /// The Director-General of store project `project_id`, with no run (M6): a valid store id of an active project, at the
+    /// root the store recorded. A refused projects folder says so first (#106 review).
+    pub(super) fn project_orchestrator(&self, project_id: &str) -> Result<Orchestrator, LeadError> {
+        if !pc::valid_project_id(project_id) {
+            return Err(LeadError::Invalid("project_id: must be a project id".into()));
+        }
+        if let Some(u) = self.projects.unavailable() {
+            return Err(projects_unavailable(u));
+        }
+        let project = self.active_project(project_id)?;
+        self.orchestrator(&project.id, Path::new(&project.root))
+    }
+
+    /// Start generation n+1 of `found`'s conversation (the shared body of both `new_conversation` forms).
+    fn renew_conversation(&self, found: Orchestrator, expect: Option<u32>) -> Result<Value, LeadError> {
         // Under the ask lock: no turn can start between the busy check and the bump, and the generation is read here,
         // so two "New conversation" clicks bump it twice from what is current, never both from the same old value.
         let active = lock(&self.lead.active);

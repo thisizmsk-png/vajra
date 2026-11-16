@@ -254,3 +254,30 @@ fn lead_status_by_project_needs_no_run_and_refuses_an_archived_project() {
     let off = app.lead_status_for_project(&p).unwrap();
     assert_eq!((off["available"].as_bool(), off["error"].as_str()), (Some(false), Some("project_archived")), "{off}");
 }
+
+/// M6: the act forms by project, with no run. An ask and a new conversation run once under their receipts and replay on
+/// retry; an envelope naming another project stores and runs nothing; a click aimed at an older conversation is stale.
+#[test]
+fn project_acts_need_no_run_and_are_bound_to_their_project() {
+    let t = Tmp::new();
+    let app = App::open(&t.data(), &t.home()).unwrap();
+    app.lead.set_bin(Some(t.bin("claude")));
+    app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    let p = pid(&t);
+    let b = crate::desktop::test_project(&t.data(), &t.home(), &t.0.join("other"));
+    let first = app.act_ask_lead_for_project(&env("a_pask_0001", &p, Some(1)), &p, "what first?");
+    assert_eq!((first["receipt"]["state"].as_str(), first["receipt"]["action"].as_str()), (Some("done"), Some("ask_lead")), "{first}");
+    wait_until("the ask", || idle(&app));
+    assert_eq!(app.act_ask_lead_for_project(&env("a_pask_0001", &p, Some(1)), &p, "what first?")["replayed"], true);
+    assert_eq!(t.count("ask.count"), 1, "the retry asked nothing");
+    // B's envelope against A's Director-General: refused, nothing stored, nothing run.
+    let wrong = app.act_ask_lead_for_project(&env("a_pask_0002", &b, Some(1)), &p, "hi");
+    assert_eq!(wrong["error"]["error"], "project_mismatch", "{wrong}");
+    assert!(!receipt_ids(&app, &b).contains(&"a_pask_0002".to_string()));
+    let nc = app.act_new_conversation_for_project(&env("a_pnew_0001", &p, Some(1)), &p);
+    assert_eq!((nc["receipt"]["state"].as_str(), nc["result"]["generation"].as_u64()), (Some("done"), Some(2)), "{nc}");
+    let stale = app.act_ask_lead_for_project(&env("a_pask_0003", &p, Some(1)), &p, "hi");
+    assert_eq!(stale["receipt"]["reason"], "stale_generation", "{stale}");
+    assert_eq!(t.count("ask.count"), 1);
+    assert!(lock(&app.runs).is_empty() && app.recorded_runs().is_empty(), "no run was started");
+}

@@ -50,6 +50,27 @@ impl App {
         self.act_bound(env, Some(found.map(|(p, _)| p)), Caller::Ui, true, "new_conversation", run_id, cur, || self.new_conversation_expecting(run_id, expect_of(env)).map_err(|e| e.to_json()))
     }
 
+    /// The project's Director-General and its current generation, with no run (M6). Bound to the envelope like the run
+    /// form: an envelope for another project stores nothing (`project_mismatch`).
+    fn project_dg(&self, project_id: &str) -> Result<(String, u32), Value> {
+        let o = self.project_orchestrator(project_id).map_err(|e| e.to_json())?;
+        Ok((o.id, o.generation))
+    }
+
+    /// `act_ask_lead` by project, with no run (M6). The receipt target is the project id.
+    pub fn act_ask_lead_for_project(&self, env: &Envelope, project_id: &str, text: &str) -> Value {
+        let found = self.project_dg(project_id);
+        let cur = found.as_ref().ok().map(|(_, g)| u64::from(*g));
+        self.act_bound(env, Some(found.map(|(p, _)| p)), Caller::Ui, true, "ask_lead", project_id, cur, || self.ask_lead_for_project_expecting(project_id, text, expect_of(env)).map_err(|e| e.to_json()))
+    }
+
+    /// `act_new_conversation` by project, with no run (M6).
+    pub fn act_new_conversation_for_project(&self, env: &Envelope, project_id: &str) -> Value {
+        let found = self.project_dg(project_id);
+        let cur = found.as_ref().ok().map(|(_, g)| u64::from(*g));
+        self.act_bound(env, Some(found.map(|(p, _)| p)), Caller::Ui, true, "new_conversation", project_id, cur, || self.new_conversation_for_project_expecting(project_id, expect_of(env)).map_err(|e| e.to_json()))
+    }
+
     pub fn act_cancel_ask(&self, env: &Envelope, ask_id: &str) -> Value {
         let owner = self.ask_owner(ask_id).ok_or_else(|| json!({"error": "ask_not_found"}));
         self.act_bound(env, Some(owner), Caller::Ui, true, "cancel_ask", ask_id, None, || self.cancel_ask(ask_id))

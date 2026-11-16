@@ -232,6 +232,15 @@ pub fn frame(ask_id: &str, run_id: &str, text: &str, red: &Redactor) -> Result<F
     if !ids::valid_run_id(run_id) {
         return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
     }
+    frame_for_project(ask_id, text, red)
+}
+
+/// `frame` for a project's Director-General asked with no run (M6). The body is exactly what `frame` builds: the fixed
+/// header never names a run, so only the run id check is left out.
+pub fn frame_for_project(ask_id: &str, text: &str, red: &Redactor) -> Result<FramedAsk, LeadError> {
+    if !valid_ulid(ask_id) {
+        return Err(LeadError::Invalid("ask_id: must be a ULID".into()));
+    }
     let n = text.chars().count();
     if n == 0 || n > MAX_TEXT {
         return Err(LeadError::Invalid(format!("text: must be 1..={MAX_TEXT} chars")));

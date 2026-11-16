@@ -2020,3 +2020,136 @@ fn a_claude_binary_swapped_before_the_director_general_launch_is_refused() {
     assert_eq!(t.ask_states(), ["queued:", "failed:lead_guard_missing"]);
     assert!(idle(&app));
 }
+
+// ------------------------------------------------------------ M6: the Director-General before any run
+
+/// An app whose Lead is the fake claude and which has never launched a run: no run in memory, no run record, no index.
+fn no_run_app(t: &Tmp) -> App {
+    let app = App::open(&t.data(), &t.home()).unwrap();
+    app.lead.set_bin(Some(t.bin("claude")));
+    app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    app
+}
+
+/// No run exists anywhere: none in memory, no guarded run record, nothing in the run index, none active.
+fn assert_no_run(t: &Tmp, app: &App) {
+    assert!(lock(&app.runs).is_empty(), "no run in memory");
+    assert!(app.recorded_runs().is_empty(), "no run record: {:?}", app.recorded_runs());
+    assert!(std::fs::read_to_string(t.data().join("runs.jsonl")).unwrap_or_default().trim().is_empty(), "no run in the index");
+    assert_eq!(app.active_runs().unwrap()["count"], 0);
+}
+
+/// M6: a project with no run asks its Director-General and gets an answer on the project's stream, through the same
+/// self-test and ledger as a run ask; the ledger line names the project and no run.
+#[test]
+fn a_project_with_no_run_can_ask_its_director_general() {
+    let t = Tmp::new();
+    let app = no_run_app(&t);
+    assert_eq!(app.lead_status_for_project(&pid(&t)).unwrap()["state"], "not_started");
+    let r = app.ask_lead_for_project(&pid(&t), "what should we build first?").unwrap();
+    assert_eq!(r["state"], "queued");
+    assert_eq!(r["stream"], stream_name(&t));
+    assert_eq!((r["project_id"].as_str(), r["generation"].as_u64()), (Some(pid(&t).as_str()), Some(1)));
+    wait_until("the ask to finish", || idle(&app) && t.ask_states().len() == 3);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
+    assert_eq!(t.count("selftest.count"), 1, "the fail-closed self-test ran first");
+    let lines = stream_text(&t, &app);
+    assert_eq!(lines[0], "you\twhat should we build first?");
+    assert!(lines.contains(&"lead\thello from the lead".to_string()), "{lines:?}");
+    // The real ask ran with the generated settings and tool server, in the project folder.
+    let stdin = std::fs::read_to_string(t.files("stdin.").iter().find(|p| std::fs::read_to_string(p).unwrap().contains("build first")).unwrap()).unwrap();
+    assert!(stdin.starts_with(lead::HEADER), "{stdin}");
+    assert!(orch_dir(&t).join("settings.json").is_file() && orch_dir(&t).join("mcp.json").is_file());
+    let q = t.ledger().into_iter().find(|r| r["kind"] == "ask" && r["state"] == "queued").unwrap();
+    assert_eq!((q["project_id"].as_str(), q["generation"].as_u64()), (Some(pid(&t).as_str()), Some(1)));
+    assert!(q.get("run_id").is_none() && q.get("session_id").is_none(), "a project ask names no run: {q}");
+    // The status by project now reads the conversation, and asking wrote no run record.
+    assert_eq!(app.lead_status_for_project(&pid(&t)).unwrap()["state"], "idle");
+    assert_no_run(&t, &app);
+    // The second ask resumes the same Director-General session.
+    let sid = std::fs::read_to_string(orch_dir(&t).join("session")).unwrap();
+    assert_eq!(app.ask_lead_for_project(&pid(&t), "and then?").unwrap()["lead_session_id"], sid);
+    wait_until("the second ask", || idle(&app) && t.ask_states().len() == 6);
+}
+
+/// M6: the Director-General asked with no run proposes a run; the proposal waits in the inbox and nothing runs until a
+/// human starts it. A run starts only through `start_proposal` (the Start click).
+#[test]
+fn a_proposal_from_a_project_ask_never_starts_a_run_by_itself() {
+    let t = Tmp::new();
+    let app = no_run_app(&t);
+    app.ask_lead_for_project(&pid(&t), "plan the first run").unwrap();
+    wait_until("the ask to finish", || idle(&app) && t.ask_states().len() == 3);
+    // The ask published generation 1, so the Director-General's tool server may call `propose_run` for this project.
+    let out = lock(&app.control).call_tool_for_project(&pid(&t), 1, "propose_run", &json!({"ask": "add a health check", "rounds": 1})).unwrap();
+    assert!(out["action_id"].is_string(), "{out}");
+    let open = lock(&app.control).open_proposals(Some(&pid(&t))).unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].ask, "add a health check");
+    // The ask and the proposal started nothing; the proposal is still open, waiting for a human.
+    assert_no_run(&t, &app);
+    assert!(app.inbox().unwrap().to_string().contains("add a health check"), "the inbox shows it for a human to start");
+    // A stale generation (an older conversation) cannot propose for this project.
+    assert!(lock(&app.control).call_tool_for_project(&pid(&t), 2, "propose_run", &json!({"ask": "x"})).is_err());
+}
+
+/// M6: the project form's rules are the run form's: the same deny and secret rules and the same own folders, for the
+/// same project in the same folder.
+#[test]
+fn a_project_ask_gets_the_same_isolation_as_a_run_ask() {
+    let t = Tmp::new();
+    let app = t.app();
+    let add = |d: &Path| super::super::test_project(&t.data(), &t.home(), d);
+    let other = t.0.join("other");
+    add(&other);
+    let gone = add(&t.0.join("archived"));
+    app.projects.archive(&gone, None).unwrap();
+    let by_run = app.isolation(RUN_ID, &t.repo()).unwrap();
+    let by_project = app.isolation_for_project(&pid(&t), &t.repo()).unwrap();
+    assert!(by_project.deny.contains(&other) && by_project.deny.contains(&t.0.join("archived")), "{by_project:?}");
+    assert_eq!((by_run.deny, by_run.secrets), (by_project.deny, by_project.secrets));
+    assert_eq!(app.own_project_folders(RUN_ID, &t.repo()).unwrap(), app.own_project_folders_for(&pid(&t), &t.repo()).unwrap());
+    // With no run at all, another project's folder is still denied and its own folder is not.
+    let t2 = Tmp::new();
+    let app2 = no_run_app(&t2);
+    super::super::test_project(&t2.data(), &t2.home(), &t2.0.join("other"));
+    let iso = app2.isolation_for_project(&pid(&t2), &t2.repo()).unwrap();
+    assert!(iso.deny.contains(&t2.0.join("other")) && !iso.deny.contains(&t2.repo()), "{iso:?}");
+    // A folder that is not the project's recorded root is refused, as with a run.
+    let elsewhere = t2.0.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    assert!(matches!(app2.isolation_for_project(&pid(&t2), &elsewhere), Err(LeadError::GuardMissing(_))));
+}
+
+/// M6: what a project ask refuses: a malformed or unknown project id, an archived project, and every guard
+/// precondition the run form has (here: no guard script). Nothing is spawned or recorded for any of them.
+#[test]
+fn a_project_ask_refuses_what_a_run_ask_refuses() {
+    let t = Tmp::new();
+    let app = no_run_app(&t);
+    assert_eq!(code(&app.ask_lead_for_project("../x", "hi").unwrap_err()), "invalid_args");
+    assert_eq!(code(&app.ask_lead_for_project("20261106-0911", "hi").unwrap_err()), "invalid_args", "a run id is not a project id");
+    assert!(app.ask_lead_for_project("p_01JC3H0000000000000000000Z", "hi").is_err(), "an unknown project");
+    let gone = super::super::test_project(&t.data(), &t.home(), &t.0.join("gone"));
+    app.projects.archive(&gone, None).unwrap();
+    assert!(app.ask_lead_for_project(&gone, "hi").is_err(), "an archived project");
+    std::fs::remove_file(t.home().join(".claude/skills/vajra/hooks/pre-tool-use.sh")).unwrap();
+    assert_eq!(code(&app.ask_lead_for_project(&pid(&t), "hi").unwrap_err()), "lead_guard_missing");
+    assert_eq!(t.count("selftest.count") + t.count("ask.count"), 0, "nothing was started");
+    assert!(t.ask_states().is_empty() && idle(&app));
+    assert_no_run(&t, &app);
+}
+
+/// M6: "New conversation" by project, with no run: generation n+1 and its stream; busy while an ask runs; a stale
+/// expected generation is refused.
+#[test]
+fn a_project_with_no_run_can_start_a_new_conversation() {
+    let t = Tmp::new();
+    let app = no_run_app(&t);
+    let r = app.new_conversation_for_project(&pid(&t)).unwrap();
+    assert_eq!((r["project_id"].as_str(), r["generation"].as_u64()), (Some(pid(&t).as_str()), Some(2)));
+    assert_eq!(r["stream"], super::orchestrator::stream(&pid(&t), 2));
+    assert!(matches!(app.new_conversation_for_project_expecting(&pid(&t), Some(1)), Err(LeadError::StaleGeneration(2))));
+    assert_eq!(code(&app.new_conversation_for_project("nope").unwrap_err()), "invalid_args");
+    assert_no_run(&t, &app);
+}
