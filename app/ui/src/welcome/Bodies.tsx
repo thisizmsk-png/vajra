@@ -228,6 +228,7 @@ export function EngineBody({ engine }: { engine: SetupList["engine"] | null }) {
   return (
     <>
       <Text variant="body-sm">{C.engine.intro}</Text>
+      {engine.reason === "leftover_folder" && <Text variant="body-sm">{C.engine.leftover}</Text>}
       <ol className="v-wel__steps">{C.engine.steps.map((s) => <li key={s}>{s}</li>)}</ol>
       <div className="v-wel__codewrap">
         <pre className="v-wel__code" tabIndex={0} aria-label={C.engine.lines}>{engine.command}</pre>

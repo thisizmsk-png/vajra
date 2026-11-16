@@ -1,0 +1,7 @@
+{
+  "installed": false,
+  "state": "missing",
+  "one_click": false,
+  "reason": null,
+  "command": "echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  /Users/someone/Applications/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/Vajra Desktop.app/Contents/Resources/engine/engine.tgz' | /usr/bin/shasum -a 256 -c && /bin/mkdir -p ~/.claude/skills && /bin/mkdir ~/.claude/skills/vajra && /usr/bin/tar -xzf '/Users/someone/Applications/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/Vajra Desktop.app/Contents/Resources/engine/engine.tgz' -C ~/.claude/skills/vajra && /bin/bash ~/.claude/skills/vajra/scripts/install.sh"
+}

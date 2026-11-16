@@ -30,7 +30,9 @@ export interface SetupRow {
 /** The engine-scripts row (D7). An unknown state reads as missing; `one_click` holds only for a known state. */
 export type EngineState = "installed" | "missing" | "broken" | "installing";
 const ENGINE_STATES: readonly EngineState[] = ["installed", "missing", "broken", "installing"];
-export interface EngineRow { installed: boolean; command: string; state: EngineState; one_click: boolean }
+/** Why the Terminal line can't install from the app's own engine copy: a folder is already where it would go. */
+export type EngineReason = "leftover_folder";
+export interface EngineRow { installed: boolean; command: string; state: EngineState; one_click: boolean; reason: EngineReason | null }
 export interface SetupList { rows: SetupRow[]; engine: EngineRow }
 
 type O = Record<string, unknown>;
@@ -58,7 +60,9 @@ function row(v: unknown): SetupRow | null {
 export function parseSetupList(v: unknown): ParseResult<SetupList> {
   if (!obj(v) || typeof v.schema !== "string") return { ok: false, reason: "malformed", detail: "not a setup list" };
   if (schemaMajor(v.schema, "harness_setup") !== SETUP_MAJOR) return { ok: false, reason: "unsupported_version", detail: v.schema };
-  if (!Array.isArray(v.rows) || !obj(v.engine) || typeof v.engine.installed !== "boolean" || !text(v.engine.command)) return { ok: false, reason: "invalid", detail: "rows or engine" };
+  // The engine's Terminal line names the app's own engine copy twice (its hash check and its unpack), so it gets more
+  // room than other text.
+  if (!Array.isArray(v.rows) || !obj(v.engine) || typeof v.engine.installed !== "boolean" || !text(v.engine.command, 1024)) return { ok: false, reason: "invalid", detail: "rows or engine" };
   const rows: SetupRow[] = [];
   for (const r of v.rows.slice(0, 32)) {
     const p = row(r);
@@ -68,7 +72,7 @@ export function parseSetupList(v: unknown): ParseResult<SetupList> {
   const known = ENGINE_STATES.includes(v.engine.state as EngineState);
   // An older core sends no state: read it from `installed`. An unknown one reads as missing, never as installed.
   const state: EngineState = v.engine.state === undefined ? (v.engine.installed ? "installed" : "missing") : known ? (v.engine.state as EngineState) : "missing";
-  const engine: EngineRow = { installed: v.engine.installed && state === "installed", command: v.engine.command, state, one_click: (known || v.engine.state === undefined) && state !== "installing" && v.engine.one_click === true };
+  const engine: EngineRow = { installed: v.engine.installed && state === "installed", command: v.engine.command, state, one_click: (known || v.engine.state === undefined) && state !== "installing" && v.engine.one_click === true, reason: v.engine.reason === "leftover_folder" && state !== "installed" ? "leftover_folder" : null };
   return { ok: true, value: { rows, engine } };
 }
 

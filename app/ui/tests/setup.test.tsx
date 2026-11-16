@@ -1,5 +1,7 @@
 // ADR-17 step 1 in the UI: Settings > Providers > Set up. Each harness's state, the vendor's own steps for one that is
 // missing or broken (never an Install button in this step), and the CLI's own sign-in in a terminal tab.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
@@ -282,7 +284,28 @@ describe("engine row", () => {
     expect(r.getByText(C.engineBroken)).toBeTruthy();
     expect(r.getByText(LIST.engine.command)).toBeTruthy();
     const odd = parseSetupList({ ...LIST, engine: { installed: true, command: "x", state: "magic", one_click: true } });
-    expect(odd.ok && odd.value.engine).toEqual({ installed: false, command: "x", state: "missing", one_click: false });
+    expect(odd.ok && odd.value.engine).toEqual({ installed: false, command: "x", state: "missing", one_click: false, reason: null });
+  });
+
+  it("says to remove a leftover folder, keeps only the known reason, and fits the bundled line", async () => {
+    panel({ ...LIST, engine: { ...LIST.engine, state: "missing", one_click: false, reason: "leftover_folder" } });
+    const r = await rowOf(C.engine);
+    expect(r.getByText(C.engineLeftover)).toBeTruthy();
+    expect(r.getByText(LIST.engine.command)).toBeTruthy();
+    const read = (engine: object) => { const p = parseSetupList({ ...LIST, engine: { ...LIST.engine, ...engine } }); return p.ok ? p.value.engine : null; };
+    expect(read({ reason: "something_else" })?.reason).toBeNull();
+    expect(read({ reason: "leftover_folder", installed: true, state: "installed" })?.reason).toBeNull();
+    expect(read({ command: "x".repeat(1025) })).toBeNull();
+  });
+
+  it("reads the longest engine line the core can send (Codex P2 on #283)", () => {
+    // The core's engine row for the deepest app path whose bundled line still fits; manual_tests.rs in the core
+    // checks these bytes against the line it generates, so the two limits can't drift apart.
+    const golden = JSON.parse(readFileSync(resolve(__dirname, "../../core/tests/fixtures/setup/engine-longest-line.json"), "utf8"));
+    expect(golden.command.length).toBeGreaterThan(1000);
+    const r = parseSetupList({ ...LIST, engine: golden });
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.value.engine.command).toBe(golden.command);
   });
 
   it("offers no engine install while the gate is off or an install is running", async () => {
