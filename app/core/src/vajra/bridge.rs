@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::gitsafe;
+
 pub const OUTPUT_CAP: usize = 1024 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -236,12 +238,11 @@ impl Bridge {
                 }) {
                     return Err(BridgeError::Invalid(format!("git flag not allowed: {bad}")));
                 }
-                // No repo-configured helper ever runs: no fsmonitor hook, and diff
-                // skips diff.external and textconv drivers (a worktree's .git/config
-                // may have been written by an agent).
-                let mut argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor="].map(String::from).to_vec();
+                // No repo-configured helper ever runs (`gitsafe`): `run` isolates the call from the repo's config, so
+                // no filter, driver, hook or signer is defined; these flags are a second line for diff and log.
+                let mut argv = gitsafe::prefix();
                 argv.push(sub.to_string());
-                if sub == "diff" {
+                if sub == "diff" || sub == "log" {
                     argv.extend(["--no-ext-diff".to_string(), "--no-textconv".to_string()]);
                 }
                 // A submodule is never entered: its own config, hooks and filters are not the core's to run (16.6).
@@ -262,6 +263,25 @@ impl Bridge {
             Request::FeaturesDef { features } => Some(features.as_slice()),
             _ => None,
         };
+        if let Request::Git { cwd: dir, args } = req {
+            // Every git call that can read a working file, a diff or a signature runs with the repo's config files
+            // unread (`gitsafe::isolate`), under one deadline for the setup steps and the call.
+            let deadline = Instant::now() + self.timeout;
+            let iso = if !gitsafe::needs_isolation(args.first().map(String::as_str).unwrap_or("")) {
+                None
+            } else {
+                match gitsafe::isolate(&self.git, dir, self.home.as_deref(), deadline) {
+                    Ok(i) => Some(i),
+                    Err(not_run) => return Ok(not_run),
+                }
+            };
+            let env: Vec<(&str, &Path)> = match &iso {
+                Some(i) => i.env(),
+                None => gitsafe::base_env(),
+            };
+            let left = deadline.saturating_duration_since(Instant::now());
+            return run_process_env(&program, &argv, cwd.as_deref(), left, self.home.as_deref(), None, &env);
+        }
         let grace = req.is_campaign_write().then_some(KILL_GRACE);
         run_process_inner(&program, &argv, cwd.as_deref(), self.timeout, self.home.as_deref(), stdin, &[], bridge_path(), grace)
     }
@@ -286,8 +306,8 @@ impl Bridge {
         if timeout.is_zero() {
             return None;
         }
-        let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C"].map(String::from).into_iter()
-            .chain([repo.to_string_lossy().into_owned()])
+        let argv: Vec<String> = gitsafe::prefix().into_iter()
+            .chain(["-C".to_string(), repo.to_string_lossy().into_owned()])
             .chain(["config", "--list", "--show-scope", "-z"].map(String::from))
             .collect();
         let out = run_process_env(&self.git, &argv, None, timeout, self.home.as_deref(), None, &[]).ok().filter(|o| o.exit() == Some(0) && !o.truncated)?;
@@ -341,8 +361,8 @@ impl Bridge {
         let result = (|| {
             let git = |args: &[&str], with_index: bool| -> Option<Output> {
                 let left = self.timeout.checked_sub(start.elapsed()).filter(|d| !d.is_zero())?;
-                let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C"].map(String::from).into_iter()
-                    .chain([top.borrow().to_string_lossy().into_owned()])
+                let argv: Vec<String> = gitsafe::prefix().into_iter()
+                    .chain(["-C".to_string(), top.borrow().to_string_lossy().into_owned()])
                     .chain(args.iter().map(|a| a.to_string()))
                     .collect();
                 let alt = repo_objects.borrow().clone();
@@ -582,11 +602,7 @@ impl Bridge {
 
     /// Git on `git_dir` alone, with replace objects off and no fsmonitor or hook; exit 0 only.
     fn pinned_git(&self, git_dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Option<Output> {
-        let argv: Vec<String> = ["--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"]
-            .iter()
-            .chain(args)
-            .map(|a| a.to_string())
-            .collect();
+        let argv: Vec<String> = gitsafe::prefix().into_iter().chain(["--no-replace-objects"].iter().chain(args).map(|a| a.to_string())).collect();
         let env = [("GIT_DIR", git_dir), ("GIT_NO_REPLACE_OBJECTS", Path::new("1")), ("GIT_CONFIG_GLOBAL", Path::new("/dev/null"))];
         run_process_env(&self.git, &argv, Some(git_dir), self.timeout, self.home.as_deref(), stdin, &env).ok().filter(|o| o.exit() == Some(0))
     }
