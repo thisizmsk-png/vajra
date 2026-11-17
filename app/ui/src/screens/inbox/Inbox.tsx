@@ -200,7 +200,7 @@ export function Inbox() {
       </div>
       <p role="status" className="v-sr">{said}</p>
       <PingRule />
-      {P.state === "ok" && !P.inboxFailed && live.length === 0 && later.length === 0 && proposals.length === 0 && <div className="v-board__state"><Empty title={S.inbox.empty}>{S.inbox.emptyHint}</Empty></div>}
+      {P.state === "ok" && !P.inboxFailed && live.length === 0 && later.length === 0 && proposals.length === 0 && <div className="v-board__state"><Empty at="pane" title={S.inbox.empty}>{S.inbox.emptyHint}</Empty></div>}
       {(P.state === "error" || P.inboxFailed) && <div className="v-board__state"><Problem title={S.inbox.failed} detail={P.error} retry={P.reload} /></div>}
       {groups.map(({ p, items, props }) => (
         <section key={p.id} className="v-inbox__group" aria-label={p.name}>

@@ -37,7 +37,9 @@
 .v-wel__also input { accent-color: var(--c-action); }
 .v-wel__also input:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 .v-wel__paste { display: flex; align-items: flex-end; gap: var(--space-sm); }
-.v-wel__orpaste { align-self: center; font-size: 12px; color: var(--c-text-muted); white-space: nowrap; }
+/* Sits on the input's line, not the middle of label-plus-input: the bottom-aligned row, one input height tall. */
+.v-wel__orpaste { font-size: var(--text-sm); line-height: var(--row-h); color: var(--c-text-muted); white-space: nowrap; }
+.v-wel__paste > .v-button { margin-bottom: calc((var(--row-h) - var(--ctl-sm)) / 2); }
 .v-wel__path { flex: 1; min-width: 0; }
 .v-wel__notice { border-left: 2px solid var(--c-warning); background: var(--c-warn-tint); border-radius: 0 var(--radius-md) var(--radius-md) 0; padding: var(--space-sm) var(--space-md); display: flex; flex-direction: column; gap: var(--space-xs); }
 .v-wel__sep { height: 1px; margin: 0; border: 0; background: var(--c-border); }

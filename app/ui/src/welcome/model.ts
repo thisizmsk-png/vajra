@@ -37,8 +37,17 @@ export interface Model {
 
 /** The core's own words for what went wrong, never its error code (the design: no raw "claude_dir_missing"). Empty when it gave none. */
 export const reason = (e: unknown): string => {
-  const d = typeof e === "object" && e !== null ? (e as { detail?: unknown }).detail : undefined;
-  return typeof d === "string" ? d.trim() : "";
+  const o = typeof e === "object" && e !== null ? (e as { error?: unknown; detail?: unknown }) : {};
+  const d = typeof o.detail === "string" ? o.detail.trim() : "";
+  // A detail that is one bare code ("project_discover") is not words: say what the code means, or say nothing.
+  if (!CODE.test(d)) return d;
+  return (typeof o.error === "string" && CODE_WORDS[o.error]) || "";
+};
+const CODE = /^[a-z][a-z0-9_]*$/;
+const CODE_WORDS: Record<string, string> = {
+  unknown_command: S.states.unknownCommand,
+  not_in_fixture: S.states.unknownCommand,
+  core_unavailable: S.states.noAnswer,
 };
 
 /** An agent counts when it is installed and its own login check says signed in. "Cannot tell" never counts. */

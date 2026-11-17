@@ -447,3 +447,12 @@ vajra-119 UI pass (one status style).
 | String | Where | Note |
 |---|---|---|
 | (changed) Working to In progress, Waiting to Pending | Run, task list status | the task list now uses the status vocabulary, as the project column does |
+
+vajra-119 UI pass (gap 10 polish).
+
+| String | Where | Note |
+|---|---|---|
+| Go to | Command palette, section label | places: projects and views |
+| Actions | Command palette, section label | everything else; a search shows one ranked list without labels |
+| The search stopped before it finished. | Welcome, repository search failed, when the core gave no words | replaces "The app's core didn't answer.", which was not always true |
+| (no longer shown) a bare error code such as project_discover | Welcome, same box | a known code is said in words (core too old, or no answer); an unknown one shows the line above |

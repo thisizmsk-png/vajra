@@ -180,9 +180,9 @@ function Frame() {
 
   // ⌘K: every project with its key, the views, the panels, Settings. The place you are on is not a place to go to.
   const commands = [
-    ...P.projects.flatMap((p, i) => (p.id === pid ? [] : [{ id: `p-${p.id}`, label: S.frame.goProject(p.name), hint: stateText(P.summaries.get(p.id)) || undefined, keys: i < 9 ? ["⌘", String(i + 1)] : undefined, run: () => goProject(p.id) }])),
-    ...(project ? (["orch", "board", "history"] as const).filter((v) => v !== route.screen).map((v) => ({ id: `v-${v}`, label: S.frame.show(S.views[v]), run: () => go(v, {}, pid) })) : []),
-    ...(project && current.focus && route.screen !== "review" ? [{ id: "v-review", label: S.frame.show(S.views.review), run: () => go("review", reviewParams, pid) }] : []),
+    ...P.projects.flatMap((p, i) => (p.id === pid ? [] : [{ id: `p-${p.id}`, label: S.frame.goProject(p.name), hint: stateText(P.summaries.get(p.id)) || undefined, keys: i < 9 ? ["⌘", String(i + 1)] : undefined, group: "go" as const, run: () => goProject(p.id) }])),
+    ...(project ? (["orch", "board", "history"] as const).filter((v) => v !== route.screen).map((v) => ({ id: `v-${v}`, label: S.frame.show(S.views[v]), group: "go" as const, run: () => go(v, {}, pid) })) : []),
+    ...(project && current.focus && route.screen !== "review" ? [{ id: "v-review", label: S.frame.show(S.views.review), group: "go" as const, run: () => go("review", reviewParams, pid) }] : []),
     ...(columnToggle ? [{ id: "column", label: compact ? S.frame.showColumn : S.frame.hideColumn, keys: ["⌘", "B"], run: () => setCompact((c) => !c) }] : []),
     ...(inspectable ? [{ id: "inspector", label: inspector ? S.frame.hideInspector : S.frame.showInspector, keys: ["⌘", "I"], run: () => setInspector((x) => !x) }] : []),
     ...(route.screen === "settings" ? [] : [{ id: "settings", label: S.frame.openSettings, keys: ["⌘", ","], run: () => openSettings() }]),

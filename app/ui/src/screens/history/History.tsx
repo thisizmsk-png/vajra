@@ -143,7 +143,7 @@ export function History() {
                 {loadErr && <Problem title={S.history.failed} detail={loadErr} retry={load} />}
                 {!camps && !loadErr && <LoadingRows label={S.states.loading} />}
                 {camps && camps.length === 0 && (
-                  <Empty title={S.history.empty} action={<Button onClick={() => go("home")}>{S.states.goHome}</Button>}>{S.history.emptyHint}</Empty>
+                  <Empty at="panel" title={S.history.empty} action={<Button onClick={() => go("home")}>{S.states.goHome}</Button>}>{S.history.emptyHint}</Empty>
                 )}
               </div>
             )}

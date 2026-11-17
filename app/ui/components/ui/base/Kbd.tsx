@@ -15,13 +15,14 @@ export const ariaShortcut = (keys: string[]) => keys.map((k) => ARIA[k] ?? k).jo
  * A key chord shown next to an action (DESIGN.md: keys are visible, so people learn them by using the app).
  * Inside a control pass `decorative`: the chord is hidden from the accessible name, and the control carries
  * `aria-keyshortcuts={ariaShortcut(keys)}` instead.
+ * A chord is one keycap ("⌘1"), the way the menu bar writes it; a word key ("esc") keeps a space from its neighbour.
  */
+export const chordText = (keys: string[]) => keys.reduce((s, k, i) => (i > 0 && (k.length > 1 || keys[i - 1].length > 1) ? `${s} ${k}` : s + k), "");
+
 export function Kbd({ keys, decorative, className }: { keys: string[]; decorative?: boolean; className?: string }) {
   return (
     <kbd className={cn("v-kbd-group", className)} aria-label={decorative ? undefined : keys.map(keyName).join(" ")} aria-hidden={decorative || undefined}>
-      {keys.map((k) => (
-        <kbd key={k} className="v-kbd" aria-hidden="true">{k}</kbd>
-      ))}
+      <kbd className="v-kbd" aria-hidden="true">{chordText(keys)}</kbd>
     </kbd>
   );
 }
