@@ -234,10 +234,24 @@ impl App {
     /// diff (`untracked: true`); the UI shows its content as all added.
     pub fn files_diff(&self, project_id: &str, worktree: Option<&str>, path: &str) -> Res {
         let (root, project) = self.files_root(project_id, worktree)?;
-        // The path may be deleted, so it is checked by shape only; `:(literal)` stops git reading it as pathspec magic.
         if check_rel(path).map_err(refused)?.is_empty() {
             return Err(invalid("path", "names no file"));
         }
+        // git diff reads the working file itself, so it must pass every rule files_read applies first: inside the root,
+        // outside the denied folders, a regular file, not the key by inode. A deleted file (missing) is allowed only
+        // when its nearest existing folder may be shown, which `resolve` checks before it answers `NotFound`.
+        match self.files_scope(&root)?.check_file(path) {
+            Ok(()) => {}
+            Err(Refused::NotFound) => {
+                let joined = root.join(path);
+                let denied = [&self.data, &self.claude].iter().any(|d| joined.starts_with(d.canonicalize().unwrap_or_else(|_| d.to_path_buf())));
+                if denied {
+                    return Err(refused(Refused::Protected));
+                }
+            }
+            Err(e) => return Err(refused(e)),
+        }
+        // `:(literal)` stops git reading the path as pathspec magic.
         let base = self.files_base(&root, &project).ok_or_else(|| fail("no_base", "the tree has no base to compare with"))?;
         let spec = format!(":(literal){path}");
         let o = self

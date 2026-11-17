@@ -253,8 +253,8 @@ impl Scope {
         Ok(Listing { entries, truncated, skipped })
     }
 
-    /// Read the file `rel`: text up to `TEXT_CAP`, an image up to `IMAGE_CAP`; anything else is only described.
-    pub fn read(&self, rel: &str) -> Result<FileRead, Refused> {
+    /// Open `rel` as `read` would: resolved inside the root, walked without links, a regular file that is not the key.
+    fn open_file(&self, rel: &str) -> Result<(File, std::fs::Metadata), Refused> {
         let real = self.resolve(rel)?;
         let f = self.open_walk(&real, false)?;
         let md = f.metadata().map_err(io)?;
@@ -264,6 +264,18 @@ impl Scope {
         if self.key.contains(&(md.dev(), md.ino())) {
             return Err(Refused::Protected);
         }
+        Ok((f, md))
+    }
+
+    /// Whether `rel` may be shown, by every rule `read` applies, without reading it. For a caller that hands the path
+    /// to another reader (git diff): `NotFound` means the path is missing and its nearest existing folder may be shown.
+    pub fn check_file(&self, rel: &str) -> Result<(), Refused> {
+        self.open_file(rel).map(|_| ())
+    }
+
+    /// Read the file `rel`: text up to `TEXT_CAP`, an image up to `IMAGE_CAP`; anything else is only described.
+    pub fn read(&self, rel: &str) -> Result<FileRead, Refused> {
+        let (f, md) = self.open_file(rel)?;
         let size = md.len();
         let image = image_mime(rel);
         let cap = if image.is_some() { IMAGE_CAP } else { TEXT_CAP };

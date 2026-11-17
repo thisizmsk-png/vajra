@@ -217,6 +217,50 @@ fn outside_git_the_index_walks_folders_but_never_through_a_link() {
 }
 
 #[test]
+fn a_diff_of_a_staged_hard_link_to_the_key_is_refused_and_never_carries_its_bytes() {
+    let fx = Fx::new();
+    let key = fx.dir.join("home/.claude/vajra").join(crate::vajra::allowlist::DENIED_NAME);
+    fs::write(&key, b"DUMMY-KEY-CANARY-d1ff").unwrap();
+    let wt = fx.repo().join(".claude/worktrees/w1");
+    fs::hard_link(&key, wt.join("notes.txt")).unwrap();
+    git(&wt, &["add", "notes.txt"]);
+    let r = fx.app.files_diff(&fx.pid, Some("w1"), "notes.txt");
+    assert!(!r.as_ref().map_or_else(|e| e.to_string(), |v| v.to_string()).contains("CANARY"), "{r:?}");
+    assert_eq!(code(&r.unwrap_err()), "protected");
+    // Committed too.
+    git(&wt, &["commit", "-q", "-m", "k"]);
+    assert_eq!(code(&fx.app.files_diff(&fx.pid, Some("w1"), "notes.txt").unwrap_err()), "protected");
+}
+
+#[test]
+fn a_diff_inside_a_denied_folder_in_the_repo_is_refused_present_or_deleted() {
+    let fx = Fx::new();
+    // The agent home sits inside the project (the store refuses that at add time, so the app is opened with that home
+    // after the project was registered): its files are tracked in the repo.
+    let home = fx.repo().join("u");
+    fs::create_dir_all(home.join(".claude/vajra")).unwrap();
+    fs::write(home.join(".claude/vajra/state.json"), b"SECRET-STATE").unwrap();
+    fs::write(home.join(".claude/vajra/gone.json"), b"SECRET-GONE").unwrap();
+    git(&fx.repo(), &["add", "-f", "u"]);
+    git(&fx.repo(), &["commit", "-q", "-m", "home"]);
+    fs::write(home.join(".claude/vajra/state.json"), b"SECRET-STATE-2").unwrap();
+    fs::remove_file(home.join(".claude/vajra/gone.json")).unwrap();
+    let app = App::open(&fx.dir.join("data"), &home).unwrap();
+    for p in ["u/.claude/vajra/state.json", "u/.claude/vajra/gone.json"] {
+        let r = app.files_diff(&fx.pid, None, p);
+        assert!(!r.as_ref().map_or_else(|e| e.to_string(), |v| v.to_string()).contains("SECRET"), "{p}: {r:?}");
+        assert_eq!(code(&r.unwrap_err()), "protected", "{p}");
+    }
+    // With the whole folder gone, the deleted path is still refused by name.
+    fs::remove_dir_all(home.join(".claude")).unwrap();
+    assert_eq!(code(&app.files_diff(&fx.pid, None, "u/.claude/vajra/state.json").unwrap_err()), "protected");
+    // A deleted file elsewhere still diffs.
+    fs::remove_file(fx.repo().join("src/lib.rs")).unwrap();
+    let d = app.files_diff(&fx.pid, None, "src/lib.rs").unwrap();
+    assert!(d["diff"].as_str().unwrap().contains("-pub fn a() {}"), "{d}");
+}
+
+#[test]
 fn name_status_parses_renames_copies_and_deletes() {
     let raw = b"M\0a.rs\0A\0b.rs\0D\0c.rs\0R100\0old.rs\0new.rs\0C075\0x.rs\0y.rs\0T\0t.rs\0";
     let got: Vec<(String, char)> = parse_name_status(raw).into_iter().map(|c| (c.path, c.status)).collect();
