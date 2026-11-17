@@ -115,11 +115,12 @@ describe("Crew tree (S2a, US-2.1)", () => {
     window.location.hash = "#/crew?slug=camp&id=r1";
     const f = open({ crew: tree() });
     render(<Crew />);
-    const backend = (await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement;
+    const t = await screen.findByRole("tree");
+    const backend = within(t).getByText("Backend").closest("[role=treeitem]") as HTMLElement;
     fireEvent.click(backend);
     act(() => f.emit("changed", {}));
     await waitFor(() => expect(f.calls.filter((c) => c.cmd === "crew").length).toBeGreaterThan(1));
-    const again = (await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement;
+    const again = within(await screen.findByRole("tree")).getByText("Backend").closest("[role=treeitem]") as HTMLElement;
     expect(again.getAttribute("aria-selected")).toBe("true");
   });
 
@@ -129,10 +130,20 @@ describe("Crew tree (S2a, US-2.1)", () => {
     render(<Crew />);
     const backend = (await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement;
     fireEvent.click(backend);
-    const details = await screen.findByRole("region", { name: S.crew.details });
-    expect(within(details).getByText(S.crew.kind)).toBeTruthy();
-    expect(within(details).queryByText(S.crew.engineId)).toBeNull();
+    const pane = await screen.findByRole("region", { name: "Backend" });
+    expect(within(pane).queryByText(S.crew.engineId)).toBeNull();
     expect(screen.queryByText("bhima")).toBeNull();
+  });
+
+  it("never shows a bare Status and Kind box: a task with no worker says it is waiting, in words", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    open({ crew: tree() });
+    render(<Crew />);
+    fireEvent.click(within(await screen.findByRole("tree")).getByText("Frontend").closest("[role=treeitem]") as HTMLElement);
+    const pane = await screen.findByRole("region", { name: "Frontend" });
+    expect(pane.textContent).toContain(S.crew.waiting);
+    expect(screen.queryByText(S.crew.kind)).toBeNull();
+    expect(screen.queryByRole("region", { name: S.crew.details })).toBeNull();
   });
 
   it("names an overlay on the node, such as a stop or a pending message", async () => {
@@ -167,7 +178,7 @@ describe("Crew tree (S2a, US-2.1)", () => {
     });
     render(<Crew />);
     fireEvent.click((await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement);
-    expect(await screen.findByRole("region", { name: S.crew.details })).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "Backend" })).toBeTruthy();
     // Same mounted component; only the hash moves.
     act(() => { window.location.hash = "#/crew?slug=camp2&id=r2"; });
     await screen.findByText("Reviewer");
@@ -214,10 +225,10 @@ describe("Crew focus from the Run view's task graph (AC-4.2.3)", () => {
     window.location.hash = "#/crew?slug=camp&id=r1&focus=task%3At1";
     open({ crew: withWorkers(), task: { task: {}, stale: false, evidence: null }, stream_window: { lines: [], head_seq: 0, first_seq: 1, at_start: true, at_end: true, gap: false } });
     render(<Crew />);
-    const row = (await screen.findByText("round 2")).closest("[role=treeitem]") as HTMLElement;
-    await waitFor(() => expect(row.getAttribute("aria-selected")).toBe("true"));
+    const t = await screen.findByRole("tree");
+    await waitFor(() => expect((within(t).getByText("round 2").closest("[role=treeitem]") as HTMLElement).getAttribute("aria-selected")).toBe("true"));
     expect(await screen.findByRole("tablist", { name: S.crew.tabsLabel })).toBeTruthy();
-    expect((screen.getByText("round 1").closest("[role=treeitem]") as HTMLElement).getAttribute("aria-selected")).not.toBe("true");
+    expect((within(t).getByText("round 1").closest("[role=treeitem]") as HTMLElement).getAttribute("aria-selected")).not.toBe("true");
   });
 
   it("selects the task group itself when it has no worker yet", async () => {

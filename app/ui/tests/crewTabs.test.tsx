@@ -42,10 +42,11 @@ async function open(replies: Record<string, unknown> = {}) {
 const tab = (name: string) => screen.findByRole("tab", { name });
 
 describe("Worker tabs (S2c, US-2.3)", () => {
-  it("offers Stream, Diff, Task and Worktree, Stream first", async () => {
+  it("offers Live, Raw output, Diff, Task and Worktree, with Live open first", async () => {
     await open();
-    const names = (await screen.findAllByRole("tab")).map((t) => t.textContent);
-    expect(names).toEqual([S.crew.tabs.stream, S.crew.tabs.diff, S.crew.tabs.task, S.crew.tabs.worktree]);
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs.map((t) => t.textContent)).toEqual([S.crew.tabs.live, S.crew.tabs.stream, S.crew.tabs.diff, S.crew.tabs.task, S.crew.tabs.worktree]);
+    expect(tabs[0].getAttribute("aria-selected")).toBe("true");
   });
 
   it("Diff shows the worktree's git diff against its base, read only", async () => {
@@ -175,11 +176,15 @@ describe("Worker tabs (S2c, US-2.3)", () => {
     const f = fakeIpc({ ...base });
     setTransport(f.transport);
     render(<Crew />);
-    fireEvent.click((await screen.findByText("Tester")).closest("[role=treeitem]") as HTMLElement);
+    // The screen opens on another worker (the active one), which reads its own task; Tester must not add a read.
+    const tester = (await screen.findByText("Tester")).closest("[role=treeitem]") as HTMLElement;
+    await screen.findByRole("tablist", { name: S.crew.tabsLabel });
+    const before = f.calls.length;
+    fireEvent.click(tester);
     fireEvent.click(await tab(S.crew.tabs.task));
     const panel = await screen.findByRole("tabpanel");
     expect(panel.textContent).toContain(S.crew.noTask);
-    expect(f.calls.some((c) => c.cmd === "task")).toBe(false);
+    expect(f.calls.slice(before).some((c) => c.cmd === "task")).toBe(false);
   });
 
   it("finds the task from the tree, not from the node title (a round is titled 'round 1')", async () => {
@@ -232,9 +237,9 @@ describe("Worker tabs (S2c, US-2.3)", () => {
 
   it("arrow keys move between tabs", async () => {
     await open();
-    const first = await tab(S.crew.tabs.stream);
+    const first = await tab(S.crew.tabs.live);
     first.focus();
     fireEvent.keyDown(first, { key: "ArrowRight" });
-    expect(document.activeElement?.textContent).toBe(S.crew.tabs.diff);
+    expect(document.activeElement?.textContent).toBe(S.crew.tabs.stream);
   });
 });
