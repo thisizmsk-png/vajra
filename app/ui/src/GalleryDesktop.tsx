@@ -14,7 +14,7 @@ const LINES = [
   ...Array.from({ length: 2000 }, (_, i) => `step ${i} ${E}[90mlog line${E}[0m`),
 ];
 const DIFF = "diff --git a/scratch.txt b/scratch.txt\n--- a/scratch.txt\n+++ b/scratch.txt\n@@ -1 +1,3 @@\n scratch\n+step1\n+step2\ndiff --git a/README.md b/README.md\n@@ -1 +1 @@\n-old\n+new";
-const TREE: CrewNode[] = [{ id: "lead", label: "Lead", status: "in_progress", children: [{ id: "be", label: "Backend", status: "in_progress", children: [{ id: "w1", label: "Backend worker 1", status: "done" }] }, { id: "fe", label: "Frontend", status: "blocked" }] }];
+const TREE: CrewNode[] = [{ id: "lead", label: "Run lead", status: "in_progress", children: [{ id: "be", label: "Backend", status: "in_progress", children: [{ id: "w1", label: "Backend worker 1", status: "done" }] }, { id: "fe", label: "Frontend", status: "blocked" }] }];
 
 /** The K3 desktop kit in use, for review and the click crawl (open with #kit). Sample data only; not an app screen. */
 export function GalleryDesktop() {
@@ -50,7 +50,7 @@ export function GalleryDesktop() {
           <EvidenceRow id="ac-2" state="fail" command="npm test" exitCode={1} />
         </tbody>
         </table>
-        <div className="v-gallery__gap"><ActionCard kind="redirect" worker="Backend" by="Lead" text="Use the kit Button" state="delivered" time="14:22" onOpenWorker={() => setNote("worker")} onOpenAudit={() => setNote("audit")} /></div>
+        <div className="v-gallery__gap"><ActionCard kind="redirect" worker="Backend" by="Run lead" text="Use the kit Button" state="delivered" time="14:22" onOpenWorker={() => setNote("worker")} onOpenAudit={() => setNote("audit")} /></div>
         <div className="v-gallery__flex v-gallery__center v-gallery__gap">
           <Tooltip text="Open the command palette (Cmd K)"><Button onClick={() => setPalette(true)}>Commands</Button></Tooltip>
           <Text variant="body-sm" muted>{note}</Text>

@@ -46,7 +46,7 @@ const rows = () => within(screen.getByRole("list", { name: L.entries })).getAllB
 
 describe("what each entry says", () => {
   it("names who wrote it and what happened, for every kind the core writes", () => {
-    expect([who("core"), who("verifier"), who("lead"), who("human"), who({ worker: "k3" })]).toEqual(["Vajra", "Verifier", "Lead", "You", "Worker k3"]);
+    expect([who("core"), who("verifier"), who("lead"), who("human"), who({ worker: "k3" })]).toEqual(["Vajra", "Verifier", "Run lead", "You", "Worker k3"]);
     const say = (kind: string, body: unknown) => what(entry(1, kind, body));
     expect(say("run_started", { resumed_from: null })).toBe("Run started");
     expect(say("run_started", { resumed_from: "20261113-2100" })).toBe("Run resumed after 20261113-2100");

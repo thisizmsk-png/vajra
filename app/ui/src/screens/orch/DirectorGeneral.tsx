@@ -292,14 +292,7 @@ export function DirectorGeneral({ embedded }: { embedded?: Embedded } = {}) {
         <div className="v-dgv__col" ref={col}>
           {embedded && <p className="v-subagents__lede">{S.dg.leadIs}</p>}
           {embedded?.intro}
-          {agents && agents.list.length > 0 && (
-            <section className="v-subagents" aria-label={S.dg.startedWorkers(agents.list.length)}>
-              <p className="v-subagents__lede">{S.dg.startedWorkers(agents.list.length)}</p>
-              <ul className="v-subagents__list">
-                {agents.list.map((a) => <li key={a.id}><SubAgentCard agent={a} verb={S.dg.workerVerb.start} onOpen={() => agents.open(a.id)} /></li>)}
-              </ul>
-            </section>
-          )}
+          {agents && <SubAgentList agents={agents} />}
           <div role="log" aria-label={S.dg.transcript} aria-live="polite" className="v-dgv__log">
             {shown.length === 0 && !showEcho && st && (
               <div className="v-dgv__empty"><p className="v-dgv__empty-t">{S.dg.empty}</p><p>{embedded ? S.dg.emptyHintLead : S.dg.emptyHint}</p></div>
@@ -343,6 +336,19 @@ export function SubAgentCard({ agent, verb, text, onOpen, href }: { agent: SubAg
   return onOpen
     ? <button type="button" className="v-subagent" onClick={onOpen}>{body}</button>
     : <a className="v-subagent" href={href}>{body}</a>;
+}
+
+/** Every worker of the run as a card that opens its chat. */
+export function SubAgentList({ agents }: { agents: SubAgents }) {
+  if (agents.list.length === 0) return null;
+  return (
+    <section className="v-subagents" aria-label={S.dg.startedWorkers(agents.list.length)}>
+      <p className="v-subagents__lede">{S.dg.startedWorkers(agents.list.length)}</p>
+      <ul className="v-subagents__list">
+        {agents.list.map((a) => <li key={a.id}><SubAgentCard agent={a} verb={S.dg.workerVerb.start} onOpen={() => agents.open(a.id)} /></li>)}
+      </ul>
+    </section>
+  );
 }
 
 const TurnView = memo(function TurnView({ role, text, agents }: { role: "you" | "dg" | "tool" | "error"; text: string; agents?: SubAgents }) {

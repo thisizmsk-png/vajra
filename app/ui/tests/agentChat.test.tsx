@@ -182,8 +182,9 @@ describe("the Lead's chat", () => {
         : win(["Working on the bucket."])),
     });
     setTransport(f.transport);
-    window.location.hash = "#/crew?slug=camp&id=r1&focus=lead";
+    window.location.hash = "#/crew?slug=camp&id=r1";
     render(<Live><Crew /></Live>);
+    fireEvent.click(within(await screen.findByRole("tree")).getByText(S.views.orch).closest("[role=treeitem]") as HTMLElement);
     const log = await screen.findByRole("log", { name: S.dg.transcript });
     const card = await within(log).findByRole("button", { name: /Messaged/ });
     expect(card.textContent).toContain("Backend");

@@ -316,7 +316,7 @@ describe("EvidenceRow and ActionCard", () => {
   });
   it("ActionCard is an article named by its heading with a live status and wired links", () => {
     const [w, a] = [vi.fn(), vi.fn()];
-    render(<ActionCard kind="redirect" worker="Backend" by="Lead" text="Use the kit Button" state="delivered" time="14:22" onOpenWorker={w} onOpenAudit={a} />);
+    render(<ActionCard kind="redirect" worker="Backend" by="Run lead" text="Use the kit Button" state="delivered" time="14:22" onOpenWorker={w} onOpenAudit={a} />);
     expect(screen.getByRole("article", { name: "Redirect for Backend" })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe("Delivered");
     fireEvent.click(screen.getByRole("button", { name: "Open worker" }));

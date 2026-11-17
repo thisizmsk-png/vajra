@@ -21,7 +21,7 @@ import type { Facts } from "./RunSummary";
 import { LIVENESS_MS, headsGrew, initialPick, isWorkerId, isWorking, stalledSince, workersIn } from "./crewLive";
 import { parseWhen } from "../when";
 import { chatItems, lastLine } from "./chat";
-import { DirectorGeneral } from "../orch/DirectorGeneral";
+import { DirectorGeneral, SubAgentList } from "../orch/DirectorGeneral";
 import type { SubAgent } from "../orch/DirectorGeneral";
 
 /** Rows read from each working worker's stream for its newest line; a few kilobytes at most. */
@@ -59,10 +59,15 @@ function statusShown(n: CrewNodeDto, stalled: boolean): Shown {
 /** The label alone, for the palette and the action bar outside a run's context. */
 const statusLabel = (n: CrewNodeDto) => statusShown(n, false).label;
 
+/** A node's name as shown: the run's lead is the "Run lead" under the Director-General (the core's id stays `lead`). */
+const titleOf = (n: CrewNodeDto) => (n.kind === "lead" ? S.crew.runLead : n.title);
+/** The Director-General's node, at the top of the tree: it oversees the run's lead. Not a node of the core's tree. */
+export const DG_NODE = "director-general";
+
 function toNode(n: CrewNodeDto, stalled: boolean): CrewNode {
   const p = parseWorkerProvider(n.provider);
   const s = statusShown(n, stalled);
-  return { id: n.id, label: n.title, status: s.shape, statusLabel: s.label, statusHint: s.hint, icon: p ? iconOf(p) : undefined, children: n.children.map((c) => toNode(c, stalled)) };
+  return { id: n.id, label: titleOf(n), status: s.shape, statusLabel: s.label, statusHint: s.hint, icon: p ? iconOf(p) : undefined, children: n.children.map((c) => toNode(c, stalled)) };
 }
 
 const find = (n: CrewNodeDto, id: string): CrewNodeDto | null => {
@@ -212,7 +217,7 @@ export function Crew() {
   // While the Lead's chat is open, each working worker's newest rows (a few kilobytes), so its card says what it is
   // doing now. Nothing is read for this anywhere else.
   const [lasts, setLasts] = useState<ReadonlyMap<string, string>>(new Map());
-  const leadOpen = selected === "lead" || selected.startsWith("run:");
+  const leadOpen = selected === DG_NODE || selected === "lead" || selected.startsWith("run:");
   const readLasts = useCallback(() => {
     const ids = streamsKey ? streamsKey.split("\n") : [];
     if (!ids.length || !leadOpen) return;
@@ -319,27 +324,48 @@ export function Crew() {
     const s = statusShown(w, stalled);
     return { id: w.id, name: nameOf(w), task: facts(w).taskOf(w), status: s.shape, statusLabel: s.label, last: isWorking(w.status) && !stalled ? lasts.get(w.id) : undefined };
   });
-  /** The Lead (and the run it leads): its conversation, with the run's workers as cards that open their chats. */
-  const leadPane = (n: CrewNodeDto) => {
-    const s = statusShown(n, stalled);
-    const f = facts(n);
+  /** The Director-General, over the Run lead: its conversation about this run, with the run's workers as cards. */
+  const dgPane = () => {
+    const f = facts(root);
     return (
-      <DirectorGeneral key="lead" embedded={{
-        title: run?.title ?? n.title,
-        status: <StatusDot status={s.shape} label={s.label} />,
+      <DirectorGeneral key={DG_NODE} embedded={{
+        title: S.views.orch,
         agents: { list: subAgents, open: openAgent },
         banner: f.stalled !== undefined && target ? <StallNote since={f.stalled} live={f.live} slug={target.slug} /> : undefined,
-        intro: <RunFacts scope={n} f={f} />,
+        intro: <RunFacts scope={root} f={f} />,
         runId: target?.runId,
       }} />
     );
   };
-  const pane = !root || !picked ? null
+  /** The Run lead (and the run it leads): what is happening, its workers as cards, and the way to tell it something,
+   *  which is through the Director-General that oversees it. */
+  const runLeadPane = (n: CrewNodeDto) => {
+    const s = statusShown(n, stalled);
+    const f = facts(n);
+    return (
+      <section key={n.id} className="v-crew__pane v-crew__summary" aria-label={titleOf(n)}>
+        <div className="v-crew__panehead">
+          <Text as="h2" variant="headline-md">{titleOf(n)}</Text>
+          <StatusDot status={s.shape} label={s.label} />
+        </div>
+        {f.stalled !== undefined && target && <StallNote since={f.stalled} live={f.live} slug={target.slug} />}
+        <div className="v-crew__lead-note">
+          <Text variant="body-sm" muted>{S.crew.runLeadIs}</Text>
+          <Button size="sm" onClick={() => setSelected(DG_NODE)}>{S.crew.askDg}</Button>
+        </div>
+        <RunFacts scope={n} f={f} />
+        <SubAgentList agents={{ list: subAgents, open: openAgent }} />
+      </section>
+    );
+  };
+  const pane = selected === DG_NODE ? dgPane()
+    : !root || !picked ? null
     : isWorkerId(picked.id) ? workerPane(picked)
     : picked.kind === "task" || picked.id.startsWith("task:") ? taskPane(picked)
-    : picked.kind === "lead" || picked.kind === "run" ? leadPane(picked)
+    : picked.kind === "lead" || picked.kind === "run" ? runLeadPane(picked)
     : <RunSummary key={picked.id} scope={picked} f={facts(picked)} />;
   const pickedShown = picked ? statusShown(picked, stalled) : null;
+  const tree: CrewNode = { id: DG_NODE, label: S.views.orch, status: "ready", statusLabel: S.crew.dgOversees, children: [toNode(root, stalled)] };
 
   return (
     <div className="v-screen v-crew">
@@ -349,13 +375,13 @@ export function Crew() {
       <div className="v-crew__body">
         <div className="v-crew__tree">
           {root && openIds && (
-            <CrewTree label={S.crew.treeLabel} nodes={[toNode(root, stalled)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
+            <CrewTree label={S.crew.treeLabel} nodes={[tree]} selected={selected} onSelect={setSelected} defaultOpen={[DG_NODE, ...openIds]} />
           )}
         </div>
         {pane}
       </div>
       <ActionBar label={S.crew.barLabel}
-        context={picked && pickedShown ? <span>{`${picked.role ?? picked.title}, ${pickedShown.label}`}</span> : undefined} />
+        context={selected === DG_NODE ? <span>{S.views.orch}</span> : picked && pickedShown ? <span>{`${picked.role ?? titleOf(picked)}, ${pickedShown.label}`}</span> : undefined} />
     </div>
   );
 }
