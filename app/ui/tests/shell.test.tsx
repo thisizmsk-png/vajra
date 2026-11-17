@@ -68,6 +68,37 @@ beforeEach(() => {
 afterEach(() => { cleanup(); setTransport(); window.location.hash = ""; });
 
 describe("Shell B frame (FG-03)", () => {
+  it("says a down core once, on Home, not again in the title bar; another screen keeps the title bar's line", async () => {
+    const down = () => new Error("no answer");
+    const over = { preflight: down, list_campaigns: down, resume_targets: down, active_runs: down, inbox: down, preferences_read: down };
+    boot("", over);
+    expect(await screen.findByText(S.home.coreDown)).toBeTruthy();
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.queryByText(S.frame.loadFailed)).toBeNull();
+    expect(screen.getAllByRole("button", { name: S.states.retry })).toHaveLength(1);
+    cleanup();
+    boot("#/settings", over);
+    expect(await screen.findByText(S.frame.loadFailed)).toBeTruthy();
+  });
+
+  it("keeps the title bar's line and retry on Home when the core answers the project list with an error and the checks pass", async () => {
+    const fail = () => { throw { error: "io_error", detail: "the project index is unreadable" }; };
+    boot("", { list_campaigns: fail });
+    expect(await screen.findByText(S.frame.loadFailed)).toBeTruthy();
+    expect(screen.queryByText(S.home.coreDown)).toBeNull();
+    const retry = screen.getAllByRole("button", { name: S.states.retry }).find((b) => b.classList.contains("v-sb-btn"));
+    expect(retry).toBeTruthy();
+    const before = ipc.calls.filter((c) => c.cmd === "list_campaigns").length;
+    fireEvent.click(retry!);
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
+  });
+
+  it("when only the project list gets no answer, Home still says the core is down, so the quiet title bar never hides it", async () => {
+    boot("", { list_campaigns: () => new Error("no answer") });
+    expect(await screen.findByText(S.home.coreDown)).toBeTruthy();
+    expect(screen.queryByText(S.frame.loadFailed)).toBeNull();
+  });
+
   it("has no static list of screens: the title bar lists projects, Unsorted last", async () => {
     boot();
     await waitFor(() => expect(tabs().getAllByRole("link")).toHaveLength(3));
@@ -227,6 +258,22 @@ describe("Shell B frame (FG-03)", () => {
     expect(within(bar).queryByRole("button", { name: /phone/i })).toBeNull();
     fireEvent.click(within(bar).getByRole("button", { name: S.views.settings }));
     expect(window.location.hash).toMatch(/\/settings$/);
+  });
+
+  it("Settings hides the project column, keeps the way back, and the column returns on leaving", async () => {
+    boot();
+    const col = { name: S.column.label("api") };
+    await screen.findByRole("complementary", col);
+    fireEvent.click(within(screen.getByRole("contentinfo", { name: S.frame.status })).getByRole("button", { name: S.views.settings }));
+    const title = await screen.findByRole("heading", { level: 1, name: S.settings.sections.providers.title });
+    expect(title.closest(".v-pagehead")).toBeTruthy();
+    expect(screen.queryByRole("complementary", col)).toBeNull();
+    // Nothing can flip the stored fold choice from here: no status bar button, and ⌘B does nothing.
+    expect(within(screen.getByRole("contentinfo", { name: S.frame.status })).queryByRole("button", { name: S.frame.column })).toBeNull();
+    key("b");
+    const back = screen.getByRole("link", { name: S.settings.backTo("api") });
+    fireEvent.click(back);
+    expect(await screen.findByRole("complementary", col)).toBeTruthy();
   });
 
   it("with no projects yet: no column, the welcome checklist, and Add project", async () => {

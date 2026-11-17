@@ -31,6 +31,8 @@ export const ICONS = {
   panelRight: <><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" /><path d="M10 2.8v10.4" /></>,
   board: <><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" /><path d="M6 2.8v10.4M10 2.8v10.4" /></>,
   director: <><circle cx="8" cy="5" r="2.4" /><path d="M3.2 13.5c.6-2.6 2.5-4 4.8-4s4.2 1.4 4.8 4" /></>,
+  /** A note on a dense row (a worker that ran on another model, or a provider error): the words sit beside it for readers. */
+  alert: <><path d="M8 2.2 14.2 13H1.8Z" /><path d="M8 6.5v2.8M8 11.2v.1" /></>,
 } satisfies Record<string, ReactNode>;
 export type IconName = keyof typeof ICONS;
 

@@ -41,6 +41,12 @@
 .v-wp--compact .v-pt__via { display: none; }
 .v-wp__diff { flex: none; white-space: nowrap; font: 500 12px/16px var(--font-ui); font-variant-numeric: tabular-nums; color: var(--c-text-secondary); }
 .v-wp__ran { color: var(--c-warning); }
+/* The row mark: a 16 px tile, then a 12 px warning glyph when there is a note (muted while it retries, amber when it needs you). */
+.v-wm { display: inline-flex; flex: none; align-items: center; gap: var(--space-xs); }
+.v-wm .v-pt { --tile: 16px; }
+.v-wm .v-pt__via { display: none; }
+.v-wm__warn { display: inline-flex; color: var(--c-text-muted); }
+.v-wm__warn--you { color: var(--c-warning); }
 .v-wp__err { color: var(--c-text-secondary); overflow-wrap: anywhere; }
 .v-wp__err--you { color: var(--c-warning); }
 .v-tree .v-pt { --tile: 20px; margin-right: var(--space-xs); }

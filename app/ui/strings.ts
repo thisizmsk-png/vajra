@@ -480,6 +480,8 @@ export const S = {
     } as Record<string, string>,
     preflightRetry: "Check again",
     preflightFailed: "Could not run the checks.",
+    coreDown: "Vajra's core isn't answering.",
+    campaignsWait: "Runs show here once the core answers.",
     start: "Start a run",
     repo: "Repository folder",
     repoHint: "A git repository. Choose it, or paste its path.",

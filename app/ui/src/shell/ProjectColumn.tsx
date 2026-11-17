@@ -9,7 +9,7 @@ import { api, newActionId } from "../ipc";
 import type { Campaign, CloseFinishedResult } from "../ipc";
 import { unsavedText, useCloseout } from "../projects/closeout";
 import type { Route } from "../router";
-import { ProviderLine } from "../screens/ProviderLine";
+import { ProviderMark } from "../screens/ProviderLine";
 
 export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorker, onSession }: {
   project: Project;
@@ -104,8 +104,8 @@ export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorke
                     {isClosed && <span className="v-w2__tag" title={S.closeout.closedHint}>{S.closeout.closed}</span>}
                     {(co?.state === "unsaved_work" || co?.state === "terminal_busy") && <span className="v-w2__tag v-w2__tag--warn" title={unsavedText(co)}>{co.state === "unsaved_work" ? S.closeout.unsaved : S.closeout.busyTag}</span>}
                     <StatusDot status={w.status} label={w.statusLabel} className="v-w2__s" /></span>
-                  <span className="v-w2__t">{w.task}</span>
-                  {w.provider && <ProviderLine p={w.provider} compact />}
+                  {/* Two lines at most: the task, and the provider as an icon at the end; its words are in the worker's pane. */}
+                  <span className="v-w2__b"><span className="v-w2__t">{w.task}</span>{w.provider && <ProviderMark p={w.provider} />}</span>
                 </button>
               );
             }) : <p className="v-pcol__none">{crew ? S.column.noWorkers : S.column.workersHint}</p>}
