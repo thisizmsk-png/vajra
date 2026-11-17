@@ -237,6 +237,9 @@ describe("Shell B frame (FG-03)", () => {
     const title = await screen.findByRole("heading", { level: 1, name: S.settings.sections.providers.title });
     expect(title.closest(".v-pagehead")).toBeTruthy();
     expect(screen.queryByRole("complementary", col)).toBeNull();
+    // Nothing can flip the stored fold choice from here: no status bar button, and ⌘B does nothing.
+    expect(within(screen.getByRole("contentinfo", { name: S.frame.status })).queryByRole("button", { name: S.frame.column })).toBeNull();
+    key("b");
     const back = screen.getByRole("link", { name: S.settings.backTo("api") });
     fireEvent.click(back);
     expect(await screen.findByRole("complementary", col)).toBeTruthy();
