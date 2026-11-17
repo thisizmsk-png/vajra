@@ -18,7 +18,7 @@
 .v-launch { border: 1px solid var(--c-border-strong); border-radius: var(--radius-lg); background: var(--c-panel); box-shadow: 0 1px 2px var(--c-shadow-soft); transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out); }
 .v-launch__ask { padding: var(--space-lg) var(--space-lg) 0; }
 .v-launch__ask .v-field__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.v-launch__ask textarea.v-input { min-height: 72px; padding: 0; border: 0; background: transparent; font-size: 16px; line-height: 25px; resize: none; }
+.v-launch__ask textarea.v-input { min-height: 72px; padding: 0; border: 0; background: transparent; font-size: var(--text-lg); line-height: 22px; resize: none; }
 .v-launch__ask textarea.v-input:focus-visible { outline: none; }
 /* The ask has no edge of its own, so while it has focus the launcher draws a 2 px ring (WCAG 2.4.7); the other fields ring themselves. */
 .v-launch:has(.v-launch__ask textarea:focus) { border-color: var(--c-focus-ring); box-shadow: 0 0 0 1px var(--c-focus-ring); }
@@ -147,11 +147,11 @@ h1.v-run__name { margin-bottom: var(--space-lg); }
 .v-crew__aside .v-section__head { margin-bottom: var(--space-sm); }
 /* A core worker's pane (16.7): its changed files, and Message, Redirect and Stop with the harness's reason when off. */
 .v-crew__pane > .v-crew__changes { margin: 0; padding: var(--space-md) var(--space-lg); }
-.v-crew__files { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: var(--text-body-sm, 13px); }
+.v-crew__files { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: var(--text-sm); }
 .v-crew__files code { overflow-wrap: anywhere; }
 .v-crew__controls { display: grid; gap: var(--space-sm); }
 .v-crew__controlrow { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
-.v-crew__reason { margin: 0; color: var(--c-text-muted); font-size: var(--text-body-sm, 13px); }
+.v-crew__reason { margin: 0; color: var(--c-text-muted); font-size: var(--text-sm); }
 .v-crew__facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px var(--space-md); margin: 0; font-size: 12px; line-height: 17px; }
 .v-crew__facts dt { color: var(--c-text-muted); }
 .v-crew__facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--c-text-secondary); }
@@ -160,8 +160,8 @@ h1.v-run__name { margin-bottom: var(--space-lg); }
 
 /* Shared screen frame: a 48 px head (title, then quiet meta), a scrolling body, the action bar at the foot. */
 .v-screen__head { display: flex; align-items: center; gap: 10px; height: 48px; flex: none; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); white-space: nowrap; }
-.v-screen__head > h1 { font-size: 14px; font-weight: 600; }
-.v-screen__meta { color: var(--c-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.v-screen__head > h1 { font-size: var(--text-lg); font-weight: 600; }
+.v-screen__meta { color: var(--c-text-muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 
 /* History: the campaigns and the search in one scrolling column; a report opens in a pane on the right. */
 .v-history__body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }

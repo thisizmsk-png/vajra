@@ -20,6 +20,9 @@ const RULES: Array<[string, RegExp]> = [
   ["gradient", /gradient\(/],
   ["banned webfont", /\b(?:Inter|Geist|Space Grotesk)\b/],
   ["ALL-CAPS transform", /text-transform\s*:\s*uppercase|\buppercase\b/],
+  // The type scale is five sizes (tokens.css --text-xs to --text-xl). A raw px size off it, such as 11.5 or 14, fails;
+  // a size on it passes until it moves to its token. Matches `font-size: N px` and the size in a `font:` shorthand.
+  ["off-scale font size", /\bfont(?:-size)?\s*:\s*(?:(?:normal|italic|[1-9]00)\s+)*(?!(?:11|12|13|15|22)px)\d+(?:\.\d+)?px/],
 ];
 // `#` inside a url fragment or a JSX/TS private field is not a color; the lookahead above keeps ids like #root out.
 const EXEMPT_DIRS = ["theme", "node_modules", "dist", "dist-lag", "tests"];

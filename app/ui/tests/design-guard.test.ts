@@ -32,6 +32,10 @@ describe("design guard", () => {
       ["gradient", "a { background: linear-gradient(red, blue); }"],
       ["banned webfont", "a { font-family: Inter; }"],
       ["ALL-CAPS transform", "a { text-transform: uppercase; }"],
+      ["off-scale font size", "a { font-size: 14px; }"],
+      ["off-scale font size", "a { font-size: 12.5px; }"],
+      ["off-scale font size", "a { font: 500 11.5px/14px var(--font-ui); }"],
+      ["off-scale font size", "a { font: 16px/20px var(--font-ui); }"],
     ];
     for (const [rule, text] of bad) {
       expect(scanText("x", text).map((v) => v.rule), text).toContain(rule);
@@ -51,7 +55,7 @@ describe("design guard", () => {
   });
 
   it("does not flag tokens, ids or ordinary css", () => {
-    for (const ok of ["a { color: var(--c-text); }", "#root { margin: 0 }", "color-mix(in srgb, var(--c-a) 60%, transparent)", "const x = `#${id}`", "a { border: 1px solid var(--c-border); }", "a { box-shadow: var(--shadow-floating); }", "a { outline: 2px solid var(--c-focus-ring); }", "a { border-color: var(--c-red-ish); }", "a { color: color-mix(in srgb, var(--c-primary) 88%, var(--c-text)); }", "a { text-decoration: underline; }"]) {
+    for (const ok of ["a { color: var(--c-text); }", "#root { margin: 0 }", "color-mix(in srgb, var(--c-a) 60%, transparent)", "const x = `#${id}`", "a { border: 1px solid var(--c-border); }", "a { box-shadow: var(--shadow-floating); }", "a { outline: 2px solid var(--c-focus-ring); }", "a { border-color: var(--c-red-ish); }", "a { color: color-mix(in srgb, var(--c-primary) 88%, var(--c-text)); }", "a { text-decoration: underline; }", "a { font-size: 12px; }", "a { font: 500 13px/16px var(--font-ui); }", "a { font: 600 var(--text-lg)/20px var(--font-ui); }", "a { line-height: 14px; }"]) {
       expect(scanText("x", ok), ok).toEqual([]);
     }
   });

@@ -112,8 +112,9 @@ needs it (none does today), and add `cva` only if variants outgrow the props. Co
 variables consumed as `var(--c-primary)`, so a theme swaps variables and nothing else. The other
 tokens that exist are `--font-ui`, `--font-mono`, `--space-xs` to `--space-xl`, `--radius-sm`,
 `--radius-md`, `--radius-lg`, `--ctl-sm`, `--row-h`, `--ctl-lg`, `--target-min`, `--sidebar-w`,
-`--bar-h`, `--t-fast`, `--t-panel` and `--ease-out`. Type sizes are not tokens; they live in the
-`Text` variants and the kit CSS, from the scale below.
+`--bar-h`, `--t-fast`, `--t-panel` and `--ease-out`. Type sizes are five tokens, `--text-xs` (11),
+`--text-sm` (12), `--text-md` (13), `--text-lg` (15) and `--text-xl` (22), used by the `Text`
+variants and the kit CSS. No other size is allowed; the design guard fails one.
 
 ## Art direction (app screens)
 
@@ -459,7 +460,8 @@ one file; log visible wording in `docs/design/changed-strings.md`. Run copy thro
 
 **Design-guard test** (`app/ui/tests/design-guard.test.ts`, in CI). Fails on raw hex, `rgb(`/`hsl(`
 values, any `letter-spacing` or `tracking-*` class, inline `style` colour properties and named
-colours anywhere in `app/ui` outside token files (`theme/` directories). Baseline 0; target 0.
+colours, and a px font size off the five-size scale, anywhere in `app/ui` outside token files
+(`theme/` directories). Baseline 0; target 0.
 
 **Contrast test** (`app/ui/tests/contrast.test.ts`). Recomputes every role pair from `tokens.css`
 and checks the tables above to within 0.01.
