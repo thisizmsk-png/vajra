@@ -493,10 +493,13 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     await openOverview(overview());
     const title = screen.getByRole("heading", { level: 1, name: S.run.title });
     expect(title.className).toContain("v-run__name");
+    // The gap comes from the header that holds the title and its meta line, not from the title itself.
+    expect(title.parentElement?.className).toBe("v-run__head");
     expect(screen.getByRole("heading", { level: 2, name: S.run.timeline })).toBeTruthy();
     const css = readFileSync(resolve(__dirname, "../src/shell.css"), "utf8");
-    const rule = css.split("\n").find((l) => l.includes(".v-run__name {")) ?? "";
-    expect(rule).toContain("margin-bottom: var(--space-lg)");
+    expect(css).not.toMatch(/^h1\.v-run__name\s*\{/m);
+    const rule = css.split("\n").find((l) => l.startsWith(".v-run__head {")) ?? "";
+    expect(rule).toContain("margin-bottom: var(--space-xl)");
   });
 
   it("renders only the rows in view for 200 tasks (AC-4.2.2)", async () => {

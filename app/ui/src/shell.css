@@ -50,9 +50,8 @@
 .v-launch .v-button--primary .v-kbd-group { display: none; }
 .v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
-/* The page title stands clear of the first section heading; flush, the two read as one two-line title. */
-h1.v-run__name { margin-bottom: var(--space-lg); }
-/* Run header: the goal as the title, then one quiet meta line (what this is, the run's slug, its status). */
+/* Run header: the goal as the title, then one quiet meta line ("Run" and the slug). Its margin keeps the header clear of
+   the first section heading; flush, the two read as one two-line title. */
 .v-run__head { margin-bottom: var(--space-xl); }
 .v-run__head h1.v-run__name { margin-bottom: var(--space-xs); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; white-space: normal; }
 .v-run__meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); color: var(--c-text-muted); font-size: var(--text-sm); }
