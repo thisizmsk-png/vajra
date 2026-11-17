@@ -97,6 +97,9 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 .v-panel__end { margin-left: auto; display: flex; align-items: center; gap: var(--space-sm); }
 .v-panel__body { padding: var(--space-md); }
 
+.v-pagehead { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-md); margin: 0 0 var(--space-lg); }
+.v-pagehead__text { display: flex; flex-direction: column; gap: var(--space-xs); min-width: 0; }
+.v-pagehead__text > * { margin: 0; }
 .v-section { margin: 0 0 var(--space-lg); }
 .v-section__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-sm); }
 

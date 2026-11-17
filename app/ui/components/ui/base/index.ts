@@ -10,6 +10,7 @@ export { Input } from "./Input";
 export { ListRow } from "./ListRow";
 export { ListBox } from "./ListBox";
 export { Section } from "./Section";
+export { PageHeader } from "./PageHeader";
 export { SegmentedControl } from "./SegmentedControl";
 export { Switch } from "./Switch";
 export { Sheet } from "./Sheet";

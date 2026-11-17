@@ -36,9 +36,9 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
   const source = (key: PreferenceKey) => key in patch || patch.inherit?.includes(key) ? C.unsaved : view.sources[key] === "project" ? C.projectSource : C.globalSource;
   const select = <K extends PreferenceKey>(key: K, label: string, choices: readonly (readonly [string, string, boolean?])[], lead?: ReactNode) => (
     <div className="v-pref__row" key={key}>
-      <label><span>{label}<small>{source(key)}</small></span>{lead}<select aria-label={label} value={String(value(key))} disabled={locked} onChange={e => change(key, (typeof view.effective[key] === "number" ? Number(e.target.value) : e.target.value) as Preferences[K])}>
+      <label><span>{label}<small>{source(key)}</small></span><span className="v-pref__ctl">{lead}<select aria-label={label} value={String(value(key))} disabled={locked} onChange={e => change(key, (typeof view.effective[key] === "number" ? Number(e.target.value) : e.target.value) as Preferences[K])}>
         {choices.map(([v, text, disabled]) => <option key={v} value={v} disabled={disabled}>{text}</option>)}
-      </select></label>
+      </select></span></label>
       {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
     </div>
   );
@@ -52,7 +52,7 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
     {section === "general" && <>
       <div className="v-pref__row">
         <label><span>{C.autoClose}<small>{source("auto_close_finished")}</small></span>
-          <Switch label={C.autoClose} checked={value("auto_close_finished")} onChange={v => { if (!locked) change("auto_close_finished", v); }} /></label>
+          <span className="v-pref__ctl"><Switch label={C.autoClose} checked={value("auto_close_finished")} onChange={v => { if (!locked) change("auto_close_finished", v); }} /></span></label>
         {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit("auto_close_finished")}>{C.inherit(C.autoClose)}</Button>}
       </div>
       <p>{C.autoCloseHint}</p>
@@ -71,9 +71,9 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
     </>}
     {section === "keyboard" && <>
       {(["palette", "settings"] as const).map(key => <div className="v-pref__row" key={key}><label><span>{key === "palette" ? C.searchShortcut : C.settingsShortcut}<small>{source("shortcuts")}</small></span>
-        <select aria-label={key === "palette" ? C.searchShortcut : C.settingsShortcut} value={value("shortcuts")[key]} disabled={locked} onChange={e => change("shortcuts", { ...value("shortcuts"), [key]: e.target.value })}>
+        <span className="v-pref__ctl"><select aria-label={key === "palette" ? C.searchShortcut : C.settingsShortcut} value={value("shortcuts")[key]} disabled={locked} onChange={e => change("shortcuts", { ...value("shortcuts"), [key]: e.target.value })}>
           {SHORTCUT_CHOICES.map(k => <option key={k} value={k}>{shortcutKeys(k).join(" ")}</option>)}
-        </select></label></div>)}
+        </select></span></label></div>)}
       {/* The shortcuts are one override in the store, so inheriting is one group-wide control that says it resets both (PR 100 review). */}
       {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit("shortcuts")}>{C.inheritShortcuts}</Button>}
     </>}
