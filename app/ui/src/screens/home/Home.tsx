@@ -44,6 +44,8 @@ const CAMPAIGN_STATUS: Record<string, StatusKey> = { active: "in_progress", runn
 const campaignStatus = (c: Campaign): StatusKey => CAMPAIGN_STATUS[c.status ?? ""] ?? "unknown";
 const basename = (p: string) => p.trim().replace(/\/+$/, "").split("/").pop() ?? "";
 const fetchCampaigns = () => api.listCampaigns().then((r) => r.campaigns);
+/** The live-runs read goes first: it is what makes the core notice a workflow that ended in error. A failed read shows nothing. */
+const fetchFailedRuns = () => api.activeRuns().catch(() => null).then(() => api.runFailures()).then((r) => r.runs);
 const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 type LiveRun = { run_id: string; campaign: string; project: string | null };
 const fetchLive = (): Promise<LiveRun[]> => api.activeRuns().then((a) =>
@@ -68,6 +70,9 @@ export function Home() {
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
   const [allCamps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
   const [targets, reloadTargets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
+  // A run whose workflow ended in error has no campaign record; the core ended its session and kept the reason. The
+  // live-runs read goes first, because that is what makes the core look for the error. A failed read shows nothing.
+  const [failedRuns] = useLoad(fetchFailedRuns, true);
   // Runs that are live in this app, from the app's own session table: a run in its first phase has no campaign record
   // yet, so the Runs list below can be empty while one holds the project. Each can be stopped from here.
   const [live, reloadLive] = useLoad<LiveRun[]>(fetchLive, true);
@@ -309,12 +314,23 @@ export function Home() {
               </ul>
             )}
             {stopErr && <div role="alert" className="v-panel__body"><Text variant="body-sm">{stopErr}</Text></div>}
+            {failedRuns.state === "ok" && failedRuns.data.filter((r) => !project || r.project === project.id).length > 0 && (
+              <ul className="v-home__campaigns" aria-label={S.home.failedRuns}>
+                {failedRuns.data.filter((r) => !project || r.project === project.id).map((r) => (
+                  <li key={r.run_id}>
+                    <StatusDot status="failed" className="v-home__dot" />
+                    <span className="v-home__goal">{S.home.failedRun(r.run_id)}</span>
+                    <span className="v-home__slug">{r.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
             {camps.state !== "ok" || camps.data.length === 0 ? (
               <div className="v-panel__body">
                 {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
                 {camps.state === "error" && <Problem title={campsFailed} detail={camps.text} retry={retryCamps} />}
                 {/* Not while a live run is listed above: that run is a run, it just has no campaign record yet. */}
-                {camps.state === "ok" && live.state !== "loading" && shownLive.length === 0 && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
+                {camps.state === "ok" && live.state !== "loading" && shownLive.length === 0 && !(failedRuns.state === "ok" && failedRuns.data.some((r) => !project || r.project === project.id)) && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
               </div>
             ) : null}
             {camps.state === "ok" && camps.data.length > 0 && (

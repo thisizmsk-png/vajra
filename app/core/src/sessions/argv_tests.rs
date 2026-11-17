@@ -69,9 +69,9 @@ fn build_run_argv_shell_metacharacters_stay_one_element() {
 #[test]
 fn build_run_argv_escapes_control_chars() {
     let mut i = input();
-    i.ask = "a\u{1}b\tc\u{2028}".into();
+    i.ask = "a\u{1}b\tc\u{2028} and then some".into();
     let argv = build(&i).unwrap();
-    assert!(argv[3].contains("\"ask\":\"a\\u0001b\\tc\\u2028\""));
+    assert!(argv[3].contains("\"ask\":\"a\\u0001b\\tc\\u2028 and then some\""));
 }
 
 #[test]
@@ -408,4 +408,25 @@ fn only_a_codex_gateway_or_key_account_gets_the_gateway_argv() {
     }
     assert!(gateway_run_argv(&Account::login(Engine::Codex), "x", "m", None).is_err());
     assert!(gateway_run_argv(&acct(Engine::Claude, Route::Gateway), "x", "m", None).is_err());
+}
+
+#[test]
+fn a_run_start_refuses_an_ask_below_the_workflows_minimum() {
+    for short in ["Yes", "do it", "  fix a bug  ", "123456789"] {
+        let mut i = input();
+        i.ask = short.into();
+        let e = validate(&i).unwrap_err();
+        assert_eq!((e.field, e.reason.contains("10 characters")), ("ask", true), "{short:?}");
+    }
+    let mut ok = input();
+    ok.ask = "1234567890".into();
+    assert!(validate(&ok).is_ok());
+}
+
+#[test]
+fn the_minimum_ask_is_the_one_the_workflow_enforces() {
+    let js = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../workflows/vajra-deliver.js")).unwrap();
+    assert!(js.contains(&format!("ASK.length < {MIN_ASK_CHARS} && !RESUME")), "workflows/vajra-deliver.js no longer refuses an ask under {MIN_ASK_CHARS}");
+    assert!(validate(&input()).is_ok());
+    assert!(format!("is too short: say at least {MIN_ASK_CHARS} characters").contains("10 characters"));
 }

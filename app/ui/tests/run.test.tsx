@@ -41,6 +41,30 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
   });
 
+  it("says why a run stopped when its workflow ended in error, in the run view", async () => {
+    const msg = "an ask of 10+ characters is required, e.g. /vajra add a --json flag to the export command";
+    // No resume target for it (a Codex run, or a folder that is gone): the failure still shows, matched on the campaign.
+    await open([], { active_runs: { count: 0, runs: [] }, resume_targets: { targets: {} }, run_failures: { runs: [
+      { run_id: "20261116-1840", campaign: "camp", message: msg, project: null },
+      { run_id: "20261116-1700", campaign: "other", message: "not this run", project: null },
+    ] } });
+    await waitFor(() => expect(screen.getAllByRole("alert").map((a) => a.textContent ?? "").some((t) => t.includes(S.home.failedRun("20261116-1840")) && t.includes(msg))).toBe(true));
+    expect(screen.queryByText(/not this run/)).toBeNull();
+  });
+
+  it("shows the failure the core lists for the campaign, and follows it when the list changes after a resume fails", async () => {
+    const alerts = () => screen.queryAllByRole("alert").map((a) => a.textContent ?? "").join(" | ");
+    let failures: { run_id: string; campaign: string; message: string; project: null }[] = []; // the core lists none: the resumed attempt succeeded or is running
+    const f = await open([], { active_runs: { count: 0, runs: [] }, run_failures: () => ({ runs: failures }) });
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "run_failures")).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(alerts()).not.toContain("reason");
+    // The resumed attempt fails with a different message: the core now lists that attempt's failure, and it is shown.
+    failures = [{ run_id: "20261116-1900", campaign: "camp", message: "second reason", project: null }];
+    await act(async () => { f.emit?.("changed", null); });
+    await waitFor(() => expect(alerts()).toContain("second reason"));
+  });
+
   it("offers a button to History next to the ask to choose a run, since History has no tab", async () => {
     setTransport(fakeIpc({ list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } }).transport);
     render(<ProjectsProvider><Run /></ProjectsProvider>);

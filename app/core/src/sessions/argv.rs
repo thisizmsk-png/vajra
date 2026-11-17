@@ -11,6 +11,8 @@ use crate::ids;
 
 /// Largest accepted ask, in bytes.
 pub const MAX_ASK_BYTES: usize = 32 * 1024;
+/// The shortest ask a run may start with: `ASK.length < 10` in `workflows/vajra-deliver.js`.
+pub const MIN_ASK_CHARS: usize = 10;
 
 /// What the Start-run form collects.
 #[derive(Clone, Debug)]
@@ -117,6 +119,11 @@ pub fn build_gateway_argv(ask: &str, model: &str, effort: Option<&str>) -> Resul
 /// control session is created for the form.
 pub fn validate(input: &RunInput) -> Result<(), InvalidInput> {
     check_ask(&input.ask)?;
+    // The deliver workflow refuses a shorter ask before it does anything, and the session it started would sit idle
+    // holding the project. A test pins this equal to the number in `workflows/vajra-deliver.js`.
+    if input.ask.trim().chars().count() < MIN_ASK_CHARS {
+        return Err(bad("ask", "is too short: say at least 10 characters about what to do"));
+    }
     if !(1..=3).contains(&input.max_rounds) {
         return Err(bad("max_rounds", "must be 1 to 3"));
     }

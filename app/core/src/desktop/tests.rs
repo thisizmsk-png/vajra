@@ -107,7 +107,7 @@ fn a_live_run_can_be_stopped_and_then_stops_holding_its_project() {
     let app = t.app();
     let stream = live_run(&t, &app, "0f8fad5b-d9cb-469f-a165-70867728950e", "20261116-1840", &["sleep", "30"]);
     let cwd = t.0.join("repo").to_string_lossy().to_string();
-    let input = || RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let input = || RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     assert_eq!(app.start_run(input(), &cwd).unwrap_err()["reason"], "project_busy", "the run holds its project");
     assert_eq!(app.active_runs().unwrap()["count"], 1);
     let r = app.stop_run("20261116-1840").unwrap();
@@ -138,7 +138,7 @@ fn a_run_that_exited_holds_nothing_and_cannot_be_stopped() {
     app.sup.wait(&stream, Duration::from_secs(5)).unwrap();
     assert_eq!(app.active_runs().unwrap()["count"], 0);
     let cwd = t.0.join("repo").to_string_lossy().to_string();
-    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let input = RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     assert_ne!(app.start_run(input, &cwd).err().and_then(|e| e["reason"].as_str().map(String::from)).as_deref(), Some("project_busy"), "a dead run does not hold the project");
     assert_eq!(app.stop_run("20261116-1818").unwrap_err()["error"], "not_found");
 }
@@ -171,13 +171,13 @@ fn one_active_run_per_project() {
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
     app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap(); // a launched run is always recorded with its project
     let cwd = t.0.join("repo").to_string_lossy().to_string();
-    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let input = RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     let held = app.start_run(input, &cwd).unwrap_err();
     assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     assert!(held["detail"].as_str().is_some_and(|d| !d.is_empty()));
     // bhishma #216 Low 2: a second Codex Lead is held the same way, under the launching lock and before its proof runs,
     // so a running Lead can't write the project's `.codex` between a second Lead's proof and its launch.
-    let codex = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
+    let codex = RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
     let held = app.start_run(codex, &cwd).unwrap_err();
     assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
@@ -791,7 +791,7 @@ fn a_campaign_folder_made_before_a_run_never_becomes_that_runs() {
     let cwd = t.0.join("repo");
     fs::create_dir_all(&cwd).unwrap();
     git_in(&cwd, &["init", "-q"]);
-    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let input = RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     let e = app.start_run_as(input, cwd.to_str().unwrap(), Some((t3, id.clone()))).unwrap_err();
     assert_eq!(code(&e), "run_id_taken", "{e}");
     assert!(lock(&app.runs).values().all(|r| r.run_id != id), "nothing launched under it");
@@ -813,7 +813,7 @@ fn the_claude_launch_argv_carries_the_run_id_the_core_picked() {
     let (minute, run_id) = app.fresh_run_id(now).unwrap();
     assert_eq!(run_id, "20261105-1231", "the pick skipped the taken minute");
     let campaign = format!("deliver-{run_id}");
-    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let input = RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     let argv = argv::build_run_argv_at(&input, &"a".repeat(32), minute, sid).unwrap();
     assert_eq!(argv[..3], ["claude", "--session-id", sid]);
@@ -3672,7 +3672,7 @@ fn a_core_run_whose_lead_fails_to_launch_is_recorded_ended_not_left_for_the_cras
     fs::create_dir_all(runs.join(run)).unwrap();
     fs::write(runs.join(run).join("lead"), "not a folder").unwrap();
     let input = crate::sessions::argv::RunInput {
-        ask: "x".into(), max_rounds: 1, base: "0123456789abcdef0123456789abcdef01234567".into(), max_in_flight: 1, campaign: None, provider: None,
+        ask: "a test ask long enough".into(), max_rounds: 1, base: "0123456789abcdef0123456789abcdef01234567".into(), max_in_flight: 1, campaign: None, provider: None,
     };
     let e = app.start_lead_run(&p, input, r[0].to_str().unwrap(), run).unwrap_err();
     assert_eq!(code(&e), "lead_failed", "{e}");
@@ -3698,7 +3698,7 @@ fn a_core_run_whose_seats_name_no_evidence_trust_never_starts() {
         seats.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         app.record_run_seats(run, &seats).unwrap();
         let input = crate::sessions::argv::RunInput {
-            ask: "x".into(), max_rounds: 1, base: "0123456789abcdef0123456789abcdef01234567".into(), max_in_flight: 1, campaign: None, provider: None,
+            ask: "a test ask long enough".into(), max_rounds: 1, base: "0123456789abcdef0123456789abcdef01234567".into(), max_in_flight: 1, campaign: None, provider: None,
         };
         let e = app.start_lead_run(&p, input, r[0].to_str().unwrap(), run).unwrap_err();
         assert_eq!(code(&e), "io", "{e}");
@@ -3721,7 +3721,7 @@ fn core_and_classic_runs_share_the_run_caps() {
     let r = repos(&t, &["one", "two", "three"]);
     let id = |repo: &Path| app.launch_project(repo).unwrap().1.id;
     let (p0, p1) = (id(&r[0]), id(&r[1]));
-    let input = || crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 2, campaign: None, provider: None };
+    let input = || crate::sessions::argv::RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "main".into(), max_in_flight: 2, campaign: None, provider: None };
     let held = |e: Value| (code(&e).to_string(), e["reason"].as_str().unwrap_or_default().to_string());
     let busy = ("run_held".to_string(), "project_busy".to_string());
 
@@ -3847,7 +3847,7 @@ fn a_run_starts_only_in_an_active_project_and_is_recorded_under_its_orchestrator
 const PSID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 
 fn input_for(provider: Option<&str>) -> RunInput {
-    RunInput { ask: "do it".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: provider.map(str::to_string) }
+    RunInput { ask: "do it, please".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: provider.map(str::to_string) }
 }
 
 #[test]
@@ -4079,7 +4079,7 @@ fn a_directory_made_where_a_projects_root_was_neither_starts_nor_resumes_under_i
     let cwd = a.to_string_lossy().to_string();
     let e = app.resume_run(sid, "c", &cwd, None).unwrap_err();
     assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
-    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    let input = RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "project_membership_inconsistent");
     assert!(lock(&app.control).nonce(sid).is_none(), "no control session was started or rotated");
     assert!(!app.sup.is_running(&format!("run-{sid}")).unwrap_or(false), "nothing was spawned");
@@ -5689,7 +5689,7 @@ fn a_bad_max_in_flight_is_invalid_args_before_any_cap() {
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca499";
     app.launch_kind(sid, "20261105-1259", "c", &cwd, |_| Ok(vec!["sleep".into(), "5".into()]), false, true, Engine::Claude, 16).unwrap();
     for bad in [0u32, 17, 99] {
-        let input = RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: bad, campaign: None, provider: None };
+        let input = RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "main".into(), max_in_flight: bad, campaign: None, provider: None };
         assert_eq!(code(&app.start_run(input, cwd.to_str().unwrap()).unwrap_err()), "invalid_args", "{bad}");
         let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca498";
         assert_eq!(code(&app.launch_kind(other, "20261105-1258", "c", &cwd, |_| Ok(vec!["true".into()]), false, true, Engine::Claude, bad).unwrap_err()), "invalid_args", "caps door: {bad}");
@@ -5931,7 +5931,7 @@ fn the_lead_shutdown_with_no_leads_ends_nothing_and_after_it_no_run_lead_starts(
     let t = Tmp::new();
     let app = t.app();
     assert_eq!(app.shutdown_leads(Duration::from_millis(100)), super::lead_start::LeadShutdown::default());
-    let input = crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None, provider: None };
+    let input = crate::sessions::argv::RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None, provider: None };
     let e = app.start_lead_run("p", input, t.0.to_str().unwrap(), "20261112-0930").unwrap_err();
     assert_eq!(e["error"], "quitting", "a quitting app refuses before it reads anything: {e}");
 }
@@ -6102,7 +6102,7 @@ fn codex_lead(t: &Tmp) -> (App, String, LeadCheck) {
     fs::write(d.join("codex"), body).unwrap();
     fs::set_permissions(d.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
     app.provider_dirs = Some(vec![d]);
-    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
+    let input = RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: Some("codex".into()) };
     let r = app.start_run(input, &t.0.join("repo").to_string_lossy()).unwrap();
     let stream = r["stream"].as_str().unwrap().to_string();
     let c = lock(&app.lead_checks).get(&stream).cloned().expect("a Codex Lead registers its first-turn read-back");
@@ -6302,7 +6302,7 @@ fn no_run_launches_while_the_engine_is_installed() {
     let app = t.app();
     let r = repos(&t, &["one"]);
     let p0 = app.launch_project(&r[0]).unwrap().1.id;
-    let input = crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 2, campaign: None, provider: None };
+    let input = crate::sessions::argv::RunInput { ask: "a test ask long enough".into(), max_rounds: 1, base: "main".into(), max_in_flight: 2, campaign: None, provider: None };
     {
         let _install = app.engine_excl.try_write().unwrap();
         let e = app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, Engine::Claude, 2).unwrap_err();

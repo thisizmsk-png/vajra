@@ -212,7 +212,7 @@ describe("Start and Resume use the chosen provider (FG-09)", () => {
   const go = async () => {
     await screen.findByText("2.1.0");
     fireEvent.change(screen.getByLabelText(S.home.repo), { target: { value: "/r" } });
-    fireEvent.change(screen.getByLabelText(S.home.ask), { target: { value: "do it" } });
+    fireEvent.change(screen.getByLabelText(S.home.ask), { target: { value: "do it right away" } });
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
   };
 
