@@ -775,6 +775,12 @@ fn run_failures(app: State<'_, App>) -> Res {
     app.run_failures()
 }
 
+/// Stop a run this app started, by its run id (a live run only; anything else is refused).
+#[tauri::command(async)]
+fn stop_run(app: State<'_, App>, run_id: String) -> Res {
+    app.stop_run(&run_id)
+}
+
 /// ADR-15 D5: the run caps (1 per project, `max_runs` in the app, the worker ceiling).
 #[tauri::command(async)]
 fn run_limits(app: State<'_, App>) -> Res {
@@ -982,6 +988,7 @@ fn main() {
             take_over,
             active_runs,
             run_failures,
+            stop_run,
             run_limits,
             set_run_limits,
             ask_lead,

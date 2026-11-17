@@ -46,7 +46,11 @@ const basename = (p: string) => p.trim().replace(/\/+$/, "").split("/").pop() ??
 const fetchCampaigns = () => api.listCampaigns().then((r) => r.campaigns);
 /** The live-runs read goes first: it is what makes the core notice a workflow that ended in error. A failed read shows nothing. */
 const fetchFailedRuns = () => api.activeRuns().catch(() => null).then(() => api.runFailures()).then((r) => r.runs);
-const fetchTargets =() => api.resumeTargets().then((r) => r.targets);
+const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
+type LiveRun = { run_id: string; campaign: string; project: string | null };
+const fetchLive = (): Promise<LiveRun[]> => api.activeRuns().then((a) =>
+  (a.runs as { run_id?: unknown; campaign?: unknown; project?: unknown }[]).filter((r) => typeof r.run_id === "string" && r.run_id)
+    .map((r) => ({ run_id: String(r.run_id), campaign: String(r.campaign ?? ""), project: typeof r.project === "string" ? r.project : null })));
 
 export function Home() {
   const [route, go] = useRoute();
@@ -69,6 +73,17 @@ export function Home() {
   // A run whose workflow ended in error has no campaign record; the core ended its session and kept the reason. The
   // live-runs read goes first, because that is what makes the core look for the error. A failed read shows nothing.
   const [failedRuns] = useLoad(fetchFailedRuns, true);
+  // Runs that are live in this app, from the app's own session table: a run in its first phase has no campaign record
+  // yet, so the Runs list below can be empty while one holds the project. Each can be stopped from here.
+  const [live, reloadLive] = useLoad<LiveRun[]>(fetchLive, true);
+  const [stopping, setStopping] = useState<string | null>(null);
+  const [stopErr, setStopErr] = useState("");
+  const stopRun = async (id: string) => {
+    setStopping(id); setStopErr("");
+    try { await api.stopRun(id); reloadLive(); reloadCamps(); recheck(); setFail(""); setHeld(""); setAddPath(""); }
+    catch (e) { setStopErr(`${S.home.stopFailed} ${problemDetail(e)}`.trim()); }
+    finally { setStopping(null); }
+  };
   // Inside a project the folders decide which campaigns are its own. Until they are read the list is loading, and if
   // they cannot be read it says so: filtering without them would empty every project and put everything in Unsorted.
   const inProject = (t: Record<string, ResumeTarget>) => (c: Campaign) => {
@@ -100,6 +115,7 @@ export function Home() {
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
+  const [held, setHeld] = useState(""); // the run id the core named as holding this project (project_busy), else empty
   const [addPath, setAddPath] = useState(""); // set when Start was refused because the folder is not a project yet
   const set = (k: keyof Draft) => (v: string) => {
     if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope;
@@ -123,6 +139,8 @@ export function Home() {
     : !chosen.installed ? S.providers.startBlocked(chosen.name) : "";
   // A folder that is not a git repository has no HEAD to run from: it is named under the field and Start stays off.
   const notGit = useNotGit(d.repo);
+  // Inside a project, only that project's live runs are listed; a run with no recorded project is not shown there.
+  const shownLive = live.state === "ok" ? live.data.filter((r) => !project || r.project === project.id) : [];
   const ready = pre.state === "ok" && pre.data.start_enabled && (!prefs.connected || !!prefs.view) && !unsupported && !blocked && !notGit;
 
   // A ref, not the busy state: a second Cmd+Return in the same tick still sees busy as null.
@@ -137,6 +155,10 @@ export function Home() {
       go("run", { slug: r.campaign, id: r.run_id, stream: r.stream });
     } catch (e) {
       setFail(problemDetail(e));
+      // A start held by a run already going: look the run up so the message names it and offers Stop.
+      const hid = isIpcError(e) && e.error === "run_held" && e.reason === "project_busy" && typeof e.holder_run_id === "string" ? e.holder_run_id : "";
+      setHeld(hid);
+      if (hid) reloadLive();
       // The core's own answer for a folder that is not a project: one click adds it, instead of a dead end.
       setAddPath(isIpcError(e) && e.error === "not_a_project" ? (typeof e.path === "string" && e.path ? e.path : d.repo.trim()) : "");
       setBusy(null);
@@ -253,7 +275,8 @@ export function Home() {
             </div>
             {fail && (
               <div role="alert" className="v-launch__fail">
-                <Text variant="body-sm">{fail}</Text>
+                <Text variant="body-sm">{held ? S.home.heldBy(held) : fail}</Text>
+                {held && <Button size="sm" onClick={() => void stopRun(held)} busy={stopping === held}>{S.home.stop}</Button>}
                 {addPath && <Button size="sm" onClick={() => void addFolder()} busy={busy === "add"}>{S.home.addFolder}</Button>}
               </div>
             )}
@@ -276,6 +299,21 @@ export function Home() {
 
           <section className="v-panel v-home__runs" aria-labelledby="v-home-camps">
             <div className="v-panel__bar"><h2 id="v-home-camps" className="v-panel__title">{S.home.campaigns}</h2></div>
+            {shownLive.length > 0 && (
+              <ul className="v-home__campaigns" aria-label={S.home.liveRuns}>
+                {shownLive.map((r) => (
+                  <li key={r.run_id}>
+                    <StatusDot status="in_progress" className="v-home__dot" />
+                    <span className="v-home__goal">{S.home.liveRun(r.run_id)}</span>
+                    <span className="v-home__slug">{S.home.liveRunNote}</span>
+                    <span className="v-home__side">
+                      <Button size="sm" onClick={() => void stopRun(r.run_id)} busy={stopping === r.run_id}>{stopping === r.run_id ? S.home.stopping : S.home.stop}</Button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {stopErr && <div role="alert" className="v-panel__body"><Text variant="body-sm">{stopErr}</Text></div>}
             {failedRuns.state === "ok" && failedRuns.data.filter((r) => !project || r.project === project.id).length > 0 && (
               <ul className="v-home__campaigns" aria-label={S.home.failedRuns}>
                 {failedRuns.data.filter((r) => !project || r.project === project.id).map((r) => (
@@ -291,7 +329,8 @@ export function Home() {
               <div className="v-panel__body">
                 {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
                 {camps.state === "error" && <Problem title={campsFailed} detail={camps.text} retry={retryCamps} />}
-                {camps.state === "ok" && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
+                {/* Not while a live run is listed above: that run is a run, it just has no campaign record yet. */}
+                {camps.state === "ok" && live.state !== "loading" && shownLive.length === 0 && !(failedRuns.state === "ok" && failedRuns.data.some((r) => !project || r.project === project.id)) && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
               </div>
             ) : null}
             {camps.state === "ok" && camps.data.length > 0 && (

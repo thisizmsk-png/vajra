@@ -754,7 +754,7 @@ impl App {
                 let Some(project) = self.pinned_project(&r.run_id).filter(|p| crate::projects::contract::valid_project_id(p)).map(PathBuf::from) else {
                     return Err(fail("project_not_recorded", "a run in progress has no recorded project, so a new start cannot be checked against it"));
                 };
-                v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) });
+                v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS), run_id: Some(r.run_id.clone()).filter(|id| !id.is_empty()) });
             }
             v
         };
@@ -2768,13 +2768,43 @@ impl App {
         roots
     }
 
+    /// Stop a run this app started: end its session (SIGHUP, then SIGKILL after the grace) by its run id. Only a run that
+    /// is live in this app can be stopped: any other id (finished, unknown, malformed) is refused, so it never reaches
+    /// another process. The run leaves `active_runs` and stops holding its project once the session has exited.
+    pub fn stop_run(&self, run_id: &str) -> Res {
+        if !crate::ids::valid_run_id(run_id) {
+            return Err(invalid("run_id", "not a run id"));
+        }
+        self.reap_runs();
+        let sessions: Vec<String> = lock(&self.runs)
+            .iter()
+            .filter(|(s, r)| r.run_id == run_id && self.sup.is_running(s).unwrap_or(false))
+            .map(|(s, _)| s.clone())
+            .collect();
+        if sessions.is_empty() {
+            return Err(fail("not_found", "that run is not running in this app"));
+        }
+        for s in &sessions {
+            self.sup.kill(s).map_err(|e| fail("io_error", e))?;
+        }
+        // `kill` returns after SIGKILL without waiting for the reader to reap the child: wait here, bounded, so Stop
+        // never reports success for a run that is still listed as live. A session that is gone is stopped.
+        for s in &sessions {
+            if matches!(self.sup.wait(s, STOP_WAIT), Ok(None)) {
+                return Err(fail("still_running", "the run did not end; try Stop again"));
+            }
+        }
+        self.reap_runs();
+        Ok(json!({"run_id": run_id, "stopped": sessions.len()}))
+    }
+
     pub fn active_runs(&self) -> Res {
         self.reap_runs();
         let runs = lock(&self.runs).clone();
         let mut active: Vec<Value> = runs
             .iter()
             .filter(|(s, _)| self.sup.is_running(s).unwrap_or(false))
-            .map(|(s, r)| json!({"stream": s, "session_id": r.session_id, "run_id": r.run_id, "campaign": r.campaign}))
+            .map(|(s, r)| json!({"stream": s, "session_id": r.session_id, "run_id": r.run_id, "campaign": r.campaign, "project": self.pinned_project(&r.run_id)}))
             .collect();
         active.sort_by(|a, b| a["stream"].as_str().cmp(&b["stream"].as_str()));
         Ok(json!({"count": active.len(), "runs": active}))
@@ -2782,6 +2812,9 @@ impl App {
 }
 
 // -------------------------------------------------------------------- helpers
+
+/// How long `stop_run` waits for a killed session to be reaped before it says the run is still going.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// Recent transcript bytes kept for the Lead's `inspect_worker`.
 const INSPECT_BYTES: usize = 16 * 1024;

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Home } from "../src/screens/home/Home";
@@ -253,6 +253,73 @@ describe("Home", () => {
     expect(f.calls.some((c) => c.cmd === "project_add")).toBe(false);
   });
 
+  // The owner's G2 block: a live run held the project, Runs said "No runs yet", there was no Stop, and Start showed "run_held:".
+  const held = { error: "run_held", reason: "project_busy", detail: "This project already has a run going. It can start when that run finishes or is stopped.", holder_run_id: "20261116-1840" };
+  it("an app-wide hold offers no Stop, even with a live run from another project: it shows the core's own words", async () => {
+    const other = [{ stream: "run-s", session_id: "s", run_id: "20261116-1700", campaign: "deliver-20261116-1700", project: "p_other" }];
+    const full = { error: "run_held", reason: "app_runs_full", detail: "2 runs are going, the most the app runs at once (2). It can start when one finishes." };
+    const f = await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      active_runs: () => ({ count: 1, runs: other }),
+      act_start_run: () => { throw full; },
+    });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/r");
+    fill(S.home.ask, "do it right away");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(full.detail);
+    expect(alert.textContent).not.toContain("20261116-1700");
+    expect(within(alert).queryByRole("button", { name: S.home.stop })).toBeNull();
+    expect(f.calls.some((c) => c.cmd === "stop_run")).toBe(false);
+  });
+  it("a held project shows its live run in Runs with a Stop, and Start says it in a sentence, never the raw code", async () => {
+    let live = [{ stream: "run-s", session_id: "s", run_id: "20261116-1840", campaign: "deliver-20261116-1840" }];
+    const f = await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      active_runs: () => ({ count: live.length, runs: live }),
+      act_start_run: () => { throw held; },
+      stop_run: () => { live = []; return { run_id: "20261116-1840", stopped: 1 }; },
+    });
+    await screen.findByText("registered");
+    // The run is listed (it has no campaign record yet, so the campaign list is empty) and can be stopped.
+    expect(await screen.findByText(S.home.liveRun("20261116-1840"))).toBeTruthy();
+    // The panel never says there are no runs while it shows the run that holds the project.
+    expect(screen.queryByText(S.home.campaignsEmpty)).toBeNull();
+    fill(S.home.repo, "/r");
+    fill(S.home.ask, "do it right away");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    // The refusal names the holding run in plain words, with its own Stop in the alert; the raw code is never shown.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(S.home.heldBy("20261116-1840"));
+    expect(alert.textContent).not.toMatch(/run_held/);
+    fireEvent.click(within(alert).getByRole("button", { name: S.home.stop }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "stop_run" && c.args?.runId === "20261116-1840")).toBe(true));
+    await waitFor(() => expect(screen.queryByText(S.home.liveRun("20261116-1840"))).toBeNull());
+    expect(screen.queryByText(held.detail)).toBeNull();
+  });
+
+  it("a live run with an empty run id is not offered a Stop that could not name it", async () => {
+    await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      active_runs: { count: 1, runs: [{ stream: "run-s", session_id: "s", run_id: "", campaign: "c" }] },
+    });
+    await screen.findByText("registered");
+    expect(screen.queryByRole("button", { name: S.home.stop })).toBeNull();
+  });
+
+  it("a failed Stop says so and keeps the run listed", async () => {
+    await open({
+      preflight: rows(true), list_campaigns: { campaigns: [] },
+      active_runs: { count: 1, runs: [{ stream: "run-s", session_id: "s", run_id: "20261116-1840", campaign: "c" }] },
+      stop_run: () => { throw { error: "not_found", detail: "that run is not running in this app" }; },
+    });
+    await screen.findByText("registered");
+    fireEvent.click(await screen.findByRole("button", { name: S.home.stop }));
+    expect(await screen.findByText(new RegExp(S.home.stopFailed))).toBeTruthy();
+    expect(screen.getByText(S.home.liveRun("20261116-1840"))).toBeTruthy();
+  });
+
   it("does not start with an empty ask: names the field, calls nothing (AC-1.1.2)", async () => {
     const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
     await screen.findByText("registered");
@@ -441,6 +508,17 @@ describe("Home inside a project (FG-03)", () => {
     return f;
   };
   const list = () => screen.getByRole("region", { name: S.home.campaigns });
+
+  it("lists only this project's live runs, never another project's", async () => {
+    inProject({ active_runs: () => ({ count: 3, runs: [
+      { stream: "a", session_id: "s1", run_id: "20261116-1000", campaign: "", project: "p_1" },
+      { stream: "b", session_id: "s2", run_id: "20261116-1100", campaign: "", project: "p_other" },
+      { stream: "c", session_id: "s3", run_id: "20261116-1200", campaign: "", project: null },
+    ] }) });
+    expect(await screen.findByText(S.home.liveRun("20261116-1000"))).toBeTruthy();
+    expect(screen.queryByText(S.home.liveRun("20261116-1100"))).toBeNull();
+    expect(screen.queryByText(S.home.liveRun("20261116-1200"))).toBeNull();
+  });
 
   it("Given the folders are still loading, Then the project's list shows loading, not 'no campaigns'", async () => {
     inProject({ resume_targets: () => new Promise(() => {}) });

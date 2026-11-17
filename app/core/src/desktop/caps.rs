@@ -53,6 +53,8 @@ impl RunLimits {
 pub struct Active {
     pub project: PathBuf,
     pub workers: u32,
+    /// The run's id when it is a classic run that `stop_run` can end; `None` for a core run under a lead.
+    pub run_id: Option<String>,
 }
 
 /// Why a start is held. `code` is stable for the UI; `detail` is shown as is.
@@ -60,20 +62,27 @@ pub struct Active {
 pub struct Held {
     pub code: &'static str,
     pub detail: String,
+    /// Only for `project_busy`: the run in this very project that holds it, when it can be named.
+    pub holder: Option<String>,
 }
 
 impl Held {
     pub fn to_json(&self) -> Value {
-        json!({"error": "run_held", "reason": self.code, "detail": self.detail})
+        let mut v = json!({"error": "run_held", "reason": self.code, "detail": self.detail});
+        if let Some(h) = &self.holder {
+            v["holder_run_id"] = json!(h);
+        }
+        v
     }
 }
 
 /// May a run on `project` with `workers` start next to `active`? Checked in order: the project, the app, the ceiling.
 pub fn check(limits: RunLimits, active: &[Active], project: &Path, workers: u32) -> Result<(), Held> {
-    if active.iter().any(|a| a.project == project) {
+    if let Some(a) = active.iter().find(|a| a.project == project) {
         return Err(Held {
             code: "project_busy",
             detail: "This project already has a run going. It can start when that run finishes or is stopped.".into(),
+            holder: a.run_id.clone(),
         });
     }
     let n = active.len() as u32;
@@ -81,6 +90,7 @@ pub fn check(limits: RunLimits, active: &[Active], project: &Path, workers: u32)
         return Err(Held {
             code: "app_runs_full",
             detail: format!("{n} runs are going, the most the app runs at once ({}). It can start when one finishes.", limits.max_runs),
+            holder: None,
         });
     }
     let used: u32 = active.iter().map(|a| a.workers).sum();
@@ -91,7 +101,7 @@ pub fn check(limits: RunLimits, active: &[Active], project: &Path, workers: u32)
         } else {
             format!("{used} of {WORKER_CEILING} workers are in use by other runs. Lower this run's workers to {free} or less, or wait for a run to finish.")
         };
-        return Err(Held { code: "workers_full", detail });
+        return Err(Held { code: "workers_full", detail, holder: None });
     }
     Ok(())
 }
@@ -219,7 +229,19 @@ mod tests {
     }
 
     fn act(p: &str, w: u32) -> Active {
-        Active { project: PathBuf::from(p), workers: w }
+        Active { project: PathBuf::from(p), workers: w, run_id: Some(format!("run-{p}")) }
+    }
+
+    #[test]
+    fn only_a_project_hold_names_its_holder() {
+        let a = [act("/r/a/.git", 4)];
+        let busy = check(RunLimits::default(), &a, Path::new("/r/a/.git"), 1).unwrap_err().to_json();
+        assert_eq!(busy["holder_run_id"], "run-/r/a/.git");
+        let full = check(RunLimits::with_max_runs(1).unwrap(), &a, Path::new("/r/b/.git"), 1).unwrap_err().to_json();
+        assert_eq!(full["reason"], "app_runs_full");
+        assert!(full.get("holder_run_id").is_none(), "an app-wide hold names no run: it is not this project's");
+        let unnamed = [Active { project: PathBuf::from("/r/c/.git"), workers: 1, run_id: None }];
+        assert!(check(RunLimits::default(), &unnamed, Path::new("/r/c/.git"), 1).unwrap_err().to_json().get("holder_run_id").is_none());
     }
 
     #[test]
