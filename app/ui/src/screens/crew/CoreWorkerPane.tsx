@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import type { ReactNode } from "react";
 import { AlertDialog, Button, Input, Section, StatusDot, Text } from "../../../components/ui/base";
 import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
@@ -36,7 +37,7 @@ const C = S.crew.core;
 
 /** A worker the core runs itself (`core:<ticket>`): its change set and its harness's Message, Redirect and Stop. Every
  * action names the full `core:` reference, which is what the core's control service routes on. */
-export function CoreWorkerPane({ node, status }: { node: CrewNodeDto; status: string }) {
+export function CoreWorkerPane({ node, status, shape: shapeOverride, banner }: { node: CrewNodeDto; status: string; shape?: StatusKey; banner?: ReactNode }) {
   const wp = parseWorkerProvider(node.provider);
   const wd = parseWorkerDiff(node.diff);
   const controls = parseCoreControls(node.controls);
@@ -46,7 +47,7 @@ export function CoreWorkerPane({ node, status }: { node: CrewNodeDto; status: st
   const [confirming, setConfirming] = useState(false);
   const why = useId();
   const { project } = useCurrentProject();
-  const shape = (STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown";
+  const shape = shapeOverride ?? ((STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown");
 
   const send = (kind: "message" | "redirect") => {
     const c = controls?.[kind];
@@ -85,6 +86,7 @@ export function CoreWorkerPane({ node, status }: { node: CrewNodeDto; status: st
           {wp && <ProviderLine p={wp} live />}
           {wd && <DiffCount d={wd} />}
         </div>
+        {banner}
         <div className="v-crew__changes">
           <Section title={C.changes}>
             {wd && wd.files.length ? (

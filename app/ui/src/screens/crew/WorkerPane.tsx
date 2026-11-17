@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { LiveFeed } from "./LiveFeed";
 import { AlertDialog, Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import type { StatusKey } from "../../../strings";
 import { DiffView, Tabs } from "../../../components/ui/desktop";
@@ -13,7 +15,7 @@ import { StreamTab } from "./StreamTab";
 import { DiffCount, ProviderLine } from "../ProviderLine";
 import { parseWorkerDiff, parseWorkerProvider } from "../../workerProvider";
 
-type TabId = "stream" | "diff" | "task" | "worktree";
+type TabId = "live" | "stream" | "diff" | "task" | "worktree";
 
 /** The task graph id (`<run>.<tid>`) of a worker whose crew-tree parent is the task group `task:<tid>`; null for any other worker. */
 export function taskGraphId(runId: string, taskLocalId: string | null): string | null {
@@ -96,12 +98,16 @@ const TASK_POLL_MS = 2000;
 /** Changed events arrive in bursts; one task read per gap is enough. */
 const TASK_EVENT_GAP_MS = 500;
 
-/** One worker: header (task, worktree, branch) and the Stream / Diff / Task / Worktree tabs. */
-export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string }) {
+/**
+ * One worker: header (task, worktree, branch) and the Live / Raw output / Diff / Task / Worktree tabs. Live, the agent's
+ * messages and steps as they arrive, is open first. `shape` overrides the dot (a stalled worker), `banner` sits under the
+ * header (the stall notice), and `onActivity` hears when the worker's stream grows.
+ */
+export function WorkerPane({ node, slug, runId, taskLocalId, status, shape: shapeOverride, banner, onActivity }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string; shape?: StatusKey; banner?: ReactNode; onActivity?: (at: number) => void }) {
   const agent = node.id.slice("agent:".length);
   const wp = parseWorkerProvider(node.provider);
   const wd = parseWorkerDiff(node.diff);
-  const [tab, setTab] = useState<TabId>("stream");
+  const [tab, setTab] = useState<TabId>("live");
   const [info, setInfo] = useState<WorktreeInfo | null | undefined>(undefined);
   const [task, setTask] = useState<TaskState>(null);
   const taskId = taskGraphId(runId, taskLocalId);
@@ -166,7 +172,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
   };
   const taskObj = task && task !== "none" && !("err" in task) ? task : null;
 
-  const shape = (STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown";
+  const shape = shapeOverride ?? ((STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown");
 
   return (
     <>
@@ -178,6 +184,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
           {wd && <DiffCount d={wd} />}
           <span className="v-crew__task">{taskId ? `${taskId}${taskObj?.title ? ` ${String(taskObj.title)}` : ""}` : S.crew.noTask}</span>
         </div>
+        {banner}
         {co?.state === "closed" && <p className="v-closeout" role="status">{S.closeout.closedHint}</p>}
         {(co?.state === "unsaved_work" || co?.state === "terminal_busy") && (
           <div className="v-closeout v-closeout--warn" role="group" aria-label={S.closeout.unsaved}>
@@ -194,6 +201,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
           value={tab}
           onChange={setTab}
           tabs={[
+            { id: "live", label: S.crew.tabs.live, panel: <LiveFeed stream={`w-${agent}`} live={runLive} onActivity={onActivity} /> },
             { id: "stream", label: S.crew.tabs.stream, panel: <StreamTab stream={`w-${agent}`} live={runLive} /> },
             { id: "diff", label: S.crew.tabs.diff, panel: info ? <DiffTab info={info} /> : <Text variant="body-sm" muted>{info === null ? S.crew.noWorktree : S.crew.loading}</Text> },
             { id: "task", label: S.crew.tabs.task, panel: <TaskTab t={task} /> },

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
@@ -36,7 +36,9 @@ async function openBackend(replies: Record<string, unknown>) {
   const f = fakeIpc({ ...liveRun(), crew: tree, ...replies });
   setTransport(f.transport);
   render(<Live><Crew /></Live>);
-  fireEvent.click((await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement);
+  fireEvent.click(within(await screen.findByRole("tree")).getByText("Backend").closest("[role=treeitem]") as HTMLElement);
+  // These tests are about the windowed terminal view, now the Raw output tab (Live is open first).
+  fireEvent.click(await screen.findByRole("tab", { name: S.crew.tabs.stream }));
   return f;
 }
 const wins = (f: ReturnType<typeof fakeIpc>) => f.calls.filter((c) => c.cmd === "stream_window");
@@ -53,14 +55,17 @@ describe("Stream tab: a window served by the core (#45)", () => {
     expect(wins(f)[0].args).toMatchObject({ stream: "w-a1", from: null });
   });
 
-  it("shows no stream for the Lead or the run (they have no worker stream)", async () => {
+  it("the Lead and the run have no stream of their own: they show the active worker's activity, never a terminal", async () => {
     window.location.hash = "#/crew?slug=camp&id=r1";
     const f = fakeIpc({ active_runs: { count: 0, runs: [] }, crew: tree, stream_window: core(3) });
     setTransport(f.transport);
     render(<Crew />);
-    await screen.findByRole("tree");
-    expect(screen.queryByRole("log")).toBeNull();
-    expect(wins(f)).toHaveLength(0);
+    const t = await screen.findByRole("tree");
+    fireEvent.click(within(t).getByText("Lead").closest("[role=treeitem]") as HTMLElement);
+    const feed = await screen.findByRole("log", { name: S.crew.live.label });
+    await waitFor(() => expect(feed.textContent).toContain("out 3"));
+    expect(screen.queryByRole("log", { name: S.crew.streamLabel })).toBeNull();
+    expect(wins(f).every((c) => c.args?.stream === "w-a1")).toBe(true);
   });
 
   it("follows the tail by replacing the window on each poll: no cursor, no draining loop", async () => {
@@ -191,6 +196,9 @@ describe("Stream tab: a window served by the core (#45)", () => {
     });
     const log = await screen.findByRole("log");
     await waitFor(() => expect(log.textContent).toContain("out 5000"));
+    // The Live tab, open first, may still have had its one read out when the test switched to Raw output: count from here.
+    await new Promise((r) => setTimeout(r, 50));
+    peak = inflight;
     scrollTo(1000); scrollTo(2000); scrollTo(3000);
     await new Promise((r) => setTimeout(r, 200));
     expect(peak).toBe(1);

@@ -1,6 +1,6 @@
 // Perf-CI fixture. Compiled in ONLY when the build sets VITE_PERF_FIXTURE (the CI post-load measurement build); the
 // normal bundle contains none of this (CI greps the shipped bundle for it). It replaces the core with a scripted one:
-// a Crew view with one worker whose stream (served as `stream_window`, the one command the Stream tab reads) starts
+// a Crew view with one worker whose stream (served as `stream_window` and `tail`, what the Live and Raw output tabs read) starts
 // LOAD_START_S after launch and delivers TOTAL lines at RATE per second, the way a long run would, so the app's post-load idle can be measured. Mirrors LOAD_START_S/LOAD_END_S in
 // app/bench/ci/measure.py.
 import { setTransport } from "../ipc";
@@ -40,6 +40,19 @@ export function fixtureTransport(elapsedS: () => number): { transport: Transport
         const end = Math.min(c, start + max - 1);
         return { lines: lines(start, end), head_seq: c, first_seq: 1, at_start: start <= 1, at_end: end >= c, gap: false };
       }
+      if (cmd === "tail") {
+        // The Live tab, open first, follows the end: the lines after `afterSeq`, within the byte budget, as the core answers.
+        const after = Math.max(0, Number(args.afterSeq ?? 0));
+        const out = [];
+        let bytes = 0;
+        for (let s = after + 1; s <= c; s++) {
+          const l = { seq: s, text: line(s) };
+          if (out.length && bytes + l.text.length > Number(args.maxBytes ?? 65536)) break;
+          bytes += l.text.length;
+          out.push(l);
+        }
+        return { lines: out, gap: false, head_seq: c, spill_start: null, spill_end: null };
+      }
       return {};
     },
     on(_e, cb) { listeners.add(cb); return () => { listeners.delete(cb); }; },
@@ -54,7 +67,7 @@ export function install() {
   setTransport(transport);
   setInterval(tick, 500);
   location.hash = "#/crew?slug=camp&id=r1";
-  // Open the worker's Stream tab, the way a person following a run does.
+  // Open the worker, the way a person following a run does: its Live tab is open first.
   const open = setInterval(() => {
     const item = [...document.querySelectorAll<HTMLElement>("[role=treeitem]")].find((e) => e.textContent?.includes("Backend"));
     if (item) { item.click(); clearInterval(open); }

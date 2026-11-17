@@ -4,7 +4,7 @@ import type { StatusKey } from "../../../strings";
 import { StatusDot } from "../base/StatusDot";
 import { Icon } from "../base/Icon";
 
-export type CrewNode = { id: string; label: string; status: StatusKey; statusLabel?: string; /** A small mark before the label (the worker's provider icon): decorative, the label carries the name. */ icon?: ReactNode; children?: CrewNode[] };
+export type CrewNode = { id: string; label: string; status: StatusKey; statusLabel?: string; /** Why the status reads as it does, in the status's tooltip; the screen also says it in text. */ statusHint?: string; /** A small mark before the label (the worker's provider icon): decorative, the label carries the name. */ icon?: ReactNode; children?: CrewNode[] };
 
 type Flat = { node: CrewNode; level: number; parent: string | null };
 
@@ -71,7 +71,7 @@ export function CrewTree({ label, nodes, selected, onSelect, defaultOpen = [] }:
           </span>
           {r.node.icon}
           <span className="v-tree__label" title={r.node.label}>{r.node.label}</span>
-          <span className="v-row__meta" title={r.node.statusLabel}><StatusDot status={r.node.status} label={r.node.statusLabel} /></span>
+          <span className="v-row__meta" title={r.node.statusHint ? `${r.node.statusLabel ?? ""}. ${r.node.statusHint}` : r.node.statusLabel}><StatusDot status={r.node.status} label={r.node.statusLabel} /></span>
         </li>
       ))}
     </ul>

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import type { StreamWindow } from "../src/ipc";
@@ -46,15 +46,35 @@ describe("perf fixture", () => {
 
   it("has no dead replies for commands the UI no longer sends", async () => {
     const { transport } = fixtureTransport(() => LOAD_END_S + 1);
-    expect(await transport.call("tail", { afterSeq: 0 })).toEqual({});
     expect(await transport.call("read_spill", { offset: 0 })).toEqual({});
   });
 
-  it("the perf build's Stream tab renders rows and no error", async () => {
+  it("answers tail as the core does: the lines after afterSeq, within the byte budget, with the real head", async () => {
+    const { transport } = fixtureTransport(() => LOAD_END_S + 1);
+    const t = (await transport.call("tail", { stream: "w-a1", afterSeq: TOTAL - 3, maxBytes: 65536 })) as { lines: { seq: number }[]; head_seq: number; gap: boolean };
+    expect(t.lines.map((l) => l.seq)).toEqual([TOTAL - 2, TOTAL - 1, TOTAL]);
+    expect(t).toMatchObject({ head_seq: TOTAL, gap: false });
+    const capped = (await transport.call("tail", { stream: "w-a1", afterSeq: 0, maxBytes: 1 })) as { lines: unknown[]; head_seq: number };
+    expect(capped.lines).toHaveLength(1);
+    expect(capped.head_seq).toBe(TOTAL);
+  });
+
+  it("the perf build opens the worker on its Live tab, which holds a capped feed and no error", async () => {
     window.location.hash = "#/crew?slug=camp&id=r1";
     setTransport(fixtureTransport(() => LOAD_END_S + 1).transport);
     render(<Crew />);
-    fireEvent.click((await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement);
+    const log = await screen.findByRole("log", { name: S.crew.live.label });
+    await waitFor(() => expect(log.textContent).toContain(String(TOTAL).padStart(6, "0")));
+    expect(log.children.length).toBeLessThanOrEqual(300);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("the perf build's Raw output tab renders rows and no error", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    setTransport(fixtureTransport(() => LOAD_END_S + 1).transport);
+    render(<Crew />);
+    fireEvent.click(within(await screen.findByRole("tree")).getByText("Backend").closest("[role=treeitem]") as HTMLElement);
+    fireEvent.click(await screen.findByRole("tab", { name: S.crew.tabs.stream }));
     const log = await screen.findByRole("log", { name: S.crew.streamLabel });
     await waitFor(() => expect(log.textContent).toContain(String(TOTAL).padStart(6, "0")));
     expect(screen.queryByRole("alert")).toBeNull();
