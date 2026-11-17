@@ -482,14 +482,17 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     const rows = within(screen.getByRole("list", { name: S.run.graph })).getAllByRole("listitem");
     expect(rows[1].textContent).toContain(S.run.wave(1));
     expect(rows[1].textContent).toContain("Backend");
-    expect(rows[1].textContent).toContain(S.run.taskStatus.in_progress);
+    expect(rows[1].textContent).toContain(S.status.in_progress);
     expect(rows[1].textContent).toContain(`${S.run.waitsFor} t1`);
   });
 
   it("words every task status in one casing, and keeps a cell for 'waits for' on every row so columns line up", async () => {
     await openOverview(overview({ graph: { tasks: [gtask("t1", 0, "ready"), gtask("t2", 1, "question", ["r1.t1"]), gtask("t3", 1, "pending"), gtask("t4", 1, "odd_new_state")], waves: 2 } }));
     const rows = within(screen.getByRole("list", { name: S.run.graph })).getAllByRole("listitem");
-    expect(rows.map((r) => r.querySelector(".v-badge")?.textContent)).toEqual([S.status.ready, S.status.question, S.run.taskStatus.pending, "odd_new_state"]);
+    // The same shape and word as the project column and History: StatusDot, never a pill.
+    expect(rows.map((r) => r.querySelector(".v-status-dot")?.textContent)).toEqual([S.status.ready, S.status.question, S.status.pending, "odd_new_state"]);
+    expect(rows.map((r) => r.querySelector(".v-status-dot")?.className.match(/v-status--\w+/)?.[0])).toEqual(["v-status--ready", "v-status--question", "v-status--pending", "v-status--unknown"]);
+    expect(rows.some((r) => r.querySelector(".v-badge"))).toBe(false);
     // Wave, task, who, status, waits for, Open: the same six cells whether or not the task waits for anything.
     expect(rows.map((r) => r.children.length)).toEqual([6, 6, 6, 6]);
     expect(rows[0].children[4].textContent).toBe("");

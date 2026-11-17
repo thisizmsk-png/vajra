@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Badge, Button, Section, Text } from "../../../components/ui/base";
+import { Badge, Button, Section, StatusDot, Text } from "../../../components/ui/base";
+import { taskStatusKey, timelineStatusKey } from "../../statusMap";
 import { VirtualList } from "../../../components/ui/desktop";
 import { RunProvider } from "../ProviderControls";
 import { ProviderLine } from "../ProviderLine";
@@ -20,8 +21,12 @@ const keyOf = (r: { task: string; criterion: string }) => `${r.task}\u0000${r.cr
 const ROW_H = 36;
 /** A task row is taller: its provider cell can carry a second line (a retry, or the provider it really ran on). */
 const TASK_H = 48;
-/** A task status in the one casing the rest of the app uses; a status with no wording of its own shows as the core sent it. */
-const taskStatus = (s: string) => S.run.taskStatus[s] ?? (S.status as Record<string, string>)[s] ?? s;
+/** A task status in the vocabulary the rest of the app uses (shape, colour, word); one the app has no word for shows as
+ * the core sent it, on the "Not run" ring. */
+const taskStatus = (s: string) => {
+  const k = taskStatusKey(s);
+  return k ? <StatusDot status={k} /> : <StatusDot status="unknown" label={s} />;
+};
 /** One line: the provider the task ran on (icon, "Model · provider", errors), when the core says. */
 const provider = (t: { provider?: unknown }) => { const p = parseWorkerProvider(t.provider); return p ? <ProviderLine p={p} compact /> : null; };
 const GRAPH_H = 288;
@@ -197,7 +202,7 @@ export function Run() {
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
         {overview && (
           <>
-            <Badge status={overview.timeline.status === "done" ? "success" : overview.timeline.status === "active" ? "info" : "danger"}>{S.run.runStatus[overview.timeline.status]}</Badge>
+            <StatusDot status={timelineStatusKey(overview.timeline.status)} label={S.run.runStatus[overview.timeline.status]} />
             {/* Exactly one phase is current; each state is text, never colour alone (AC-4.1.1). */}
             <ol aria-label={S.run.timeline} className="v-run__phases">
               {overview.timeline.phases.map((p) => (
@@ -227,7 +232,7 @@ export function Run() {
                   <Text as="span" variant="body-sm" muted>{S.run.wave(t.wave)}</Text>
                   <span className="v-run__title" title={t.title ?? undefined}>{t.local} {t.title ?? ""}</span>
                   <span className="v-run__who">{provider(t) ?? t.owner ?? ""}</span>
-                  <Badge status={t.status === "closed" || t.status === "done" ? "success" : t.status === "failed" ? "danger" : undefined}>{taskStatus(t.status)}</Badge>
+                  {taskStatus(t.status)}
                   {/* Always present, so the columns line up down the list. A long list is cut with an ellipsis; the tooltip has all of it. */}
                   <span className="v-run__deps" title={waits || undefined}><Text as="span" variant="body-sm" muted>{waits}</Text></span>
                   <Button size="sm" variant="ghost" onClick={open}>{S.run.openWorker}</Button>

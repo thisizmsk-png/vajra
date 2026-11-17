@@ -598,7 +598,6 @@ export const S = {
     phases: { Understand: "Understand", Plan: "Plan", Execute: "Execute", Verify: "Verify", Fix: "Fix", Deliver: "Deliver" } as Record<string, string>,
     fixRound: (n: number | null | undefined, max: number | null | undefined) => (n ? (max ? `round ${n} of ${max}` : `round ${n}`) : ""),
     wave: (n: number) => `Wave ${n + 1}`, waitsFor: "Waits for", openWorker: "Open",
-    taskStatus: { pending: "Waiting", in_progress: "Working", closed: "Done", done: "Done", failed: "Failed", blocked: "Blocked" } as Record<string, string>,
     overviewFailed: "Could not read the run's progress.",
     criteria: "Acceptance criteria",
     emptyTitle: "No run open",

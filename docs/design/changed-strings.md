@@ -433,3 +433,9 @@ vajra-119 UI pass (PR B).
 |---|---|---|
 | No run open | Review, when no run is chosen | title of the centred empty state; the line under it is unchanged |
 | (changed) the Run title | Review, an open run | shows the run's goal; "Run" stays as the meta label, and is the title while the goal is unknown |
+
+vajra-119 UI pass (one status style).
+
+| String | Where | Note |
+|---|---|---|
+| (changed) Working to In progress, Waiting to Pending | Run, task list status | the task list now uses the status vocabulary, as the project column does |
