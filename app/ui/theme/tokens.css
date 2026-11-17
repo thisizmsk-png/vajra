@@ -103,6 +103,16 @@
 :root {
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  /* Type scale: five sizes and no others (the design guard fails any other font size). xs labels and meta, sm secondary
+     and mono, md body and controls, lg section and pane titles, xl the page title. */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 15px;
+  --text-xl: 22px;
+  /* Not text: the monogram letter inside a provider tile (20 px) and its small "via" badge (14 px). */
+  --glyph-tile: 10px;
+  --glyph-tile-sm: 7px;
   --radius-lg: 10px;
   --bar-h: 40px;
   --radius-sm: 4px;

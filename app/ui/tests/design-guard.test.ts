@@ -32,6 +32,14 @@ describe("design guard", () => {
       ["gradient", "a { background: linear-gradient(red, blue); }"],
       ["banned webfont", "a { font-family: Inter; }"],
       ["ALL-CAPS transform", "a { text-transform: uppercase; }"],
+      ["off-scale font size", "a { font-size: 14px; }"],
+      ["off-scale font size", "a { font-size: 12.5px; }"],
+      ["off-scale font size", "a { font: 500 11.5px/14px var(--font-ui); }"],
+      ["off-scale font size", "a { font: 16px/20px var(--font-ui); }"],
+      ["off-scale font size", "a { font: bold 14px var(--font-ui); }"],
+      ["off-scale font size", "a { font: oblique 14px var(--font-ui); }"],
+      ["off-scale font size", "a { font: italic small-caps bolder condensed 14px/1.2 var(--font-ui); }"],
+      ["off-scale font size", "a { font: oblique 10deg lighter 9.5px var(--font-ui); }"],
     ];
     for (const [rule, text] of bad) {
       expect(scanText("x", text).map((v) => v.rule), text).toContain(rule);
@@ -50,8 +58,19 @@ describe("design guard", () => {
     expect(scanText("x", '<i style={{ padding: 4, display: "flex" }} />')).toEqual([]);
   });
 
+  it("catches an off-scale size in a font declaration split across lines, on the size's own line", () => {
+    for (const text of ["a {\n  font:\n    600\n    14px/20px var(--font-ui);\n}", "a {\n  font-size:\n    12.5px;\n}", "a { font: bold\n  oblique 9px var(--font-ui); }"]) {
+      const v = scanText("x", text).filter((x) => x.rule === "off-scale font size");
+      expect(v, text).toHaveLength(1);
+      expect(text.split("\n")[v[0].line - 1], text).toMatch(/\dpx/);
+    }
+    // One declaration never reads into the next: a px value after the semicolon is not a font size.
+    expect(scanText("x", "a {\n  font:\n    600 13px/20px var(--font-ui);\n  padding: 14px;\n}")).toEqual([]);
+    expect(scanText("x", "a { font-size: 12px }\nb { width: 14px; }")).toEqual([]);
+  });
+
   it("does not flag tokens, ids or ordinary css", () => {
-    for (const ok of ["a { color: var(--c-text); }", "#root { margin: 0 }", "color-mix(in srgb, var(--c-a) 60%, transparent)", "const x = `#${id}`", "a { border: 1px solid var(--c-border); }", "a { box-shadow: var(--shadow-floating); }", "a { outline: 2px solid var(--c-focus-ring); }", "a { border-color: var(--c-red-ish); }", "a { color: color-mix(in srgb, var(--c-primary) 88%, var(--c-text)); }", "a { text-decoration: underline; }"]) {
+    for (const ok of ["a { color: var(--c-text); }", "#root { margin: 0 }", "color-mix(in srgb, var(--c-a) 60%, transparent)", "const x = `#${id}`", "a { border: 1px solid var(--c-border); }", "a { box-shadow: var(--shadow-floating); }", "a { outline: 2px solid var(--c-focus-ring); }", "a { border-color: var(--c-red-ish); }", "a { color: color-mix(in srgb, var(--c-primary) 88%, var(--c-text)); }", "a { text-decoration: underline; }", "a { font-size: 12px; }", "a { font: 500 13px/16px var(--font-ui); }", "a { font: 600 var(--text-lg)/20px var(--font-ui); }", "a { line-height: 14px; }", "a { font: bold 13px/14px var(--font-ui); }", "a { font: italic 600 var(--text-sm)/17px var(--font-ui); }", "a { font-variant-numeric: tabular-nums; padding: 14px; }"]) {
       expect(scanText("x", ok), ok).toEqual([]);
     }
   });

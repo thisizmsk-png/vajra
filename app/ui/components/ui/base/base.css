@@ -1,16 +1,20 @@
 /* K2 base kit styles, Graphite (docs/desktop/DESIGN.md). Variables from theme/tokens.css only; the design guard enforces it.
    The primary action is ink (--c-action). Azure (--c-primary) marks focus, the current selection's live state and the live line, nothing else. */
-body { margin: 0; background: var(--c-background); color: var(--c-text); font: 400 13px/19px var(--font-ui); caret-color: var(--c-primary); -webkit-font-smoothing: antialiased; }
+body { margin: 0; background: var(--c-background); color: var(--c-text); font: 400 var(--text-md)/19px var(--font-ui); caret-color: var(--c-primary); -webkit-font-smoothing: antialiased; }
+/* Bare elements take the app's type, never the browser's: controls default to a 13.33 px system face, and code, kbd and
+   pre to a 16 px serif mono. Zero specificity, so any kit or screen class still wins. */
+:where(button, input, select, textarea) { font-family: inherit; font-size: inherit; }
+:where(code, kbd, samp, pre) { font-family: var(--font-mono); font-size: var(--text-sm); }
 ::selection { background: var(--c-selection); }
 :root { scrollbar-color: var(--c-border-strong) transparent; scrollbar-width: thin; }
 
 .v-text { margin: 0; font-family: var(--font-ui); color: var(--c-text); }
-.v-text--headline-lg { font-size: 22px; line-height: 28px; font-weight: 600; }
-.v-text--headline-md { font-size: 15px; line-height: 20px; font-weight: 600; }
-.v-text--body { font-size: 13px; line-height: 19px; font-weight: 400; }
-.v-text--body-sm { font-size: 12px; line-height: 17px; font-weight: 400; color: var(--c-text-secondary); }
-.v-text--label { font-size: 13px; line-height: 16px; font-weight: 500; }
-.v-text--mono { font-family: var(--font-mono); font-size: 12px; line-height: 18px; font-weight: 400; }
+.v-text--headline-lg { font-size: var(--text-xl); line-height: 28px; font-weight: 600; }
+.v-text--headline-md { font-size: var(--text-lg); line-height: 20px; font-weight: 600; }
+.v-text--body { font-size: var(--text-md); line-height: 19px; font-weight: 400; }
+.v-text--body-sm { font-size: var(--text-sm); line-height: 17px; font-weight: 400; color: var(--c-text-secondary); }
+.v-text--label { font-size: var(--text-md); line-height: 16px; font-weight: 500; }
+.v-text--mono { font-family: var(--font-mono); font-size: var(--text-sm); line-height: 18px; font-weight: 400; }
 .v-text--muted { color: var(--c-text-muted); }
 .v-num { font-variant-numeric: tabular-nums; }
 
@@ -31,7 +35,10 @@ body { margin: 0; background: var(--c-background); color: var(--c-text); font: 4
 .v-button--primary { background: var(--c-action); color: var(--c-text-on-action); font-weight: 600; }
 .v-button--primary:hover:not([aria-disabled="true"]) { background: color-mix(in srgb, var(--c-action) 86%, var(--c-background)); }
 .v-button--secondary { background: var(--c-panel); color: var(--c-text); border-color: var(--c-border); box-shadow: 0 1px 0 var(--c-border); }
-.v-button--ghost { background: transparent; color: var(--c-text-secondary); }
+/* Ghost is the quiet third action. It keeps a faint fill at rest, so it reads as a button without a hover (a bare label
+   beside a bordered peer looked like plain text). An icon-only ghost stays clear, like a toolbar glyph. */
+.v-button--ghost { background: color-mix(in srgb, var(--c-accent) 60%, transparent); color: var(--c-text-secondary); }
+.v-button--ghost:has(> .v-icon:only-child) { background: transparent; }
 .v-button--danger { background: var(--c-surface-elevated); color: var(--c-danger); border-color: var(--c-border); }
 .v-button--secondary:hover:not([aria-disabled="true"]),
 .v-button--danger:hover:not([aria-disabled="true"]) { background: var(--c-accent); border-color: var(--c-border-strong); }
