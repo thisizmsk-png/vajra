@@ -41,6 +41,14 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
   });
 
+  it("titles an open run with its goal and keeps the slug on the meta line", async () => {
+    window.location.hash = "#/run?slug=camp";
+    setTransport(fakeIpc({ list_campaigns: { campaigns: [{ slug: "camp", goal: "Add per-key rate limiting" }] }, resume_targets: { targets: {} }, evidence_list: { rows: [] } }).transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    expect(await screen.findByRole("heading", { level: 1, name: "Add per-key rate limiting" })).toBeTruthy();
+    expect(screen.getByText("camp").tagName).toBe("CODE");
+  });
+
   it("offers a button to History next to the ask to choose a run, since History has no tab", async () => {
     setTransport(fakeIpc({ list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } }).transport);
     render(<ProjectsProvider><Run /></ProjectsProvider>);

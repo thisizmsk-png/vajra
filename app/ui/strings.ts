@@ -598,6 +598,7 @@ export const S = {
     taskStatus: { pending: "Waiting", in_progress: "Working", closed: "Done", done: "Done", failed: "Failed", blocked: "Blocked" } as Record<string, string>,
     overviewFailed: "Could not read the run's progress.",
     criteria: "Acceptance criteria",
+    emptyTitle: "No run open",
     pick: "Choose a run in History to see its evidence.",
     none: "This run has no acceptance criteria yet.",
     failed: "Could not read the evidence.",

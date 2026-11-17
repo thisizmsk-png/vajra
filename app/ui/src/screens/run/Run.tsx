@@ -9,7 +9,7 @@ import { api, errorText, isIpcError, onChanged } from "../../ipc";
 import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
 import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
-import { Problem, problemDetail } from "../states";
+import { Empty, Problem, problemDetail } from "../states";
 import { EvidenceApproval } from "./EvidenceApproval";
 import { Proof } from "./Proof";
 import { RunLog } from "./RunLog";
@@ -139,15 +139,27 @@ export function Run() {
   if (!slug) {
     return (
       <div className="v-home">
-        <Text as="h1" variant="headline-lg">{S.run.title}</Text>
-        <Text variant="body-sm" muted>{S.run.pick}</Text>
-        <Button size="sm" onClick={() => go("history")}>{S.states.openHistory}</Button>
+        <h1 className="v-sr">{S.run.title}</h1>
+        <div className="v-empty v-empty--pane">
+          <Text as="h2" variant="headline-md">{S.run.emptyTitle}</Text>
+          <Text variant="body" muted>{S.run.pick}</Text>
+          <div className="v-empty__act"><Button size="sm" onClick={() => go("history")}>{S.states.openHistory}</Button></div>
+        </div>
       </div>
     );
   }
+  // The goal leads, as it does in History. The list is already loaded for the project column; until it names this run,
+  // the title stays "Run", and the slug is always on the meta line.
+  const goal = P.campaigns.find((c) => c.slug === slug)?.goal?.trim();
   return (
     <div className="v-home">
-      <Text as="h1" variant="headline-lg" className="v-run__name">{S.run.title}</Text>
+      <header className="v-run__head">
+        <Text as="h1" variant="headline-lg" className="v-run__name">{goal || S.run.title}</Text>
+        <div className="v-run__meta">
+          {goal && <span>{S.run.title}</span>}
+          <code>{slug}</code>
+        </div>
+      </header>
       {/* The first run from the welcome: one line on what the evidence rows mean. It lives in the link, so it is gone on the next visit. */}
       {route.params.first === "1" && (
         <div className="v-run__first" role="note">
@@ -169,7 +181,7 @@ export function Run() {
             {/* Exactly one phase is current; each state is text, never colour alone (AC-4.1.1). */}
             <ol aria-label={S.run.timeline} className="v-run__phases">
               {overview.timeline.phases.map((p) => (
-                <li key={p.name} aria-current={p.state === "current" ? "step" : undefined}>
+                <li key={p.name} data-state={p.state} aria-current={p.state === "current" ? "step" : undefined}>
                   {S.run.phases[p.name] ?? p.name} <Text as="span" variant="body-sm" muted>{S.run.phaseState[p.state]}{p.name === "Fix" && p.state !== "pending" && p.round ? `, ${S.run.fixRound(p.round, p.max_rounds)}` : ""}</Text>
                 </li>
               ))}
