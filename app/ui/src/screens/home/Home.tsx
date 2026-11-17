@@ -224,6 +224,10 @@ export function Home() {
   // A core that does not answer fails every read on this screen for one reason. The checks panel says it once, with
   // the retry; the preferences line would say it again in other words.
   const coreDown = pre.state === "error" && pre.down;
+  // The runs list failing for that same reason is not a second problem: its panel stays quiet, and the one retry
+  // rereads everything the outage failed (the checks, the runs, their folders and the project list).
+  const campsDown = coreDown && camps.state === "error" && camps.down;
+  const retryAll = () => { recheck(); reloadCamps(); reloadTargets(); reloadProjects(); };
   // An empty ask is also said beside Start (the ask box can be scrolled out of sight), not only on the box.
   const why = notGit ? S.folder.startNeedsRepo : checksBlock ? S.home.startNeedsChecks(failing) : pre.state === "error" ? S.home.startNeedsAnswer : shown && errs.ask ? errs.ask : "";
   const repoName = basename(d.repo);
@@ -284,7 +288,7 @@ export function Home() {
 
           <section className="v-home__checks" aria-label={S.home.preflight}>
             {pre.state === "loading" && <LoadingRows rows={1} label={S.states.loading} />}
-            {pre.state === "error" && <Problem title={S.home.preflightFailed} detail={pre.text} retry={recheck} />}
+            {pre.state === "error" && <Problem title={coreDown ? S.home.coreDown : S.home.preflightFailed} detail={pre.text} retry={coreDown ? retryAll : recheck} />}
             {pre.state === "ok" && (
               <details open={failing > 0}>
                 <summary className="v-home__checksum">
@@ -328,7 +332,8 @@ export function Home() {
             {camps.state !== "ok" || camps.data.length === 0 ? (
               <div className="v-panel__body">
                 {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
-                {camps.state === "error" && <Problem title={campsFailed} detail={camps.text} retry={retryCamps} />}
+                {camps.state === "error" && !campsDown && <Problem title={campsFailed} detail={camps.text} retry={retryCamps} />}
+                {campsDown && <Text variant="body-sm" muted>{S.home.campaignsWait}</Text>}
                 {/* Not while a live run is listed above: that run is a run, it just has no campaign record yet. */}
                 {camps.state === "ok" && live.state !== "loading" && shownLive.length === 0 && !(failedRuns.state === "ok" && failedRuns.data.some((r) => !project || r.project === project.id)) && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
               </div>
@@ -369,7 +374,7 @@ export function Home() {
       </div>
       <ActionBar label={S.home.barLabel}
         context={repoName ? <><b>{repoName}</b><span>{d.repo.trim()}</span></> : <span>{S.home.barNoRepo}</span>}
-        actions={[{ id: "recheck", label: S.home.preflightRetry, run: recheck }]} />
+        actions={[{ id: "recheck", label: S.home.preflightRetry, run: coreDown ? retryAll : recheck }]} />
     </div>
   );
 }

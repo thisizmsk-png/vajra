@@ -426,3 +426,11 @@ Engine Terminal line (red team G2 M1). A downloaded app has no engine in the ski
 | There is already a vajra folder in Claude Code's skills folder (~/.claude/skills/vajra), but it has no install script. Move it to the Trash, and this row shows the line that installs the copy that came with this app. | Settings > Providers > Set up engine row, same case | |
 | (removed) "then /vajra doctor" | Run workflow check fix | That is a Claude Code command, not a shell line. The fix is now the install line only. |
 | If you don't have the engine yet, the line first checks the copy that came with this app and puts it in Claude Code's skills folder. Then it runs the engine's install script, which makes a folder for Vajra's records, with a key file inside it, and adds Vajra's safety hooks to Claude Code's settings. It does not install any agent. | Welcome Engine step, under the line | the first sentence is new |
+
+vajra-119 UI pass (core down, one message).
+
+| String | Where | Note |
+|---|---|---|
+| Vajra's core isn't answering. | Home, when the core does not answer | replaces "Could not run the checks." in that case only; the detail line is unchanged |
+| Runs show here once the core answers. | Home, Runs panel, same case | replaces a second error box |
+| (removed in that case) Could not read your projects. | title bar, only while Home is showing | Home already says it; other screens keep it |

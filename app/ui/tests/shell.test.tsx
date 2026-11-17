@@ -68,6 +68,19 @@ beforeEach(() => {
 afterEach(() => { cleanup(); setTransport(); window.location.hash = ""; });
 
 describe("Shell B frame (FG-03)", () => {
+  it("says a down core once, on Home, not again in the title bar; another screen keeps the title bar's line", async () => {
+    const down = () => new Error("no answer");
+    const over = { preflight: down, list_campaigns: down, resume_targets: down, active_runs: down, inbox: down, preferences_read: down };
+    boot("", over);
+    expect(await screen.findByText(S.home.coreDown)).toBeTruthy();
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.queryByText(S.frame.loadFailed)).toBeNull();
+    expect(screen.getAllByRole("button", { name: S.states.retry })).toHaveLength(1);
+    cleanup();
+    boot("#/settings", over);
+    expect(await screen.findByText(S.frame.loadFailed)).toBeTruthy();
+  });
+
   it("has no static list of screens: the title bar lists projects, Unsorted last", async () => {
     boot();
     await waitFor(() => expect(tabs().getAllByRole("link")).toHaveLength(3));

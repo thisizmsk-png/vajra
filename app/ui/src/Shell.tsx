@@ -146,6 +146,7 @@ function Frame() {
   // A first launch has no remembered project: until the list answers, show neither screen rather than flash the launcher.
   const deciding = welcome === null && P.state === "loading" && !remembered && (route.screen === "orch" || route.screen === "launch") && !route.params.new;
   const showColumn = !!project && !compact && !welcoming;
+  const homeShown = !project && (route.screen === "orch" || route.screen === "launch");
   const inspectable = !!project && INSPECTED.has(route.screen) && !welcoming;
   const showInspector = inspectable && inspector;
   const reviewParams: Record<string, string> = current.focus ? { slug: current.focus } : {};
@@ -203,8 +204,10 @@ function Frame() {
               <ProjectTabs projects={P.projects} summaries={P.summaries} current={pid} view={route.screen} onAdd={addProject} />
             ) : (
               <>
-                <span className="v-tb__empty">{P.state === "error" ? S.frame.loadFailed : P.state === "ok" ? (welcoming ? S.welcome.windowTitle : S.frame.noProjects) : ""}</span>
-                {P.state === "error" && <button type="button" className="v-sb-btn" onClick={P.reload}>{S.states.retry}</button>}
+                {/* With no project, orch and launch both show Home, which says the core is down once, with one retry for
+                    every read (projects included). The title bar repeating it made three copies of one failure. */}
+                <span className="v-tb__empty">{P.state === "error" ? (homeShown ? "" : S.frame.loadFailed) : P.state === "ok" ? (welcoming ? S.welcome.windowTitle : S.frame.noProjects) : ""}</span>
+                {P.state === "error" && !homeShown && <button type="button" className="v-sb-btn" onClick={P.reload}>{S.states.retry}</button>}
                 {P.state === "ok" && !welcoming && <FindRepos onAdded={P.reload} />}
                 <button type="button" className="v-tb__add" onClick={addProject}><Icon name="plus" size={12} />{S.frame.addProject}</button>
               </>
