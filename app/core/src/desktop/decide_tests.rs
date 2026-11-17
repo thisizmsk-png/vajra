@@ -1504,3 +1504,21 @@ fn a_forged_index_line_cannot_move_a_failure_onto_another_campaign() {
     assert_eq!(rows[0]["run_id"], RUN);
     assert_eq!(rows[0]["campaign"], CAMP, "the campaign is the guarded record's, not the index line's");
 }
+
+#[test]
+fn failure_detection_waits_for_a_launch_in_flight_so_a_resume_is_never_hit() {
+    // A resume installs its session under the launch lock. While it holds the lock no reaper may snapshot or kill, so an
+    // older failure check cannot end the freshly resumed process that took over the same session stream.
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_classic(&t, &app);
+    t.result("wf_e.json", &error_result("an old failure"));
+    {
+        let _launch = app.launching.lock().unwrap();
+        assert_eq!(app.active_runs().unwrap()["count"], 1, "nothing is ended while a launch holds the lock");
+        assert!(app.sup.is_running(&stream).unwrap_or(false));
+        assert!(app.run_failures().unwrap()["runs"].as_array().unwrap().is_empty(), "and no failure is recorded");
+    }
+    assert_eq!(app.active_runs().unwrap()["count"], 0, "once the launch is done the errored run is ended");
+    assert_eq!(app.run_failures().unwrap()["runs"][0]["message"], "an old failure");
+}

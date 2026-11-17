@@ -860,14 +860,16 @@ impl App {
     /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
         self.check_codex_leads();
-        self.end_errored_runs();
         // A launch in flight owns the session it just took; it reaps itself.
-        // The guard stays bound until `reap_locked` returns, so a launch cannot install a session in between.
+        // The guard stays bound until `reap_locked` returns, so a launch cannot install a session in between. The same
+        // guard covers failure detection: a resume installs its session under this lock, so it cannot put a fresh
+        // process under a stream between the snapshot of the old run and the kill, and the kill never lands on it.
         let _guard = match self.launching.try_lock() {
             Ok(g) => g,
             Err(std::sync::TryLockError::WouldBlock) => return,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
         };
+        self.end_errored_runs();
         self.reap_locked();
     }
 
