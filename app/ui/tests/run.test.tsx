@@ -41,6 +41,28 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
   });
 
+  it("titles an open run with its goal and keeps the slug on the meta line", async () => {
+    window.location.hash = "#/run?slug=camp";
+    setTransport(fakeIpc({ list_campaigns: { campaigns: [{ slug: "camp", goal: "Add per-key rate limiting" }] }, resume_targets: { targets: {} }, evidence_list: { rows: [] } }).transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    expect(await screen.findByRole("heading", { level: 1, name: "Add per-key rate limiting" })).toBeTruthy();
+    expect(screen.getByText("camp").tagName).toBe("CODE");
+  });
+
+  it("clamps a long, unbroken goal to two lines and keeps all of it in the tooltip", async () => {
+    const goal = `Fix ${"https://example.com/".repeat(40)}\nand then the second line`;
+    window.location.hash = "#/run?slug=camp";
+    setTransport(fakeIpc({ list_campaigns: { campaigns: [{ slug: "camp", goal }] }, resume_targets: { targets: {} }, evidence_list: { rows: [] } }).transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    const h1 = await screen.findByRole("heading", { level: 1 });
+    expect(h1.getAttribute("title")).toBe(goal.trim());
+    expect(h1.className).toContain("v-run__name");
+    expect(h1.closest(".v-run__head")).toBeTruthy();
+    const css = readFileSync(resolve(__dirname, "../src/shell.css"), "utf8");
+    const rule = css.split("\n").find((l) => l.includes(".v-run__head h1.v-run__name {")) ?? "";
+    for (const d of ["-webkit-line-clamp: 2", "overflow: hidden", "overflow-wrap: anywhere"]) expect(rule).toContain(d);
+  });
+
   it("says why a run stopped when its workflow ended in error, in the run view", async () => {
     const msg = "an ask of 10+ characters is required, e.g. /vajra add a --json flag to the export command";
     // No resume target for it (a Codex run, or a folder that is gone): the failure still shows, matched on the campaign.
@@ -495,10 +517,13 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     await openOverview(overview());
     const title = screen.getByRole("heading", { level: 1, name: S.run.title });
     expect(title.className).toContain("v-run__name");
+    // The gap comes from the header that holds the title and its meta line, not from the title itself.
+    expect(title.parentElement?.className).toBe("v-run__head");
     expect(screen.getByRole("heading", { level: 2, name: S.run.timeline })).toBeTruthy();
     const css = readFileSync(resolve(__dirname, "../src/shell.css"), "utf8");
-    const rule = css.split("\n").find((l) => l.includes(".v-run__name {")) ?? "";
-    expect(rule).toContain("margin-bottom: var(--space-lg)");
+    expect(css).not.toMatch(/^h1\.v-run__name\s*\{/m);
+    const rule = css.split("\n").find((l) => l.startsWith(".v-run__head {")) ?? "";
+    expect(rule).toContain("margin-bottom: var(--space-xl)");
   });
 
   it("renders only the rows in view for 200 tasks (AC-4.2.2)", async () => {
