@@ -145,7 +145,11 @@ function Frame() {
   const welcoming = (welcome ?? (P.state === "ok" && P.projects.length === 0)) && (route.screen === "orch" || route.screen === "launch") && !route.params.new;
   // A first launch has no remembered project: until the list answers, show neither screen rather than flash the launcher.
   const deciding = welcome === null && P.state === "loading" && !remembered && (route.screen === "orch" || route.screen === "launch") && !route.params.new;
-  const showColumn = !!project && !compact && !welcoming;
+  // Settings has its own section list, so the project column steps aside there; the stored fold choice is untouched.
+  // The fold button, ⌘B and the palette entry all need the column to be a choice here, so they share this one condition:
+  // on Settings none of them is offered, and none can flip the stored choice behind the screen.
+  const columnToggle = !!project && route.screen !== "settings";
+  const showColumn = columnToggle && !compact && !welcoming;
   // Home says "the core isn't answering" once, with a retry that rereads the project list too, only when its reads got
   // no answer. A project list the core answered with an error is another failure: Home says nothing about it, so the
   // title bar keeps its line and retry.
@@ -165,7 +169,7 @@ function Frame() {
     if (!e.shiftKey && Number.isInteger(n) && n >= 1 && n <= 9) {
       const p = P.projects[n - 1];
       if (p) { e.preventDefault(); goProject(p.id); }
-    } else if (!e.shiftKey && k === "b" && project) { e.preventDefault(); setCompact((c) => !c); }
+    } else if (!e.shiftKey && k === "b" && columnToggle) { e.preventDefault(); setCompact((c) => !c); }
     else if (!e.shiftKey && k === "i" && inspectable) { e.preventDefault(); setInspector((x) => !x); }
   };
   useEffect(() => {
@@ -179,7 +183,7 @@ function Frame() {
     ...P.projects.flatMap((p, i) => (p.id === pid ? [] : [{ id: `p-${p.id}`, label: S.frame.goProject(p.name), hint: stateText(P.summaries.get(p.id)) || undefined, keys: i < 9 ? ["⌘", String(i + 1)] : undefined, run: () => goProject(p.id) }])),
     ...(project ? (["orch", "board", "history"] as const).filter((v) => v !== route.screen).map((v) => ({ id: `v-${v}`, label: S.frame.show(S.views[v]), run: () => go(v, {}, pid) })) : []),
     ...(project && current.focus && route.screen !== "review" ? [{ id: "v-review", label: S.frame.show(S.views.review), run: () => go("review", reviewParams, pid) }] : []),
-    ...(project ? [{ id: "column", label: compact ? S.frame.showColumn : S.frame.hideColumn, keys: ["⌘", "B"], run: () => setCompact((c) => !c) }] : []),
+    ...(columnToggle ? [{ id: "column", label: compact ? S.frame.showColumn : S.frame.hideColumn, keys: ["⌘", "B"], run: () => setCompact((c) => !c) }] : []),
     ...(inspectable ? [{ id: "inspector", label: inspector ? S.frame.hideInspector : S.frame.showInspector, keys: ["⌘", "I"], run: () => setInspector((x) => !x) }] : []),
     ...(route.screen === "settings" ? [] : [{ id: "settings", label: S.frame.openSettings, keys: ["⌘", ","], run: () => openSettings() }]),
     { id: "add", label: S.frame.addProject, run: addProject },
@@ -244,7 +248,7 @@ function Frame() {
               <TerminalDock defaultPlace={project?.root ? { cwd: project.root, label: project.name } : undefined} />
             </div>
           </div>
-          <StatusBar runs={P.runs} usage={projectState.usage} compact={project ? compact : null} onColumn={() => setCompact((c) => !c)}
+          <StatusBar runs={P.runs} usage={projectState.usage} compact={columnToggle ? compact : null} onColumn={() => setCompact((c) => !c)}
             onSettings={() => openSettings()} />
         </div>
       </CurrentProject.Provider>

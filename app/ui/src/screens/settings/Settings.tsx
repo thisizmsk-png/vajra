@@ -1,7 +1,7 @@
 // Settings in the project shell: explicit global defaults and per-project overrides.
 // Provider availability remains a separate check; preferences never grant execution permissions.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Kbd, Text } from "../../../components/ui/base";
+import { Kbd, PageHeader } from "../../../components/ui/base";
 import { ActionBar } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api } from "../../ipc";
@@ -87,8 +87,7 @@ export function Settings() {
         </div>
         <div className="v-screen__body">
           <div className="v-settings__col">
-            <Text as="h1" variant="headline-lg">{meta.title}</Text>
-            <Text variant="body" muted className="v-home__lede">{meta.lede}</Text>
+            <PageHeader title={meta.title} lede={meta.lede} />
             {prefs.connected && ["providers", "general", "appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} agents={agentChoices(providers.list)} />}
             {section === "general" && <WorkerCopies />}
             {section === "providers" && <AccountsPanel accounts={accounts} />}
