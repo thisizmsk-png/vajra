@@ -81,6 +81,24 @@ describe("Shell B frame (FG-03)", () => {
     expect(await screen.findByText(S.frame.loadFailed)).toBeTruthy();
   });
 
+  it("keeps the title bar's line and retry on Home when the core answers the project list with an error and the checks pass", async () => {
+    const fail = () => { throw { error: "io_error", detail: "the project index is unreadable" }; };
+    boot("", { list_campaigns: fail });
+    expect(await screen.findByText(S.frame.loadFailed)).toBeTruthy();
+    expect(screen.queryByText(S.home.coreDown)).toBeNull();
+    const retry = screen.getAllByRole("button", { name: S.states.retry }).find((b) => b.classList.contains("v-sb-btn"));
+    expect(retry).toBeTruthy();
+    const before = ipc.calls.filter((c) => c.cmd === "list_campaigns").length;
+    fireEvent.click(retry!);
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "list_campaigns").length).toBeGreaterThan(before));
+  });
+
+  it("when only the project list gets no answer, Home still says the core is down, so the quiet title bar never hides it", async () => {
+    boot("", { list_campaigns: () => new Error("no answer") });
+    expect(await screen.findByText(S.home.coreDown)).toBeTruthy();
+    expect(screen.queryByText(S.frame.loadFailed)).toBeNull();
+  });
+
   it("has no static list of screens: the title bar lists projects, Unsorted last", async () => {
     boot();
     await waitFor(() => expect(tabs().getAllByRole("link")).toHaveLength(3));

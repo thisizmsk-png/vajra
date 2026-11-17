@@ -146,7 +146,10 @@ function Frame() {
   // A first launch has no remembered project: until the list answers, show neither screen rather than flash the launcher.
   const deciding = welcome === null && P.state === "loading" && !remembered && (route.screen === "orch" || route.screen === "launch") && !route.params.new;
   const showColumn = !!project && !compact && !welcoming;
-  const homeShown = !project && (route.screen === "orch" || route.screen === "launch");
+  // Home says "the core isn't answering" once, with a retry that rereads the project list too, only when its reads got
+  // no answer. A project list the core answered with an error is another failure: Home says nothing about it, so the
+  // title bar keeps its line and retry.
+  const homeShown = !project && (route.screen === "orch" || route.screen === "launch") && P.state === "error" && P.down;
   const inspectable = !!project && INSPECTED.has(route.screen) && !welcoming;
   const showInspector = inspectable && inspector;
   const reviewParams: Record<string, string> = current.focus ? { slug: current.focus } : {};

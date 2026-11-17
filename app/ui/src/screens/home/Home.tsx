@@ -57,7 +57,7 @@ export function Home() {
   const prefs = usePreferences();
   // Inside a project the folder is the project's, and the list is the project's own campaigns (FG-03).
   const { project } = useCurrentProject();
-  const { projects, reload: reloadProjects } = useProjects();
+  const { projects, reload: reloadProjects, state: projectsState, down: projectsDown, error: projectsError } = useProjects();
   // The core decides which project owns a folder (a symlink or a linked worktree is its project too); a core that
   // cannot answer falls back to a literal match on a registered root, else the Unsorted bucket.
   const storeProject = async (cwd: string): Promise<string> => {
@@ -223,7 +223,8 @@ export function Home() {
   const checksBlock = pre.state === "ok" && !pre.data.start_enabled;
   // A core that does not answer fails every read on this screen for one reason. The checks panel says it once, with
   // the retry; the preferences line would say it again in other words.
-  const coreDown = pre.state === "error" && pre.down;
+  // The project list getting no answer counts too: the shell then leaves the title bar quiet and relies on this note.
+  const coreDown = (pre.state === "error" && pre.down) || (projectsState === "error" && projectsDown);
   // The runs list failing for that same reason is not a second problem: its panel stays quiet, and the one retry
   // rereads everything the outage failed (the checks, the runs, their folders and the project list).
   const campsDown = coreDown && camps.state === "error" && camps.down;
@@ -288,7 +289,9 @@ export function Home() {
 
           <section className="v-home__checks" aria-label={S.home.preflight}>
             {pre.state === "loading" && <LoadingRows rows={1} label={S.states.loading} />}
-            {pre.state === "error" && <Problem title={coreDown ? S.home.coreDown : S.home.preflightFailed} detail={pre.text} retry={coreDown ? retryAll : recheck} />}
+            {coreDown
+              ? <Problem title={S.home.coreDown} detail={pre.state === "error" ? pre.text : projectsError} retry={retryAll} />
+              : pre.state === "error" && <Problem title={S.home.preflightFailed} detail={pre.text} retry={recheck} />}
             {pre.state === "ok" && (
               <details open={failing > 0}>
                 <summary className="v-home__checksum">
