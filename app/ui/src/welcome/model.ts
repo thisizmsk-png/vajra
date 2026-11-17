@@ -3,6 +3,7 @@ import type { CheckKind } from "./CheckRow";
 import type { LoginState } from "../providerContract";
 import type { SetupRow } from "../setupContract";
 import { S } from "../../strings";
+import { isIpcError } from "../ipc";
 
 const C = S.welcome;
 
@@ -37,7 +38,9 @@ export interface Model {
 
 /** The core's own words for what went wrong, never its error code (the design: no raw "claude_dir_missing"). Empty when it gave none. */
 export const reason = (e: unknown): string => {
-  const o = typeof e === "object" && e !== null ? (e as { error?: unknown; detail?: unknown }) : {};
+  // Not the core's error shape: the core never answered (the down test Home and the project store use).
+  if (!isIpcError(e)) return S.states.noAnswer;
+  const o = e as { error?: unknown; detail?: unknown };
   const d = typeof o.detail === "string" ? o.detail.trim() : "";
   // A detail that is one bare code ("project_discover") is not words: say what the code means, or say nothing.
   if (!CODE.test(d)) return d;
@@ -47,7 +50,7 @@ const CODE = /^[a-z][a-z0-9_]*$/;
 const CODE_WORDS: Record<string, string> = {
   unknown_command: S.states.unknownCommand,
   not_in_fixture: S.states.unknownCommand,
-  core_unavailable: S.states.noAnswer,
+  core_unavailable: S.states.noAnswer, // the welcome demo fixture's down core
 };
 
 /** An agent counts when it is installed and its own login check says signed in. "Cannot tell" never counts. */

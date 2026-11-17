@@ -23,6 +23,12 @@ describe("welcome reason", () => {
     expect(reason({ error: "something_new", detail: "project_discover" })).toBe("");
     expect(S.welcome.folder.failedBody(reason({ error: "something_new", detail: "project_discover" }))).not.toContain("project_discover");
   });
+  it("a core that never answered (a plain Error, no error code) gets the no-answer words", () => {
+    const down = new Error("IPC timed out");
+    expect(reason(down)).toBe(S.states.noAnswer);
+    expect(S.welcome.folder.failedBody(reason(down))).toBe(S.states.noAnswer);
+    expect(reason("Command project_discover not found")).toBe(S.states.noAnswer);
+  });
 });
 
 describe("Kbd", () => {
