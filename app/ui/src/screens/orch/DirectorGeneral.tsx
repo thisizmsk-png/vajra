@@ -331,7 +331,8 @@ export function SubAgentCard({ agent, verb, text, onOpen, href }: { agent: SubAg
       <span className="v-subagent__top">
         <span className="v-subagent__verb">{verb}</span>
         <span className="v-subagent__name">{agent?.name ?? ""}</span>
-        {agent && <StatusDot status={agent.status} label={agent.statusLabel} className="v-subagent__dot" />}
+        {/* A worker this run's tree does not list (another run's, or gone) has no status to show. */}
+        {agent?.statusLabel && <StatusDot status={agent.status} label={agent.statusLabel} className="v-subagent__dot" />}
       </span>
       {agent?.task && <span className="v-subagent__task">{agent.task}</span>}
       {text && <span className="v-subagent__text">{text}</span>}
@@ -356,7 +357,7 @@ const TurnView = memo(function TurnView({ role, text, agents }: { role: "you" | 
           const a = agents?.list.find((w) => w.id === c.worker || w.id === `agent:${c.worker}`) ?? null;
           const shown = a ?? { id: c.worker!, name: c.worker!.replace(/^agent:/, ""), task: null, status: "unknown" as StatusKey, statusLabel: "" };
           const open = a && agents ? () => agents.open(a.id) : undefined;
-          return <SubAgentCard key={i} agent={a ? a : { ...shown, statusLabel: S.status.unknown }} verb={S.dg.workerVerb[c.action]} text={c.text ?? undefined}
+          return <SubAgentCard key={i} agent={shown} verb={S.dg.workerVerb[c.action]} text={c.text ?? undefined}
             onOpen={open} href={open ? undefined : toHash("crew", { worker: shown.id.replace(/^agent:/, "") })} />;
         })}
         {rest.length > 0 && (
