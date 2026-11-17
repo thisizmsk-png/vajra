@@ -48,6 +48,8 @@ describe("Crew states", () => {
     setTransport(fakeIpc({
       active_runs: { count: 0, runs: [] },
       crew: () => { if (!up) throw "command crew failed"; return node("lead", "lead", "Lead", "in_progress"); },
+      // The tree opens on the Lead, whose chat reads its status.
+      lead_status: { available: false, busy: false, name: "Lead" },
     }).transport);
     render(<Crew />);
     const alert = await screen.findByRole("alert");

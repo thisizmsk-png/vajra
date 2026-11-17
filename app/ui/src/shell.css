@@ -267,6 +267,24 @@
 .v-feed__who { margin: 0; color: var(--c-text-muted); font: 500 var(--text-xs)/16px var(--font-ui); }
 .v-feed__text { margin: 0; color: var(--c-text-secondary); font: 400 var(--text-sm)/18px var(--font-ui); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
 .v-feed__paused { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+/* The worker's chat: the thread over its message box. A step folds; its row is the summary, so it is a keyboard stop. */
+.v-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: var(--space-sm); }
+.v-chat .v-dgv__composer { padding: 0; }
+.v-chat .v-dgv__box { max-width: none; }
+summary.v-feed__steprow { cursor: pointer; list-style: none; border-radius: var(--radius-sm); }
+summary.v-feed__steprow::-webkit-details-marker { display: none; }
+summary.v-feed__steprow:hover .v-feed__tool { color: var(--c-text); }
+summary.v-feed__steprow:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-feed__path { text-decoration: underline; text-decoration-color: var(--c-border-strong); text-underline-offset: 3px; }
+.v-feed__steprow .v-badge { flex: none; }
+.v-feed__step[open] > .v-feed__steprow .v-feed__detail { white-space: normal; overflow-wrap: anywhere; }
+.v-feed__stepacts { display: flex; gap: var(--space-xs); }
+/* A step's own diff is one file: its name over its lines, at the thread's width. */
+.v-feed__step .v-diff { grid-template-columns: minmax(0, 1fr); gap: var(--space-xs); }
+.v-chat__msg { display: flex; flex-direction: column; gap: 2px; max-width: 72ch; padding: var(--space-sm) var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-panel); contain: layout; }
+.v-chat__msg--you { align-self: flex-end; box-shadow: inset 2px 0 0 var(--c-info); }
+.v-chat__msg .v-feed__text { display: block; overflow: visible; -webkit-line-clamp: unset; color: var(--c-text); }
+.v-chat__state { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); margin-top: var(--space-xs); color: var(--c-text-muted); font: 400 var(--text-xs)/16px var(--font-ui); }
 
 /* The plain-words summary for the Lead, the run and the other groups, with the active worker's activity under it. */
 .v-crew__summary { display: flex; flex-direction: column; gap: var(--space-lg); padding: var(--space-lg) var(--space-xl); min-width: 0; }

@@ -16,10 +16,17 @@ import { onChangedPaced, usePoll } from "../../projects/poll";
 import { useProjects } from "../../projects/store";
 import { WorkerPane } from "./WorkerPane";
 import { CoreWorkerPane } from "./CoreWorkerPane";
-import { RunSummary, StallNote } from "./RunSummary";
+import { RunFacts, RunSummary, StallNote } from "./RunSummary";
 import type { Facts } from "./RunSummary";
 import { LIVENESS_MS, headsGrew, initialPick, isWorkerId, isWorking, stalledSince, workersIn } from "./crewLive";
 import { parseWhen } from "../when";
+import { chatItems, lastLine } from "./chat";
+import { DirectorGeneral } from "../orch/DirectorGeneral";
+import type { SubAgent } from "../orch/DirectorGeneral";
+
+/** Rows read from each working worker's stream for its newest line; a few kilobytes at most. */
+const LAST_ROWS = 12;
+const LAST_BYTES = 8 * 1024;
 
 /** A status or event is re-read at least this often: a tasks.json edit raises no event (AC-2.1.2: within 2 s). */
 const POLL_MS = 2000;
@@ -121,6 +128,7 @@ export function Crew() {
     setSelected("");
     setErr("");
     setGrewAt(null);
+    setLasts(new Map());
     heads.current = new Map();
     openedAt.current = Date.now();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -198,7 +206,23 @@ export function Crew() {
     });
   }, [streamsKey, onActivity]);
   useEffect(readHeads, [readHeads]);
-  usePoll(readHeads, LIVENESS_MS, !!streamsKey && !!root && root.children.some((c) => c.kind === "run" && c.status !== "unknown"));
+  const runLive = !!root && root.children.some((c) => c.kind === "run" && c.status !== "unknown");
+  usePoll(readHeads, LIVENESS_MS, !!streamsKey && runLive);
+
+  // While the Lead's chat is open, each working worker's newest rows (a few kilobytes), so its card says what it is
+  // doing now. Nothing is read for this anywhere else.
+  const [lasts, setLasts] = useState<ReadonlyMap<string, string>>(new Map());
+  const leadOpen = selected === "lead" || selected.startsWith("run:");
+  const readLasts = useCallback(() => {
+    const ids = streamsKey ? streamsKey.split("\n") : [];
+    if (!ids.length || !leadOpen) return;
+    const asked = heads.current;
+    void Promise.all(ids.map((id) => api.streamWindow(id, null, LAST_ROWS, LAST_BYTES).then((w) => [`agent:${id.slice("w-".length)}`, lastLine(chatItems(w.lines))] as [string, string], () => null))).then((got) => {
+      if (asked === heads.current) setLasts(new Map(got.filter((g): g is [string, string] => g !== null)));
+    });
+  }, [streamsKey, leadOpen]);
+  useEffect(readLasts, [readLasts]);
+  usePoll(readLasts, LIVENESS_MS, leadOpen && !!streamsKey && runLive);
 
   // ⌘K: go to any worker of this run by name.
   useCommands(root ? agents(root).map((n) => ({ id: n.id, label: S.palette.goWorker(n.title), hint: statusLabel(n), run: () => setSelected(n.id) })) : []);
@@ -285,9 +309,35 @@ export function Crew() {
       </section>
     );
   };
+  /** Open a worker's chat from a card: its ancestors open in the tree, and it is selected. */
+  const openAgent = (id: string) => {
+    const path = pathTo(root, id);
+    if (path) setOpenIds((o) => Array.from(new Set([...(o ?? []), ...path.slice(0, -1)])));
+    setSelected(id);
+  };
+  const subAgents: SubAgent[] = agents(root).map((w) => {
+    const s = statusShown(w, stalled);
+    return { id: w.id, name: nameOf(w), task: facts(w).taskOf(w), status: s.shape, statusLabel: s.label, last: isWorking(w.status) && !stalled ? lasts.get(w.id) : undefined };
+  });
+  /** The Lead (and the run it leads): its conversation, with the run's workers as cards that open their chats. */
+  const leadPane = (n: CrewNodeDto) => {
+    const s = statusShown(n, stalled);
+    const f = facts(n);
+    return (
+      <DirectorGeneral key="lead" embedded={{
+        title: run?.title ?? n.title,
+        status: <StatusDot status={s.shape} label={s.label} />,
+        agents: { list: subAgents, open: openAgent },
+        banner: f.stalled !== undefined && target ? <StallNote since={f.stalled} live={f.live} slug={target.slug} /> : undefined,
+        intro: <RunFacts scope={n} f={f} />,
+        runId: target?.runId,
+      }} />
+    );
+  };
   const pane = !root || !picked ? null
     : isWorkerId(picked.id) ? workerPane(picked)
     : picked.kind === "task" || picked.id.startsWith("task:") ? taskPane(picked)
+    : picked.kind === "lead" || picked.kind === "run" ? leadPane(picked)
     : <RunSummary key={picked.id} scope={picked} f={facts(picked)} />;
   const pickedShown = picked ? statusShown(picked, stalled) : null;
 

@@ -67,3 +67,31 @@
 .v-dgv__bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); padding: 6px 8px 8px 14px; }
 .v-dgv__hint { color: var(--c-text-muted); }
 .v-dgv__err { color: var(--c-danger); font: 400 var(--text-sm)/16px var(--font-ui); }
+.v-dgv__off { color: var(--c-text-muted); font: 400 var(--text-sm)/16px var(--font-ui); }
+.v-dgv__sends { display: flex; align-items: center; gap: var(--space-xs); flex: none; }
+
+/* The same conversation as a run's Lead, in the Workers screen's pane. */
+.v-dgv--embedded { overflow: hidden; }
+.v-dgv--embedded .v-dgv__who { flex: 1; min-width: 0; align-items: center; }
+.v-dgv--embedded .v-dgv__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-dgv--embedded .v-dgv__who > .v-status-dot { flex: none; }
+.v-dgv--embedded .v-dgv__col { max-width: none; padding: var(--space-lg); gap: var(--space-lg); }
+.v-dgv--embedded .v-dgv__box { max-width: none; }
+.v-dgv--embedded .v-dgv__composer { padding: 0 var(--space-lg) var(--space-lg); }
+.v-dgv--embedded > .v-crew__stall { margin: var(--space-md) var(--space-lg) 0; }
+
+/* A sub-agent card: who, on what, its status and its newest line; the whole card opens the worker's chat. */
+.v-subagents { display: flex; flex-direction: column; gap: var(--space-sm); }
+.v-subagents__lede { margin: 0; color: var(--c-text-muted); font: 500 12px/16px var(--font-ui); }
+.v-subagents__list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-sm); }
+.v-subagent { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0; padding: var(--space-sm) var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-panel); color: var(--c-text); text-align: left; font: inherit; text-decoration: none; cursor: pointer; transition: border-color var(--t-fast) var(--ease-out); }
+.v-subagent:hover { border-color: var(--c-border-strong); }
+.v-subagent:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-turn ~ .v-subagent, .v-dgv__log > .v-subagent { max-width: 85%; }
+.v-subagent__top { display: flex; align-items: baseline; gap: var(--space-sm); min-width: 0; font: 400 var(--text-sm)/18px var(--font-ui); }
+.v-subagent__verb { flex: none; color: var(--c-text-muted); }
+.v-subagent__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.v-subagent__dot { margin-left: auto; flex: none; }
+.v-subagent__task, .v-subagent__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--c-text-secondary); font: 400 var(--text-sm)/18px var(--font-ui); }
+.v-subagent__text { color: var(--c-text-muted); }
+.v-subagent__open { color: var(--c-info); font: 500 12px/16px var(--font-ui); }
