@@ -13,7 +13,7 @@ const task = (local: string, status: string, title: string) => ({ id: `r1.${loca
 const overview = {
   slug: "c1", run_id: "r1", stale: false,
   timeline: { phases: [], current: "execute", status: "active" },
-  graph: { waves: 1, tasks: [task("t1", "done", "Design the limiter"), task("t2", "in_progress", "Token bucket"), task("t3", "question", "Retry-After"), task("t4", "pending", "Docs"), task("t5", "done", "Dashboard")] },
+  graph: { waves: 1, tasks: [task("t1", "done", "Design the limiter"), { ...task("t2", "in_progress", "Token bucket"), provider: { account: "a1", label: "Claude Code", family: "claude", model: null, model_name: null, billing: "plan" } }, task("t3", "question", "Retry-After"), task("t4", "pending", "Docs"), task("t5", "done", "Dashboard")] },
 };
 const ev = (t: string, status: string, criterion: string) => ({ task: t, title: null, owner: null, criterion, status, head: null, path: null, commands: null, report: null });
 const current: Current = { project: { schema: "vajra.project/1", id: "p_1", name: "api", root: "/src/api", created: null, archived: null, rev: 0 }, campaigns: [], focus: "c1", runId: "r1" };
@@ -45,6 +45,19 @@ describe("Board", () => {
     expect(within(lane(S.board.lanes.review)).getByText("Dashboard")).toBeTruthy();
     expect(within(lane(S.board.lanes.review)).getByText("Deploy to staging")).toBeTruthy();
     expect(lane(S.board.lanes.review).getAttribute("aria-label")).toBe(S.board.of(S.board.lanes.review, 2));
+  });
+
+  it("a card is title first, then one muted 'id · owner' meta line; lanes are plain (no box)", async () => {
+    mount(ok);
+    const title = await screen.findByText("Token bucket");
+    const card = title.closest(".v-card")!;
+    expect(title.className).toBe("v-card__t");
+    expect(card.querySelector(".v-card__m .v-card__id")?.textContent).toMatch(/^t\d · bhima$/);
+    expect(card.querySelector(".v-card__owner")).toBeNull();
+    expect(lane(S.board.lanes.running).className).toBe("v-lane");
+    // The narrow layout only clips the provider line (CSS), so it stays in the card's text for screen readers.
+    expect(card.querySelector(".v-card__prov .v-wp__line")?.textContent).toContain("Claude Code");
+    expect(card.textContent).toContain("Claude Code");
   });
 
   it("badges what needs you and can filter to it", async () => {
