@@ -47,6 +47,16 @@ describe("Board", () => {
     expect(lane(S.board.lanes.review).getAttribute("aria-label")).toBe(S.board.of(S.board.lanes.review, 2));
   });
 
+  it("a card is title first, then one muted 'id · owner' meta line; lanes are plain (no box)", async () => {
+    mount(ok);
+    const title = await screen.findByText("Token bucket");
+    const card = title.closest(".v-card")!;
+    expect(title.className).toBe("v-card__t");
+    expect(card.querySelector(".v-card__m .v-card__id")?.textContent).toMatch(/^t\d · bhima$/);
+    expect(card.querySelector(".v-card__owner")).toBeNull();
+    expect(lane(S.board.lanes.running).className).toBe("v-lane");
+  });
+
   it("badges what needs you and can filter to it", async () => {
     mount(ok);
     await screen.findByText("Token bucket");

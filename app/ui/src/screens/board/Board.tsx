@@ -17,6 +17,7 @@ import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import { ProviderLine } from "../ProviderLine";
+import { workerLine } from "../../workerProvider";
 
 const LANES: Lane[] = ["backlog", "running", "review", "done"];
 const EVENT_MIN_GAP_MS = 500;
@@ -150,16 +151,15 @@ export function Board() {
                           onKeyDown={(e) => onKey(e, c)}
                         >
                           <span className="v-card__top">
-                            <span className="v-card__id">{c.kind === "task" ? c.local : c.kind === "plan" ? S.board.plan : S.board.question}</span>
+                            <span className="v-card__t">{c.title}</span>
                             {c.needsYou && <Badge status="warning" className="v-card__you">{S.board.needsYou}</Badge>}
                           </span>
-                          <span className="v-card__t">{c.title}</span>
                           <span className="v-card__m">
                             {c.kind === "task" && <StatusDot status={c.status} />}
+                            <span className="v-card__id">{[c.kind === "task" ? c.local : c.kind === "plan" ? S.board.plan : S.board.question, c.owner].filter(Boolean).join(" · ")}</span>
                             {c.criteria && <span className="v-num">{S.board.criteria(c.criteria.pass, c.criteria.total)}</span>}
-                            {c.owner && <span className="v-card__owner">{c.owner}</span>}
                           </span>
-                          {c.provider && <ProviderLine p={c.provider} />}
+                          {c.provider && <span className="v-card__prov" title={workerLine(c.provider)}><ProviderLine p={c.provider} compact /></span>}
                         </button>
                       </li>
                     ))}
