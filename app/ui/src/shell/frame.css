@@ -143,22 +143,25 @@
 .v-board__filter.is-on { background: var(--c-accent); color: var(--c-text); }
 .v-board__state { padding: 48px var(--space-xl); }
 .v-board__lanes { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(200px, 1fr)); gap: 12px; padding: 12px var(--space-lg) var(--space-lg); overflow: auto; }
-.v-lane { display: flex; flex-direction: column; gap: 6px; min-height: 0; padding: var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-lg); background: var(--c-surface); }
+.v-lane { display: flex; flex-direction: column; gap: 6px; min-height: 0; padding: 0; }
 .v-lane__h { display: flex; align-items: center; gap: 6px; height: var(--row-h); margin: 0; padding: 0 var(--space-xs); color: var(--c-text); font: 600 var(--text-sm)/16px var(--font-ui); }
 .v-lane__h .v-num { margin-left: auto; color: var(--c-text-muted); font-weight: 400; }
-.v-lane__list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; overflow: auto; }
+.v-lane__list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; overflow: auto; container-type: inline-size; }
+/* A card narrower than 240px shows the provider as its icon only; the name stays in the tooltip. */
+/* Clipped, not display:none, so the model line stays in the card's accessible name. */
+@container (max-width: 239px) { .v-card__prov .v-wp__line { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } .v-card__prov { position: relative; } }
 .v-lane__none { margin: 0; padding: var(--space-xs); color: var(--c-text-muted); font: 400 12px/16px var(--font-ui); }
-.v-card { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 10px 12px; border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-panel); color: var(--c-text); font: inherit; text-align: left; transition: border-color var(--t-fast) var(--ease-out); }
+.v-card { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-panel); color: var(--c-text); font: inherit; text-align: left; transition: border-color var(--t-fast) var(--ease-out); }
 .v-card:hover { border-color: var(--c-border-strong); }
 .v-card:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: -2px; } /* inside the card: the lane list clips anything outside it */
 .v-card--you { box-shadow: inset 2px 0 0 var(--c-warning); }
-.v-card__top { display: flex; align-items: center; gap: var(--space-sm); min-height: 18px; }
-.v-card__id { color: var(--c-text-muted); font: 500 var(--text-xs)/14px var(--font-ui); font-variant-numeric: tabular-nums; }
-.v-card__you { margin-left: auto; height: 18px; padding: 0 6px; }
-.v-card__t { font: 500 13px/18px var(--font-ui); overflow-wrap: anywhere; }
-.v-card__m { display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px; row-gap: 4px; min-width: 0; color: var(--c-text-muted); font: 400 var(--text-xs)/14px var(--font-ui); }
+.v-card__top { display: flex; align-items: flex-start; gap: var(--space-sm); }
+.v-card__id { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.v-card__you { margin-left: auto; flex: none; height: 18px; padding: 0 6px; }
+.v-card__t { flex: 1; min-width: 0; font: 500 13px/18px var(--font-ui); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.v-card__m { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-sm); row-gap: var(--space-xs); min-width: 0; color: var(--c-text-muted); font: 400 var(--text-sm)/16px var(--font-ui); }
 .v-card__m .v-num { white-space: nowrap; }
-.v-card__owner { margin-left: auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-card__prov { display: block; min-width: 0; }
 
 /* Settings: the section list beside the section. */
 .v-settings__grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); }
