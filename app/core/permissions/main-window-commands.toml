@@ -56,6 +56,7 @@ permissions = [
   "allow-kb-search",
   "allow-take-over",
   "allow-active-runs",
+  "allow-run-failures",
   "allow-stop-run",
   "allow-run-limits",
   "allow-set-run-limits",

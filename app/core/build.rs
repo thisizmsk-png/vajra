@@ -55,6 +55,7 @@ const COMMANDS: &[&str] = &[
     "kb_search",
     "take_over",
     "active_runs",
+    "run_failures",
     "stop_run",
     "run_limits",
     "set_run_limits",

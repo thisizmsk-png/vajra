@@ -1369,3 +1369,191 @@ fn an_approve_resume_whose_claude_is_swapped_before_the_exec_is_refused_and_the_
     app.sup.wait(&format!("run-{SID}"), std::time::Duration::from_secs(5)).unwrap();
     assert!(t.0.join("pinbin/ran").exists(), "an unchanged file is the one that resumes");
 }
+
+// ---- A workflow that returns an error result must not leave an idle session holding the project.
+
+fn error_result(message: &str) -> Value {
+    json!({"workflowName": "vajra-deliver", "status": "completed", "runId": "r1", "taskId": "t1", "error": null,
+        "result": {"status": "error", "node": "input", "error": message, "artifacts": {}}})
+}
+
+/// A live run as `launch` leaves it: the run indexed and recorded, its session up, its entry in the run table.
+fn live_classic(t: &Tmp, app: &App) -> String {
+    t.run(app);
+    t.live(app);
+    let stream = format!("run-{SID}");
+    lock(&app.runs).insert(stream.clone(), Run { session_id: SID.into(), run_id: RUN.into(), campaign: CAMP.into(), cwd: t.cwd(), nonces: Redactor::default() });
+    stream
+}
+
+#[test]
+fn a_workflow_error_result_ends_the_session_frees_the_project_and_shows_its_message() {
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_classic(&t, &app);
+    assert_eq!(app.active_runs().unwrap()["count"], 1, "the idle session holds the project");
+    let msg = "an ask of 10+ characters is required, e.g. /vajra add a --json flag to the export command";
+    t.result("wf_e.json", &error_result(msg));
+    // The next look at the runs ends the session, so nothing stays live and nothing holds the project.
+    assert_eq!(app.active_runs().unwrap()["count"], 0, "the errored run no longer counts as live");
+    app.sup.wait(&stream, std::time::Duration::from_secs(5)).unwrap();
+    assert!(!app.sup.is_running(&stream).unwrap_or(false));
+    let f = app.run_failures().unwrap();
+    assert_eq!(f["runs"][0]["run_id"], RUN);
+    assert_eq!(f["runs"][0]["message"], msg);
+}
+
+#[test]
+fn a_running_or_waiting_workflow_is_not_ended_as_failed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_classic(&t, &app);
+    let mut running = error_result("not yet");
+    running["status"] = json!("running");
+    t.result("wf_r.json", &running);
+    assert_eq!(app.active_runs().unwrap()["count"], 1, "a workflow still running is left alone");
+    let ask = json!({"workflowName": "vajra-deliver", "status": "completed", "result": {"status": "need_input", "node": "understand", "question": "Which one?", "artifacts": {}}});
+    t.result_at("wf_q.json", &ask, RUN, 90);
+    assert_eq!(app.active_runs().unwrap()["count"], 1, "a question is not an error: the session stays up for it");
+    assert!(app.sup.is_running(&stream).unwrap_or(false));
+    assert!(app.run_failures().unwrap()["runs"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn an_error_result_with_no_message_still_says_something() {
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    t.result("wf_e.json", &error_result(""));
+    app.active_runs().unwrap();
+    let m = app.run_failures().unwrap()["runs"][0]["message"].as_str().unwrap().to_string();
+    assert!(m.contains("no reason"), "{m}");
+}
+
+#[test]
+fn an_error_result_in_another_sessions_folder_does_not_end_this_run() {
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_classic(&t, &app);
+    // Same project, a different session id: its result is not this run's.
+    let other = t.home().join(".claude/projects").join(project_slug(&t.cwd())).join("1b4e28ba-2fa1-41d2-883f-0016d3cca427/workflows");
+    fs::create_dir_all(&other).unwrap();
+    let p = other.join("wf_x.json");
+    fs::write(&p, error_result("planted").to_string()).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(app.active_runs().unwrap()["count"], 1, "another session's error result ends nothing here");
+    assert!(app.sup.is_running(&stream).unwrap_or(false));
+    assert!(app.run_failures().unwrap()["runs"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn an_error_result_older_than_the_runs_start_does_not_end_it() {
+    // A resumed session shares its session id and folder with the run before it: that run's old result is not this one's.
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_classic(&t, &app);
+    let p = t.wf_dir().join("wf_old.json");
+    fs::write(&p, error_result("from an earlier run").to_string()).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::File::options().write(true).open(&p).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(start_of(RUN) as u64 - 600)).unwrap();
+    assert_eq!(app.active_runs().unwrap()["count"], 1);
+    assert!(app.sup.is_running(&stream).unwrap_or(false));
+    assert!(app.run_failures().unwrap()["runs"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn the_failure_reason_is_capped_and_stripped_of_control_and_invisible_characters() {
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    let evil = format!("bad\u{1b}[31m ask\u{202e}\u{200b}\u{feff}\u{2028}\u{e0041}\u{7}\u{85}end {}", "z".repeat(900));
+    t.result("wf_e.json", &error_result(&evil));
+    app.active_runs().unwrap();
+    let m = app.run_failures().unwrap()["runs"][0]["message"].as_str().unwrap().to_string();
+    assert!(m.chars().count() <= 500, "capped, got {}", m.chars().count());
+    assert!(m.starts_with("bad"), "{m:?}");
+    for c in ['\u{1b}', '\u{202e}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{e0041}', '\u{7}', '\u{85}'] {
+        assert!(!m.contains(c), "{c:?} must not survive: {m:?}");
+    }
+}
+
+#[test]
+fn the_failure_record_is_written_once_so_a_later_reason_does_not_replace_it() {
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    app.write_run_failure(RUN, "the first reason");
+    app.write_run_failure(RUN, "a second, different reason");
+    assert_eq!(app.read_run_failure(RUN).as_deref(), Some("the first reason"));
+}
+
+#[test]
+fn a_forged_index_line_cannot_move_a_failure_onto_another_campaign() {
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    t.result("wf_e.json", &error_result("this run's own reason"));
+    app.active_runs().unwrap();
+    // A worker appends index lines pairing this failed run id with another campaign (and one for a run with no record).
+    let forged = |run: &str, camp: &str| runindex::Entry { campaign: camp.into(), session_id: SID.into(), run_id: run.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
+    runindex::append(&t.0.join("data/runs.jsonl"), &forged(RUN, "deliver-victim")).unwrap();
+    runindex::append(&t.0.join("data/runs.jsonl"), &forged(RUN, "deliver-victim-2")).unwrap();
+    runindex::append(&t.0.join("data/runs.jsonl"), &forged("20261106-0912", "deliver-victim")).unwrap();
+    let rows = app.run_failures().unwrap()["runs"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "one row per run id, and none for a run with no guarded record: {rows:?}");
+    assert_eq!(rows[0]["run_id"], RUN);
+    assert_eq!(rows[0]["campaign"], CAMP, "the campaign is the guarded record's, not the index line's");
+}
+
+#[test]
+fn failure_detection_waits_for_a_launch_in_flight_so_a_resume_is_never_hit() {
+    // A resume installs its session under the launch lock. While it holds the lock no reaper may snapshot or kill, so an
+    // older failure check cannot end the freshly resumed process that took over the same session stream.
+    let t = Tmp::new();
+    let app = t.app();
+    let stream = live_classic(&t, &app);
+    t.result("wf_e.json", &error_result("an old failure"));
+    {
+        let _launch = app.launching.lock().unwrap();
+        assert_eq!(app.active_runs().unwrap()["count"], 1, "nothing is ended while a launch holds the lock");
+        assert!(app.sup.is_running(&stream).unwrap_or(false));
+        assert!(app.run_failures().unwrap()["runs"].as_array().unwrap().is_empty(), "and no failure is recorded");
+    }
+    assert_eq!(app.active_runs().unwrap()["count"], 0, "once the launch is done the errored run is ended");
+    assert_eq!(app.run_failures().unwrap()["runs"][0]["message"], "an old failure");
+}
+
+#[test]
+fn only_the_current_attempts_failure_is_listed_whatever_the_engine() {
+    // A resume keeps the campaign and gets a fresh run id. The failure of an earlier attempt is not listed once a later
+    // attempt exists, and a later attempt's own failure is. Nothing here depends on the run being resumable.
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    t.result("wf_e.json", &error_result("first reason"));
+    app.active_runs().unwrap();
+    assert_eq!(app.run_failures().unwrap()["runs"][0]["message"], "first reason", "its only attempt: listed");
+    // A resumed attempt of the same campaign, running or succeeded: the earlier failure is no longer current.
+    let later = "20261106-1000";
+    t.another_run(&app, later, true);
+    assert!(app.run_failures().unwrap()["runs"].as_array().unwrap().is_empty(), "an earlier attempt's failure is hidden once a later attempt exists");
+    // The later attempt fails with its own reason: that one is listed, alone.
+    app.write_run_failure(later, "second reason");
+    let rows = app.run_failures().unwrap()["runs"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0]["run_id"].as_str(), rows[0]["message"].as_str()), (Some(later), Some("second reason")));
+}
+
+#[test]
+fn a_failure_is_listed_for_a_run_with_no_resume_target() {
+    // The Run view used to take the current attempt from the resume targets, which leave out an engine that cannot
+    // resume (a Codex run) and a folder that is gone. The list needs neither.
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    app.write_run_failure(RUN, "too short");
+    fs::remove_dir_all(t.cwd()).unwrap(); // the run's folder is gone
+    let rows = app.run_failures().unwrap()["runs"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0]["campaign"].as_str(), rows[0]["message"].as_str()), (Some(CAMP), Some("too short")));
+}
