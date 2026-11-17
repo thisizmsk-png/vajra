@@ -467,3 +467,12 @@ vajra-122 live worker view (owner, 17 Nov: "who will understand what's going on"
 | Nothing yet. Messages and steps appear here as the worker writes them. / Could not read the worker's activity. / Some earlier activity is no longer available. | Live tab states | |
 | Task given / Message / {n} more lines in Raw output | Live tab entries | the prompt the worker got, a message to it, and a long tool result cut at 6 lines |
 | New activity: {step or first line} | Live tab, polite status | screen readers only, at most once every 10 seconds |
+
+vajra-119 UI pass (gap 10 polish).
+
+| String | Where | Note |
+|---|---|---|
+| Go to | Command palette, section label | places: projects and views |
+| Actions | Command palette, section label | everything else; a search shows one ranked list without labels |
+| The search stopped before it finished. | Welcome, repository search failed, when the core answered with no words | replaces "The app's core didn't answer." only in that case; a core that never answered still gets the no-answer words |
+| (no longer shown) a bare error code such as project_discover | Welcome, same box | a known code is said in words (core too old, or no answer); an unknown one shows the line above |

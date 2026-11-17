@@ -85,6 +85,8 @@
 .v-palette__field:focus-within { box-shadow: inset 0 -2px 0 var(--c-focus-ring); }
 .v-palette [role="listbox"] { max-height: min(420px, 50vh); overflow: auto; padding: 6px; }
 .v-palette .v-row { min-height: 34px; padding: 0 10px; }
+.v-palette__group { padding: var(--space-sm) 10px var(--space-xs); color: var(--c-text-muted); font-size: var(--text-xs); font-weight: 500; }
+.v-palette [role="group"] + [role="group"] { margin-top: var(--space-xs); }
 .v-palette .v-row > .v-kbd-group { margin-left: auto; }
 .v-palette .v-row__meta + .v-kbd-group { margin-left: var(--space-sm); }
 .v-palette .v-row[aria-selected="true"] .v-kbd { color: var(--c-text-secondary); }
@@ -95,6 +97,7 @@
 .v-actionbar__ctx { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .v-actionbar__ctx b { color: var(--c-text); font-weight: 600; }
 .v-actionbar__acts { display: flex; align-items: center; gap: 2px; margin-left: auto; }
-.v-actionbar__act { height: 28px; color: var(--c-text-secondary); }
+/* The key belongs to its label: a 6 px gap, not the button's 8, so "Start run ⌘↵" reads as one thing. */
+.v-actionbar__act { height: 28px; gap: 6px; color: var(--c-text-secondary); }
 .v-actionbar__act--primary { color: var(--c-text); font-weight: 600; }
 .v-actionbar__act--primary + .v-actionbar__act { margin-left: var(--space-sm); }

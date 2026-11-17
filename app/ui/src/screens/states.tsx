@@ -37,9 +37,10 @@ export function Problem({ title, detail, retry }: { title: string; detail?: stri
 }
 
 /** Nothing here yet: what this place is for, and the one real next step. Never a blank area. */
-export function Empty({ title, children, action }: { title: string; children?: ReactNode; action?: ReactNode }) {
+/** `at` "pane": the whole view is empty, so it sits in the middle of it; "panel": centred inside one card. */
+export function Empty({ title, children, action, at }: { title: string; children?: ReactNode; action?: ReactNode; at?: "pane" | "panel" }) {
   return (
-    <div className="v-empty">
+    <div className={at ? `v-empty v-empty--${at}` : "v-empty"}>
       <Text as="h2" variant="headline-md">{title}</Text>
       {children && <Text variant="body" muted>{children}</Text>}
       {action && <div className="v-empty__act">{action}</div>}
