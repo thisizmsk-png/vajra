@@ -14,6 +14,9 @@ import { Empty, Problem, problemDetail } from "../states";
 import { EvidenceApproval } from "./EvidenceApproval";
 import { Proof } from "./Proof";
 import { RunLog } from "./RunLog";
+import { useTaskActivity } from "./taskActivity";
+import { clock, isWorking, runStalled } from "../crew/crewLive";
+import { ago, parseWhen } from "../when";
 
 const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
 const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
@@ -144,6 +147,16 @@ export function Run() {
     return () => { live = false; };
   }, [slug, pickedTask]);
 
+  // Is this run going? A process of this app runs it (live), or it says it is active but nothing runs it: Stalled, by
+  // the Workers screen's rule. Working rows then read Stalled, and only a live run's rows read their worker's newest line.
+  const runId = overview && hasRunId(overview.run_id) ? overview.run_id : "";
+  const live = P.liveCampaigns ? P.liveCampaigns.includes(slug ?? "") : P.liveRuns.includes(runId) ? true : null;
+  const updatedMs = parseWhen(P.campaigns.find((c) => c.slug === slug)?.updated ?? "");
+  const lastMs = Number.isFinite(updatedMs) ? updatedMs : null;
+  const working = useMemo(() => (overview?.graph.tasks ?? []).filter((t) => isWorking(t.status)).map((t) => t.local), [overview]);
+  const stalled = runStalled({ running: overview?.timeline.status === "active" && working.length > 0, live, lastMs, now: Date.now() });
+  const activity = useTaskActivity(slug ?? "", runId, working, live === true);
+
   // With no project list there is nothing to choose from: "choose one in History" would send the person to an empty
   // screen, so say what failed and offer the retry.
   if (!slug && P.state === "error") {
@@ -202,7 +215,9 @@ export function Run() {
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
         {overview && (
           <>
-            <StatusDot status={timelineStatusKey(overview.timeline.status)} label={S.run.runStatus[overview.timeline.status]} />
+            {stalled
+              ? <StatusDot status="blocked" label={`${lastMs !== null ? S.crew.stalledSince(clock(lastMs), ago(new Date(lastMs).toISOString())) : S.crew.stalledNoTime} ${S.crew.stalledWhy}`} />
+              : <StatusDot status={timelineStatusKey(overview.timeline.status)} label={S.run.runStatus[overview.timeline.status]} />}
             {/* Exactly one phase is current; each state is text, never colour alone (AC-4.1.1). */}
             <ol aria-label={S.run.timeline} className="v-run__phases">
               {overview.timeline.phases.map((p) => (
@@ -227,15 +242,20 @@ export function Run() {
               const t = overview.graph.tasks[i];
               const open = () => go("crew", { slug, id: overview.run_id, focus: `task:${t.local}` });
               const waits = t.deps.length > 0 ? `${S.run.waitsFor} ${t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}` : "";
+              const doing = stalled ? "" : activity.get(t.local) ?? "";
               return (
                 <div role="listitem" className="v-run__row v-run__task" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
                   <Text as="span" variant="body-sm" muted>{S.run.wave(t.wave)}</Text>
-                  <span className="v-run__title" title={t.title ?? undefined}>{t.local} {t.title ?? ""}</span>
+                  {/* The title opens the task's worker chat, like Open; the newest line says what a working one is doing. */}
+                  <span className="v-run__title">
+                    <button type="button" className="v-run__open" onClick={open} title={t.title ?? undefined}>{t.local} {t.title ?? ""}</button>
+                    {doing && <span className="v-run__doing" title={doing}>{doing}</span>}
+                  </span>
                   <span className="v-run__who">{provider(t) ?? t.owner ?? ""}</span>
-                  {taskStatus(t.status)}
+                  {stalled && isWorking(t.status) ? <StatusDot status="blocked" label={S.crew.stalled} /> : taskStatus(t.status)}
                   {/* Always present, so the columns line up down the list. A long list is cut with an ellipsis; the tooltip has all of it. */}
                   <span className="v-run__deps" title={waits || undefined}><Text as="span" variant="body-sm" muted>{waits}</Text></span>
-                  <Button size="sm" variant="ghost" onClick={open}>{S.run.openWorker}</Button>
+                  <Button size="sm" variant="ghost" onClick={open} aria-label={S.run.openChat(t.local)}>{S.run.openWorker}</Button>
                 </div>
               );
             }}

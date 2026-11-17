@@ -58,6 +58,18 @@ export function stalledSince(o: { working: boolean; live: boolean; canTell: bool
   return undefined;
 }
 
+/**
+ * A run listed as running, seen from outside its Workers screen (the sessions list, the Review page): `stalledSince` for
+ * a run nothing here watches, where no process of this app runs it. A run started outside the app has no process here
+ * either, so one whose own record moved in the last `STALL_MS` is not called stalled. `live` null: the app's live runs
+ * could not be read, and nothing is claimed.
+ */
+export function runStalled(o: { running: boolean; live: boolean | null; lastMs: number | null; now: number }): boolean {
+  if (o.live === null || !o.running) return false;
+  if (!o.live && o.lastMs !== null && o.now - o.lastMs < STALL_MS) return false;
+  return stalledSince({ working: true, live: o.live, canTell: false, lastMs: o.lastMs, watchedMs: 0, activeNow: false, now: o.now }) !== undefined;
+}
+
 /** How often the Workers screen reads the head of each working worker's stream while its run is live. */
 export const LIVENESS_MS = 10_000;
 

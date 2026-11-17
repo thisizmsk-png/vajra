@@ -73,6 +73,12 @@
 /* A list row is as wide as its content by default; a task row is as wide as the list, or each row would size its own tracks. */
 .v-vrow:has(> .v-run__task) { width: 100%; }
 .v-run__task > * { min-width: 0; }
+/* A task's title opens its worker's chat; a working one's newest line sits under it, muted. */
+.v-run__task .v-run__title { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+.v-run__open { all: unset; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: var(--radius-sm); }
+.v-run__open:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--c-border-strong); }
+.v-run__open:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-run__doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--c-text-muted); font: 400 var(--text-xs)/16px var(--font-ui); }
 .v-run__task > .v-badge { justify-self: start; }
 .v-run__title, .v-run__who, .v-run__deps { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v-run__who .v-wp__ran, .v-run__who .v-wp__err { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
