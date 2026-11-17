@@ -183,13 +183,12 @@ fn a_file_diff_is_against_the_base_and_a_new_file_is_marked_untracked() {
     let text = d["diff"].as_str().unwrap();
     assert!(text.contains("+two") && text.contains("README.md"), "{text}");
     let n = fx.app.files_diff(&fx.pid, Some("w1"), "src/new.rs").unwrap();
-    assert_eq!((n["diff"].as_str(), n["untracked"].as_bool()), (Some(""), Some(true)));
+    assert_eq!((n["diff"].as_str(), n["untracked"].as_bool()), (Some("diff --git a/src/new.rs b/src/new.rs\nnew file\n--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1,1 @@\n+new\n"), Some(true)));
     for (p, want) in [("/etc/hosts", "invalid_args"), ("../x", "invalid_args"), ("", "invalid_args"), (".git/HEAD", "protected")] {
         assert_eq!(code(&fx.app.files_diff(&fx.pid, Some("w1"), p).unwrap_err()), want, "{p:?}");
     }
-    // Pathspec magic is read literally: `:(glob)*` names no file, so no diff of the whole tree.
-    let g = fx.app.files_diff(&fx.pid, Some("w1"), ":(glob)*").unwrap();
-    assert_eq!(g["diff"], "");
+    // A path is only ever a path: `:(glob)*` names no file, so nothing (no diff of the whole tree).
+    assert_eq!(code(&fx.app.files_diff(&fx.pid, Some("w1"), ":(glob)*").unwrap_err()), "not_found");
 }
 
 #[test]
@@ -258,6 +257,71 @@ fn a_diff_inside_a_denied_folder_in_the_repo_is_refused_present_or_deleted() {
     fs::remove_file(fx.repo().join("src/lib.rs")).unwrap();
     let d = app.files_diff(&fx.pid, None, "src/lib.rs").unwrap();
     assert!(d["diff"].as_str().unwrap().contains("-pub fn a() {}"), "{d}");
+}
+
+#[test]
+fn a_tracked_file_replaced_by_a_hard_link_to_the_key_is_refused_by_the_diff() {
+    // Codex's case: `notes.txt` is tracked with innocent content, then the working file is swapped for a hard link to
+    // the key without staging anything.
+    let fx = Fx::new();
+    let key = fx.dir.join("home/.claude/vajra").join(crate::vajra::allowlist::DENIED_NAME);
+    fs::write(&key, b"DUMMY-KEY-CANARY-c0de\n").unwrap();
+    fs::write(fx.repo().join("notes.txt"), "hello\n").unwrap();
+    git(&fx.repo(), &["add", "notes.txt"]);
+    git(&fx.repo(), &["commit", "-q", "-m", "notes"]);
+    fs::remove_file(fx.repo().join("notes.txt")).unwrap();
+    fs::hard_link(&key, fx.repo().join("notes.txt")).unwrap();
+    let r = fx.app.files_diff(&fx.pid, None, "notes.txt");
+    assert!(!format!("{r:?}").contains("CANARY"), "{r:?}");
+    assert_eq!(code(&r.unwrap_err()), "protected");
+}
+
+#[test]
+fn a_folder_is_not_diffed_as_many_unchecked_files() {
+    let fx = Fx::new();
+    fs::write(fx.repo().join("src/lib.rs"), "pub fn b() {}\n").unwrap();
+    assert_eq!(code(&fx.app.files_diff(&fx.pid, None, "src").unwrap_err()), "not_a_file");
+    // A folder deleted from the work tree but present at the base.
+    fs::remove_dir_all(fx.repo().join("src")).unwrap();
+    assert_eq!(code(&fx.app.files_diff(&fx.pid, None, "src").unwrap_err()), "not_a_file");
+}
+
+#[test]
+fn a_diff_is_built_from_the_checked_read_and_the_base_object() {
+    let fx = Fx::new();
+    // Modified, with the base read from git's objects even though the working file differs.
+    fs::write(fx.repo().join("src/lib.rs"), "pub fn a() {}\npub fn b() {}\n").unwrap();
+    let d = fx.app.files_diff(&fx.pid, None, "src/lib.rs").unwrap();
+    assert_eq!(d["diff"], "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n pub fn a() {}\n+pub fn b() {}\n");
+    // Unchanged.
+    assert_eq!(fx.app.files_diff(&fx.pid, None, "README.md").unwrap()["diff"], "");
+    // Binary at the working side.
+    fs::write(fx.repo().join("README.md"), b"\0\x01").unwrap();
+    assert_eq!(fx.app.files_diff(&fx.pid, None, "README.md").unwrap()["kind"], "binary");
+    // Missing on both sides.
+    assert_eq!(code(&fx.app.files_diff(&fx.pid, None, "nope.txt").unwrap_err()), "not_found");
+}
+
+#[test]
+fn an_index_over_the_bridge_cap_stays_a_git_list_flagged_partial() {
+    let fx = Fx::new();
+    // 6000 tracked paths of ~200 bytes each: over the bridge's 1 MiB output cap.
+    let deep = format!("{}/", "d".repeat(190));
+    let dir = fx.repo().join(&deep);
+    fs::create_dir_all(&dir).unwrap();
+    for i in 0..6000 {
+        fs::write(dir.join(format!("f{i:04}.txt")), "").unwrap();
+    }
+    git(&fx.repo(), &["add", "."]);
+    git(&fx.repo(), &["commit", "-q", "-m", "many"]);
+    // Ignored files the plain walk would have listed.
+    fs::write(fx.repo().join("target/z.o"), "x").unwrap();
+    let v = fx.app.files_index(&fx.pid, None).unwrap();
+    assert_eq!(v["truncated"], true);
+    let paths: Vec<&str> = v["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+    assert!(paths.len() > 500, "{}", paths.len());
+    assert!(paths.iter().all(|p| !p.starts_with("target/") && !p.ends_with(".log") && !p.starts_with(".claude/")), "no ignored file");
+    assert!(paths.iter().all(|p| p == &".gitignore" || p == &"README.md" || p == &"src/lib.rs" || (p.starts_with(&deep) && p.ends_with(".txt") && p.len() == deep.len() + 9)), "no cut path");
 }
 
 #[test]

@@ -110,10 +110,25 @@ fn invalid_requests_run_nothing() {
         vec!["log", "--output", "/tmp/x"],
         vec!["status", "-c"],
         vec!["diff", "--ext-diff"],
+        vec!["cat-file", "--filters", "HEAD:a"],
+        vec!["cat-file", "--textconv", "HEAD:a"],
+        vec!["cat-file", "--batch"],
+        vec!["cat-file", "-p", "HEAD:a"],
+        vec!["cat-file", "blob", "HEAD:a", "extra"],
+        vec!["cat-file", "blob", "--path=a", "HEAD"],
+        vec!["cat-file", "blob", "HEAD"],
+        vec!["cat-file", "blob", ":a"],
+        vec!["cat-file", "blob", "HEAD:"],
+        vec!["cat-file", "-t"],
     ] {
         let args: Vec<String> = args.into_iter().map(String::from).collect();
         let r = b.plan(&Request::Git { cwd: cwd.clone(), args });
         assert!(matches!(r, Err(BridgeError::Invalid(_))));
+    }
+    // The two cat-file forms the Files panel uses pass, with replace refs off.
+    for kind in ["-t", "blob"] {
+        let (_, argv, _) = b.plan(&Request::Git { cwd: cwd.clone(), args: vec!["cat-file".into(), kind.into(), "abc123:src/a.rs".into()] }).unwrap();
+        assert_eq!(argv, ["--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=", "cat-file", kind, "abc123:src/a.rs"]);
     }
     let r = b.plan(&Request::KbSearch { query: "  ".into(), k: 1, repo: cwd });
     assert!(matches!(r, Err(BridgeError::Invalid(_))));

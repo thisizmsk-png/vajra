@@ -207,6 +207,30 @@ fn a_link_swapped_in_after_the_check_is_refused_not_followed() {
 }
 
 #[test]
+fn a_folder_above_the_root_swapped_for_a_link_after_the_check_is_refused() {
+    // The root is <tmp>/root/wt; an outside folder holds a look-alike `wt` with a secret.
+    let fx = Fx::new();
+    let wt = fx.root().join("wt");
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(wt.join("a.txt"), "inside").unwrap();
+    fs::create_dir_all(fx.dir.join("outside/wt")).unwrap();
+    fs::write(fx.dir.join("outside/wt/a.txt"), "SECRET").unwrap();
+    let s = Scope::new(&wt, &[], &fx.key()).unwrap();
+    let real = s.resolve("a.txt").unwrap();
+    // Swap `root` (an ancestor of the scope's root) for a link to `outside`.
+    fs::rename(fx.root(), fx.dir.join("root-old")).unwrap();
+    symlink(fx.dir.join("outside"), fx.root()).unwrap();
+    assert_eq!(s.open_walk(&real, false).unwrap_err(), Refused::Outside);
+    assert!(s.read("a.txt").is_err());
+    assert!(s.list("").is_err());
+    // And a same-named real folder put in place is refused by identity.
+    fs::remove_file(fx.root()).unwrap();
+    fs::create_dir_all(fx.root().join("wt")).unwrap();
+    fs::write(fx.root().join("wt/a.txt"), "SECRET").unwrap();
+    assert_eq!(s.read("a.txt").unwrap_err(), Refused::Outside);
+}
+
+#[test]
 fn a_large_file_is_refused_with_its_size_and_the_cap() {
     let fx = Fx::new();
     fs::write(fx.root().join("big.log"), vec![b'a'; TEXT_CAP as usize + 1]).unwrap();

@@ -228,6 +228,21 @@ impl Bridge {
             Request::Doctor => (script("vajra-doctor.sh"), vec![], None),
             Request::Git { cwd, args } => {
                 let sub = args.first().map(String::as_str).unwrap_or("");
+                // `cat-file` only as `cat-file -t <rev>:<path>` or `cat-file blob <rev>:<path>`: one object read from
+                // git's store, never the working tree, never a filter or textconv (no `--filters`, `--textconv`,
+                // `--batch` or any other flag can be added), and replace refs are not followed.
+                if sub == "cat-file" {
+                    let ok = args.len() == 3
+                        && matches!(args[1].as_str(), "-t" | "blob")
+                        && !args[2].starts_with('-')
+                        && args[2].split_once(':').is_some_and(|(rev, path)| !rev.is_empty() && !path.is_empty());
+                    if !ok {
+                        return Err(BridgeError::Invalid("git cat-file is allowed only as -t or blob of one <rev>:<path>".into()));
+                    }
+                    let argv: Vec<String> =
+                        ["--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=", "cat-file"].iter().map(|s| s.to_string()).chain(args[1..].iter().cloned()).collect();
+                    return Ok((self.git.clone(), argv, Some(cwd.clone())));
+                }
                 if !GIT_READ_ONLY.contains(&sub) {
                     return Err(BridgeError::Invalid(format!("git subcommand not allowed: {sub}")));
                 }

@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 
 use crate::vajra::allowlist::DENIED_NAME;
 
+pub mod diff;
 pub mod link;
 
 /// Largest text file sent whole.
@@ -141,6 +142,8 @@ pub struct FileRead {
 #[derive(Debug)]
 pub struct Scope {
     root: PathBuf,
+    /// The root folder's device and inode when the scope was made.
+    root_id: (u64, u64),
     deny: Vec<PathBuf>,
     key: Vec<(u64, u64)>,
 }
@@ -150,14 +153,16 @@ impl Scope {
     /// signing key's path: only `stat`ed, never opened.
     pub fn new(root: &Path, deny: &[PathBuf], key: &Path) -> Result<Self, Refused> {
         let root = root.canonicalize().map_err(io)?;
-        if !root.is_dir() {
+        let md = std::fs::metadata(&root).map_err(io)?;
+        if !md.is_dir() {
             return Err(Refused::NotADirectory);
         }
+        let root_id = (md.dev(), md.ino());
         let deny = deny.iter().filter_map(|d| d.canonicalize().ok()).collect();
         let mut keyids: Vec<(u64, u64)> =
             [std::fs::symlink_metadata(key), std::fs::metadata(key)].into_iter().flatten().map(|m| (m.dev(), m.ino())).collect();
         keyids.dedup();
-        Ok(Self { root, deny, key: keyids })
+        Ok(Self { root, root_id, deny, key: keyids })
     }
 
     pub fn root(&self) -> &Path {
@@ -201,6 +206,28 @@ impl Scope {
         Ok(real)
     }
 
+    /// The root, opened from `/` one part at a time without following a link (the root is canonical, so it has none),
+    /// and checked to be the same folder (device and inode) `new` found. A folder above the root swapped for a link
+    /// since then is refused, not followed: `O_NOFOLLOW` on a whole path guards only its last part.
+    fn open_root(&self) -> Result<File, Refused> {
+        let mut at = open_path(Path::new("/"), libc::O_RDONLY | libc::O_DIRECTORY)?;
+        for c in self.root.components() {
+            match c {
+                Component::RootDir => {}
+                Component::Normal(s) => {
+                    let s = s.to_str().ok_or(Refused::BadPath("not UTF-8"))?;
+                    at = open_at(&at, s, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+                }
+                _ => return Err(Refused::Outside),
+            }
+        }
+        let md = at.metadata().map_err(io)?;
+        if (md.dev(), md.ino()) != self.root_id {
+            return Err(Refused::Outside);
+        }
+        Ok(at)
+    }
+
     /// Open the canonical `real` (from `resolve`) one part at a time from the root, never following a link. `dir`
     /// asks for a directory; otherwise the last part is opened without blocking (a FIFO can't hang the read).
     fn open_walk(&self, real: &Path, dir: bool) -> Result<File, Refused> {
@@ -208,7 +235,7 @@ impl Scope {
         // `real` was checked to have no link in it, so a link (ELOOP) or a non-folder (ENOTDIR) met here was swapped in
         // since: refused as leading outside, whichever error the OS gives for it.
         let changed = |e: Refused| if matches!(e, Refused::NotADirectory) { Refused::Outside } else { e };
-        let mut at = open_path(&self.root, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW).map_err(changed)?;
+        let mut at = self.open_root().map_err(changed)?;
         for (i, p) in parts.iter().enumerate() {
             let last = i + 1 == parts.len();
             let flags = if !last || dir { libc::O_DIRECTORY } else { libc::O_NONBLOCK };

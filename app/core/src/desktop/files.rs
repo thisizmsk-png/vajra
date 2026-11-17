@@ -135,7 +135,8 @@ impl App {
     }
 
     /// `files_index`: every file path in the tree, for "Open file..." (fuzzy find by path). In a git repository it is
-    /// what git tracks plus new files it does not ignore; elsewhere a walk of the folders, without links, both capped.
+    /// what git tracks plus new files it does not ignore (`truncated` when git's answer was cut); in a folder git says is
+    /// not a work tree, a walk of the folders without links. Both capped.
     pub fn files_index(&self, project_id: &str, worktree: Option<&str>) -> Res {
         let (root, _) = self.files_root(project_id, worktree)?;
         let scope = self.files_scope(&root)?;
@@ -146,8 +147,25 @@ impl App {
         };
         let mut paths: Vec<String> = Vec::new();
         let mut truncated = false;
-        if let Some(out) = self.files_git(&root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]) {
-            for p in out.split(|&b| b == 0).filter_map(|p| std::str::from_utf8(p).ok()).filter(|p| !p.is_empty()) {
+        // A git folder always gets git's list, even a partial one (output over the bridge's cap, or slow): the plain walk
+        // below knows no ignore rules, so it is only for a folder git says is not a work tree.
+        let in_git = self.files_git(&root, &["rev-parse", "--is-inside-work-tree"]).is_some_and(|b| b.trim_ascii() == b"true");
+        if in_git {
+            let o = self
+                .bridge
+                .run(&Request::Git { cwd: root.clone(), args: ["ls-files", "-z", "--cached", "--others", "--exclude-standard"].map(String::from).to_vec() })
+                .map_err(|e| fail("git_failed", e))?;
+            let partial = o.truncated || o.timed_out;
+            if o.code != Some(0) && !partial {
+                return Err(fail("git_failed", "git could not list this tree"));
+            }
+            truncated |= partial;
+            let mut records: Vec<&[u8]> = o.stdout_raw.split(|&b| b == 0).collect();
+            // A cut answer's last record may be a cut path.
+            if partial {
+                records.pop();
+            }
+            for p in records.into_iter().filter_map(|p| std::str::from_utf8(p).ok()).filter(|p| !p.is_empty()) {
                 if check_rel(p).is_err() || denied(p) {
                     continue;
                 }
@@ -237,33 +255,59 @@ impl App {
         if check_rel(path).map_err(refused)?.is_empty() {
             return Err(invalid("path", "names no file"));
         }
-        // git diff reads the working file itself, so it must pass every rule files_read applies first: inside the root,
-        // outside the denied folders, a regular file, not the key by inode. A deleted file (missing) is allowed only
-        // when its nearest existing folder may be shown, which `resolve` checks before it answers `NotFound`.
-        match self.files_scope(&root)?.check_file(path) {
-            Ok(()) => {}
+        // Git never opens a working file here. The current side is read by `Scope` (every files_read rule: inside the
+        // root, outside the denied folders, no links, a regular file, not the key by inode). The base side is the blob
+        // at the base commit, from git's object store. The core then diffs the two texts itself.
+        let scope = self.files_scope(&root)?;
+        let new = match scope.read(path) {
+            Ok(r) => match r.content {
+                Content::Text(t) => Some(t),
+                Content::TooLarge { cap } => return Ok(json!({"path": path, "kind": "too_large", "cap": cap})),
+                Content::Image { .. } | Content::Binary => return Ok(json!({"path": path, "kind": "binary"})),
+            },
             Err(Refused::NotFound) => {
+                // Deleted: `resolve` already refused it if its nearest existing folder may not be shown; a path in a
+                // denied folder is refused by name too, even when that folder is gone.
                 let joined = root.join(path);
-                let denied = [&self.data, &self.claude].iter().any(|d| joined.starts_with(d.canonicalize().unwrap_or_else(|_| d.to_path_buf())));
-                if denied {
+                if [&self.data, &self.claude].iter().any(|d| joined.starts_with(d.canonicalize().unwrap_or_else(|_| d.to_path_buf()))) {
                     return Err(refused(Refused::Protected));
                 }
+                None
             }
             Err(e) => return Err(refused(e)),
-        }
-        // `:(literal)` stops git reading the path as pathspec magic.
+        };
         let base = self.files_base(&root, &project).ok_or_else(|| fail("no_base", "the tree has no base to compare with"))?;
-        let spec = format!(":(literal){path}");
-        let o = self
-            .bridge
-            .run(&Request::Git { cwd: root.clone(), args: ["diff", "--no-color", &base, "--", &spec].map(String::from).to_vec() })
-            .map_err(|e| fail("git_failed", e))?;
-        if o.code != Some(0) && !o.truncated && !o.timed_out {
-            return Err(fail("git_failed", "git could not diff this file"));
+        // The base side, from git's object store only (`<commit>:<path>` takes the path literally).
+        let object = format!("{base}:{path}");
+        let old = match self.files_git(&root, &["cat-file", "-t", &object]).map(|b| String::from_utf8_lossy(&b).trim().to_string()).as_deref() {
+            None => None,
+            Some("blob") => {
+                let o = self
+                    .bridge
+                    .run(&Request::Git { cwd: root.clone(), args: ["cat-file", "blob", &object].map(String::from).to_vec() })
+                    .map_err(|e| fail("git_failed", e))?;
+                if o.truncated || o.timed_out || o.stdout_raw.len() as u64 > files::TEXT_CAP {
+                    return Ok(json!({"path": path, "kind": "too_large", "cap": files::TEXT_CAP}));
+                }
+                if o.code != Some(0) {
+                    return Err(fail("git_failed", "git could not read this file at the base"));
+                }
+                if files::looks_binary(&o.stdout_raw) {
+                    return Ok(json!({"path": path, "kind": "binary"}));
+                }
+                match String::from_utf8(o.stdout_raw) {
+                    Ok(t) => Some(t),
+                    Err(_) => return Ok(json!({"path": path, "kind": "binary"})),
+                }
+            }
+            // A folder (tree) or a submodule (commit) at the base.
+            Some(_) => return Err(refused(Refused::NotAFile)),
+        };
+        if old.is_none() && new.is_none() {
+            return Err(refused(Refused::NotFound));
         }
-        let untracked = o.stdout.is_empty()
-            && self.files_git(&root, &["ls-files", "-z", "--others", "--exclude-standard", "--", &spec]).is_some_and(|b| !b.is_empty());
-        Ok(json!({"path": path, "base": base, "diff": o.stdout, "truncated": o.truncated || o.timed_out, "untracked": untracked}))
+        let diff = files::diff::unified(path, old.as_deref(), new.as_deref());
+        Ok(json!({"path": path, "base": base, "kind": "text", "diff": diff, "truncated": false, "untracked": old.is_none()}))
     }
 }
 
