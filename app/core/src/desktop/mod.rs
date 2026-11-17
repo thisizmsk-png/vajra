@@ -875,7 +875,10 @@ impl App {
 
     /// A live run whose workflow has returned an error result (an ask it refuses, say) is doing nothing: its session
     /// sits at the prompt and would hold the project for ever. Record the reason, then end the session so the hold is
-    /// released. The result file is untrusted text; it can only end the run it belongs to.
+    /// released. The result file is worker-writable (it sits in the user's Claude projects folder, not the app's guarded
+    /// one), so a forged one can end that run's own session and leave a false reason, and nothing else: the folder is
+    /// per session, so it can never end another run. That is no new capability: a worker that can write there with the
+    /// sandbox off can already signal its own session. Tracked for later: also require the session to have been quiet.
     pub(super) fn end_errored_runs(&self) {
         let live: Vec<(String, Run)> = lock(&self.runs).iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(s, r)| (s.clone(), r.clone())).collect();
         if live.is_empty() {
