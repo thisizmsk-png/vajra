@@ -469,7 +469,7 @@ describe("Home", () => {
     setTransport(f.transport);
     render(<PreferencesProvider projectId={null}><Home /></PreferencesProvider>);
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain(S.home.preflightFailed);
+    expect(alert.textContent).toContain(S.home.coreDown);
     expect(alert.textContent).toContain(S.states.noAnswer);
     await waitFor(() => expect(f.calls.map((c) => c.cmd)).toContain("preferences_read"));
     await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
@@ -477,6 +477,23 @@ describe("Home", () => {
     expect(screen.queryByText(S.preferences.readFailed)).toBeNull();
     const why = screen.getByText(S.home.startNeedsAnswer);
     expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-describedby")).toBe(why.id);
+  });
+
+  it("says a down core once when the runs fail too, and its one retry rereads the checks and the runs", async () => {
+    const down = () => new Error("no answer");
+    const f = fakeIpc({ preflight: down, preferences_read: down, list_campaigns: down, resume_targets: down });
+    setTransport(f.transport);
+    render(<PreferencesProvider projectId={null}><Home /></PreferencesProvider>);
+    expect(await screen.findByText(S.home.campaignsWait)).toBeTruthy();
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.queryByText(S.home.campaignsFailed)).toBeNull();
+    const count = (cmd: string) => f.calls.filter((c) => c.cmd === cmd).length;
+    const before = { pre: count("preflight"), camps: count("list_campaigns") };
+    expect(screen.getAllByRole("button", { name: S.states.retry })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: S.states.retry }));
+    await waitFor(() => expect(count("preflight")).toBeGreaterThan(before.pre));
+    await waitFor(() => expect(count("list_campaigns")).toBeGreaterThan(before.camps));
   });
 
   it("still says the preferences could not be read when the core does answer", async () => {

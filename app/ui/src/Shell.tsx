@@ -150,6 +150,10 @@ function Frame() {
   // on Settings none of them is offered, and none can flip the stored choice behind the screen.
   const columnToggle = !!project && route.screen !== "settings";
   const showColumn = columnToggle && !compact && !welcoming;
+  // Home says "the core isn't answering" once, with a retry that rereads the project list too, only when its reads got
+  // no answer. A project list the core answered with an error is another failure: Home says nothing about it, so the
+  // title bar keeps its line and retry.
+  const homeShown = !project && (route.screen === "orch" || route.screen === "launch") && P.state === "error" && P.down;
   const inspectable = !!project && INSPECTED.has(route.screen) && !welcoming;
   const showInspector = inspectable && inspector;
   const reviewParams: Record<string, string> = current.focus ? { slug: current.focus } : {};
@@ -207,8 +211,10 @@ function Frame() {
               <ProjectTabs projects={P.projects} summaries={P.summaries} current={pid} view={route.screen} onAdd={addProject} />
             ) : (
               <>
-                <span className="v-tb__empty">{P.state === "error" ? S.frame.loadFailed : P.state === "ok" ? (welcoming ? S.welcome.windowTitle : S.frame.noProjects) : ""}</span>
-                {P.state === "error" && <button type="button" className="v-sb-btn" onClick={P.reload}>{S.states.retry}</button>}
+                {/* With no project, orch and launch both show Home, which says the core is down once, with one retry for
+                    every read (projects included). The title bar repeating it made three copies of one failure. */}
+                <span className="v-tb__empty">{P.state === "error" ? (homeShown ? "" : S.frame.loadFailed) : P.state === "ok" ? (welcoming ? S.welcome.windowTitle : S.frame.noProjects) : ""}</span>
+                {P.state === "error" && !homeShown && <button type="button" className="v-sb-btn" onClick={P.reload}>{S.states.retry}</button>}
                 {P.state === "ok" && !welcoming && <FindRepos onAdded={P.reload} />}
                 <button type="button" className="v-tb__add" onClick={addProject}><Icon name="plus" size={12} />{S.frame.addProject}</button>
               </>
