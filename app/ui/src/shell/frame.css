@@ -68,6 +68,8 @@
 .v-w2__a { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; }
 .v-w2__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 13px/16px var(--font-ui); }
 .v-w2__s { margin-left: auto; }
+.v-w2__b { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; }
+.v-w2__b .v-w2__t { flex: 1; }
 .v-w2.is-closed .v-w2__name, .v-w2.is-closed .v-w2__t { color: var(--c-text-muted); }
 .v-w2__tag { flex: none; padding: 0 6px; border: 1px solid var(--c-border); border-radius: var(--radius-md); color: var(--c-text-muted); font: 500 11px/16px var(--font-ui); }
 .v-w2__tag--warn { color: var(--c-text); border-color: var(--c-text-muted); }

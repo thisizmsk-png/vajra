@@ -13,7 +13,7 @@ import type { Current } from "../src/projects/current";
 import { workersOf } from "../src/projects/store";
 import { CrewTree } from "../components/ui/desktop";
 import { DirectorGeneral } from "../src/screens/orch/DirectorGeneral";
-import { ProviderLine, iconOf } from "../src/screens/ProviderLine";
+import { ProviderLine, ProviderMark, iconOf } from "../src/screens/ProviderLine";
 import { errorText, parseWorkerProvider, ranOn, workerLine } from "../src/workerProvider";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -85,6 +85,27 @@ describe("a worker's provider (effective)", () => {
     rerender(<ProviderLine p={p} compact />);
     expect(screen.queryByText(W.billing.gateway)).toBeNull();
   });
+  it("ProviderMark is one row: the icon, the line for readers and in the tooltip, and one warning glyph that carries the note", () => {
+    const plain = parseWorkerProvider(gateway)!;
+    const { container, rerender } = render(<ProviderMark p={plain} />);
+    expect(container.querySelector(".v-wm")?.getAttribute("title")).toBe("DeepSeek V3.2 via OpenRouter");
+    expect(screen.getByText("DeepSeek V3.2 via OpenRouter").className).toBe("v-sr");
+    expect(container.querySelector("[data-provider-note]")).toBeNull();
+    // Retrying: the note is there, muted (nothing for you to do yet).
+    const retry = parseWorkerProvider({ ...gateway, error: { kind: "timeout", action: "retrying", attempt: 1, retry_at: "14:05" } })!;
+    rerender(<ProviderMark p={retry} />);
+    let note = container.querySelector("[data-provider-note]")!;
+    expect(note.getAttribute("title")).toBe("Upstream timeout. Retrying, attempt 1 of 2 at 14:05.");
+    expect(note.textContent).toBe("Upstream timeout. Retrying, attempt 1 of 2 at 14:05.");
+    expect(note.className).not.toContain("--you");
+    // Ran on another model: amber, and the words say which.
+    const ran = parseWorkerProvider({ ...gateway, requested: { model: "x-ai/grok-4", model_name: "Grok 4", label: "OpenRouter" } })!;
+    rerender(<ProviderMark p={ran} />);
+    note = container.querySelector("[data-provider-note]")!;
+    expect(note.className).toContain("v-wm__warn--you");
+    expect(note.textContent).toBe(W.ranOn("DeepSeek V3.2 via OpenRouter", "Grok 4 via OpenRouter"));
+  });
+
   it("a family without a mark gets the fallback icon", () => {
     const { container } = render(iconOf(parseWorkerProvider({ ...claude, family: "brand-new-family" })!));
     expect(container.querySelector("[data-family]")?.getAttribute("data-family")).toBe("unknown");
