@@ -235,9 +235,12 @@ impl Bridge {
                     let ok = args.len() == 3
                         && matches!(args[1].as_str(), "-t" | "blob")
                         && !args[2].starts_with('-')
-                        && args[2].split_once(':').is_some_and(|(rev, path)| !rev.is_empty() && !path.is_empty());
+                        && args[2].split_once(':').is_some_and(|(rev, path)| {
+                            // A full object id only (sha1 or sha256): no ref names, no `@{...}`, no `:/search`.
+                            matches!(rev.len(), 40 | 64) && rev.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) && !path.is_empty()
+                        });
                     if !ok {
-                        return Err(BridgeError::Invalid("git cat-file is allowed only as -t or blob of one <rev>:<path>".into()));
+                        return Err(BridgeError::Invalid("git cat-file is allowed only as -t or blob of one <full commit id>:<path>".into()));
                     }
                     let argv: Vec<String> =
                         ["--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=", "cat-file"].iter().map(|s| s.to_string()).chain(args[1..].iter().cloned()).collect();
