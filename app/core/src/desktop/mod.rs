@@ -894,10 +894,15 @@ impl App {
     pub fn run_failures(&self) -> Res {
         self.reap_runs();
         let mut out: Vec<Value> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // The index is worker-writable: it only says WHICH run ids to look at. The campaign comes from the guarded run
+        // record (a row with none is skipped), so an index line can never move one run's failure onto another's view.
         for e in runindex::entries(&self.data.join("runs.jsonl")).into_iter().rev().take(50) {
-            if let Some(m) = self.read_run_failure(&e.run_id) {
-                out.push(json!({"run_id": e.run_id, "campaign": e.campaign, "message": m, "project": self.pinned_project(&e.run_id)}));
+            if !crate::ids::valid_run_id(&e.run_id) || !seen.insert(e.run_id.clone()) {
+                continue;
             }
+            let (Some(m), Some((_, _, campaign, _))) = (self.read_run_failure(&e.run_id), self.read_run_record(&e.run_id)) else { continue };
+            out.push(json!({"run_id": e.run_id, "campaign": campaign, "message": m, "project": self.pinned_project(&e.run_id)}));
         }
         out.reverse();
         Ok(json!({"runs": out}))
