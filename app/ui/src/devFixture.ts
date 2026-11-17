@@ -97,22 +97,35 @@ const crew = n("lead", "lead", "Lead", "in_progress", [
   ]),
 ]);
 
+/** `?fixture=stalled`: a run from 6 Nov whose process is gone. tasks.json still says t1 is in progress, and no worker ever
+ * picked it up: what the core answers for a run nobody is running (Lead and run read "unknown"). */
+const stalledCrew = n("lead", "lead", "Lead", "unknown", [
+  n(`run:${RUN}`, "run", `Run ${RUN}`, "unknown", [n("task:t1", "task", "Prototyper · t1", "in_progress", [], { engine_id: "abhimanyu" })]),
+]);
+
+// The core's worker-stream format (crew record.rs): the agent's own text untagged, then `[user] `, `[tool] `, `[result] `
+// and `[hook] ` lines.
 const stream = [
-  "Read src/middleware/index.ts",
-  "Read src/lib/redis.ts",
-  "Edit src/middleware/rateLimit.ts (+64 -0)",
-  "Edit src/server.ts (+3 -1)",
-  "$ npm test -- rateLimit",
-  "\u001b[32m✓\u001b[0m allows 60 requests per minute per key (41 ms)",
-  "\u001b[32m✓\u001b[0m refills one token per second (12 ms)",
-  "\u001b[31m✕\u001b[0m isolates buckets between keys (8 ms)",
-  "\u001b[2mTests: 1 failed, 2 passed, 3 total\u001b[0m",
-  "Message from Lead: key the bucket by key id, not the raw key.",
-  "Edit src/middleware/rateLimit.ts (+12 -6)",
-  "$ npm test -- rateLimit",
-  "\u001b[32mTests: 3 passed, 3 total\u001b[0m",
-  "Edit src/middleware/rateLimit.ts (+41 -2)",
-  "Write test/rateLimit.redis.test.ts",
+  "[user] Build the token bucket middleware for task graph id 20261106-2140.t2.",
+  "I'll start by reading the middleware chain and the Redis client so the bucket plugs in where the auth check ends.",
+  "[tool] Read src/middleware/index.ts",
+  "[tool] Read src/lib/redis.ts",
+  "The chain runs auth before routing, so the limiter goes right after auth and can key on the API key id.",
+  "[tool] Edit src/middleware/rateLimit.ts",
+  "[tool] Edit src/server.ts",
+  "[tool] Bash npm test -- rateLimit",
+  "[result] \u001b[32m✓\u001b[0m allows 60 requests per minute per key (41 ms)",
+  "[result] \u001b[32m✓\u001b[0m refills one token per second (12 ms)",
+  "[result] \u001b[31m✕\u001b[0m isolates buckets between keys (8 ms)",
+  "[result] Tests: 1 failed, 2 passed, 3 total",
+  "One test fails: two keys share a bucket. The bucket name uses the raw key, which collides after trimming.",
+  "[hook] Message from Lead: key the bucket by key id, not the raw key.",
+  "[tool] Edit src/middleware/rateLimit.ts",
+  "[tool] Bash npm test -- rateLimit",
+  "[result] Tests: 3 passed, 3 total",
+  "All three pass. Next I'm adding a Redis-backed store so buckets survive a restart.",
+  "[tool] Edit src/middleware/rateLimit.ts",
+  "[tool] Write test/rateLimit.redis.test.ts",
 ].map((text, i) => ({ seq: i + 1, text }));
 
 const diff = `diff --git a/src/server.ts b/src/server.ts
@@ -319,6 +332,7 @@ export function installFixture(mode = "") {
     { name: "Git", ok: true, detail: "2.46.0", fix: "" },
     { name: "Vajra engine", ok: false, detail: "not installed", fix: "bash scripts/install.sh" },
   ], start_enabled: false }) };
+  const stalled: typeof replies = { crew: () => stalledCrew, active_runs: () => ({ count: 0, runs: [] }) };
   const welcome = mode.startsWith("welcome-") ? welcomeFixture(mode.slice("welcome-".length)) : null;
   let revision = 0;
   let global = mode === "pings" ? { ...DEFAULT_PREFERENCES, ping: { ...DEFAULT_PING, batch_minutes: 0, questions: false } } : { ...DEFAULT_PREFERENCES };
@@ -367,7 +381,7 @@ export function installFixture(mode = "") {
       if (cmd === "folder_is_git") return { git: true };
       if (cmd === "provider_agents") return agents;
       if (cmd === "provider_agents_save") { agents = { schema: AGENTS.schema, ...(args?.agents as object) }; return agents; }
-      const r = (mode === "empty" || welcome ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd] ?? setupReplies[cmd];
+      const r = (mode === "empty" || welcome ? empty[cmd] : mode === "blocked" ? blocked[cmd] : mode === "stalled" ? stalled[cmd] : undefined) ?? replies[cmd] ?? setupReplies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },

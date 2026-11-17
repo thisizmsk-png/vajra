@@ -433,3 +433,23 @@ vajra-119 UI pass (PR B).
 |---|---|---|
 | No run open | Review, when no run is chosen | title of the centred empty state; the line under it is unchanged |
 | (changed) the Run title | Review, an open run | shows the run's goal; "Run" stays as the meta label, and is the title while the goal is unknown |
+
+vajra-122 live worker view (owner, 17 Nov: "who will understand what's going on").
+
+| String | Where | Note |
+|---|---|---|
+| (changed) No live updates | Workers tree, a node nothing reports on | was "Unknown (no signal)"; the status's tooltip says why (no process runs this run / this worker never reported / nothing under this has reported) |
+| Stalled | Workers tree and pane header, anything still marked working in a stalled run | replaces a blue In progress; uses the Blocked dot |
+| Stalled: no activity since {time} ({how long ago}) | stall notice above the pane | "Stalled: no activity, and no time is recorded for the last one" when no time is known |
+| No process is running this run, so the tasks still marked in progress are not moving. / The run is still running, but nothing has been written for over 30 minutes. | stall notice, second line | which of the two depends on whether a process runs the run |
+| Review run / Stop run | stall notice action | Review opens the run's Review view; Stop run is the same call as Home's |
+| What is happening; Now; Worker; Latest worker; Last activity; Workers; Active now; None recorded | run and Lead summary | replaces the bare Status and Kind box |
+| {worker} is working on {task}. / All {n} workers have finished. / No worker is working right now. / No worker has started yet. | run and Lead summary, first line | |
+| {worker}, live | run and Lead summary, heading over the active worker's activity | |
+| Waiting to start: no worker has picked this up yet. / No worker picked this up before the run stopped. | a task with no worker | the second when the run has stalled |
+| Live; (changed) Raw output | worker tabs | Live is new and open first; Raw output was "Stream" (the same terminal view) |
+| Worker activity, newest last | Live tab's log | screen readers only |
+| Paused while you read. / {n} new lines below. / Follow live | Live tab, after scrolling up | |
+| Nothing yet. Messages and steps appear here as the worker writes them. / Could not read the worker's activity. / Some earlier activity is no longer available. | Live tab states | |
+| Task given / Message / {n} more lines in Raw output | Live tab entries | the prompt the worker got, a message to it, and a long tool result cut at 6 lines |
+| New activity: {step or first line} | Live tab, polite status | screen readers only, at most once every 10 seconds |

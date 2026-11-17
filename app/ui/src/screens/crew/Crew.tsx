@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Section, StatusDot, Text } from "../../../components/ui/base";
+import { Button, StatusDot, Text } from "../../../components/ui/base";
 import { ActionBar, CrewTree } from "../../../components/ui/desktop";
 import type { CrewNode } from "../../../components/ui/desktop";
 import { RunProvider } from "../ProviderControls";
@@ -16,6 +16,10 @@ import { onChangedPaced, usePoll } from "../../projects/poll";
 import { useProjects } from "../../projects/store";
 import { WorkerPane } from "./WorkerPane";
 import { CoreWorkerPane } from "./CoreWorkerPane";
+import { RunSummary, StallNote } from "./RunSummary";
+import type { Facts } from "./RunSummary";
+import { initialPick, isWorkerId, isWorking, stalledSince, workersIn } from "./crewLive";
+import { parseWhen } from "../when";
 
 /** A status or event is re-read at least this often: a tasks.json edit raises no event (AC-2.1.2: within 2 s). */
 const POLL_MS = 2000;
@@ -26,17 +30,32 @@ type Target = { slug: string; runId: string };
 const STATUSES = new Set<string>(["pending", "ready", "claimed", "in_progress", "done", "blocked", "question", "failed", "unknown"]);
 const statusOf = (s: string): StatusKey => (STATUSES.has(s) ? (s as StatusKey) : "unknown");
 
-/** The text next to the dot: the status, or "no signal" for a node nothing reports on, plus any overlay. */
-function statusLabel(n: CrewNodeDto): string {
-  const key = statusOf(n.status);
-  const base = key === "unknown" ? S.crew.unknownSignal : S.status[key];
-  const extra = (n.overlays as unknown[]).filter((o): o is string => typeof o === "string").map((o) => S.crew.overlay[o] ?? o);
-  return [base, ...extra].join(", ");
-}
+/** Whether a node, or anything under it, still says it is working. */
+const anyWorking = (n: CrewNodeDto): boolean => isWorking(n.status) || n.children.some(anyWorking);
 
-function toNode(n: CrewNodeDto): CrewNode {
+/** How one node reads: the dot, the words next to it and, for a node that says nothing, why. */
+type Shown = { shape: StatusKey; label: string; hint?: string };
+
+/**
+ * The text next to the dot: the status, plus any overlay. A node nothing reports on says "No live updates" (the hint says
+ * why); a node that says it is working in a run that has stalled says "Stalled" instead of a blue In progress.
+ */
+function statusShown(n: CrewNodeDto, stalled: boolean): Shown {
+  const key = statusOf(n.status);
+  const extra = (n.overlays as unknown[]).filter((o): o is string => typeof o === "string").map((o) => S.crew.overlay[o] ?? o);
+  const join = (base: string) => [base, ...extra].join(", ");
+  if (stalled && anyWorking(n)) return { shape: "blocked", label: join(S.crew.stalled), hint: S.crew.stalledHint };
+  if (key !== "unknown") return { shape: key, label: join(S.status[key]) };
+  const hint = n.kind === "run" || n.kind === "lead" ? S.crew.noLiveWhy.run : isWorkerId(n.id) ? S.crew.noLiveWhy.worker : S.crew.noLiveWhy.group;
+  return { shape: "unknown", label: join(S.crew.unknownSignal), hint };
+}
+/** The label alone, for the palette and the action bar outside a run's context. */
+const statusLabel = (n: CrewNodeDto) => statusShown(n, false).label;
+
+function toNode(n: CrewNodeDto, stalled: boolean): CrewNode {
   const p = parseWorkerProvider(n.provider);
-  return { id: n.id, label: n.title, status: statusOf(n.status), statusLabel: statusLabel(n), icon: p ? iconOf(p) : undefined, children: n.children.map(toNode) };
+  const s = statusShown(n, stalled);
+  return { id: n.id, label: n.title, status: s.shape, statusLabel: s.label, statusHint: s.hint, icon: p ? iconOf(p) : undefined, children: n.children.map((c) => toNode(c, stalled)) };
 }
 
 const find = (n: CrewNodeDto, id: string): CrewNodeDto | null => {
@@ -58,13 +77,10 @@ const taskGroupOf = (n: CrewNodeDto, id: string, task: string | null = null): st
 };
 /** A worker the core runs itself (ADR-16 16.7): its id is the full `core:<ticket>` reference its controls act on. */
 const isCore = (id: string) => id.startsWith("core:");
-const isWorker = (id: string) => id.startsWith("agent:") || isCore(id);
 /** Every worker in the tree (a run's subagents and the core's own), in tree order. */
-const agents = (n: CrewNodeDto, out: CrewNodeDto[] = []): CrewNodeDto[] => {
-  if (isWorker(n.id)) out.push(n);
-  n.children.forEach((c) => agents(c, out));
-  return out;
-};
+const agents = (n: CrewNodeDto) => workersIn(n);
+/** Re-render this often so "5 minutes ago" and the silent-run check stay current. */
+const CLOCK_MS = 30_000;
 /** Ids from the root down to `id`, or null. */
 const pathTo = (n: CrewNodeDto, id: string): string[] | null => {
   if (n.id === id) return [n.id];
@@ -82,7 +98,7 @@ const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
 
 export function Crew() {
   const [route, go] = useRoute();
-  const { liveRuns } = useProjects();
+  const { liveRuns, campaigns } = useProjects();
   const routed = route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined;
   const [target, setTarget] = useState<Target | null | undefined>(routed);
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
@@ -104,8 +120,20 @@ export function Crew() {
     setOpenIds(null);
     setSelected("");
     setErr("");
+    setGrewAt(null);
+    openedAt.current = Date.now();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeKey]);
+
+  // When anything last happened: the campaign's own last write, or a worker's stream growing while this view watched.
+  const [grewAt, setGrewAt] = useState<number | null>(null);
+  const openedAt = useRef(Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), CLOCK_MS);
+    return () => clearInterval(t);
+  }, []);
+  const onActivity = useCallback((at: number) => { setGrewAt(at); setNow(at); }, []);
 
   // `focus=<node id>` (from the Run view's task graph) selects that node (a task's latest worker), and opens its ancestors, once the tree has loaded.
   const focus = route.params.focus ?? "";
@@ -142,7 +170,7 @@ export function Crew() {
     if (!target) return;
     const asked = target;
     api.crew(target.slug, target.runId).then(
-      (n) => { if (current.current !== asked) return; setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
+      (n) => { if (current.current !== asked) return; setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || initialPick(n)); },
       (e) => { if (current.current === asked) setErr(problemDetail(e)); },
     );
   }, [target]);
@@ -187,6 +215,63 @@ export function Crew() {
   }
   const picked = root && selected ? find(root, selected) : null;
   const run = root?.children.find((c) => c.kind === "run");
+
+  // Has the run stalled? Something says it is working, but no process runs it, or it has been silent too long.
+  // The core marks the run node in progress only while a process runs it, and "unknown" otherwise (crew in the desktop
+  // core). That answer comes with this very tree, so it never races the projects store's own read of the live runs.
+  const live = run ? run.status !== "unknown" : !!target && liveRuns.includes(target.runId);
+  const updated = parseWhen(campaigns.find((c) => c.slug === target?.slug)?.updated ?? "");
+  const lastMs = [Number.isFinite(updated) ? updated : null, grewAt].reduce<number | null>((a, b) => (b === null ? a : a === null ? b : Math.max(a, b)), null);
+  const activeNow = agents(root).some((w) => (w.overlays as unknown[]).includes("activity"));
+  const stall = stalledSince({ working: anyWorking(root), live, lastMs, watchedMs: now - openedAt.current, activeNow, now });
+  const stalled = stall !== undefined;
+  const banner = (n: CrewNodeDto) => stalled && anyWorking(n) && target ? <StallNote since={stall ?? null} live={live} slug={target.slug} runId={target.runId} /> : undefined;
+
+  /** A worker's name as a person reads it: its role, else its task and round ("Backend · t2, round 1"). */
+  const nameOf = (w: CrewNodeDto) => {
+    if (w.role) return w.role;
+    const tid = taskGroupOf(root, w.id);
+    const task = tid ? find(root, `task:${tid}`) : null;
+    return task ? `${task.title}, ${w.title}` : w.title;
+  };
+  const facts = (n: CrewNodeDto): Facts => ({
+    ...statusShown(n, stalled), stalled: stalled && anyWorking(n) ? stall ?? null : undefined, live,
+    slug: target?.slug ?? "", runId: target?.runId ?? "", lastMs, activeNow, nameOf, onActivity,
+    taskOf: (w) => {
+      const tid = taskGroupOf(root, w.id);
+      return tid ? find(root, `task:${tid}`)?.title ?? tid : null;
+    },
+  });
+
+  /** A worker's own pane: its live activity first. */
+  const workerPane = (w: CrewNodeDto) => {
+    const s = statusShown(w, stalled);
+    if (isCore(w.id)) return <CoreWorkerPane key={w.id} node={w} status={s.label} shape={s.shape} banner={banner(w)} />;
+    if (!target) return null;
+    return <WorkerPane key={w.id} node={w} slug={target.slug} runId={target.runId} taskLocalId={taskGroupOf(root, w.id) ?? null} status={s.label} shape={s.shape} banner={banner(w)} onActivity={onActivity} />;
+  };
+  /** A task shows its latest round's worker; a task nothing has picked up says so in words. */
+  const taskPane = (t: CrewNodeDto) => {
+    const latest = t.children.filter((c) => isWorkerId(c.id)).pop();
+    if (latest) return workerPane(latest);
+    const s = statusShown(t, stalled);
+    return (
+      <section className="v-crew__pane v-crew__summary" aria-label={t.title}>
+        <div className="v-crew__panehead">
+          <Text as="h2" variant="headline-md">{t.title}</Text>
+          <StatusDot status={s.shape} label={s.label} />
+        </div>
+        {banner(t)}
+        <p className="v-crew__now">{stalled && anyWorking(t) ? S.crew.neverStarted : S.crew.waiting}</p>
+      </section>
+    );
+  };
+  const pane = !root || !picked ? null
+    : isWorkerId(picked.id) ? workerPane(picked)
+    : picked.kind === "task" || picked.id.startsWith("task:") ? taskPane(picked)
+    : <RunSummary key={picked.id} scope={picked} f={facts(picked)} />;
+  const pickedShown = picked ? statusShown(picked, stalled) : null;
+
   return (
     <div className="v-screen v-crew">
       {head(run?.title)}
@@ -195,49 +280,13 @@ export function Crew() {
       <div className="v-crew__body">
         <div className="v-crew__tree">
           {root && openIds && (
-            <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
+            <CrewTree label={S.crew.treeLabel} nodes={[toNode(root, stalled)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
           )}
         </div>
-        {root && picked && (isCore(picked.id) ? (
-          <CoreWorkerPane key={picked.id} node={picked} status={statusLabel(picked)} />
-        ) : picked.id.startsWith("agent:") ? (
-          target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={taskGroupOf(root, picked.id) ?? null} status={statusLabel(picked)} />
-        ) : (
-          <div className="v-crew__pane v-crew__pane--facts">
-            <Section title={S.crew.details}>
-              <dl className="v-crew__facts" aria-label={S.crew.details}>
-                <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
-                <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
-              </dl>
-            </Section>
-            {(() => {
-              // How the workers under the selection stand, counted from the same tree (the tree names them).
-              const ws = agents(picked);
-              if (ws.length === 0) return null;
-              const counts = new Map<StatusKey, number>();
-              for (const w of ws) counts.set(statusOf(w.status), (counts.get(statusOf(w.status)) ?? 0) + 1);
-              return (
-                <section className="v-panel v-crew__workers" aria-labelledby="v-crew-workers">
-                  <div className="v-panel__bar">
-                    <h3 id="v-crew-workers" className="v-panel__title">{S.crew.workers}</h3>
-                    <span className="v-panel__meta">{S.crew.workersDone(counts.get("done") ?? 0, ws.length)}</span>
-                  </div>
-                  <div className="v-crew__meter" aria-hidden="true">
-                    {[...counts].map(([k, n]) => <span key={k} className={`v-status--${k}`} style={{ flexGrow: n }} />)}
-                  </div>
-                  <ul>
-                    {[...counts].map(([k, n]) => (
-                      <li key={k}><StatusDot status={k} /><span className="v-num">{n}</span></li>
-                    ))}
-                  </ul>
-                </section>
-              );
-            })()}
-          </div>
-        ))}
+        {pane}
       </div>
       <ActionBar label={S.crew.barLabel}
-        context={picked ? <span>{`${picked.role ?? picked.title}, ${statusLabel(picked)}`}</span> : undefined} />
+        context={picked && pickedShown ? <span>{`${picked.role ?? picked.title}, ${pickedShown.label}`}</span> : undefined} />
     </div>
   );
 }

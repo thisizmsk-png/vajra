@@ -243,6 +243,43 @@
 .v-loading { visibility: hidden; animation: v-loading-show 0s linear 100ms forwards; }
 @keyframes v-loading-show { to { visibility: visible; } }
 .v-crew__state { padding: 48px var(--space-xl); }
+
+/* A worker's live activity: its messages read as prose, its tool steps as quiet rows under them. The scroll box is
+   capped to the window so the tabs above stay put while it follows the newest line. */
+/* In a worker's pane the tabs take the height left under the header, and the Live tab's feed fills its panel, so the
+   newest line sits at the window's bottom edge, never below it. */
+.v-crew__pane > .v-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.v-crew__pane > .v-tabs > .v-tabpanel { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.v-feed { display: flex; flex-direction: column; gap: var(--space-sm); min-width: 0; flex: 1; min-height: 0; }
+.v-feed__scroll { flex: 1; display: flex; flex-direction: column; gap: var(--space-md); min-height: 160px; overflow-y: auto; padding: 2px var(--space-xs) var(--space-md) 0; }
+/* Under the run summary the feed is one section among others: capped, so the facts above stay in view. */
+.v-crew__summary .v-feed__scroll { flex: none; max-height: 40vh; }
+.v-feed__scroll > * { flex: none; }
+.v-feed__scroll:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
+.v-feed__empty { margin: 0; color: var(--c-text-muted); font: 400 var(--text-md)/20px var(--font-ui); }
+.v-feed__say { margin: 0; max-width: 72ch; color: var(--c-text); font: 400 var(--text-md)/20px var(--font-ui); white-space: pre-wrap; overflow-wrap: anywhere; contain: layout; }
+.v-feed__step { display: flex; flex-direction: column; gap: var(--space-xs); padding-left: var(--space-sm); border-left: 1px solid var(--c-border); contain: layout; }
+.v-feed__steprow { display: flex; align-items: baseline; gap: var(--space-sm); margin: 0; min-width: 0; font: 400 var(--text-sm)/18px var(--font-ui); }
+.v-feed__tool { flex: none; color: var(--c-text-secondary); font-weight: 500; }
+.v-feed__detail { min-width: 0; color: var(--c-text-muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-feed__result { margin: 0; color: var(--c-text-muted); font: 400 var(--text-sm)/18px var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.v-feed__aside { display: flex; flex-direction: column; gap: 2px; max-width: 72ch; padding: var(--space-sm) var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-panel); }
+.v-feed__who { margin: 0; color: var(--c-text-muted); font: 500 var(--text-xs)/16px var(--font-ui); }
+.v-feed__text { margin: 0; color: var(--c-text-secondary); font: 400 var(--text-sm)/18px var(--font-ui); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.v-feed__paused { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+
+/* The plain-words summary for the Lead, the run and the other groups, with the active worker's activity under it. */
+.v-crew__summary { display: flex; flex-direction: column; gap: var(--space-lg); padding: var(--space-lg) var(--space-xl); min-width: 0; }
+.v-crew__summary > .v-section { margin: 0; }
+.v-crew__summary > .v-crew__panehead { padding: 0; }
+.v-crew__now { margin: 0 0 var(--space-sm); color: var(--c-text); font: 400 var(--text-md)/20px var(--font-ui); }
+/* A stall: a quiet notice with its one action, not an alarm. */
+.v-crew__stall { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm) var(--space-md); padding: var(--space-sm) var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-panel); box-shadow: inset 2px 0 0 var(--c-warning); }
+.v-crew__stall > div { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 2px; }
+.v-crew__stall p { margin: 0; }
+.v-crew__stall-t { color: var(--c-text); font: 500 var(--text-md)/20px var(--font-ui); }
+.v-crew__stall-why { color: var(--c-text-secondary); font: 400 var(--text-sm)/18px var(--font-ui); }
+.v-crew__pane:not(.v-crew__summary) > .v-crew__stall { margin: var(--space-md) var(--space-lg) 0; }
 .v-crew__tree--loading { border: 0; padding: 0; max-width: 320px; }
 
 /* Under 1200 px (UX.md section 3): Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */

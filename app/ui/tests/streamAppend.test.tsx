@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import type { StreamWindow, Tail } from "../src/ipc";
@@ -6,6 +6,7 @@ import { Crew } from "../src/screens/crew/Crew";
 import { PANE_BYTES, appendTail } from "../src/screens/crew/streamAppend";
 import { fakeIpc } from "./fakeIpc";
 import { Live, liveRun } from "./liveRun";
+import { S } from "../strings";
 
 afterEach(() => { cleanup(); setTransport(); window.location.hash = ""; });
 
@@ -107,8 +108,9 @@ describe("Stream tab following the live end", () => {
     });
     setTransport(f.transport);
     render(<Live><Crew /></Live>);
-    fireEvent.click((await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement);
-    const log = await screen.findByRole("log");
+    fireEvent.click(within(await screen.findByRole("tree")).getByText("Backend").closest("[role=treeitem]") as HTMLElement);
+    fireEvent.click(await screen.findByRole("tab", { name: S.crew.tabs.stream }));
+    const log = await screen.findByRole("log", { name: S.crew.streamLabel });
     await waitFor(() => expect(log.textContent).toContain("out 3"));
     const windows = f.calls.filter((c) => c.cmd === "stream_window").length;
     head = 5;

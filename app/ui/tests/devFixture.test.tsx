@@ -17,7 +17,11 @@ describe("fixture mode (dev ?fixture)", () => {
     installFixture();
     window.location.hash = "#/crew?slug=deliver-20261106-2140&id=20261106-2140";
     render(<Crew />);
-    fireEvent.click((await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement);
+    // It opens on the active worker's Live tab: its messages and steps.
+    const feed = await screen.findByRole("log", { name: S.crew.live.label });
+    await waitFor(() => expect(feed.textContent).toContain("test/rateLimit.redis.test.ts"));
+    expect(feed.textContent).toContain("All three pass.");
+    fireEvent.click(await screen.findByRole("tab", { name: S.crew.tabs.stream }));
     const log = await screen.findByRole("log", { name: S.crew.streamLabel });
     await waitFor(() => expect(log.textContent).toContain("Write test/rateLimit.redis.test.ts"));
     expect(screen.queryByText(/not_in_fixture/)).toBeNull();
@@ -28,6 +32,7 @@ describe("fixture mode (dev ?fixture)", () => {
     window.location.hash = "#/crew?slug=deliver-20261106-2140&id=20261106-2140";
     render(<Crew />);
     fireEvent.click((await screen.findByText("Backend worker 1")).closest("[role=treeitem]") as HTMLElement);
+    fireEvent.click(await screen.findByRole("tab", { name: S.crew.tabs.stream }));
     await screen.findByRole("log", { name: S.crew.streamLabel });
     await waitFor(() => expect(screen.getByText(S.crew.windowGap)).toBeTruthy());
   });
