@@ -4,7 +4,7 @@ import { setTransport } from "../src/ipc";
 import type { CrewNodeDto } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
 import { LiveFeed, ANNOUNCE_MS, FEED_ROWS } from "../src/screens/crew/LiveFeed";
-import { STALL_MS, WATCH_MS, activeWorker, announceOf, feedItems, initialPick, stalledSince } from "../src/screens/crew/crewLive";
+import { LIVENESS_MS, STALL_MS, WATCH_MS, activeWorker, announceOf, feedItems, headsGrew, initialPick, stalledSince } from "../src/screens/crew/crewLive";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
 
@@ -52,7 +52,7 @@ describe("crew live rules", () => {
 
   it("calls a run stalled when no process runs it, or when it has been silent too long while watched", () => {
     const now = Date.UTC(2026, 10, 17);
-    const base = { working: true, live: false, lastMs: now - 1000, watchedMs: 0, activeNow: false, now };
+    const base = { working: true, live: false, canTell: true, lastMs: now - 1000, watchedMs: 0, activeNow: false, now };
     expect(stalledSince(base)).toBe(now - 1000);
     expect(stalledSince({ ...base, lastMs: null })).toBeNull();
     expect(stalledSince({ ...base, working: false })).toBeUndefined();
@@ -61,6 +61,17 @@ describe("crew live rules", () => {
     expect(stalledSince({ ...live, watchedMs: WATCH_MS })).toBe(now - STALL_MS - 1);
     expect(stalledSince({ ...live, watchedMs: WATCH_MS, activeNow: true })).toBeUndefined();
     expect(stalledSince({ ...live, watchedMs: WATCH_MS, lastMs: now - 60_000 })).toBeUndefined();
+    // Only the core's own workers are working: nothing here can see them write, so a live run is never called silent.
+    expect(stalledSince({ ...live, watchedMs: WATCH_MS, canTell: false })).toBeUndefined();
+  });
+
+  it("counts a stream head as activity only when it grew past one already seen", () => {
+    const seen = new Map<string, number>();
+    expect(headsGrew(seen, [["w-a", 40], ["w-b", 7]])).toBe(false); // first sighting only records
+    expect(headsGrew(seen, [["w-a", 40], ["w-b", 7]])).toBe(false);
+    expect(headsGrew(seen, [["w-a", 41]])).toBe(true);
+    expect(headsGrew(seen, [["w-c", 3]])).toBe(false);
+    expect(seen.get("w-a")).toBe(41);
   });
 
   it("reads the worker stream as messages, steps with their results, and prompts, with colour codes dropped", () => {
@@ -114,6 +125,60 @@ describe("the Workers screen says what is happening", () => {
     await waitFor(() => expect(note.textContent).toContain("since"));
     expect(note.textContent).toMatch(/Nov|11/);
   });
+
+  it("a live run whose worker keeps writing never reads Stalled, even from a pane with no live feed (35 minutes on)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const start = Date.now();
+    // The campaign file was last written 2 hours ago; one worker (a2) is coding with no task status change, and the
+    // reader sits on a task whose worker the core runs itself (no stream, no feed on screen).
+    const t = structuredClone(liveTree);
+    t.children[0].children.push(node("task:t9", "task", "Checks · t9", "in_progress", [node("core:r1.t9.r1", "round", "round 1", "in_progress")]));
+    let head = 10;
+    const f = fakeIpc({
+      active_runs: { count: 0, runs: [] }, crew: t,
+      list_campaigns: { campaigns: [{ slug: "camp", updated: new Date(start - 2 * 3600_000).toISOString() }] },
+      resume_targets: { targets: {} }, inbox: { items: [], count: 0 }, project_list: { projects: [] },
+      tail: () => ({ lines: [], gap: false, head_seq: head, spill_start: null, spill_end: null }),
+      stream_window: window_(["Working."]),
+    });
+    setTransport(f.transport);
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    const { Live } = await import("./liveRun");
+    render(<Live><Crew /></Live>);
+    const tree = await screen.findByRole("tree");
+    fireEvent.click(within(tree).getByText("Checks · t9").closest("[role=treeitem]") as HTMLElement);
+    await screen.findByRole("complementary", { name: S.crew.core.controls });
+    expect(screen.queryByRole("log", { name: S.crew.live.label })).toBeNull();
+    for (let m = 0; m < 35 * 60_000; m += LIVENESS_MS) {
+      head += 1;
+      await act(async () => { await vi.advanceTimersByTimeAsync(LIVENESS_MS); });
+    }
+    expect(f.calls.some((c) => c.cmd === "tail" && c.args?.stream === "w-a2")).toBe(true);
+    expect(within(tree).queryAllByText(S.crew.stalled)).toHaveLength(0);
+    expect(screen.queryByRole("group", { name: S.crew.stalled })).toBeNull();
+    expect(screen.queryByRole("button", { name: /stop run/i })).toBeNull();
+  }, 30_000);
+
+  it("a live run whose working workers have all gone silent reads Stalled and offers Review run, not Stop run", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const f = fakeIpc({
+      active_runs: { count: 0, runs: [] }, crew: liveTree,
+      list_campaigns: { campaigns: [{ slug: "camp", updated: new Date(Date.now() - 2 * 3600_000).toISOString() }] },
+      resume_targets: { targets: {} }, inbox: { items: [], count: 0 }, project_list: { projects: [] },
+      tail: () => ({ lines: [], gap: false, head_seq: 10, spill_start: null, spill_end: null }),
+      stream_window: window_(["Working."], 10),
+    });
+    setTransport(f.transport);
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    const { Live } = await import("./liveRun");
+    render(<Live><Crew /></Live>);
+    await screen.findByRole("tree");
+    await act(async () => { await vi.advanceTimersByTimeAsync(WATCH_MS + 31_000); });
+    const note = await screen.findByRole("group", { name: S.crew.stalled });
+    expect(note.textContent).toContain(S.crew.stalledSilentWhy);
+    expect(within(note).getByRole("button", { name: S.crew.review })).toBeTruthy();
+    expect(within(note).queryByRole("button", { name: /stop/i })).toBeNull();
+  }, 30_000);
 
   it("a node nothing reports on says 'No live updates' and why, never 'Unknown (no signal)'", async () => {
     open({ crew: node("lead", "lead", "Lead", "unknown", [node("run:r1", "run", "Run r1", "unknown", [node("task:t1", "task", "Docs · t1", "pending")])]) });

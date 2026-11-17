@@ -46,14 +46,33 @@ export function initialPick(root: CrewNodeDto): string {
 
 /**
  * A run has stalled when something still says it is working but nothing is: no live process exists for the run, or the
- * run is live and nothing has happened for `STALL_MS` (and the view has watched long enough to know). Returns when the
- * last activity was (ms, null when unknown), or undefined when the run has not stalled.
+ * run is live and no working worker's stream has grown for `STALL_MS` (and the view has watched long enough to know).
+ * `canTell` is false when no working worker writes a stream (only the core's own workers are working): then a live run
+ * is never called silent, since nothing here could see it work. Returns when the last activity was (ms, null when
+ * unknown), or undefined when the run has not stalled.
  */
-export function stalledSince(o: { working: boolean; live: boolean; lastMs: number | null; watchedMs: number; activeNow: boolean; now: number }): number | null | undefined {
+export function stalledSince(o: { working: boolean; live: boolean; canTell: boolean; lastMs: number | null; watchedMs: number; activeNow: boolean; now: number }): number | null | undefined {
   if (!o.working || o.activeNow) return undefined;
   if (!o.live) return o.lastMs;
-  if (o.lastMs !== null && o.watchedMs >= WATCH_MS && o.now - o.lastMs >= STALL_MS) return o.lastMs;
+  if (o.canTell && o.lastMs !== null && o.watchedMs >= WATCH_MS && o.now - o.lastMs >= STALL_MS) return o.lastMs;
   return undefined;
+}
+
+/** How often the Workers screen reads the head of each working worker's stream while its run is live. */
+export const LIVENESS_MS = 10_000;
+
+/**
+ * Compares stream heads with the last ones seen: true when any stream grew. The first sighting of a stream only records
+ * it (a head that was already there is not new activity). `seen` is updated in place.
+ */
+export function headsGrew(seen: Map<string, number>, heads: [string, number][]): boolean {
+  let grew = false;
+  for (const [id, head] of heads) {
+    const was = seen.get(id);
+    if (was !== undefined && head > was) grew = true;
+    seen.set(id, Math.max(was ?? head, head));
+  }
+  return grew;
 }
 
 /** "6 Nov, 22:05" in the reader's locale. */

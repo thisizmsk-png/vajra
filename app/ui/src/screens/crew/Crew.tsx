@@ -18,7 +18,7 @@ import { WorkerPane } from "./WorkerPane";
 import { CoreWorkerPane } from "./CoreWorkerPane";
 import { RunSummary, StallNote } from "./RunSummary";
 import type { Facts } from "./RunSummary";
-import { initialPick, isWorkerId, isWorking, stalledSince, workersIn } from "./crewLive";
+import { LIVENESS_MS, headsGrew, initialPick, isWorkerId, isWorking, stalledSince, workersIn } from "./crewLive";
 import { parseWhen } from "../when";
 
 /** A status or event is re-read at least this often: a tasks.json edit raises no event (AC-2.1.2: within 2 s). */
@@ -121,12 +121,16 @@ export function Crew() {
     setSelected("");
     setErr("");
     setGrewAt(null);
+    heads.current = new Map();
     openedAt.current = Date.now();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeKey]);
 
   // When anything last happened: the campaign's own last write, or a worker's stream growing while this view watched.
+  // Streams grow from the workers' transcripts on every crew read, so their heads say a worker is writing whatever pane
+  // is open; `heads` holds the last head seen per stream.
   const [grewAt, setGrewAt] = useState<number | null>(null);
+  const heads = useRef(new Map<string, number>());
   const openedAt = useRef(Date.now());
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -181,6 +185,21 @@ export function Crew() {
   // Leading and trailing: an event inside the gap is not lost, it is read when the gap ends. Hidden: one read on showing.
   useEffect(() => (target ? onChangedPaced(EVENT_MIN_GAP_MS, load) : undefined), [target, load]);
 
+  // Liveness, whatever pane is open: the head of each working worker's stream, read with a one-byte tail. Any head that
+  // grew is activity. Only while the run is live and the window shows (usePoll), so a finished run costs nothing.
+  const streamsKey = root ? workersIn(root).filter((w) => isWorking(w.status) && w.id.startsWith("agent:")).map((w) => `w-${w.id.slice("agent:".length)}`).join("\n") : "";
+  const readHeads = useCallback(() => {
+    const ids = streamsKey ? streamsKey.split("\n") : [];
+    if (!ids.length) return;
+    const asked = heads.current;
+    void Promise.all(ids.map((id) => api.tail(id, Number.MAX_SAFE_INTEGER, 1).then((t) => [id, t.head_seq] as [string, number], () => null))).then((got) => {
+      if (asked !== heads.current) return; // the route moved on
+      if (headsGrew(asked, got.filter((g): g is [string, number] => g !== null))) onActivity(Date.now());
+    });
+  }, [streamsKey, onActivity]);
+  useEffect(readHeads, [readHeads]);
+  usePoll(readHeads, LIVENESS_MS, !!streamsKey && !!root && root.children.some((c) => c.kind === "run" && c.status !== "unknown"));
+
   // ⌘K: go to any worker of this run by name.
   useCommands(root ? agents(root).map((n) => ({ id: n.id, label: S.palette.goWorker(n.title), hint: statusLabel(n), run: () => setSelected(n.id) })) : []);
 
@@ -223,9 +242,9 @@ export function Crew() {
   const updated = parseWhen(campaigns.find((c) => c.slug === target?.slug)?.updated ?? "");
   const lastMs = [Number.isFinite(updated) ? updated : null, grewAt].reduce<number | null>((a, b) => (b === null ? a : a === null ? b : Math.max(a, b)), null);
   const activeNow = agents(root).some((w) => (w.overlays as unknown[]).includes("activity"));
-  const stall = stalledSince({ working: anyWorking(root), live, lastMs, watchedMs: now - openedAt.current, activeNow, now });
+  const stall = stalledSince({ working: anyWorking(root), live, canTell: !!streamsKey, lastMs, watchedMs: now - openedAt.current, activeNow, now });
   const stalled = stall !== undefined;
-  const banner = (n: CrewNodeDto) => stalled && anyWorking(n) && target ? <StallNote since={stall ?? null} live={live} slug={target.slug} runId={target.runId} /> : undefined;
+  const banner = (n: CrewNodeDto) => stalled && anyWorking(n) && target ? <StallNote since={stall ?? null} live={live} slug={target.slug} /> : undefined;
 
   /** A worker's name as a person reads it: its role, else its task and round ("Backend · t2, round 1"). */
   const nameOf = (w: CrewNodeDto) => {

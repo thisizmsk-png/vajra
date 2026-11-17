@@ -1,8 +1,6 @@
-import { useState } from "react";
 import { Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
-import { api, errorText } from "../../ipc";
 import type { CrewNodeDto } from "../../ipc";
 import { useRoute } from "../../router";
 import { ago } from "../when";
@@ -15,27 +13,19 @@ const C = S.crew;
 export const whenText = (ms: number, now = Date.now()) => `${ago(new Date(ms).toISOString(), now)} (${clock(ms)})`;
 
 /**
- * A run that says it is working but is not: when it last moved, why it reads as stalled, and the one thing to do. A run
- * with no process is reviewed; a live run that went silent can be stopped (the same Stop run as Home).
+ * A run that says it is working but is not: when it last moved, why it reads as stalled, and the one thing to do, which
+ * is to review the run. A silent run that is still live is not offered a stop here: silence is a guess, and Home's Stop
+ * run stays one click away for someone who has looked.
  */
-export function StallNote({ since, live, slug, runId }: { since: number | null; live: boolean; slug: string; runId: string }) {
+export function StallNote({ since, live, slug }: { since: number | null; live: boolean; slug: string }) {
   const [, go] = useRoute();
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const stop = () => {
-    setBusy(true);
-    api.stopRun(runId).then(() => setErr(""), (e) => setErr(`${C.stopFailed} ${errorText(e)}`)).finally(() => setBusy(false));
-  };
   return (
     <div className="v-crew__stall" role="group" aria-label={C.stalled}>
       <div>
         <p className="v-crew__stall-t">{since !== null ? C.stalledSince(clock(since), ago(new Date(since).toISOString())) : C.stalledNoTime}</p>
         <p className="v-crew__stall-why">{live ? C.stalledSilentWhy : C.stalledWhy}</p>
-        {err && <p className="v-crew__stall-why" role="alert">{err}</p>}
       </div>
-      {live
-        ? <Button size="sm" variant="danger" busy={busy} onClick={stop}>{busy ? C.stopping : C.stopRun}</Button>
-        : <Button size="sm" onClick={() => go("review", { slug })}>{C.review}</Button>}
+      <Button size="sm" onClick={() => go("review", { slug })}>{C.review}</Button>
     </div>
   );
 }
@@ -71,7 +61,7 @@ export function RunSummary({ scope, f }: { scope: CrewNodeDto; f: Facts }) {
         <Text as="h2" variant="headline-md">{scope.role ?? scope.title}</Text>
         <StatusDot status={f.shape} label={f.label} />
       </div>
-      {f.stalled !== undefined && <StallNote since={f.stalled} live={f.live} slug={f.slug} runId={f.runId} />}
+      {f.stalled !== undefined && <StallNote since={f.stalled} live={f.live} slug={f.slug} />}
       <Section title={C.summary.label}>
         <p className="v-crew__now">{now}</p>
         {f.hint && f.stalled === undefined && <Text variant="body-sm" muted>{f.hint}</Text>}

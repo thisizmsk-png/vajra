@@ -551,9 +551,6 @@ export const S = {
     stalledSilentWhy: "The run is still running, but nothing has been written for over 30 minutes.",
     stalledHint: "Stalled: something still says it is working, but nothing is happening.",
     review: "Review run",
-    stopRun: "Stop run",
-    stopping: "Stopping",
-    stopFailed: "Could not stop the run.",
     /** The plain-words summary for the Lead, the run and the other groups. */
     summary: {
       label: "What is happening",

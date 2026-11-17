@@ -455,8 +455,8 @@ vajra-122 live worker view (owner, 17 Nov: "who will understand what's going on"
 | (changed) No live updates | Workers tree, a node nothing reports on | was "Unknown (no signal)"; the status's tooltip says why (no process runs this run / this worker never reported / nothing under this has reported) |
 | Stalled | Workers tree and pane header, anything still marked working in a stalled run | replaces a blue In progress; uses the Blocked dot |
 | Stalled: no activity since {time} ({how long ago}) | stall notice above the pane | "Stalled: no activity, and no time is recorded for the last one" when no time is known |
-| No process is running this run, so the tasks still marked in progress are not moving. / The run is still running, but nothing has been written for over 30 minutes. | stall notice, second line | which of the two depends on whether a process runs the run |
-| Review run / Stop run | stall notice action | Review opens the run's Review view; Stop run is the same call as Home's |
+| No process is running this run, so the tasks still marked in progress are not moving. / The run is still running, but nothing has been written for over 30 minutes. | stall notice, second line | which of the two depends on whether a process runs the run; the second only when no working worker's stream has grown for 30 minutes |
+| Review run | stall notice action | opens the run's Review view; no stop is offered here (silence is a guess; Home keeps Stop run) |
 | What is happening; Now; Worker; Latest worker; Last activity; Workers; Active now; None recorded | run and Lead summary | replaces the bare Status and Kind box |
 | {worker} is working on {task}. / All {n} workers have finished. / No worker is working right now. / No worker has started yet. | run and Lead summary, first line | |
 | {worker}, live | run and Lead summary, heading over the active worker's activity | |
