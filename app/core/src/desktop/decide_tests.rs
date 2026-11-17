@@ -1522,3 +1522,38 @@ fn failure_detection_waits_for_a_launch_in_flight_so_a_resume_is_never_hit() {
     assert_eq!(app.active_runs().unwrap()["count"], 0, "once the launch is done the errored run is ended");
     assert_eq!(app.run_failures().unwrap()["runs"][0]["message"], "an old failure");
 }
+
+#[test]
+fn only_the_current_attempts_failure_is_listed_whatever_the_engine() {
+    // A resume keeps the campaign and gets a fresh run id. The failure of an earlier attempt is not listed once a later
+    // attempt exists, and a later attempt's own failure is. Nothing here depends on the run being resumable.
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    t.result("wf_e.json", &error_result("first reason"));
+    app.active_runs().unwrap();
+    assert_eq!(app.run_failures().unwrap()["runs"][0]["message"], "first reason", "its only attempt: listed");
+    // A resumed attempt of the same campaign, running or succeeded: the earlier failure is no longer current.
+    let later = "20261106-1000";
+    t.another_run(&app, later, true);
+    assert!(app.run_failures().unwrap()["runs"].as_array().unwrap().is_empty(), "an earlier attempt's failure is hidden once a later attempt exists");
+    // The later attempt fails with its own reason: that one is listed, alone.
+    app.write_run_failure(later, "second reason");
+    let rows = app.run_failures().unwrap()["runs"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0]["run_id"].as_str(), rows[0]["message"].as_str()), (Some(later), Some("second reason")));
+}
+
+#[test]
+fn a_failure_is_listed_for_a_run_with_no_resume_target() {
+    // The Run view used to take the current attempt from the resume targets, which leave out an engine that cannot
+    // resume (a Codex run) and a folder that is gone. The list needs neither.
+    let t = Tmp::new();
+    let app = t.app();
+    live_classic(&t, &app);
+    app.write_run_failure(RUN, "too short");
+    fs::remove_dir_all(t.cwd()).unwrap(); // the run's folder is gone
+    let rows = app.run_failures().unwrap()["runs"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0]["campaign"].as_str(), rows[0]["message"].as_str()), (Some(CAMP), Some("too short")));
+}

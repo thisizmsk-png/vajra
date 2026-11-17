@@ -899,11 +899,19 @@ impl App {
         let mut seen = std::collections::HashSet::new();
         // The index is worker-writable: it only says WHICH run ids to look at. The campaign comes from the guarded run
         // record (a row with none is skipped), so an index line can never move one run's failure onto another's view.
+        // Newest first: the first run seen for a campaign is its CURRENT attempt (a resume keeps the campaign and gets a
+        // fresh run id). Only that attempt's failure is listed, so a later attempt that is running or succeeded hides an
+        // earlier failure. This covers every engine, resumable or not, unlike the resume targets.
+        let mut campaigns = std::collections::HashSet::new();
         for e in runindex::entries(&self.data.join("runs.jsonl")).into_iter().rev().take(50) {
             if !crate::ids::valid_run_id(&e.run_id) || !seen.insert(e.run_id.clone()) {
                 continue;
             }
-            let (Some(m), Some((_, _, campaign, _))) = (self.read_run_failure(&e.run_id), self.read_run_record(&e.run_id)) else { continue };
+            let Some((_, _, campaign, _)) = self.read_run_record(&e.run_id) else { continue };
+            if !campaigns.insert(campaign.clone()) {
+                continue;
+            }
+            let Some(m) = self.read_run_failure(&e.run_id) else { continue };
             out.push(json!({"run_id": e.run_id, "campaign": campaign, "message": m, "project": self.pinned_project(&e.run_id)}));
         }
         out.reverse();
