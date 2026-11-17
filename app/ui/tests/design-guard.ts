@@ -20,11 +20,13 @@ const RULES: Array<[string, RegExp]> = [
   ["gradient", /gradient\(/],
   ["banned webfont", /\b(?:Inter|Geist|Space Grotesk)\b/],
   ["ALL-CAPS transform", /text-transform\s*:\s*uppercase|\buppercase\b/],
-  // The type scale is five sizes (tokens.css --text-xs to --text-xl). A raw px size off it, such as 11.5 or 14, fails;
-  // a size on it passes until it moves to its token. Matches `font-size: N px`, and any px length in a `font:` shorthand
-  // whatever keywords lead it (style, variant, weight, stretch), except the line height after the slash.
-  ["off-scale font size", /\bfont(?:-size)?\s*:[^;{}]*?(?<![\w./-])(?!(?:11|12|13|15|22)px\b)\d+(?:\.\d+)?px/],
 ];
+
+// The type scale is five sizes (tokens.css --text-xs to --text-xl). A raw px size off it, such as 11.5 or 14, fails;
+// a size on it passes until it moves to its token. Matches `font-size: N px`, and any px length in a `font:` shorthand
+// whatever keywords lead it (style, variant, weight, stretch), except the line height after the slash. A declaration
+// may span lines, so this runs on the whole text; it stops at `;`, `{` or `}`, so it never reads into the next one.
+const OFF_SCALE = /\bfont(?:-size)?\s*:[^;{}]*?(?<![\w./-])((?!(?:11|12|13|15|22)px\b)\d+(?:\.\d+)?px)/g;
 // `#` inside a url fragment or a JSX/TS private field is not a color; the lookahead above keeps ids like #root out.
 const EXEMPT_DIRS = ["theme", "node_modules", "dist", "dist-lag", "tests"];
 
@@ -41,6 +43,11 @@ export function scanText(file: string, text: string): Violation[] {
       const line = lineAt(block.index + prop.index);
       out.push({ file, line, rule: "inline style color", text: text.split("\n")[line - 1].trim() });
     }
+  }
+  for (const m of text.matchAll(OFF_SCALE)) {
+    // Report the line that holds the size, which is where the fix goes.
+    const line = lineAt(m.index + m[0].length - m[1].length);
+    out.push({ file, line, rule: "off-scale font size", text: text.split("\n")[line - 1].trim() });
   }
   text.split("\n").forEach((line, i) => {
     for (const [rule, re] of RULES) if (re.test(line)) out.push({ file, line: i + 1, rule, text: line.trim() });
