@@ -50,8 +50,18 @@
 .v-launch .v-button--primary .v-kbd-group { display: none; }
 .v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
-/* The page title stands clear of the first section heading; flush, the two read as one two-line title. */
-h1.v-run__name { margin-bottom: var(--space-lg); }
+/* Run header: the goal as the title, then one quiet meta line ("Run" and the slug). Its margin keeps the header clear of
+   the first section heading; flush, the two read as one two-line title. */
+.v-run__head { margin-bottom: var(--space-xl); }
+.v-run__head h1.v-run__name { margin-bottom: var(--space-xs); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; white-space: normal; }
+.v-run__meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); color: var(--c-text-muted); font-size: var(--text-sm); }
+.v-run__meta code { color: var(--c-text-secondary); }
+/* Progress as a stepper: one segment per phase, the bar above each word says done, current or not yet. */
+.v-run__phases { display: flex; gap: var(--space-xs); margin: var(--space-sm) 0 0; padding: 0; list-style: none; max-width: 640px; }
+.v-run__phases li { flex: 1; min-width: 0; padding-top: var(--space-sm); border-top: 2px solid var(--c-border); font-size: var(--text-sm); }
+.v-run__phases li[data-state="done"] { border-top-color: var(--c-text-muted); }
+.v-run__phases li[aria-current="step"] { border-top-color: var(--c-primary); font-weight: 500; }
+.v-run__phases li .v-text { display: block; }
 /* The one-time line on the Run screen after the first run from the welcome */
 .v-run__first { display: flex; align-items: center; gap: var(--space-md); margin-bottom: var(--space-lg); padding: var(--space-sm) var(--space-md); border-left: 2px solid var(--c-border-strong); background: var(--c-surface); border-radius: 0 var(--radius-md) var(--radius-md) 0; }
 .v-run__first > :first-child { flex: 1; min-width: 0; }
@@ -214,7 +224,9 @@ h1.v-run__name { margin-bottom: var(--space-lg); }
 .v-settings__checks .v-home__checks li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); }
 
 /* States: a problem (alert, plain title, the detail small, Try again), an empty place with its next step, loading rows. */
-.v-problem { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); padding: var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); max-width: 560px; }
+/* A problem is a note in the flow, not a card: it often sits inside a card or panel already, and a box in a box read as
+   three separate failures when the core was down. The rule on its left carries the weight. */
+.v-problem { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); padding: var(--space-xs) 0 var(--space-xs) var(--space-md); border-left: 2px solid var(--c-danger); max-width: 560px; }
 .v-problem__detail { overflow-wrap: anywhere; }
 .v-problem .v-button { margin-top: var(--space-xs); }
 /* The "tried at" line is a live region, so it exists before the first retry. Until it has words it is out of the
@@ -222,6 +234,8 @@ h1.v-run__name { margin-bottom: var(--space-lg); }
 .v-problem .v-checked:empty { position: absolute; min-height: 0; margin: 0; }
 .v-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); max-width: 480px; }
 .v-empty__act { display: flex; gap: var(--space-sm); margin-top: var(--space-sm); }
+/* An empty view (nothing chosen yet) sits in the middle of the pane, not pinned to its top-left corner. */
+.v-empty--pane { align-items: center; margin: 18vh auto 0; text-align: center; }
 .v-loading { display: flex; flex-direction: column; gap: 10px; padding: var(--space-xs) 0; }
 .v-loading .v-skeleton { height: 12px; max-width: 420px; }
 .v-loading .v-skeleton:nth-child(2n) { max-width: 300px; }
