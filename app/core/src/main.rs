@@ -161,6 +161,14 @@ fn files_changed(app: State<'_, App>, project_id: String, worktree: Option<Strin
     app.files_changed(&project_id, worktree.as_deref())
 }
 
+/// Open a web link from a rendered Markdown file, once the person confirmed it in the UI. http and https only.
+#[tauri::command(async)]
+fn files_open_link(url: String) -> Res {
+    vajra_desktop::files::link::open_link(&url)
+        .map(|()| serde_json::json!({"opened": true}))
+        .map_err(|e| serde_json::json!({"error": "invalid_args", "detail": e.to_string()}))
+}
+
 #[tauri::command(async)]
 fn files_diff(app: State<'_, App>, project_id: String, worktree: Option<String>, path: String) -> Res {
     app.files_diff(&project_id, worktree.as_deref(), &path)
@@ -1061,6 +1069,7 @@ fn main() {
             files_read,
             files_changed,
             files_diff,
+            files_open_link,
             act_worker_clean_up,
             record_orphans,
             run_log_since,

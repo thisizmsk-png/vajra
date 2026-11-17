@@ -118,6 +118,7 @@ const COMMANDS: &[&str] = &[
     "files_read",
     "files_changed",
     "files_diff",
+    "files_open_link",
 ];
 
 #[path = "engine_pack.rs"]

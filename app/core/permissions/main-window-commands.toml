@@ -119,4 +119,5 @@ permissions = [
   "allow-files-read",
   "allow-files-changed",
   "allow-files-diff",
+  "allow-files-open-link",
 ]
