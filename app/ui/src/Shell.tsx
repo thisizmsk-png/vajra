@@ -145,7 +145,8 @@ function Frame() {
   const welcoming = (welcome ?? (P.state === "ok" && P.projects.length === 0)) && (route.screen === "orch" || route.screen === "launch") && !route.params.new;
   // A first launch has no remembered project: until the list answers, show neither screen rather than flash the launcher.
   const deciding = welcome === null && P.state === "loading" && !remembered && (route.screen === "orch" || route.screen === "launch") && !route.params.new;
-  const showColumn = !!project && !compact && !welcoming;
+  // Settings has its own section list, so the project column steps aside there; the stored fold choice is untouched.
+  const showColumn = !!project && !compact && !welcoming && route.screen !== "settings";
   const inspectable = !!project && INSPECTED.has(route.screen) && !welcoming;
   const showInspector = inspectable && inspector;
   const reviewParams: Record<string, string> = current.focus ? { slug: current.focus } : {};

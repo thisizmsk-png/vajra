@@ -229,6 +229,19 @@ describe("Shell B frame (FG-03)", () => {
     expect(window.location.hash).toMatch(/\/settings$/);
   });
 
+  it("Settings hides the project column, keeps the way back, and the column returns on leaving", async () => {
+    boot();
+    const col = { name: S.column.label("api") };
+    await screen.findByRole("complementary", col);
+    fireEvent.click(within(screen.getByRole("contentinfo", { name: S.frame.status })).getByRole("button", { name: S.views.settings }));
+    const title = await screen.findByRole("heading", { level: 1, name: S.settings.sections.providers.title });
+    expect(title.closest(".v-pagehead")).toBeTruthy();
+    expect(screen.queryByRole("complementary", col)).toBeNull();
+    const back = screen.getByRole("link", { name: S.settings.backTo("api") });
+    fireEvent.click(back);
+    expect(await screen.findByRole("complementary", col)).toBeTruthy();
+  });
+
   it("with no projects yet: no column, the welcome checklist, and Add project", async () => {
     boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] } });
     expect(await screen.findByRole("heading", { name: S.welcome.title })).toBeTruthy();
