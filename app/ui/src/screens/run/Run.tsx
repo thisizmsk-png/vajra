@@ -154,7 +154,8 @@ export function Run() {
   return (
     <div className="v-home">
       <header className="v-run__head">
-        <Text as="h1" variant="headline-lg" className="v-run__name">{goal || S.run.title}</Text>
+        {/* A goal can be up to 1000 characters with line breaks: the CSS clamps it to two lines, and the tooltip has all of it. */}
+        <h1 className="v-text v-text--headline-lg v-run__name" title={goal || undefined}>{goal || S.run.title}</h1>
         <div className="v-run__meta">
           {goal && <span>{S.run.title}</span>}
           <code>{slug}</code>

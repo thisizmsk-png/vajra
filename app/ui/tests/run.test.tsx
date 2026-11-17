@@ -49,6 +49,20 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     expect(screen.getByText("camp").tagName).toBe("CODE");
   });
 
+  it("clamps a long, unbroken goal to two lines and keeps all of it in the tooltip", async () => {
+    const goal = `Fix ${"https://example.com/".repeat(40)}\nand then the second line`;
+    window.location.hash = "#/run?slug=camp";
+    setTransport(fakeIpc({ list_campaigns: { campaigns: [{ slug: "camp", goal }] }, resume_targets: { targets: {} }, evidence_list: { rows: [] } }).transport);
+    render(<ProjectsProvider><Run /></ProjectsProvider>);
+    const h1 = await screen.findByRole("heading", { level: 1 });
+    expect(h1.getAttribute("title")).toBe(goal.trim());
+    expect(h1.className).toContain("v-run__name");
+    expect(h1.closest(".v-run__head")).toBeTruthy();
+    const css = readFileSync(resolve(__dirname, "../src/shell.css"), "utf8");
+    const rule = css.split("\n").find((l) => l.includes(".v-run__head h1.v-run__name {")) ?? "";
+    for (const d of ["-webkit-line-clamp: 2", "overflow: hidden", "overflow-wrap: anywhere"]) expect(rule).toContain(d);
+  });
+
   it("offers a button to History next to the ask to choose a run, since History has no tab", async () => {
     setTransport(fakeIpc({ list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } }).transport);
     render(<ProjectsProvider><Run /></ProjectsProvider>);
