@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Badge, Button, Icon, Input, Text } from "../../../components/ui/base";
+import { Badge, Button, Icon, Input, StatusDot, Text } from "../../../components/ui/base";
+import { runStatusKey } from "../../statusMap";
 import { ActionBar, Table } from "../../../components/ui/desktop";
 import type { Column } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
@@ -41,7 +42,6 @@ const REPORT_MESSAGE: Record<string, string> = {
 };
 
 const text = (a?: string, b?: string) => (a ?? "").localeCompare(b ?? "");
-const TONE = { active: "info", done: "success", stopped: "warning", failed: "danger", abandoned: undefined } as Record<string, "success" | "warning" | "danger" | "info" | undefined>;
 const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, verify: (c: Campaign) => void): Column<Campaign>[] => [
   // The goal leads; the slug under it opens the run and names the button (the slug is what the terminal shows).
   { key: "slug", header: S.history.colSlug, sort: (a, b) => text(a.slug, b.slug), cell: (c) => (
@@ -50,7 +50,7 @@ const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, ver
       <button type="button" className="v-history__slug" title={c.slug} onClick={() => open(c)}>{c.slug}</button>
     </div>
   ) },
-  { key: "status", header: S.history.colStatus, sort: (a, b) => text(a.status, b.status), cell: (c) => (c.status ? <Badge status={TONE[c.status]}>{S.history.state[c.status] ?? c.status}</Badge> : null) },
+  { key: "status", header: S.history.colStatus, sort: (a, b) => text(a.status, b.status), cell: (c) => (c.status ? <StatusDot status={runStatusKey(c.status)} label={S.history.state[c.status] ?? c.status} /> : null) },
   { key: "passing", header: S.history.colPassing, sort: (a, b) => (a.passing ?? 0) / (a.total || 1) - (b.passing ?? 0) / (b.total || 1), cell: (c) => (c.total != null ? (
     <span className="v-history__pass">
       <span className="v-history__meter" aria-hidden="true"><span style={{ width: `${c.total ? Math.round(((c.passing ?? 0) / c.total) * 100) : 0}%` }} /></span>

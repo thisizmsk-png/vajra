@@ -441,3 +441,9 @@ vajra-119 UI pass (core down, one message).
 | Vajra's core isn't answering. | Home, when the core does not answer | replaces "Could not run the checks." in that case only; the detail line is unchanged |
 | Runs show here once the core answers. | Home, Runs panel, same case | replaces a second error box |
 | (removed in that case) Could not read your projects. | title bar, only while Home is showing | Home already says it; other screens keep it |
+
+vajra-119 UI pass (one status style).
+
+| String | Where | Note |
+|---|---|---|
+| (changed) Working to In progress, Waiting to Pending | Run, task list status | the task list now uses the status vocabulary, as the project column does |
