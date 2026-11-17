@@ -292,6 +292,10 @@ impl App {
                 if o.code != Some(0) {
                     return Err(fail("git_failed", "git could not read this file at the base"));
                 }
+                // A key committed through a hard link lives on in the base blob: the minus side would print it.
+                if scope.holds_key(&o.stdout_raw) {
+                    return Err(refused(Refused::Protected));
+                }
                 if files::looks_binary(&o.stdout_raw) {
                     return Ok(json!({"path": path, "kind": "binary"}));
                 }

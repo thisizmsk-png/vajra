@@ -276,6 +276,63 @@ fn a_tracked_file_replaced_by_a_hard_link_to_the_key_is_refused_by_the_diff() {
     assert_eq!(code(&r.unwrap_err()), "protected");
 }
 
+/// The key committed into the repo through a hard link: its bytes now live in a git blob with its own identity.
+fn key_in_base(fx: &Fx) {
+    let key = fx.dir.join("home/.claude/vajra").join(crate::vajra::allowlist::DENIED_NAME);
+    fs::write(&key, b"DUMMY-KEY-CANARY-ba5e0001\n").unwrap();
+    fs::hard_link(&key, fx.repo().join("notes.txt")).unwrap();
+    git(&fx.repo(), &["add", "notes.txt"]);
+    git(&fx.repo(), &["commit", "-q", "-m", "k"]);
+}
+
+#[test]
+fn a_key_committed_then_deleted_is_not_printed_as_the_minus_side() {
+    let fx = Fx::new();
+    key_in_base(&fx);
+    fs::remove_file(fx.repo().join("notes.txt")).unwrap();
+    let r = fx.app.files_diff(&fx.pid, None, "notes.txt");
+    assert!(!format!("{r:?}").contains("CANARY"), "{r:?}");
+    assert_eq!(code(&r.unwrap_err()), "protected");
+}
+
+#[test]
+fn a_key_committed_then_replaced_is_not_printed_as_the_minus_side() {
+    let fx = Fx::new();
+    key_in_base(&fx);
+    // Break the link: an innocent file with its own inode replaces it.
+    fs::remove_file(fx.repo().join("notes.txt")).unwrap();
+    fs::write(fx.repo().join("notes.txt"), "hello\n").unwrap();
+    let r = fx.app.files_diff(&fx.pid, None, "notes.txt");
+    assert!(!format!("{r:?}").contains("CANARY"), "{r:?}");
+    assert_eq!(code(&r.unwrap_err()), "protected");
+    // The innocent working file itself still reads.
+    assert_eq!(fx.app.files_read(&fx.pid, None, "notes.txt").unwrap()["text"], "hello\n");
+}
+
+#[test]
+fn a_copy_of_the_key_or_a_file_embedding_it_is_refused_by_content() {
+    let fx = Fx::new();
+    key_in_base(&fx);
+    // A checkout in a worktree makes a fresh file (own inode) with the key's bytes.
+    let wt2 = fx.repo().join(".claude/worktrees/w2");
+    git(&fx.repo(), &["worktree", "add", "-q", "-b", "worker-2", wt2.to_str().unwrap()]);
+    let r = fx.app.files_read(&fx.pid, Some("w2"), "notes.txt");
+    assert!(!format!("{r:?}").contains("CANARY"), "{r:?}");
+    assert_eq!(code(&r.unwrap_err()), "protected");
+    fs::write(fx.repo().join("big.md"), "# notes\nsee DUMMY-KEY-CANARY-ba5e0001 here\n").unwrap();
+    assert_eq!(code(&fx.app.files_read(&fx.pid, None, "big.md").unwrap_err()), "protected");
+    fs::write(fx.repo().join("pic.png"), "DUMMY-KEY-CANARY-ba5e0001").unwrap();
+    assert_eq!(code(&fx.app.files_read(&fx.pid, None, "pic.png").unwrap_err()), "protected", "as an image too");
+}
+
+#[test]
+fn a_key_shorter_than_the_minimum_matches_nothing() {
+    let fx = Fx::new();
+    let key = fx.dir.join("home/.claude/vajra").join(crate::vajra::allowlist::DENIED_NAME);
+    fs::write(&key, b"pub\n").unwrap();
+    assert_eq!(fx.app.files_read(&fx.pid, None, "src/lib.rs").unwrap()["kind"], "text");
+}
+
 #[test]
 fn a_folder_is_not_diffed_as_many_unchecked_files() {
     let fx = Fx::new();
