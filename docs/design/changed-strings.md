@@ -434,6 +434,14 @@ vajra-119 UI pass (PR B).
 | No run open | Review, when no run is chosen | title of the centred empty state; the line under it is unchanged |
 | (changed) the Run title | Review, an open run | shows the run's goal; "Run" stays as the meta label, and is the title while the goal is unknown |
 
+vajra-119 UI pass (core down, one message).
+
+| String | Where | Note |
+|---|---|---|
+| Vajra's core isn't answering. | Home, when the core does not answer | replaces "Could not run the checks." in that case only; the detail line is unchanged |
+| Runs show here once the core answers. | Home, Runs panel, same case | replaces a second error box |
+| (removed in that case) Could not read your projects. | title bar, only while Home is showing | Home already says it; other screens keep it |
+
 vajra-119 UI pass (one status style).
 
 | String | Where | Note |

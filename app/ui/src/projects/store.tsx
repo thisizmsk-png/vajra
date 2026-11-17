@@ -6,7 +6,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from "react";
 import { S } from "../../strings";
 import type { StatusKey } from "../../strings";
-import { api } from "../ipc";
+import { api, isIpcError } from "../ipc";
 import { forgetRead, ownedRead } from "../reads";
 import type { Campaign, CrewNodeDto, InboxItem } from "../ipc";
 import { problemDetail } from "../screens/states";
@@ -22,6 +22,8 @@ const EVENT_MIN_GAP_MS = 500;
 export type ProjectsView = {
   state: "loading" | "ok" | "error";
   error: string;
+  /** The error was a core that never answered, not an error the core returned (the same test Home uses). */
+  down: boolean;
   projects: Project[];
   byCampaign: Record<string, ProjectId>;
   /** The run id of each campaign this app started (`resume_targets`), for the Director-General's commands. */
@@ -63,11 +65,11 @@ export function workersOf(root: CrewNodeDto): WorkerRow[] {
 
 const EMPTY: ProjectIndex = { projects: [], byCampaign: {} };
 const Ctx = createContext<ProjectsView>({
-  state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, liveRuns: [], summaries: new Map(), reload: () => {},
+  state: "loading", error: "", down: false, ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, liveRuns: [], summaries: new Map(), reload: () => {},
 });
 
 export function ProjectsProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, liveRuns: [], summaries: new Map() });
+  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", down: false, ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, liveRuns: [], summaries: new Map() });
   const seq = useRef(0);
 
   const load = useCallback(() => {
@@ -85,7 +87,7 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
         const fresh = inbox.status === "fulfilled" && Array.isArray(inbox.value?.items)
           ? { inbox: inbox.value.items, inboxFailed: false, inboxCount: Number.isSafeInteger(inbox.value.count) && inbox.value.count >= inbox.value.items.length ? inbox.value.count : inbox.value.items.length }
           : {};
-        setData((d) => ({ ...d, ...fresh, state: "error", error: problemDetail(e) }));
+        setData((d) => ({ ...d, ...fresh, state: "error", error: problemDetail(e), down: !isIpcError(e) }));
         return;
       }
       const campaigns = Array.isArray(camps.value?.campaigns) ? camps.value.campaigns : [];
@@ -121,7 +123,7 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
       const listed = items.filter((i) => i.kind !== "run_proposal").length;
       const cc = inbox.status === "fulfilled" ? inbox.value?.campaign_count : undefined;
       const campaignCount = typeof cc === "number" && Number.isSafeInteger(cc) && cc >= listed && cc <= (inbox.status === "fulfilled" ? inbox.value.count : listed) ? cc : null;
-      setData({ state: "ok", error: "", ...index, runIds, campaigns, inbox: items, inboxCount: inbox.status === "fulfilled" && Number.isSafeInteger(inbox.value?.count) && inbox.value.count >= items.length ? inbox.value.count : items.length, inboxCampaignCount: campaignCount, inboxFailed: inbox.status === "rejected", crew, runs, liveRuns, summaries: summarize(index, campaigns, items, crew) });
+      setData({ state: "ok", error: "", down: false, ...index, runIds, campaigns, inbox: items, inboxCount: inbox.status === "fulfilled" && Number.isSafeInteger(inbox.value?.count) && inbox.value.count >= items.length ? inbox.value.count : items.length, inboxCampaignCount: campaignCount, inboxFailed: inbox.status === "rejected", crew, runs, liveRuns, summaries: summarize(index, campaigns, items, crew) });
     })();
   }, []);
 
