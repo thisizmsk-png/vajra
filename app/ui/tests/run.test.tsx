@@ -43,12 +43,27 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
 
   it("says why a run stopped when its workflow ended in error, in the run view", async () => {
     const msg = "an ask of 10+ characters is required, e.g. /vajra add a --json flag to the export command";
-    await open([], { active_runs: { count: 0, runs: [] }, run_failures: { runs: [
+    await open([], { active_runs: { count: 0, runs: [] }, resume_targets: { targets: { camp: { session_id: "s", run_id: "20261116-1840", cwd: "/r" } } }, run_failures: { runs: [
       { run_id: "20261116-1840", campaign: "camp", message: msg, project: null },
       { run_id: "20261116-1700", campaign: "other", message: "not this run", project: null },
     ] } });
     await waitFor(() => expect(screen.getAllByRole("alert").map((a) => a.textContent ?? "").some((t) => t.includes(S.home.failedRun("20261116-1840")) && t.includes(msg))).toBe(true));
     expect(screen.queryByText(/not this run/)).toBeNull();
+  });
+
+  it("two attempts of one campaign: an earlier failure is not shown for a resumed attempt, and a later failure shows its own reason", async () => {
+    const alerts = () => screen.queryAllByRole("alert").map((a) => a.textContent ?? "").join(" | ");
+    const failures = [{ run_id: "20261116-1840", campaign: "camp", message: "first reason", project: null }];
+    let current = "20261116-1900"; // the resumed attempt (same campaign, fresh run id), running or succeeded
+    const f = await open([], { active_runs: { count: 0, runs: [] }, resume_targets: () => ({ targets: { camp: { session_id: "s", run_id: current, cwd: "/r" } } }), run_failures: () => ({ runs: failures }) });
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "run_failures")).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(alerts()).not.toContain("first reason");
+    // The resumed attempt fails too, with a different message: it is the one shown, not the oldest.
+    failures.push({ run_id: "20261116-1900", campaign: "camp", message: "second reason", project: null });
+    await act(async () => { f.emit?.("changed", null); });
+    await waitFor(() => expect(alerts()).toContain("second reason"));
+    expect(alerts()).not.toContain("first reason");
   });
 
   it("offers a button to History next to the ask to choose a run, since History has no tab", async () => {

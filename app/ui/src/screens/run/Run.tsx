@@ -42,7 +42,11 @@ export function Run() {
     let live = true;
     setFailure(null);
     if (!slug) return;
-    const look = () => void api.activeRuns().catch(() => null).then(() => api.runFailures()).then((r) => { if (live) setFailure(r.runs.find((x) => x.campaign === slug) ?? null); }, () => {});
+    // A resume keeps the campaign but gets a fresh run id, and failures are kept for every attempt: show one only if it
+    // is the CURRENT attempt's (the newest run of this campaign), never an earlier attempt's.
+    const look = () => void api.activeRuns().catch(() => null)
+      .then(() => Promise.all([api.runFailures(), api.resumeTargets()]))
+      .then(([f, t]) => { if (live) { const cur = t.targets[slug]?.run_id; setFailure(cur ? f.runs.find((x) => x.campaign === slug && x.run_id === cur) ?? null : null); } }, () => {});
     look();
     const off = onChanged(look);
     return () => { live = false; off(); };
