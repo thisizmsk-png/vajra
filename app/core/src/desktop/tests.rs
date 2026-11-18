@@ -1932,7 +1932,9 @@ fn a_slow_filter_probe_does_not_give_the_tree_a_fresh_budget() {
     let (mut app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
     let real = String::from_utf8(std::process::Command::new("which").arg("git").output().unwrap().stdout).unwrap().trim().to_string();
     let p = t.home().join("slow-config-git.sh");
-    fs::write(&p, format!("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = config ] && sleep 2; done\nexec {real} \"$@\"\n")).unwrap();
+    // Only the filter probe's config read (`--show-scope`) is slow: the isolated HEAD read's own config read is not
+    // the probe this test is about.
+    fs::write(&p, format!("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --show-scope ] && sleep 2; done\nexec {real} \"$@\"\n")).unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
     app.bridge.git = p;

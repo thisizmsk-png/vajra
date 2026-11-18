@@ -97,7 +97,7 @@ fn real_git_diff_ignores_repo_diff_external() {
     fs::write(repo.join("f.txt"), "a\n").unwrap();
     git(&["add", "f.txt"]);
     git(&["config", "diff.external", &format!("/usr/bin/touch {}", marker.display())]);
-    let b = Bridge::new(tmp());
+    let b = Bridge::new(tmp()).with_git_scratch(tmp());
     let o = b.run(&Request::Git { cwd: repo.clone(), args: vec!["diff".into(), "--cached".into(), "HEAD".into(), "--".into()] }).unwrap();
     assert!(!marker.exists(), "diff.external ran");
     assert!(o.stdout.contains("+a"), "{}", o.stdout);

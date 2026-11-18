@@ -25,6 +25,8 @@ impl T {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("home")).unwrap();
         fs::create_dir_all(root.join("marks")).unwrap();
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::set_permissions(root.join("data"), fs::Permissions::from_mode(0o700)).unwrap();
         T { root: root.canonicalize().unwrap() }
     }
     fn home(&self) -> PathBuf {
@@ -60,7 +62,11 @@ impl T {
         p
     }
     fn bridge(&self) -> Bridge {
-        Bridge::new(self.root.join("scripts")).with_home(self.home())
+        Bridge::new(self.root.join("scripts")).with_home(self.home()).with_git_scratch(self.scratch())
+    }
+    /// Stands in for the folder under the app's data dir.
+    fn scratch(&self) -> PathBuf {
+        self.root.join("data/git-scratch")
     }
     /// Every hostile key on `dir`'s repo config (`file`: the config file to write, `--local` by default).
     fn poison(&self, dir: &Path, file: Option<&Path>) {
@@ -191,9 +197,10 @@ fn every_bridge_call_on_a_hostile_repo_runs_nothing_and_answers_right() {
     assert_eq!((diff.files_total, diff.added, diff.removed), (3, 4, 1), "{diff:?}");
 
     assert!(t.marks().is_empty(), "a repo-named program ran: {:?}", t.marks());
-    // The bridge leaves no private git dir behind.
-    let left: Vec<_> = fs::read_dir(std::env::temp_dir()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(&format!("vajra-git-{}-", std::process::id()))).collect();
-    assert!(left.is_empty(), "{left:?}");
+    // The bridge leaves no private git dir behind, and makes none in the temp folder.
+    assert_eq!(fs::read_dir(t.scratch()).unwrap().count(), 0);
+    let in_tmp: Vec<_> = fs::read_dir(std::env::temp_dir()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(&format!("vajra-git-{}-", std::process::id()))).collect();
+    assert!(in_tmp.is_empty(), "{in_tmp:?}");
 }
 
 #[test]
@@ -241,6 +248,81 @@ fn a_filter_in_an_included_file_or_a_worktree_config_runs_nothing() {
     // The worktree's own index is not rewritten by a status read (no optional lock taken).
     let idx = fs::metadata(t.root.join("clone/.git/worktrees/wt/index")).unwrap().modified().unwrap();
     assert_eq!(idx, old);
+}
+
+#[test]
+fn a_partial_clone_with_a_planted_upload_pack_never_fetches_through_any_call() {
+    // bhishma and Claude on #299: a promisor remote whose upload-pack writes a marker, the file protocol opened by its
+    // own allow key, and refs to a missing commit. (Git before 2.44 ignores the no-lazy-fetch variable; the unit test
+    // in the gitsafe module runs this without it.)
+    let t = T::new();
+    let (repo, _) = hostile_repo(&t);
+    let remote = t.root.join("remote");
+    fs::create_dir_all(&remote).unwrap();
+    t.git(&remote, &["init", "-q"]);
+    let up = t.hook("uploadpack", "exit 1");
+    for (k, v) in [
+        ("core.repositoryformatversion", "1"),
+        ("extensions.partialclone", "origin"),
+        ("remote.origin.url", remote.to_str().unwrap()),
+        ("remote.origin.promisor", "true"),
+        ("remote.origin.uploadpack", up.to_str().unwrap()),
+        ("protocol.file.allow", "always"),
+        ("protocol.allow", "always"),
+    ] {
+        t.git(&repo, &["-c", "core.hooksPath=/dev/null", "config", k, v]);
+    }
+    let ghost = "1234567890123456789012345678901234567890";
+    fs::write(repo.join(".git/refs/heads/ghost"), format!("{ghost}\n")).unwrap();
+    let b = t.bridge();
+    for args in [
+        &["rev-parse", "--verify", "--quiet", "ghost^{commit}"][..],
+        &["rev-parse", "--verify", "--quiet", &format!("{ghost}^{{commit}}")],
+        &["merge-base", "HEAD", "ghost"],
+        &["log", "-1", "ghost"],
+        &["diff", "ghost", "--"],
+    ] {
+        assert_ne!(run(&b, &repo, args).exit(), Some(0), "{args:?}");
+    }
+    // The HEAD read still works on the same repo.
+    assert_eq!(ok(&b, &repo, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "main");
+    // HEAD itself at the missing commit (Claude on #299): the app's HEAD and base reads.
+    fs::write(repo.join(".git/HEAD"), format!("{ghost}\n")).unwrap();
+    // Plain `rev-parse HEAD` prints the ref's id without loading the object, so it may succeed; only the marker counts.
+    run(&b, &repo, &["rev-parse", "HEAD"]);
+    for args in [&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"][..], &["merge-base", "HEAD", "ghost"], &["status", "--porcelain"]] {
+        assert_ne!(run(&b, &repo, args).exit(), Some(0), "{args:?}");
+    }
+    assert!(t.marks().is_empty(), "a repo-named program ran: {:?}", t.marks());
+}
+
+#[test]
+fn a_work_tree_moved_elsewhere_is_refused() {
+    // `core.worktree` pointing outside the folder asked about (bhishma LATER 1 on #299): the call is refused.
+    let t = T::new();
+    let (repo, _) = hostile_repo(&t);
+    let elsewhere = t.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("secret"), "key\n").unwrap();
+    t.git(&repo, &["-c", "core.hooksPath=/dev/null", "config", "core.worktree", elsewhere.to_str().unwrap()]);
+    let b = t.bridge();
+    for args in [&["status", "--porcelain"][..], &["diff", "HEAD", "--"], &["ls-files", "--others", "-z"], &["rev-parse", "HEAD"]] {
+        let o = run(&b, &repo, args);
+        assert_eq!(o.exit(), Some(128), "{args:?}: {o:?}");
+        assert!(!o.stdout.contains("secret"), "{args:?}");
+    }
+    assert!(t.marks().is_empty(), "{:?}", t.marks());
+}
+
+#[test]
+fn a_bridge_with_no_scratch_folder_runs_no_repo_call() {
+    let t = T::new();
+    let (repo, _) = hostile_repo(&t);
+    let b = Bridge::new(t.root.join("scripts")).with_home(t.home());
+    assert_eq!(run(&b, &repo, &["status", "--porcelain"]).exit(), Some(128));
+    assert_eq!(run(&b, &repo, &["rev-parse", "HEAD"]).exit(), Some(128));
+    assert_eq!(run(&b, &repo, &["--version"]).exit(), Some(0));
+    assert!(t.marks().is_empty(), "{:?}", t.marks());
 }
 
 #[test]

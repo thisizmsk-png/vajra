@@ -129,6 +129,9 @@ pub struct Bridge {
     /// The cwd of the run record's campaign calls: the core's own empty git dir (`record::record_dir`), so the
     /// active pointer `create` sets is one no user session reads. A record campaign call is refused without it.
     pub record_cwd: Option<PathBuf>,
+    /// Where an isolated git call makes its private common dir (`gitsafe`): a folder under the app's data dir, which no
+    /// agent sandbox may write. `None`: every git call but `--version` is refused.
+    pub git_scratch: Option<PathBuf>,
 }
 
 const GIT_READ_ONLY: [&str; 7] = ["--version", "rev-parse", "merge-base", "status", "log", "diff", "ls-files"];
@@ -144,11 +147,18 @@ impl Bridge {
             home: None,
             jq_candidates: ["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/bin/jq"].iter().map(PathBuf::from).collect(),
             record_cwd: None,
+            git_scratch: None,
         }
     }
 
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.home = Some(home);
+        self
+    }
+
+    /// Isolated git calls make their private dirs in `dir` (`git_scratch`).
+    pub fn with_git_scratch(mut self, dir: PathBuf) -> Self {
+        self.git_scratch = Some(dir);
         self
     }
 
@@ -264,13 +274,13 @@ impl Bridge {
             _ => None,
         };
         if let Request::Git { cwd: dir, args } = req {
-            // Every git call that can read a working file, a diff or a signature runs with the repo's config files
-            // unread (`gitsafe::isolate`), under one deadline for the setup steps and the call.
+            // Every git call but `--version` runs with the repo's config files unread (`gitsafe::isolate`), under one
+            // deadline for the setup steps and the call.
             let deadline = Instant::now() + self.timeout;
             let iso = if !gitsafe::needs_isolation(args.first().map(String::as_str).unwrap_or("")) {
                 None
             } else {
-                match gitsafe::isolate(&self.git, dir, self.home.as_deref(), deadline) {
+                match gitsafe::isolate(&self.git, dir, self.home.as_deref(), self.git_scratch.as_deref(), deadline) {
                     Ok(i) => Some(i),
                     Err(not_run) => return Ok(not_run),
                 }
