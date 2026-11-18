@@ -264,10 +264,10 @@ export const S = {
     thinking: "Answering",
     empty: "No questions yet",
     emptyHint: "Ask what is happening in this project, or what should be built next. It can propose a run; only you can start it.",
-    leadIs: "The Director-General leads this run. It sees every worker, and can message or redirect any of them.",
-    askLeadPlaceholder: "Ask the Lead about this run, or tell it what to change",
-    emptyHintLead: "Ask how the run is going, or tell the Lead what to change. It can message or redirect any of its workers; the cards above open each worker's own chat.",
-    /** Sub-agent cards in the Lead's chat. */
+    leadIs: "The Director-General oversees this project's runs. It sees each Run lead and every worker, and can message or redirect any worker.",
+    askLeadPlaceholder: "Ask the Director-General about this run, or what to change",
+    emptyHintLead: "Ask how this run is going, or what to change. The Director-General can message or redirect any worker; the cards above open each worker's own chat.",
+    /** Sub-agent cards in the Director-General's chat and the Run lead's pane. */
     openChat: "Open chat",
     startedWorkers: (n: number) => `${n} ${n === 1 ? "worker" : "workers"} in this run`,
     workerVerb: { start: "Worker", message: "Messaged", redirect: "Redirected", inspect: "Checked on", stop: "Asked to stop" },
@@ -560,7 +560,12 @@ export const S = {
     stalledSilentWhy: "The run is still running, but nothing has been written for over 30 minutes.",
     stalledHint: "Stalled: something still says it is working, but nothing is happening.",
     review: "Review run",
-    /** The plain-words summary for the Lead, the run and the other groups. */
+    /** The Run lead in the tree (the core calls it the lead), under the Director-General. UI wording only. */
+    runLead: "Run lead",
+    dgOversees: "Oversees runs",
+    runLeadIs: "The Run lead plans this run and hands its tasks to the workers below. To tell it something, ask the Director-General, which oversees it.",
+    askDg: "Ask the Director-General",
+    /** The plain-words summary for the Run lead, the run and the other groups. */
     summary: {
       label: "What is happening",
       now: "Now",
@@ -589,13 +594,17 @@ export const S = {
       gap: "Some earlier activity is no longer available.",
       prompt: "Task given",
       note: "Message",
-      fromLeadTask: "Lead, the task",
-      fromLead: "Lead",
-      leadRedirect: "Lead, change of direction",
+      fromLeadTask: "Run lead, the task",
+      fromLead: "Run lead",
+      leadRedirect: "Run lead, change of direction",
       fromYou: "You",
       youRedirect: "You, change of direction",
       path: "Path",
       noFileDiff: "No change to this file against the base now.",
+      newFile: "A new file. Git does not track it yet, so there is no diff against the base to show.",
+      pastCut: "The worker's changes are too large to read in full, and this file is past the cut.",
+      partCut: "This file's diff was cut at the size limit; what follows is only its start.",
+      diffFailed: "The worktree's changes could not be read.",
       tests: (passed: number, failed: number) => (failed > 0 ? `${failed} failed, ${passed} passed` : `${passed} passed`),
       delivery: { sending: "Sending", sent: "Sent", seen: "Seen by the worker", failed: "Not sent", ended: "Not delivered" } as Record<"sending" | "sent" | "seen" | "failed" | "ended", string>,
       deliveryHint: "It reaches the worker on its next step.",
@@ -719,7 +728,7 @@ export const S = {
       signedTo: (to: number, tail: number) =>
         `Signed up to entry ${to}.${tail ? ` ${tail === 1 ? "The last entry is" : `The last ${tail} entries are`} hash-chained but not signed yet.` : ""}`,
       standing: { signed: "Signed", unconfirmed: "Not confirmed", not_verified: "Not verified" },
-      who: { core: "Vajra", verifier: "Verifier", lead: "Lead", human: "You" } as Record<string, string>,
+      who: { core: "Vajra", verifier: "Verifier", lead: "Run lead", human: "You" } as Record<string, string>,
       worker: (ticket: string) => `Worker ${ticket}`,
       wholeRun: "the run",
       what: {
@@ -735,7 +744,7 @@ export const S = {
         question: (text: string) => `Question: ${text}`,
         answer: (text: string) => `Answer: ${text}`,
         status_set: (status: string, reason: string) => `Run status: ${status}${reason ? ` (${reason})` : ""}`,
-        lead_turn: (turns: number, tokens: number) => `Lead turn ${turns}, ${tokens.toLocaleString("en-US")} tokens`,
+        lead_turn: (turns: number, tokens: number) => `Run lead turn ${turns}, ${tokens.toLocaleString("en-US")} tokens`,
         receipt: (scope: string, model: string, tokens: number, usd: string) => `Receipt for ${scope}: ${model}, ${tokens.toLocaleString("en-US")} tokens, ${usd} at API prices`,
         anchored: (seq: number) => `Sent to the signed record up to entry ${seq}`,
         recovered: (bytes: number, seq: number) => `After a crash, cut ${bytes} bytes of a half-written line after entry ${seq}`,

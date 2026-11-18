@@ -89,7 +89,8 @@ export function chatItems(lines: readonly { seq: number; text: string }[], sent:
   const last = items[items.length - 1]?.seq ?? 0;
   sent.forEach((s, n) => {
     if (s.id && reached.has(s.id)) return;
-    const state: Delivery = s.state === "sent" && finished ? "ended" : s.state;
+    // A message the worker never got (still sending, or queued but not handed over) ends with the worker.
+    const state: Delivery = (s.state === "sent" || s.state === "sending") && finished ? "ended" : s.state;
     items.push({ kind: "steer", seq: last + 0.5 + n / 1000, from: "you", redirect: s.redirect, id: s.id, text: s.text, state, error: s.error });
   });
   return items;
@@ -105,14 +106,50 @@ export function lastLine(items: readonly ChatItem[]): string {
   return "";
 }
 
-/** One file's part of a unified diff, or "" when the diff does not touch it. `path` may be absolute (a tool's
- * `file_path`); the diff names files relative to the repository, so the match is on the path's end. */
-export function fileDiff(diff: string, path: string): string {
-  const parts = diff.split(/^(?=diff --git )/m);
-  const ends = (name: string) => name !== "" && (path === name || path.endsWith(`/${name}`));
-  for (const p of parts) {
+/** Does the repo-relative `name` stand for the step's `path`? A path under the worktree `root` must match exactly once
+ * made relative; any other path (relative, or no root known) matches exactly or, failing that, on its end. */
+function names(path: string, root?: string): (name: string, loose: boolean) => boolean {
+  const base = root?.replace(/\/+$/, "");
+  const rel = base && path.startsWith(`${base}/`) ? path.slice(base.length + 1) : null;
+  return (name, loose) => name !== "" && (rel !== null ? name === rel : path === name || (loose && path.endsWith(`/${name}`)));
+}
+
+function partFor(parts: string[], is: (name: string, loose: boolean) => boolean, loose: boolean): number {
+  return parts.findIndex((p) => {
     const m = /^diff --git a\/(.+?) b\/(.+?)$/m.exec(p);
-    if (m && (ends(m[1]) || ends(m[2]))) return p;
+    return !!m && (is(m[1], loose) || is(m[2], loose));
+  });
+}
+
+/** One file's part of a unified diff, or "" when the diff does not touch it. `path` may be absolute (a tool's
+ * `file_path`) and the diff names files relative to the repository: with the worktree `root` the match is exact on the
+ * relative path; without it, an exact name wins over one that only ends the same (two `index.ts` in two folders). */
+export function fileDiff(diff: string, path: string, root?: string): string {
+  const parts = diff.split(/^(?=diff --git )/m);
+  const is = names(path, root);
+  const i = partFor(parts, is, false);
+  const j = i >= 0 ? i : partFor(parts, is, true);
+  return j >= 0 ? parts[j] : "";
+}
+
+/** What a step that wrote a file shows when opened: its diff (`cut` when the diff stopped inside it), a file git does not
+ * track yet (no diff against the base exists), a file past the diff's size cap, or no change at all. */
+export type StepFile = { kind: "diff"; diff: string; cut: boolean } | { kind: "new" } | { kind: "cut" } | { kind: "none" };
+
+/** The core's worktree diff reply, as far as a step reads it. */
+export type WorktreeDiff = { diff: string; truncated: boolean; untracked?: string[]; untracked_truncated?: boolean };
+
+export function stepFile(d: WorktreeDiff, path: string, root?: string): StepFile {
+  const part = fileDiff(d.diff, path, root);
+  if (part) {
+    // A cut diff stops inside its last part, so only that one can be partial.
+    const last = d.diff.split(/^(?=diff --git )/m).pop() === part;
+    return { kind: "diff", diff: part, cut: d.truncated && last };
   }
-  return "";
+  const is = names(path, root);
+  const untracked = d.untracked ?? [];
+  if (untracked.some((n) => is(n, false)) || untracked.some((n) => is(n, true))) return { kind: "new" };
+  // Not in what was read, but the read stopped early: the file may be past the cut, so say so, not "no change".
+  if (d.truncated || d.untracked_truncated) return { kind: "cut" };
+  return { kind: "none" };
 }

@@ -8,7 +8,9 @@ import { onChangedPaced, usePoll } from "../../projects/poll";
 import { appendTail } from "./streamAppend";
 import { RESULT_LINES, announceOf } from "./crewLive";
 import { WRITE_TOOLS, chatItems } from "./chat";
-import type { ChatItem, Delivery, Sent } from "./chat";
+import type { ChatItem, Delivery, Sent, StepFile } from "./chat";
+
+type DiffOf = (path: string) => Promise<StepFile>;
 
 const POLL_MS = 1000;
 const EVENT_MIN_GAP_MS = 500;
@@ -31,8 +33,8 @@ export type FeedProps = {
   sent?: readonly Sent[];
   /** The worker has ended: a sent message that never reached it says so. */
   finished?: boolean;
-  /** The worker's change to one file (a unified diff part, "" for none), read when a step that wrote it is opened. */
-  diffOf?: (path: string) => Promise<string>;
+  /** The worker's change to one file, read when a step that wrote it is opened. */
+  diffOf?: DiffOf;
 };
 
 /**
@@ -172,20 +174,27 @@ function DeliveryLine({ state, error }: { state: Delivery; error?: string }) {
 }
 
 /** A step's file change, read when the row is opened and not before. */
-function StepDiff({ path, diffOf }: { path: string; diffOf: (path: string) => Promise<string> }) {
-  const [d, setD] = useState<string | { err: string } | null>(null);
+function StepDiff({ path, diffOf }: { path: string; diffOf: DiffOf }) {
+  const [d, setD] = useState<StepFile | { err: string } | null>(null);
   useEffect(() => {
     let live = true;
     diffOf(path).then((x) => live && setD(x), (e) => live && setD({ err: errorText(e) }));
     return () => { live = false; };
   }, [path, diffOf]);
   if (d === null) return <Text variant="body-sm" muted>{S.crew.loading}</Text>;
-  if (typeof d !== "string") return <Text variant="body-sm" muted>{d.err}</Text>;
-  if (!d) return <Text variant="body-sm" muted>{L.noFileDiff}</Text>;
-  return <DiffView diff={d} height={DIFF_HEIGHT} />;
+  if ("err" in d) return <Text variant="body-sm" muted>{d.err}</Text>;
+  if (d.kind === "new") return <Text variant="body-sm" muted>{L.newFile}</Text>;
+  if (d.kind === "cut") return <Text variant="body-sm" muted>{L.pastCut}</Text>;
+  if (d.kind === "none") return <Text variant="body-sm" muted>{L.noFileDiff}</Text>;
+  return (
+    <>
+      {d.cut && <Text variant="body-sm">{L.partCut}</Text>}
+      <DiffView diff={d.diff} height={DIFF_HEIGHT} />
+    </>
+  );
 }
 
-function Step({ item, diffOf }: { item: Extract<ChatItem, { kind: "step" }>; diffOf?: (path: string) => Promise<string> }) {
+function Step({ item, diffOf }: { item: Extract<ChatItem, { kind: "step" }>; diffOf?: DiffOf }) {
   const [opened, setOpened] = useState(false);
   const shown = item.result.slice(0, RESULT_LINES);
   const more = item.result.length - shown.length;
@@ -214,7 +223,7 @@ function Step({ item, diffOf }: { item: Extract<ChatItem, { kind: "step" }>; dif
   );
 }
 
-const Entry = memo(function Entry({ item, diffOf }: { item: ChatItem; diffOf?: (path: string) => Promise<string> }) {
+const Entry = memo(function Entry({ item, diffOf }: { item: ChatItem; diffOf?: DiffOf }) {
   if (item.kind === "step") return <Step item={item} diffOf={diffOf} />;
   if (item.kind === "agent") return <p className="v-feed__say">{item.text}</p>;
   if (item.kind === "note") {

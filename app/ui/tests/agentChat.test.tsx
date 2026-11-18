@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import type { CrewNodeDto } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
-import { chatItems, fileDiff, lastLine, steerBlocks, testSummary } from "../src/screens/crew/chat";
+import { chatItems, fileDiff, lastLine, stepFile, steerBlocks, testSummary } from "../src/screens/crew/chat";
 import { SENT_PER_WORKER, sentStore } from "../src/screens/crew/sentStore";
 import { toolCalls } from "../src/screens/orch/transcript";
 import { S } from "../strings";
@@ -74,6 +74,36 @@ describe("a worker's stream as a chat", () => {
     expect(fileDiff(d, "/w/src/b.ts")).toContain("+q");
     expect(fileDiff(d, "/w/src/b.ts")).not.toContain("+y");
     expect(fileDiff(d, "/w/src/c.ts")).toBe("");
+  });
+
+  it("a message still sending when the worker ends says Not delivered too", () => {
+    const sent = [{ key: "k", id: "", text: "hurry", redirect: false, state: "sending" as const }];
+    expect(chatItems(lines(["Working."]), sent).pop()).toMatchObject({ state: "sending" });
+    expect(chatItems(lines(["Working."]), sent, true).pop()).toMatchObject({ state: "ended" });
+  });
+
+  it("matches the exact worktree-relative path before one that only ends the same", () => {
+    const d = "diff --git a/web/index.ts b/web/index.ts\n@@ -1 +1 @@\n-w\n+W\ndiff --git a/index.ts b/index.ts\n@@ -1 +1 @@\n-r\n+R\n";
+    // Under the worktree: only the exact relative path.
+    expect(fileDiff(d, "/w/index.ts", "/w")).toContain("+R");
+    expect(fileDiff(d, "/w/web/index.ts", "/w/")).toContain("+W");
+    expect(fileDiff(d, "/w/api/index.ts", "/w")).toBe("");
+    // No root known: an exact name wins over an ending.
+    expect(fileDiff(d, "index.ts")).toContain("+R");
+  });
+
+  it("a step for a new file, a cut diff or a file past the cut says so, never No change", () => {
+    const one = "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n";
+    const base = { diff: one, truncated: false };
+    expect(stepFile(base, "/w/src/a.ts", "/w")).toEqual({ kind: "diff", diff: one, cut: false });
+    // git diff leaves out a file git does not track: it is in the untracked list instead.
+    expect(stepFile({ ...base, untracked: ["test/new.test.ts"] }, "/w/test/new.test.ts", "/w")).toEqual({ kind: "new" });
+    // The diff stopped inside the file's part: show it, marked as cut.
+    expect(stepFile({ diff: one, truncated: true }, "/w/src/a.ts", "/w")).toMatchObject({ kind: "diff", cut: true });
+    // The diff stopped before the file, or the untracked list did.
+    expect(stepFile({ diff: one, truncated: true }, "/w/src/z.ts", "/w")).toEqual({ kind: "cut" });
+    expect(stepFile({ ...base, untracked: [], untracked_truncated: true }, "/w/src/z.ts", "/w")).toEqual({ kind: "cut" });
+    expect(stepFile(base, "/w/src/z.ts", "/w")).toEqual({ kind: "none" });
   });
 
   it("keeps at most SENT_PER_WORKER messages per worker", () => {
@@ -162,6 +192,19 @@ describe("talking to a worker", () => {
     expect(screen.getByRole("button", { name: L.send }).getAttribute("aria-disabled")).toBe("true");
   });
 
+  it("a Write step for a file git does not track yet opens to say it is new, not that nothing changed", async () => {
+    open({
+      stream_window: win(["[tool] Write: /w/test/new.test.ts"]),
+      worktree_info: { worker: "a2", worktree: "/w", branch: "b", base: "abc123" },
+      diff: { code: 0, diff: "", truncated: false, timed_out: false, untracked: ["test/new.test.ts"] },
+    });
+    const log = await screen.findByRole("log", { name: L.label });
+    const row = await waitFor(() => { const r = log.querySelector("summary"); expect(r).toBeTruthy(); return r as HTMLElement; });
+    fireEvent.click(row);
+    expect(await within(log).findByText(L.newFile)).toBeTruthy();
+    expect(within(log).queryByText(L.noFileDiff)).toBeNull();
+  });
+
   it("a test step opens to its output with the counts on the row, and the row is keyboard reachable", async () => {
     open({ stream_window: win(["[tool] Bash: npm test", "[result] Tests: 3 passed, 3 total"]) });
     const log = await screen.findByRole("log", { name: L.label });
@@ -182,8 +225,9 @@ describe("the Lead's chat", () => {
         : win(["Working on the bucket."])),
     });
     setTransport(f.transport);
-    window.location.hash = "#/crew?slug=camp&id=r1&focus=lead";
+    window.location.hash = "#/crew?slug=camp&id=r1";
     render(<Live><Crew /></Live>);
+    fireEvent.click(within(await screen.findByRole("tree")).getByText(S.views.orch).closest("[role=treeitem]") as HTMLElement);
     const log = await screen.findByRole("log", { name: S.dg.transcript });
     const card = await within(log).findByRole("button", { name: /Messaged/ });
     expect(card.textContent).toContain("Backend");

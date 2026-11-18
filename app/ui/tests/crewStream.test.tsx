@@ -55,13 +55,19 @@ describe("Stream tab: a window served by the core (#45)", () => {
     expect(wins(f)[0].args).toMatchObject({ stream: "w-a1", from: null });
   });
 
-  it("the Lead has no terminal: it is a conversation whose worker cards open each worker's chat", async () => {
+  it("the Director-General sits over the Run lead; neither has a terminal, and its worker cards open each worker's chat", async () => {
     window.location.hash = "#/crew?slug=camp&id=r1";
     const f = fakeIpc({ active_runs: { count: 0, runs: [] }, crew: tree, stream_window: core(3), lead_status: { available: false, busy: false, name: "Lead" } });
     setTransport(f.transport);
     render(<Crew />);
     const t = await screen.findByRole("tree");
-    fireEvent.click(within(t).getByText("Lead").closest("[role=treeitem]") as HTMLElement);
+    const items = within(t).getAllByRole("treeitem");
+    expect(items[0].textContent).toContain(S.views.orch);
+    expect(items[1].textContent).toContain(S.crew.runLead);
+    expect(within(t).queryByText("Lead")).toBeNull();
+    // The Run lead points to the Director-General, which is where you talk to it.
+    fireEvent.click(items[1]);
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.askDg }));
     await screen.findByRole("log", { name: S.dg.transcript });
     expect(screen.queryByRole("log", { name: S.crew.streamLabel })).toBeNull();
     // Asked by the run it leads, never a terminal stream of its own.

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { LiveFeed } from "./LiveFeed";
 import { Composer } from "../orch/Composer";
-import { fileDiff } from "./chat";
+import { stepFile } from "./chat";
+import type { StepFile, WorktreeDiff } from "./chat";
 import { sentStore, useSent } from "./sentStore";
 import { AlertDialog, Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import type { StatusKey } from "../../../strings";
@@ -224,16 +225,20 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status, shape: shap
   const shape = shapeOverride ?? ((STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown");
 
   // The chat's file changes: one diff read of the worktree per opened step (a short cache serves several opened at once).
-  const diffCache = useRef<{ at: number; p: Promise<string> } | null>(null);
+  const diffCache = useRef<{ at: number; p: Promise<WorktreeDiff> } | null>(null);
   useEffect(() => { diffCache.current = null; }, [info]);
-  const diffOf = useCallback((path: string) => {
-    if (!info?.base) return Promise.resolve("");
+  const diffOf = useCallback((path: string): Promise<StepFile> => {
+    if (!info?.base) return Promise.resolve({ kind: "none" });
     const now = Date.now();
     if (!diffCache.current || now - diffCache.current.at > DIFF_CACHE_MS) {
-      const p = api.diff(info.worktree, info.base).then((d) => (d.code === 0 && !d.timed_out ? d.diff : ""));
+      // A failed or timed-out read is an error, never "no change".
+      const p = api.diff(info.worktree, info.base).then((d) => {
+        if (d.code !== 0 || d.timed_out) throw { error: "diff_failed", detail: S.crew.live.diffFailed };
+        return d;
+      });
       diffCache.current = { at: now, p };
     }
-    return diffCache.current.p.then((d) => fileDiff(d, path));
+    return diffCache.current.p.then((d) => stepFile(d, path, info.worktree));
   }, [info]);
   const nodeFinished = node.status === "done" || node.status === "failed";
   const chat = (

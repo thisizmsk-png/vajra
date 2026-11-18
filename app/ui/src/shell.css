@@ -273,6 +273,10 @@
 .v-feed__who { margin: 0; color: var(--c-text-muted); font: 500 var(--text-xs)/16px var(--font-ui); }
 .v-feed__text { margin: 0; color: var(--c-text-secondary); font: 400 var(--text-sm)/18px var(--font-ui); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
 .v-feed__paused { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+/* The Run lead's pane: how to reach it (through the Director-General), then its run and workers. */
+.v-crew__lead-note { display: flex; align-items: center; gap: var(--space-md); justify-content: space-between; padding: var(--space-sm) var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-panel); }
+.v-crew__lead-note > .v-button { flex: none; }
+.v-crew__summary .v-subagents { margin-top: var(--space-md); }
 /* The worker's chat: the thread over its message box. A step folds; its row is the summary, so it is a keyboard stop. */
 .v-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: var(--space-sm); }
 .v-chat .v-dgv__composer { padding: 0; }
