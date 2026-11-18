@@ -222,7 +222,7 @@ function Frame() {
             <Search />
           </header>
           {showColumn && project && (
-            <ProjectColumn project={project} campaigns={current.campaigns} crew={crew} route={route}
+            <ProjectColumn project={project} campaigns={current.campaigns} crew={crew} route={route} liveCampaigns={P.liveCampaigns ?? null}
               onOrch={() => go("orch", {}, pid)}
               onWorker={(w) => crew && go("worker", { slug: crew.campaign, id: crew.runId, worker: w.id }, pid)}
               onSession={(s) => go("review", { slug: s }, pid)} />

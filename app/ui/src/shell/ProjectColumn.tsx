@@ -11,9 +11,11 @@ import { unsavedText, useCloseout } from "../projects/closeout";
 import type { Route } from "../router";
 import { ProviderMark } from "../screens/ProviderLine";
 
-export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorker, onSession }: {
+export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorker, onSession, liveCampaigns = null }: {
   project: Project;
   campaigns: Campaign[];
+  /** The campaigns a process of this app runs now (null: not known), so an old "running" run reads Stalled. */
+  liveCampaigns?: string[] | null;
   /** The live run, only when it is this project's. */
   crew: ActiveCrew | null;
   route: Route;
@@ -22,10 +24,12 @@ export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorke
   onSession: (slug: string) => void;
 }) {
   const [q, setQ] = useState("");
+  const liveKey = liveCampaigns ? liveCampaigns.join("\n") : null;
   const days = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return sessionsByDay(needle ? campaigns.filter((c) => `${c.goal ?? ""} ${c.slug}`.toLowerCase().includes(needle)) : campaigns);
-  }, [campaigns, q]);
+    const live = liveKey === null ? null : new Set(liveKey ? liveKey.split("\n") : []);
+    return sessionsByDay(needle ? campaigns.filter((c) => `${c.goal ?? ""} ${c.slug}`.toLowerCase().includes(needle)) : campaigns, new Date(), live);
+  }, [campaigns, q, liveKey]);
   const focus = crew ? campaigns.find((c) => c.slug === crew.campaign) : campaigns[0];
   const live = crew?.workers.filter((w) => w.status === "in_progress" || w.status === "claimed" || w.status === "question").length ?? 0;
   const onOrchView = route.screen === "orch";
@@ -127,7 +131,8 @@ export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorke
               {d.items.map((s) => {
                 const active = route.screen === "review" && route.params.slug === s.slug;
                 return (
-                  <button key={s.slug} type="button" className={active ? "v-srow is-active" : "v-srow"} onClick={() => onSession(s.slug)} aria-current={active ? "page" : undefined} title={s.title}>
+                  <button key={s.slug} type="button" className={active ? "v-srow is-active" : "v-srow"} onClick={() => onSession(s.slug)} aria-current={active ? "page" : undefined}
+                    title={s.stalled ? S.projects.stalledRow(s.title) : s.title} aria-label={s.stalled ? S.projects.stalledRow(s.title) : undefined}>
                     <StatusDot status={s.dot} className="v-dot-sr" />
                     <span className="v-srow__t">{s.title}</span>
                     <span className="v-srow__time">{s.time}</span>

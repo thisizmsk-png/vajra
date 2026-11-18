@@ -25,7 +25,8 @@ export type Project = Pick<ContractProject, "schema" | "id" | "name" | "rev"> & 
 };
 
 /** One row of a project's history: a campaign run, until the core lists sessions itself. */
-export type SessionRow = { slug: string; title: string; status: SessionStatus; dot: StatusKey; time: string; sortKey: string };
+/** `stalled`: it says running, but no process of this app runs it and its record has not moved for a while. */
+export type SessionRow = { slug: string; title: string; status: SessionStatus; dot: StatusKey; time: string; sortKey: string; stalled?: boolean };
 export type DayGroup = { key: string; label: string; summary: string; items: SessionRow[] };
 
 /** A worker of the project's live run, from the crew tree. */

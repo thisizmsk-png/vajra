@@ -42,6 +42,8 @@ export type ProjectsView = {
   runs: number;
   /** The run ids the core says are live: a screen polls its run only while it is one of these. */
   liveRuns: string[];
+  /** The campaigns a process of this app runs now; null or absent when that could not be read. */
+  liveCampaigns?: string[] | null;
   summaries: Map<ProjectId, ProjectSummary>;
   reload: () => void;
 };
@@ -118,12 +120,16 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
       const liveRuns = active.status === "fulfilled" && Array.isArray(active.value?.runs)
         ? (active.value.runs as { run_id?: unknown }[]).map((r) => r.run_id).filter((r): r is string => typeof r === "string")
         : [];
+      // The campaigns a process of this app runs now; null when that could not be read (then nothing reads Stalled).
+      const liveCampaigns = active.status === "fulfilled" && Array.isArray(active.value?.runs)
+        ? (active.value.runs as { campaign?: unknown }[]).map((r) => r.campaign).filter((c): c is string => typeof c === "string")
+        : null;
       // The core's campaign-only total when it is sane (a whole number, at least what the list shows, at most the total);
       // else null: an older core sent none, and the badge must not mistake the cut list for the total.
       const listed = items.filter((i) => i.kind !== "run_proposal").length;
       const cc = inbox.status === "fulfilled" ? inbox.value?.campaign_count : undefined;
       const campaignCount = typeof cc === "number" && Number.isSafeInteger(cc) && cc >= listed && cc <= (inbox.status === "fulfilled" ? inbox.value.count : listed) ? cc : null;
-      setData({ state: "ok", error: "", down: false, ...index, runIds, campaigns, inbox: items, inboxCount: inbox.status === "fulfilled" && Number.isSafeInteger(inbox.value?.count) && inbox.value.count >= items.length ? inbox.value.count : items.length, inboxCampaignCount: campaignCount, inboxFailed: inbox.status === "rejected", crew, runs, liveRuns, summaries: summarize(index, campaigns, items, crew) });
+      setData({ state: "ok", error: "", down: false, ...index, runIds, campaigns, inbox: items, inboxCount: inbox.status === "fulfilled" && Number.isSafeInteger(inbox.value?.count) && inbox.value.count >= items.length ? inbox.value.count : items.length, inboxCampaignCount: campaignCount, inboxFailed: inbox.status === "rejected", crew, runs, liveRuns, liveCampaigns, summaries: summarize(index, campaigns, items, crew) });
     })();
   }, []);
 

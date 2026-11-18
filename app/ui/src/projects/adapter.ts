@@ -8,6 +8,8 @@ import type { Campaign, EvidenceRow, InboxItem, ResumeTarget, RunOverview } from
 import { PROJECT_SCHEMA, validId } from "../projectContract";
 import type { Project as StoreProject } from "../projectContract";
 import { parseWorkerProvider } from "../workerProvider";
+import { runStalled } from "../screens/crew/crewLive";
+import { parseWhen } from "../screens/when";
 import type { ActiveCrew, BoardCard, DayGroup, Lane, Project, ProjectId, ProjectSummary, SessionRow, SessionStatus, TabState } from "./contract";
 
 export const UNSORTED_ID = "p_unsorted";
@@ -137,7 +139,11 @@ const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padSt
 const ORDER: SessionStatus[] = ["running", "done", "stopped", "failed", "unknown"];
 
 /** A project's runs by day, newest first, each day with a status summary ("2 done, 1 stopped"). Unreadable times go to Earlier. */
-export function sessionsByDay(campaigns: Campaign[], now: Date = new Date()): DayGroup[] {
+/**
+ * `live`: the campaigns a process of this app runs now (null when that could not be read). A run that says running but
+ * is not one of them, and whose record has not moved for a while, reads Stalled (`runStalled`, the Workers screen's rule).
+ */
+export function sessionsByDay(campaigns: Campaign[], now: Date = new Date(), live: ReadonlySet<string> | null = null): DayGroup[] {
   const today = dayKey(now);
   const y = new Date(now);
   y.setDate(y.getDate() - 1);
@@ -146,7 +152,9 @@ export function sessionsByDay(campaigns: Campaign[], now: Date = new Date()): Da
   const rows = campaigns.map((c) => {
     const m = DAY_RE.exec(whenOf(c));
     const status = sessionStatus(c);
-    const row: SessionRow = { slug: c.slug, title: c.goal || c.slug, status, dot: DOT[status], time: m?.[4] ? `${m[4]}:${m[5]}` : "", sortKey: m ? whenOf(c) : "" };
+    const last = parseWhen(c.updated ?? "");
+    const stalled = runStalled({ running: status === "running", live: live ? live.has(c.slug) : null, lastMs: Number.isFinite(last) ? last : null, now: now.getTime() });
+    const row: SessionRow = { slug: c.slug, title: c.goal || c.slug, status, dot: stalled ? "blocked" : DOT[status], time: m?.[4] ? `${m[4]}:${m[5]}` : "", sortKey: m ? whenOf(c) : "", ...(stalled ? { stalled } : {}) };
     return { row, day: m ? `${m[1]}-${m[2]}-${m[3]}` : "" };
   }).sort((a, b) => (a.row.sortKey === b.row.sortKey ? 0 : a.row.sortKey > b.row.sortKey ? -1 : 1));
   for (const { row, day } of rows) {
@@ -160,9 +168,9 @@ export function sessionsByDay(campaigns: Campaign[], now: Date = new Date()): Da
   }
   const out = [...groups.values()].sort((a, b) => (a.key === "earlier" ? 1 : b.key === "earlier" ? -1 : a.key > b.key ? -1 : 1));
   for (const g of out) {
-    const n = new Map<SessionStatus, number>();
-    for (const r of g.items) n.set(r.status, (n.get(r.status) ?? 0) + 1);
-    g.summary = ORDER.filter((s) => n.has(s)).map((s) => S.projects.dayCount(n.get(s)!, s)).join(", ");
+    const n = new Map<SessionStatus | "stalled", number>();
+    for (const r of g.items) { const k = r.stalled ? "stalled" : r.status; n.set(k, (n.get(k) ?? 0) + 1); }
+    g.summary = [...ORDER.slice(0, 1), "stalled" as const, ...ORDER.slice(1)].filter((s) => n.has(s)).map((s) => S.projects.dayCount(n.get(s)!, s)).join(", ");
   }
   return out;
 }

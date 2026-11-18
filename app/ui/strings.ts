@@ -407,8 +407,10 @@ export const S = {
     today: "Today",
     yesterday: "Yesterday",
     earlier: "Earlier",
-    dayCount: (n: number, s: "running" | "done" | "stopped" | "failed" | "unknown") =>
-      `${n} ${{ running: "running", done: "done", stopped: "stopped", failed: "failed", unknown: "not known" }[s]}`,
+    dayCount: (n: number, s: "running" | "stalled" | "done" | "stopped" | "failed" | "unknown") =>
+      `${n} ${{ running: "running", stalled: "stalled", done: "done", stopped: "stopped", failed: "failed", unknown: "not known" }[s]}`,
+    /** A session row that says running but has stalled: what a screen reader and the tooltip say. */
+    stalledRow: (title: string) => `${title}, stalled: no process in this app is running it`,
   },
   terminal: {
     region: "Terminal",
@@ -681,7 +683,7 @@ export const S = {
     runStatus: { active: "In progress", done: "Done", need_input: "Needs your input", rejected: "Rejected" },
     phases: { Understand: "Understand", Plan: "Plan", Execute: "Execute", Verify: "Verify", Fix: "Fix", Deliver: "Deliver" } as Record<string, string>,
     fixRound: (n: number | null | undefined, max: number | null | undefined) => (n ? (max ? `round ${n} of ${max}` : `round ${n}`) : ""),
-    wave: (n: number) => `Wave ${n + 1}`, waitsFor: "Waits for", openWorker: "Open",
+    wave: (n: number) => `Wave ${n + 1}`, waitsFor: "Waits for", openWorker: "Open", openChat: (task: string) => `Open the chat of ${task}'s worker`,
     overviewFailed: "Could not read the run's progress.",
     criteria: "Acceptance criteria",
     emptyTitle: "No run open",
