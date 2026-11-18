@@ -3114,6 +3114,9 @@ mod seat_env;
 pub mod seat_start;
 mod inbox;
 mod projects;
+pub mod files;
+#[cfg(test)]
+mod files_tests;
 mod wfresult;
 mod decide;
 mod lead;

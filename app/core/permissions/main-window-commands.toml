@@ -113,4 +113,11 @@ permissions = [
   "allow-core-runs",
   "allow-labs-get",
   "allow-labs-set",
+  "allow-files-roots",
+  "allow-files-list",
+  "allow-files-index",
+  "allow-files-read",
+  "allow-files-changed",
+  "allow-files-diff",
+  "allow-files-open-link",
 ]

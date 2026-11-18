@@ -22,6 +22,7 @@ pub mod diagnostics;
 pub mod control;
 pub mod crew;
 pub mod desktop;
+pub mod files;
 pub mod projects;
 pub mod providers;
 pub mod sessions;

@@ -112,6 +112,13 @@ const COMMANDS: &[&str] = &[
     "core_runs",
     "labs_get",
     "labs_set",
+    "files_roots",
+    "files_list",
+    "files_index",
+    "files_read",
+    "files_changed",
+    "files_diff",
+    "files_open_link",
 ];
 
 #[path = "engine_pack.rs"]

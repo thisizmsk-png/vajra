@@ -141,6 +141,14 @@ signature, the Atman practice-log hash chain (`hooks/post-tool-use.sh`), the
 pre-compact event chain, and campaign checkpoints (`scripts/vajra-campaign.sh`,
 which reads the key itself so it never enters model context).
 
+Vajra Desktop never opens or reads the key. It only looks up the key file's
+identity (device and inode) to refuse the key under another name, such as a
+hard link. Its Files panel shows a project's files read-only. It refuses the git
+folder, the app's data folder, the agent home and the key, and walks every path
+without following links. Its diff view sends only the current file and changed-line
+numbers, never what a file held at the base commit, because a copy of the key
+committed into a repository has its own identity there.
+
 ## What is not guaranteed
 
 - **The guard is a heuristic over shell.** Commands assembled at run time

@@ -133,6 +133,47 @@ fn labs_set(app: State<'_, App>, project: String, on: bool) -> Res {
     app.labs_set(&project, on)
 }
 
+// The Files panel (desktop/files.rs): read-only, one project's folder or one of its run worktrees. The UI names the
+// project and the worktree; the core picks the root and checks every path against it.
+
+#[tauri::command(async)]
+fn files_roots(app: State<'_, App>, project_id: String) -> Res {
+    app.files_roots(&project_id)
+}
+
+#[tauri::command(async)]
+fn files_list(app: State<'_, App>, project_id: String, worktree: Option<String>, path: String, show_ignored: bool) -> Res {
+    app.files_list(&project_id, worktree.as_deref(), &path, show_ignored)
+}
+
+#[tauri::command(async)]
+fn files_index(app: State<'_, App>, project_id: String, worktree: Option<String>) -> Res {
+    app.files_index(&project_id, worktree.as_deref())
+}
+
+#[tauri::command(async)]
+fn files_read(app: State<'_, App>, project_id: String, worktree: Option<String>, path: String) -> Res {
+    app.files_read(&project_id, worktree.as_deref(), &path)
+}
+
+#[tauri::command(async)]
+fn files_changed(app: State<'_, App>, project_id: String, worktree: Option<String>) -> Res {
+    app.files_changed(&project_id, worktree.as_deref())
+}
+
+/// Open a web link from a rendered Markdown file, once the person confirmed it in the UI. http and https only.
+#[tauri::command(async)]
+fn files_open_link(url: String) -> Res {
+    vajra_desktop::files::link::open_link(&url)
+        .map(|()| serde_json::json!({"opened": true}))
+        .map_err(|e| serde_json::json!({"error": "invalid_args", "detail": e.to_string()}))
+}
+
+#[tauri::command(async)]
+fn files_diff(app: State<'_, App>, project_id: String, worktree: Option<String>, path: String) -> Res {
+    app.files_diff(&project_id, worktree.as_deref(), &path)
+}
+
 /// Settings: the disk the worker copies use. A walk of the copies' folder, off the event thread.
 #[tauri::command(async)]
 fn worker_disk(app: State<'_, App>) -> Res {
@@ -1022,6 +1063,13 @@ fn main() {
             core_runs,
             labs_get,
             labs_set,
+            files_roots,
+            files_list,
+            files_index,
+            files_read,
+            files_changed,
+            files_diff,
+            files_open_link,
             act_worker_clean_up,
             record_orphans,
             run_log_since,
