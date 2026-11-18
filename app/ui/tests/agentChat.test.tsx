@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import type { CrewNodeDto } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
-import { chatItems, fileDiff, lastLine, stepFile, steerBlocks, testSummary } from "../src/screens/crew/chat";
+import { chatItems, fileDiff, lastLine, newlySeen, stepFile,steerBlocks, testSummary } from "../src/screens/crew/chat";
 import { SENT_PER_WORKER, sentStore } from "../src/screens/crew/sentStore";
 import { toolCalls } from "../src/screens/orch/transcript";
 import { S } from "../strings";
@@ -74,6 +74,17 @@ describe("a worker's stream as a chat", () => {
     expect(fileDiff(d, "/w/src/b.ts")).toContain("+q");
     expect(fileDiff(d, "/w/src/b.ts")).not.toContain("+y");
     expect(fileDiff(d, "/w/src/c.ts")).toBe("");
+  });
+
+  it("a message remembered as Seen is not added at the end once its block is out of the window", () => {
+    const one = { key: "k", id: "act_9", text: "hurry", redirect: false, state: "sent" as const };
+    const inWindow = lines(["Working.", ...steer("act_9", "hurry").split("\n")]);
+    expect(newlySeen(inWindow, [one])).toEqual(["act_9"]);
+    expect(newlySeen(inWindow, [{ ...one, state: "seen" }])).toEqual([]);
+    // Pending, not in the transcript: not seen.
+    expect(newlySeen(lines(["Working."]), [one])).toEqual([]);
+    const later = chatItems(lines(["Later."]), [{ ...one, state: "seen" }]);
+    expect(later.some((i) => i.kind === "steer")).toBe(false);
   });
 
   it("a message still sending when the worker ends says Not delivered too", () => {
@@ -148,7 +159,11 @@ describe("talking to a worker", () => {
 
   it("sends through the core's control message, shows Sent, then Seen when the worker's transcript has it", async () => {
     let texts = ["Working."];
-    const f = open({ stream_window: () => win(texts), tail: () => ({ lines: [], gap: false, head_seq: texts.length, spill_start: null, spill_end: null }), control_message: { action_id: "act_7", state: "queued" } });
+    const f = open({
+      stream_window: () => win(texts),
+      tail: (a?: Record<string, unknown>) => ({ lines: lines(texts).filter((l) => l.seq > Number(a?.afterSeq ?? 0)), gap: false, head_seq: texts.length, spill_start: null, spill_end: null }),
+      control_message: { action_id: "act_7", state: "queued" },
+    });
     const box = await screen.findByRole("textbox", { name: L.ask("Backend") });
     await waitFor(() => expect(box.getAttribute("aria-disabled")).toBeNull());
     fireEvent.change(box, { target: { value: "key it by id" } });
@@ -160,6 +175,13 @@ describe("talking to a worker", () => {
     texts = ["Working.", ...steer("act_7", "key it by id").split("\n")];
     await waitFor(() => expect(within(log).getByText(L.delivery.seen)).toBeTruthy(), { timeout: 3000 });
     expect(within(log).getAllByText("key it by id")).toHaveLength(1);
+    // Much later its block has scrolled out of the window: it is remembered as Seen, never shown again as Sent.
+    await waitFor(() => expect(sentStore.get("agent:a2")[0]?.state).toBe("seen"));
+    texts = [...texts, ...Array.from({ length: 310 }, (_, i) => `Later step ${i}.`)];
+    await waitFor(() => expect(log.textContent).toContain("Later step 309."), { timeout: 3000 });
+    expect(log.textContent).not.toContain("Working.");
+    expect(within(log).queryByText("key it by id")).toBeNull();
+    expect(within(log).queryByText(L.delivery.sent)).toBeNull();
   });
 
   it("Change direction goes through the core's control redirect", async () => {

@@ -88,12 +88,22 @@ export function chatItems(lines: readonly { seq: number; text: string }[], sent:
   for (const i of items) if (i.kind === "steer" && mine.has(i.id)) i.state = "seen";
   const last = items[items.length - 1]?.seq ?? 0;
   sent.forEach((s, n) => {
-    if (s.id && reached.has(s.id)) return;
+    // Reached in this window, or remembered as seen once its block scrolled out of it: it is in the transcript already.
+    if (s.state === "seen" || (s.id && reached.has(s.id))) return;
     // A message the worker never got (still sending, or queued but not handed over) ends with the worker.
     const state: Delivery = (s.state === "sent" || s.state === "sending") && finished ? "ended" : s.state;
     items.push({ kind: "steer", seq: last + 0.5 + n / 1000, from: "you", redirect: s.redirect, id: s.id, text: s.text, state, error: s.error });
   });
   return items;
+}
+
+/** The ids of sent messages whose relayed block is in `lines` and that are not yet remembered as seen. */
+export function newlySeen(lines: readonly { seq: number; text: string }[], sent: readonly Sent[]): string[] {
+  const open = sent.filter((s) => s.id && s.state !== "seen");
+  if (open.length === 0) return [];
+  // The transcript's own relayed blocks only, never the pending entries chatItems appends.
+  const reached = new Set(feedItems(lines).flatMap(toChat).flatMap((i) => (i.kind === "steer" && i.id ? [i.id] : [])));
+  return open.filter((s) => reached.has(s.id)).map((s) => s.id);
 }
 
 /** The newest line of activity, for a status that says what a worker is doing ("Running npm test", "Editing src/a.ts"). */

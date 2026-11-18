@@ -7,7 +7,7 @@ import type { StreamWindow } from "../../ipc";
 import { onChangedPaced, usePoll } from "../../projects/poll";
 import { appendTail } from "./streamAppend";
 import { RESULT_LINES, announceOf } from "./crewLive";
-import { WRITE_TOOLS, chatItems } from "./chat";
+import { WRITE_TOOLS, chatItems, newlySeen } from "./chat";
 import type { ChatItem, Delivery, Sent, StepFile } from "./chat";
 
 type DiffOf = (path: string) => Promise<StepFile>;
@@ -29,6 +29,8 @@ export type FeedProps = {
   stream: string;
   live?: boolean;
   onActivity?: (at: number) => void;
+  /** Sent messages (by action id) whose relayed block is now in the transcript: the caller remembers them as Seen. */
+  onSeen?: (ids: string[]) => void;
   /** Messages the human sent this worker from the app, placed in the thread with where each is. */
   sent?: readonly Sent[];
   /** The worker has ended: a sent message that never reached it says so. */
@@ -43,7 +45,7 @@ export type FeedProps = {
  * diff). It follows the live end and scrolls with it; scrolling up pauses that (new lines are counted, not shown) until
  * the reader scrolls back down or picks Follow live. `onActivity` hears when the stream grows, with the time it was seen.
  */
-export function LiveFeed({ stream, live = true, onActivity, sent, finished = false, diffOf }: FeedProps) {
+export function LiveFeed({ stream, live = true, onActivity, sent, finished = false, diffOf, onSeen }: FeedProps) {
   const [win, setWin] = useState<StreamWindow | null>(null);
   const [err, setErr] = useState("");
   const [following, setFollowing] = useState(true);
@@ -107,6 +109,11 @@ export function LiveFeed({ stream, live = true, onActivity, sent, finished = fal
   usePoll(() => void refresh(), POLL_MS, live);
 
   const items = useMemo(() => chatItems(win?.lines ?? [], sent, finished), [win, sent, finished]);
+  // Remember what reached the worker, so it stays Seen after its block scrolls out of the window.
+  useEffect(() => {
+    const ids = newlySeen(win?.lines ?? [], sent ?? []);
+    if (ids.length > 0) onSeen?.(ids);
+  }, [win, sent, onSeen]);
 
   // Following: keep the newest entry in view after every change (one write, before paint).
   useLayoutEffect(() => {
