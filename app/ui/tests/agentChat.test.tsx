@@ -237,6 +237,25 @@ describe("talking to a worker", () => {
   });
 });
 
+describe("before the crew tree arrives", () => {
+  it("renders the loading rows and throws nothing, then the tree with the Director-General over the Run lead", async () => {
+    const held: ((v: unknown) => void)[] = [];
+    let ready = false;
+    const answer = (v: unknown) => { ready = true; held.splice(0).forEach((r) => r(v)); };
+    const f = fakeIpc({ ...liveRun(), crew: () => (ready ? tree : new Promise((r) => { held.push(r); })), task: { task: {} }, stream_window: win(["Working."]) });
+    setTransport(f.transport);
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    render(<Live><Crew /></Live>);
+    // The request is still out: the tree is null, so nothing built from it (cards, tree) has run.
+    expect(await screen.findByLabelText(S.states.loading)).toBeTruthy();
+    expect(screen.queryByRole("tree")).toBeNull();
+    act(() => answer(tree));
+    const t = await screen.findByRole("tree");
+    expect(within(t).getByText(S.views.orch)).toBeTruthy();
+    expect(within(t).getByText(S.crew.runLead)).toBeTruthy();
+  });
+});
+
 describe("the Lead's chat", () => {
   it("a message the Lead sent a worker is a card that opens that worker's chat", async () => {
     const f = fakeIpc({
