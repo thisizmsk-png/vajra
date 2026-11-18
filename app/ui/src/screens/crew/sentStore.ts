@@ -23,6 +23,12 @@ export const sentStore = {
   add: (worker: string, s: Sent) => set(worker, [...sentStore.get(worker), s]),
   update: (worker: string, key: string, patch: Partial<Sent>) =>
     set(worker, sentStore.get(worker).map((s) => (s.key === key ? { ...s, ...patch } : s))),
+  /** These messages reached the worker (their block is in its transcript): Seen from now on, in any window. */
+  markSeen: (worker: string, ids: readonly string[]) => {
+    const list = sentStore.get(worker);
+    if (!list.some((s) => s.id && ids.includes(s.id) && s.state !== "seen")) return;
+    set(worker, list.map((s) => (s.id && ids.includes(s.id) ? { ...s, state: "seen" as const } : s)));
+  },
   /** Tests only. */
   clear: () => { byWorker.clear(); subs.forEach((f) => f()); },
   subscribe: (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; },

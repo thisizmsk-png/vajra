@@ -155,6 +155,7 @@ const TASK_EVENT_GAP_MS = 500;
 export function WorkerPane({ node, slug, runId, taskLocalId, status, shape: shapeOverride, banner, onActivity }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string; shape?: StatusKey; banner?: ReactNode; onActivity?: (at: number) => void }) {
   const agent = node.id.slice("agent:".length);
   const sent = useSent(node.id);
+  const onSeen = useCallback((ids: string[]) => sentStore.markSeen(node.id, ids), [node.id]);
   const wp = parseWorkerProvider(node.provider);
   const wd = parseWorkerDiff(node.diff);
   const [tab, setTab] = useState<TabId>("live");
@@ -243,7 +244,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status, shape: shap
   const nodeFinished = node.status === "done" || node.status === "failed";
   const chat = (
     <div className="v-chat">
-      <LiveFeed stream={`w-${agent}`} live={runLive} onActivity={onActivity} sent={sent} finished={nodeFinished || !runLive} diffOf={info?.base ? diffOf : undefined} />
+      <LiveFeed stream={`w-${agent}`} live={runLive} onActivity={onActivity} sent={sent} onSeen={onSeen} finished={nodeFinished || !runLive} diffOf={info?.base ? diffOf : undefined} />
       <WorkerComposer worker={node.id} name={node.role ?? node.title} off={!runLive ? L.offRunEnded : nodeFinished ? L.offFinished : !taskId ? L.offNoTask : ""} />
     </div>
   );
