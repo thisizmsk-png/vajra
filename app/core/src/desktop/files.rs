@@ -235,7 +235,11 @@ impl App {
         let Some(base) = self.files_base(&root, &project) else {
             return Ok(json!({"base": null, "files": [], "truncated": false}));
         };
-        let mut changes = self.files_git(&root, &["diff", "--name-status", "-z", "--no-renames", &base, "--"]).map(|b| parse_name_status(&b)).unwrap_or_default();
+        // `--relative`: only paths under this folder, relative to it (a project may sit below the repository's top).
+        let mut changes = self
+            .files_git(&root, &["diff", "--name-status", "-z", "--no-renames", "--relative", &base, "--"])
+            .map(|b| parse_name_status(&b))
+            .unwrap_or_default();
         if let Some(u) = self.files_git(&root, &["ls-files", "-z", "--others", "--exclude-standard"]) {
             changes.extend(u.split(|&b| b == 0).filter_map(|p| std::str::from_utf8(p).ok()).filter(|p| !p.is_empty()).map(|p| Change { path: p.into(), status: 'A', from: None }));
         }
@@ -280,7 +284,9 @@ impl App {
         };
         let base = self.files_base(&root, &project).ok_or_else(|| fail("no_base", "the tree has no base to compare with"))?;
         // The base side, from git's object store only (`<commit>:<path>` takes the path literally).
-        let object = format!("{base}:{path}");
+        // `<commit>:./<path>` is relative to the folder git runs in, so a project below the repository's top reads its
+        // own file, not a top-level one of the same name.
+        let object = format!("{base}:./{path}");
         let old = match self.files_git(&root, &["cat-file", "-t", &object]).map(|b| String::from_utf8_lossy(&b).trim().to_string()).as_deref() {
             None => None,
             Some("blob") => {

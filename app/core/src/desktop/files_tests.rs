@@ -367,6 +367,33 @@ fn an_index_over_the_bridge_cap_stays_a_git_list_flagged_partial() {
 }
 
 #[test]
+fn a_project_below_the_repository_top_uses_its_own_paths_for_git() {
+    let fx = Fx::new();
+    // The repo's top holds a README.md too; the project is only `sub`.
+    let sub = fx.repo().join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("README.md"), "sub one\nsub two\n").unwrap();
+    fs::write(sub.join("Cargo.toml"), "[package]\n").unwrap();
+    git(&fx.repo(), &["add", "sub"]);
+    git(&fx.repo(), &["commit", "-q", "-m", "sub"]);
+    let pid = test_project(&fx.dir.join("data"), &fx.dir.join("home"), &sub);
+    let app = App::open(&fx.dir.join("data"), &fx.dir.join("home")).unwrap();
+    // Unchanged: no marks (not "every line added", not compared with the top-level README.md).
+    for p in ["Cargo.toml", "README.md"] {
+        let d = app.files_diff(&pid, None, p).unwrap();
+        assert_eq!((&d["added"], &d["removed"], d["untracked"].as_bool()), (&json!([]), &json!([]), Some(false)), "{p}: {d}");
+    }
+    fs::write(sub.join("README.md"), "sub one\nsub 2\n").unwrap();
+    let d = app.files_diff(&pid, None, "README.md").unwrap();
+    assert_eq!((&d["added"], &d["removed"]), (&json!([2]), &json!([[1, 1]])));
+    // Changed files: only this project's, relative to it, each readable back through the checked reader.
+    fs::write(fx.repo().join("src/lib.rs"), "outside the project\n").unwrap();
+    let c = app.files_changed(&pid, None).unwrap();
+    assert_eq!(c["files"], json!([{"path": "README.md", "status": "M", "from": null}]));
+    assert_eq!(app.files_read(&pid, None, "README.md").unwrap()["text"], "sub one\nsub 2\n");
+}
+
+#[test]
 fn name_status_parses_renames_copies_and_deletes() {
     let raw = b"M\0a.rs\0A\0b.rs\0D\0c.rs\0R100\0old.rs\0new.rs\0C075\0x.rs\0y.rs\0T\0t.rs\0";
     let got: Vec<(String, char)> = parse_name_status(raw).into_iter().map(|c| (c.path, c.status)).collect();
