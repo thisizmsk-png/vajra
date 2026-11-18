@@ -32,9 +32,11 @@ export function useTaskActivity(slug: string, runId: string, working: readonly s
   const [lines, setLines] = useState<ReadonlyMap<string, string>>(new Map());
   const key = working.slice(0, MAX_TASKS).join("\n");
   const gen = useRef(0);
-  useEffect(() => { gen.current++; setLines(new Map()); }, [slug, runId]);
+  // A new run, or the run no longer live: drop what was read, so a line never outlives the work it described.
+  useEffect(() => { gen.current++; setLines(new Map()); }, [slug, runId, live]);
   const read = useCallback(() => {
-    if (!key || !live || !runId) return;
+    // Hidden window: nothing is read; usePoll reads again as soon as the window shows.
+    if (!key || !live || !runId || document.hidden) return;
     const mine = gen.current;
     const want = key.split("\n");
     void api.crew(slug, runId).then(async (root) => {

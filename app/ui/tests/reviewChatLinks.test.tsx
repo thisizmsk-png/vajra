@@ -1,7 +1,7 @@
 // The Review page's task rows open their worker's chat and say what a working one is doing; an old run that still says
 // running reads Stalled there and in the sessions list, by the Workers screen's own rule.
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import type { CrewNodeDto } from "../src/ipc";
 import { sessionsByDay } from "../src/projects/adapter";
@@ -67,12 +67,12 @@ describe("task rows", () => {
   const phases = ["Understand", "Plan", "Execute", "Verify"].map((name, i) => ({ name, state: i < 2 ? "done" : i === 2 ? "current" : "pending" }));
   const gtask = (local: string, status: string) => ({ id: `r1.${local}`, local, title: `Title ${local}`, owner: "Backend", status, deps: [], wave: 0 });
   const overview = { slug: "camp", run_id: "20261117-1100", stale: false, timeline: { phases, current: "Execute", status: "active" }, graph: { tasks: [gtask("t1", "closed"), gtask("t2", "in_progress")], waves: 1 } };
-  const open = (live: boolean, updated: string) => {
+  const open = (live: boolean, updated: string, state: { live: boolean; ov: typeof overview } = { live, ov: overview }) => {
     window.location.hash = "#/run?slug=camp";
     const f = fakeIpc({
-      list_campaigns: { campaigns: [{ slug: "camp", goal: "Rate limits", status: "active", updated }] }, resume_targets: { targets: {} },
-      active_runs: { count: live ? 1 : 0, runs: live ? [{ run_id: overview.run_id, campaign: "camp" }] : [] }, inbox: { count: 0, items: [] },
-      evidence_list: { slug: "camp", stale: false, rows: [] }, run_overview: overview, crew,
+      list_campaigns: () => ({ campaigns: [{ slug: "camp", goal: "Rate limits", status: state.ov.timeline.status, updated }] }), resume_targets: { targets: {} },
+      active_runs: () => ({ count: state.live ? 1 : 0, runs: state.live ? [{ run_id: overview.run_id, campaign: "camp" }] : [] }), inbox: { count: 0, items: [] },
+      evidence_list: { slug: "camp", stale: false, rows: [] }, run_overview: () => state.ov, crew,
       stream_window: (a?: Record<string, unknown>) => ({ lines: a?.stream === "w-a2" ? [{ seq: 1, text: "[tool] Bash: npm test -- bucket" }] : [], head_seq: 1, first_seq: 1, at_start: true, at_end: true, gap: false }),
       run_log_since: { run_id: overview.run_id, entries: [], head_seq: 0, broken: null, io_error: null },
       evidence_approval: { run_id: overview.run_id, state: "none" },
@@ -99,5 +99,36 @@ describe("task rows", () => {
     expect(within(list).queryByText(S.status.in_progress)).toBeNull();
     expect(screen.getByText(/Stalled: no activity since/)).toBeTruthy();
     expect(f.calls.some((c) => c.cmd === "stream_window")).toBe(false);
+  });
+
+  it("a working task's line is gone once the run ends and the task is done", async () => {
+    const state = { live: true, ov: overview };
+    const f = open(true, new Date().toISOString(), state);
+    const list = await screen.findByRole("list", { name: S.run.graph });
+    await waitFor(() => expect(within(list).getByText("Bash npm test -- bucket")).toBeTruthy());
+    state.live = false;
+    state.ov = { ...overview, timeline: { ...overview.timeline, status: "done" }, graph: { ...overview.graph, tasks: [gtask("t1", "closed"), gtask("t2", "closed")] } };
+    act(() => f.emit("changed", {}));
+    await waitFor(() => expect(within(list).queryByText("Bash npm test -- bucket")).toBeNull());
+  });
+
+  it("an active run still planning, with no task yet, reads Stalled once nothing runs it", async () => {
+    const planning = { ...overview, graph: { tasks: [], waves: 0 } };
+    open(false, "2026-11-10 09:00", { live: false, ov: planning });
+    await waitFor(() => expect(screen.getByText(/Stalled: no activity since/)).toBeTruthy());
+  });
+
+  it("reads no worker line while the window is hidden, and reads as soon as it shows", async () => {
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    const f = open(true, new Date().toISOString());
+    await screen.findByRole("list", { name: S.run.graph });
+    await new Promise((r) => setTimeout(r, 50));
+    // (The projects store reads the crew tree on its own; the rows read no worker stream.)
+    expect(f.calls.some((c) => c.cmd === "stream_window")).toBe(false);
+    hidden.mockReturnValue(false);
+    act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+    const list = screen.getByRole("list", { name: S.run.graph });
+    await waitFor(() => expect(within(list).getByText("Bash npm test -- bucket")).toBeTruthy());
+    hidden.mockRestore();
   });
 });

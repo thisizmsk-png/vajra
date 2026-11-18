@@ -154,7 +154,8 @@ export function Run() {
   const updatedMs = parseWhen(P.campaigns.find((c) => c.slug === slug)?.updated ?? "");
   const lastMs = Number.isFinite(updatedMs) ? updatedMs : null;
   const working = useMemo(() => (overview?.graph.tasks ?? []).filter((t) => isWorking(t.status)).map((t) => t.local), [overview]);
-  const stalled = runStalled({ running: overview?.timeline.status === "active" && working.length > 0, live, lastMs, now: Date.now() });
+  // An active run can be planning with no task yet; it is stalled by the same rule as the sessions list, task or not.
+  const stalled = runStalled({ running: overview?.timeline.status === "active", live, lastMs, now: Date.now() });
   const activity = useTaskActivity(slug ?? "", runId, working, live === true);
 
   // With no project list there is nothing to choose from: "choose one in History" would send the person to an empty
@@ -242,7 +243,7 @@ export function Run() {
               const t = overview.graph.tasks[i];
               const open = () => go("crew", { slug, id: overview.run_id, focus: `task:${t.local}` });
               const waits = t.deps.length > 0 ? `${S.run.waitsFor} ${t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}` : "";
-              const doing = stalled ? "" : activity.get(t.local) ?? "";
+              const doing = stalled || !isWorking(t.status) ? "" : activity.get(t.local) ?? "";
               return (
                 <div role="listitem" className="v-run__row v-run__task" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
                   <Text as="span" variant="body-sm" muted>{S.run.wave(t.wave)}</Text>
