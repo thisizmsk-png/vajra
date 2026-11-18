@@ -8,10 +8,10 @@
 // run or none. Only a folder the core has no project for yet needs a run of it; with neither, the view links to the
 // launcher.
 import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { RefObject, UIEvent } from "react";
-import type { KeyboardEvent } from "react";
-import { Badge, Button, Icon, Kbd, ariaShortcut } from "../../../components/ui/base";
+import type { ReactNode, UIEvent } from "react";
+import { Badge, Button, Icon, StatusDot } from "../../../components/ui/base";
 import { S } from "../../../strings";
+import type { StatusKey } from "../../../strings";
 import { errorText } from "../../ipc";
 import type { InboxItem, LeadStatus } from "../../ipc";
 import { useCurrentProject } from "../../projects/current";
@@ -22,7 +22,8 @@ import type { ProposalOverride } from "../../accountsContract";
 import { Home } from "../home/Home";
 import { actionId, dg, envelope, useDgReload } from "./dgApi";
 import type { Outcome, Target } from "./dgApi";
-import { turns } from "./transcript";
+import { toolCalls, turns } from "./transcript";
+import { Composer } from "./Composer";
 import "./dg.css";
 
 // The per-worker provider editor loads only for a proposal that carries workers (it brings the accounts and pickers with it).
@@ -36,11 +37,19 @@ const EVENT_MIN_GAP_MS = 500;
 
 const sentence = (s: string) => (s ? s.slice(0, 1).toUpperCase() + s.slice(1) : s);
 
-export function DirectorGeneral() {
-  const { project, dgRun, proposals = [] } = useCurrentProject();
+/**
+ * `embedded`: the same conversation shown as a run's Lead on the Workers screen. It has the run's name over it, its
+ * workers as cards that open their chats, and no proposals or palette commands (the Director-General view has those).
+ */
+export type Embedded = { title: string; status?: ReactNode; agents: SubAgents; banner?: ReactNode; intro?: ReactNode; /** The run on screen, asked by its id when its folder is not a registered project. */ runId?: string };
+
+export function DirectorGeneral({ embedded }: { embedded?: Embedded } = {}) {
+  const ctx = useCurrentProject();
+  const { project, dgRun } = ctx;
+  const proposals = embedded ? [] : ctx.proposals ?? [];
   // Who the view talks to (M6): a registered project by its core id, whether or not it has a run; else a run of the folder.
   const coreProject = project?.registered ? project.id : null;
-  const runOnly = coreProject ? null : dgRun ?? null;
+  const runOnly = coreProject ? null : embedded?.runId ?? dgRun ?? null;
   // One key for "the conversation this view is on": a switch of project or run resets the view.
   const dgKey = coreProject ? `p:${coreProject}` : runOnly ? `r:${runOnly}` : null;
   const [st, setSt] = useState<LeadStatus | null>(null);
@@ -232,14 +241,14 @@ export function DirectorGeneral() {
   cancelRef.current = cancel;
   const onCancel = useCallback(() => void cancelRef.current(), []);
 
-  useCommands(dgKey ? [
+  useCommands(dgKey && !embedded ? [
     { id: "dg-ask", label: S.dg.ask, run: () => field.current?.focus() },
     { id: "dg-new", label: S.dg.newConversation, run: () => void fresh() },
   ] : []);
 
   const launch = project ? toHash("launch", {}, project.id) : "#/launch";
   // No project yet (first run): there is no Director-General to talk to; the launcher is how a project begins.
-  if (!project) return <Home />;
+  if (!project && !embedded) return <Home />;
   const name = project?.name ?? "";
 
   // A folder the core has no project for, and no run of it: nothing to address yet. A registered project never lands
@@ -260,29 +269,35 @@ export function DirectorGeneral() {
   const stateKey = !st ? null : !available ? "unavailable" : busy ? "thinking" : st.state === "running" ? "running" : "idle";
   const stateLine = !st ? "" : !available ? (st.read_only_reason ?? S.dg.state.unavailable) : busy ? sentence(st.reason && st.busy ? st.reason : S.dg.thinking) : sentence(st.reason ?? "");
 
+  const agents = embedded?.agents;
   return (
-    <section className="v-screen v-dgv" aria-label={S.dg.title(name)}>
+    <section className={embedded ? "v-crew__pane v-dgv v-dgv--embedded" : "v-screen v-dgv"} aria-label={embedded ? embedded.title : S.dg.title(name)}>
       <header className="v-dgv__head">
         <div className="v-dgv__who">
-          <h1 className="v-dgv__name">{S.views.orch}</h1>
-          {stateKey && <span className={`v-dgv__state-line v-dgv__state-line--${stateKey}`}><i aria-hidden="true" />{stateLine}</span>}
+          {embedded ? <h2 className="v-dgv__name">{embedded.title}</h2> : <h1 className="v-dgv__name">{S.views.orch}</h1>}
+          {embedded?.status}
+          {stateKey && (!embedded || stateKey === "thinking" || stateKey === "unavailable") && <span className={`v-dgv__state-line v-dgv__state-line--${stateKey}`}><i aria-hidden="true" />{stateLine}</span>}
         </div>
         <div className="v-dgv__acts">
           {generation !== null && <span className="v-dgv__gen" title={S.dg.generationHint}>{S.dg.generation(generation)}</span>}
           <Button size="sm" variant="ghost" disabled={busy || !available} onClick={() => void fresh()}>{S.dg.newConversation}</Button>
-          <a className="v-dgv__link" href={launch}>{S.dg.startYourself}</a>
+          {!embedded && <a className="v-dgv__link" href={launch}>{S.dg.startYourself}</a>}
         </div>
       </header>
+      {embedded?.banner}
 
       {loadErr && !st && <div className="v-dgv__state"><Problem title={S.dg.loadFailed} detail={loadErr} retry={() => void readStatus()} /></div>}
 
       <div className="v-dgv__scroll" ref={pane} onScroll={onScroll}>
         <div className="v-dgv__col" ref={col}>
+          {embedded && <p className="v-subagents__lede">{S.dg.leadIs}</p>}
+          {embedded?.intro}
+          {agents && <SubAgentList agents={agents} />}
           <div role="log" aria-label={S.dg.transcript} aria-live="polite" className="v-dgv__log">
             {shown.length === 0 && !showEcho && st && (
-              <div className="v-dgv__empty"><p className="v-dgv__empty-t">{S.dg.empty}</p><p>{S.dg.emptyHint}</p></div>
+              <div className="v-dgv__empty"><p className="v-dgv__empty-t">{S.dg.empty}</p><p>{embedded ? S.dg.emptyHintLead : S.dg.emptyHint}</p></div>
             )}
-            {shown.map((t, i) => <TurnView key={i} role={t.role} text={t.text} />)}
+            {shown.map((t, i) => <TurnView key={i} role={t.role} text={t.text} agents={agents} />)}
             {showEcho && <TurnView role="you" text={echo!} />}
             {busy && <p className="v-dgv__thinking" role="status"><i aria-hidden="true" />{S.dg.thinking}</p>}
           </div>
@@ -291,62 +306,73 @@ export function DirectorGeneral() {
         </div>
       </div>
 
-      <Composer field={field} available={available} canAsk={canAsk} cancellable={busy && !!askId} sending={sending} askErr={askErr} onSend={onSend} onCancel={onCancel} />
+      <Composer id={embedded ? "lead-ask" : "dg-ask"} label={S.dg.ask} placeholder={embedded ? S.dg.askLeadPlaceholder : S.dg.askPlaceholder}
+        field={field} available={available} canAsk={canAsk} cancellable={busy && !!askId} sending={sending} askErr={askErr} onSend={onSend} onCancel={onCancel} />
     </section>
   );
 }
 
-type ComposerProps = {
-  field: RefObject<HTMLTextAreaElement>;
-  available: boolean;
-  canAsk: boolean;
-  cancellable: boolean;
-  sending: boolean;
-  askErr: string;
-  /** Resolves to whether the ask was taken; false puts the text back. */
-  onSend: (text: string) => Promise<boolean>;
-  onCancel: () => void;
-};
+/** A sub-agent the Lead can link to: its readable name, its status and how to open its chat. */
+export type SubAgent = { id: string; name: string; task: string | null; status: StatusKey; statusLabel: string; last?: string };
+/** What an embedded Lead chat knows about the run's workers. */
+export type SubAgents = { list: SubAgent[]; open: (id: string) => void };
 
-/** The composer owns its draft and takes only stable props, so a streaming transcript re-rendering its parent never
- *  re-renders it, and a keystroke re-renders nothing else. */
-const Composer = memo(function Composer({ field, available, canAsk, cancellable, sending, askErr, onSend, onCancel }: ComposerProps) {
-  const [draft, setDraft] = useState("");
-  const submit = async () => {
-    const text = draft;
-    if (!text.trim() || !canAsk) return;
-    setDraft("");
-    if (!(await onSend(text))) setDraft((now) => now || text);
-  };
-  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(); }
-  };
-  return (
-    <form className="v-dgv__composer" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
-      <div className="v-dgv__box">
-        <label className="v-sr" htmlFor="dg-ask">{S.dg.ask}</label>
-        <textarea id="dg-ask" ref={field} className="v-dgv__field" rows={2} value={draft} placeholder={S.dg.askPlaceholder}
-          onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey} readOnly={!available}
-          aria-disabled={!available || undefined} aria-describedby={askErr ? "dg-ask-err" : undefined}
-          aria-keyshortcuts={ariaShortcut(["⌘", "↵"])} />
-        <div className="v-dgv__bar">
-          {askErr ? <span id="dg-ask-err" className="v-dgv__err" role="alert">{askErr}</span> : <span className="v-dgv__hint"><Kbd keys={["⌘", "↵"]} decorative /></span>}
-          {cancellable
-            ? <Button size="sm" variant="secondary" onClick={onCancel}>{S.dg.cancel}</Button>
-            : <Button size="sm" variant="primary" type="submit" disabled={!canAsk || !draft.trim()} busy={sending}>{S.dg.send}</Button>}
-        </div>
-      </div>
-    </form>
+/** A link to one worker's chat: who, what it is on, its status and, while it works, its newest line. */
+export function SubAgentCard({ agent, verb, text, onOpen, href }: { agent: SubAgent | null; verb: string; text?: string; onOpen?: () => void; href?: string }) {
+  const body = (
+    <>
+      <span className="v-subagent__top">
+        <span className="v-subagent__verb">{verb}</span>
+        <span className="v-subagent__name">{agent?.name ?? ""}</span>
+        {/* A worker this run's tree does not list (another run's, or gone) has no status to show. */}
+        {agent?.statusLabel && <StatusDot status={agent.status} label={agent.statusLabel} className="v-subagent__dot" />}
+      </span>
+      {agent?.task && <span className="v-subagent__task">{agent.task}</span>}
+      {text && <span className="v-subagent__text">{text}</span>}
+      {!text && agent?.last && <span className="v-subagent__text">{agent.last}</span>}
+      <span className="v-subagent__open">{S.dg.openChat}</span>
+    </>
   );
-});
+  return onOpen
+    ? <button type="button" className="v-subagent" onClick={onOpen}>{body}</button>
+    : <a className="v-subagent" href={href}>{body}</a>;
+}
 
-const TurnView = memo(function TurnView({ role, text }: { role: "you" | "dg" | "tool" | "error"; text: string }) {
+/** Every worker of the run as a card that opens its chat. */
+export function SubAgentList({ agents }: { agents: SubAgents }) {
+  if (agents.list.length === 0) return null;
+  return (
+    <section className="v-subagents" aria-label={S.dg.startedWorkers(agents.list.length)}>
+      <p className="v-subagents__lede">{S.dg.startedWorkers(agents.list.length)}</p>
+      <ul className="v-subagents__list">
+        {agents.list.map((a) => <li key={a.id}><SubAgentCard agent={a} verb={S.dg.workerVerb.start} onOpen={() => agents.open(a.id)} /></li>)}
+      </ul>
+    </section>
+  );
+}
+
+const TurnView = memo(function TurnView({ role, text, agents }: { role: "you" | "dg" | "tool" | "error"; text: string; agents?: SubAgents }) {
   if (role === "tool") {
+    // A call that messaged, redirected, inspected or stopped a worker is a card that opens that worker's chat; the rest
+    // fold away as before.
+    const calls = toolCalls(text);
+    const rest = calls.filter((c) => !c.worker).map((c) => c.line);
     return (
-      <details className="v-turn v-turn--tool">
-        <summary>{S.dg.tools}</summary>
-        <p className="v-turn__t">{text}</p>
-      </details>
+      <>
+        {calls.filter((c) => c.worker).map((c, i) => {
+          const a = agents?.list.find((w) => w.id === c.worker || w.id === `agent:${c.worker}`) ?? null;
+          const shown = a ?? { id: c.worker!, name: c.worker!.replace(/^agent:/, ""), task: null, status: "unknown" as StatusKey, statusLabel: "" };
+          const open = a && agents ? () => agents.open(a.id) : undefined;
+          return <SubAgentCard key={i} agent={shown} verb={S.dg.workerVerb[c.action]} text={c.text ?? undefined}
+            onOpen={open} href={open ? undefined : toHash("crew", { worker: shown.id.replace(/^agent:/, "") })} />;
+        })}
+        {rest.length > 0 && (
+          <details className="v-turn v-turn--tool">
+            <summary>{S.dg.tools}</summary>
+            <p className="v-turn__t">{rest.join("\n")}</p>
+          </details>
+        )}
+      </>
     );
   }
   const who = role === "you" ? S.dg.you : role === "error" ? S.dg.problem : S.views.orch;

@@ -23,7 +23,7 @@ describe("fixture mode (dev ?fixture)", () => {
     expect(feed.textContent).toContain("All three pass.");
     fireEvent.click(await screen.findByRole("tab", { name: S.crew.tabs.stream }));
     const log = await screen.findByRole("log", { name: S.crew.streamLabel });
-    await waitFor(() => expect(log.textContent).toContain("Write test/rateLimit.redis.test.ts"));
+    await waitFor(() => expect(log.textContent).toContain("Write: test/rateLimit.redis.test.ts"));
     expect(screen.queryByText(/not_in_fixture/)).toBeNull();
   });
 

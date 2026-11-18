@@ -55,16 +55,25 @@ describe("Stream tab: a window served by the core (#45)", () => {
     expect(wins(f)[0].args).toMatchObject({ stream: "w-a1", from: null });
   });
 
-  it("the Lead and the run have no stream of their own: they show the active worker's activity, never a terminal", async () => {
+  it("the Director-General sits over the Run lead; neither has a terminal, and its worker cards open each worker's chat", async () => {
     window.location.hash = "#/crew?slug=camp&id=r1";
-    const f = fakeIpc({ active_runs: { count: 0, runs: [] }, crew: tree, stream_window: core(3) });
+    const f = fakeIpc({ active_runs: { count: 0, runs: [] }, crew: tree, stream_window: core(3), lead_status: { available: false, busy: false, name: "Lead" } });
     setTransport(f.transport);
     render(<Crew />);
     const t = await screen.findByRole("tree");
-    fireEvent.click(within(t).getByText("Lead").closest("[role=treeitem]") as HTMLElement);
-    const feed = await screen.findByRole("log", { name: S.crew.live.label });
-    await waitFor(() => expect(feed.textContent).toContain("out 3"));
+    const items = within(t).getAllByRole("treeitem");
+    expect(items[0].textContent).toContain(S.views.orch);
+    expect(items[1].textContent).toContain(S.crew.runLead);
+    expect(within(t).queryByText("Lead")).toBeNull();
+    // The Run lead points to the Director-General, which is where you talk to it.
+    fireEvent.click(items[1]);
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.askDg }));
+    await screen.findByRole("log", { name: S.dg.transcript });
     expect(screen.queryByRole("log", { name: S.crew.streamLabel })).toBeNull();
+    // Asked by the run it leads, never a terminal stream of its own.
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "lead_status" && c.args?.runId === "r1")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: /Backend/ }));
+    await waitFor(() => expect(screen.getByRole("log", { name: S.crew.live.label }).textContent).toContain("out 3"));
     expect(wins(f).every((c) => c.args?.stream === "w-a1")).toBe(true);
   });
 

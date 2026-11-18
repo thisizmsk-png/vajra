@@ -204,15 +204,16 @@ describe("the Workers screen says what is happening", () => {
     expect(f.calls.find((c) => c.cmd === "stream_window")?.args).toMatchObject({ stream: "w-a2", maxLines: FEED_ROWS });
   });
 
-  it("the run shows who is working on what, and that worker's activity under it", async () => {
-    open({ crew: liveTree, stream_window: window_(["[tool] Edit src/a.ts"]) });
+  it("the run is the Lead's chat: who is working on what, and a card per worker that opens its chat", async () => {
+    open({ crew: liveTree, stream_window: window_(["[tool] Edit src/a.ts"]), lead_status: { available: false, busy: false, name: "Lead" } });
     fireEvent.click(within(await screen.findByRole("tree")).getByText("Run r1").closest("[role=treeitem]") as HTMLElement);
     const sum = await screen.findByRole("region", { name: S.crew.summary.label });
     expect(sum.textContent).toContain(S.crew.summary.working("Backend", "Backend · t2"));
     expect(sum.textContent).toContain(S.crew.workersDone(1, 3));
-    const pane = screen.getByRole("region", { name: "Run r1" });
-    expect(within(pane).getByRole("heading", { name: S.crew.summary.streamOf("Backend") })).toBeTruthy();
-    await waitFor(() => expect(within(pane).getByRole("log", { name: S.crew.live.label }).textContent).toContain("src/a.ts"));
+    const cards = screen.getByRole("region", { name: S.dg.startedWorkers(3) });
+    expect(within(cards).getAllByRole("button")).toHaveLength(3);
+    fireEvent.click(within(cards).getAllByRole("button")[2]);
+    await waitFor(() => expect(screen.getByRole("log", { name: S.crew.live.label }).textContent).toContain("src/a.ts"));
   });
 });
 

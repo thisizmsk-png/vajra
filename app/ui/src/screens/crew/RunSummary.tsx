@@ -45,7 +45,8 @@ export type Facts = {
 
 /** The Lead, the run or another group: what is running now, which worker, how long since anything happened, and the
  * active (else newest) worker's activity underneath. */
-export function RunSummary({ scope, f }: { scope: CrewNodeDto; f: Facts }) {
+/** What is running now under `scope`, which worker, how long since anything happened, and how far along it is. */
+export function RunFacts({ scope, f }: { scope: CrewNodeDto; f: Facts }) {
   const ws = workersIn(scope);
   const active = activeWorker(scope);
   const shown = focusWorker(scope);
@@ -56,21 +57,28 @@ export function RunSummary({ scope, f }: { scope: CrewNodeDto; f: Facts }) {
     : C.summary.idle;
   const last = f.activeNow ? C.summary.activeNow : f.lastMs !== null ? whenText(f.lastMs) : C.summary.noneSeen;
   return (
+    <Section title={C.summary.label}>
+      <p className="v-crew__now">{now}</p>
+      {f.hint && f.stalled === undefined && <Text variant="body-sm" muted>{f.hint}</Text>}
+      <dl className="v-crew__facts" aria-label={C.summary.label}>
+        {shown && (<><dt>{active ? C.summary.worker : C.summary.latest}</dt><dd>{f.nameOf(shown)}</dd></>)}
+        <dt>{C.summary.lastActivity}</dt><dd>{last}</dd>
+        {ws.length > 0 && (<><dt>{C.summary.progress}</dt><dd>{C.workersDone(done, ws.length)}</dd></>)}
+      </dl>
+    </Section>
+  );
+}
+
+export function RunSummary({ scope, f }: { scope: CrewNodeDto; f: Facts }) {
+  const shown = focusWorker(scope);
+  return (
     <section className="v-crew__pane v-crew__summary" aria-label={scope.role ?? scope.title}>
       <div className="v-crew__panehead">
         <Text as="h2" variant="headline-md">{scope.role ?? scope.title}</Text>
         <StatusDot status={f.shape} label={f.label} />
       </div>
       {f.stalled !== undefined && <StallNote since={f.stalled} live={f.live} slug={f.slug} />}
-      <Section title={C.summary.label}>
-        <p className="v-crew__now">{now}</p>
-        {f.hint && f.stalled === undefined && <Text variant="body-sm" muted>{f.hint}</Text>}
-        <dl className="v-crew__facts" aria-label={C.summary.label}>
-          {shown && (<><dt>{active ? C.summary.worker : C.summary.latest}</dt><dd>{f.nameOf(shown)}</dd></>)}
-          <dt>{C.summary.lastActivity}</dt><dd>{last}</dd>
-          {ws.length > 0 && (<><dt>{C.summary.progress}</dt><dd>{C.workersDone(done, ws.length)}</dd></>)}
-        </dl>
-      </Section>
+      <RunFacts scope={scope} f={f} />
       {/* A worker the core runs itself writes no stream; its pane has its changes and controls. */}
       {shown && shown.id.startsWith("agent:") && (
         <Section title={C.summary.streamOf(f.nameOf(shown))}>

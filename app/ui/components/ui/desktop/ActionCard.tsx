@@ -21,7 +21,7 @@ export function ActionCard({
 }: {
   kind: "message" | "redirect" | "stop";
   worker: string;
-  by: "Lead" | "You";
+  by: "Run lead" | "You";
   text?: string;
   state: ActionState;
   time: string;

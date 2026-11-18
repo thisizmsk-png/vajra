@@ -1,6 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { LiveFeed } from "./LiveFeed";
+import { Composer } from "../orch/Composer";
+import { stepFile } from "./chat";
+import type { StepFile, WorktreeDiff } from "./chat";
+import { sentStore, useSent } from "./sentStore";
 import { AlertDialog, Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import type { StatusKey } from "../../../strings";
 import { DiffView, Tabs } from "../../../components/ui/desktop";
@@ -93,6 +97,51 @@ function WorktreeTab({ info }: { info: WorktreeInfo | null | undefined }) {
 
 const STATUS_KEYS = ["pending", "ready", "claimed", "in_progress", "done", "blocked", "question", "failed", "unknown"] as const;
 const WORKTREE_RETRY_MS = 3000;
+/** Steps opened within this long of each other share one diff read of the worktree. */
+const DIFF_CACHE_MS = 5000;
+const L = S.crew.live;
+
+/**
+ * The message box under a worker's chat. A message goes through the core's steering path (the control service queues
+ * it; the worker's control hook hands it over on its next tool call, wrapped with the session's steering nonce), the
+ * same path the Lead's message tool uses: there is no second channel. The thread shows where each one is.
+ */
+export function WorkerComposer({ worker, name, off }: { worker: string; name: string; off: string }) {
+  const [sending, setSending] = useState(false);
+  const [err, setErr] = useState("");
+  const [said, setSaid] = useState("");
+  const send = useCallback(async (raw: string, redirect: boolean): Promise<boolean> => {
+    const text = raw.trim();
+    if (!text) return false;
+    const key = newActionId();
+    sentStore.add(worker, { key, id: "", text, redirect, state: "sending" });
+    setSending(true);
+    setErr("");
+    try {
+      const r = await (redirect ? api.controlRedirect : api.controlMessage)(worker, text);
+      const id = typeof r.action_id === "string" ? r.action_id : "";
+      sentStore.update(worker, key, r.state === "refused" ? { id, state: "failed" } : { id, state: "sent" });
+      setSaid(L.announceSent);
+      return true;
+    } catch (e) {
+      const why = errorText(e);
+      sentStore.update(worker, key, { state: "failed", error: why });
+      setErr(why);
+      return true; // the text stays in the thread, with why it was not sent
+    } finally {
+      setSending(false);
+    }
+  }, [worker]);
+  const onSend = useCallback((t: string) => send(t, false), [send]);
+  const alt = useMemo(() => ({ label: L.redirect, onSend: (t: string) => send(t, true) }), [send]);
+  return (
+    <>
+      <Composer id={`ask-${worker.replace(/[^A-Za-z0-9_-]/g, "-")}`} label={L.ask(name)} placeholder={L.askPlaceholder}
+        available={!off} canAsk={!off && !sending} sending={sending} askErr={err} offReason={off} onSend={onSend} alt={alt} />
+      <p className="v-sr" role="status" aria-live="polite">{said}</p>
+    </>
+  );
+}
 /** Same cadence as the Crew screen's own refresh. */
 const TASK_POLL_MS = 2000;
 /** Changed events arrive in bursts; one task read per gap is enough. */
@@ -105,6 +154,8 @@ const TASK_EVENT_GAP_MS = 500;
  */
 export function WorkerPane({ node, slug, runId, taskLocalId, status, shape: shapeOverride, banner, onActivity }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string; shape?: StatusKey; banner?: ReactNode; onActivity?: (at: number) => void }) {
   const agent = node.id.slice("agent:".length);
+  const sent = useSent(node.id);
+  const onSeen = useCallback((ids: string[]) => sentStore.markSeen(node.id, ids), [node.id]);
   const wp = parseWorkerProvider(node.provider);
   const wd = parseWorkerDiff(node.diff);
   const [tab, setTab] = useState<TabId>("live");
@@ -174,6 +225,30 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status, shape: shap
 
   const shape = shapeOverride ?? ((STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown");
 
+  // The chat's file changes: one diff read of the worktree per opened step (a short cache serves several opened at once).
+  const diffCache = useRef<{ at: number; p: Promise<WorktreeDiff> } | null>(null);
+  useEffect(() => { diffCache.current = null; }, [info]);
+  const diffOf = useCallback((path: string): Promise<StepFile> => {
+    if (!info?.base) return Promise.resolve({ kind: "none" });
+    const now = Date.now();
+    if (!diffCache.current || now - diffCache.current.at > DIFF_CACHE_MS) {
+      // A failed or timed-out read is an error, never "no change".
+      const p = api.diff(info.worktree, info.base).then((d) => {
+        if (d.code !== 0 || d.timed_out) throw { error: "diff_failed", detail: S.crew.live.diffFailed };
+        return d;
+      });
+      diffCache.current = { at: now, p };
+    }
+    return diffCache.current.p.then((d) => stepFile(d, path, info.worktree));
+  }, [info]);
+  const nodeFinished = node.status === "done" || node.status === "failed";
+  const chat = (
+    <div className="v-chat">
+      <LiveFeed stream={`w-${agent}`} live={runLive} onActivity={onActivity} sent={sent} onSeen={onSeen} finished={nodeFinished || !runLive} diffOf={info?.base ? diffOf : undefined} />
+      <WorkerComposer worker={node.id} name={node.role ?? node.title} off={!runLive ? L.offRunEnded : nodeFinished ? L.offFinished : !taskId ? L.offNoTask : ""} />
+    </div>
+  );
+
   return (
     <>
       <section className="v-crew__pane" aria-label={S.crew.header}>
@@ -201,7 +276,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status, shape: shap
           value={tab}
           onChange={setTab}
           tabs={[
-            { id: "live", label: S.crew.tabs.live, panel: <LiveFeed stream={`w-${agent}`} live={runLive} onActivity={onActivity} /> },
+            { id: "live", label: S.crew.tabs.live, panel: chat },
             { id: "stream", label: S.crew.tabs.stream, panel: <StreamTab stream={`w-${agent}`} live={runLive} /> },
             { id: "diff", label: S.crew.tabs.diff, panel: info ? <DiffTab info={info} /> : <Text variant="body-sm" muted>{info === null ? S.crew.noWorktree : S.crew.loading}</Text> },
             { id: "task", label: S.crew.tabs.task, panel: <TaskTab t={task} /> },

@@ -121,8 +121,8 @@ export function feedItems(lines: readonly { seq: number; text: string }[]): Feed
 }
 
 /** A short line for a screen reader about the newest entry: the step's tool, or the start of the message. */
-export function announceOf(item: FeedItem | undefined): string {
+export function announceOf(item: { kind: "step"; tool: string; detail: string } | { kind: string; text: string } | undefined): string {
   if (!item) return "";
-  if (item.kind === "step") return item.detail ? `${item.tool} ${item.detail}`.slice(0, 120) : item.tool;
+  if ("tool" in item) return item.detail ? `${item.tool} ${item.detail}`.slice(0, 120) : item.tool;
   return item.text.split("\n")[0].slice(0, 120);
 }
