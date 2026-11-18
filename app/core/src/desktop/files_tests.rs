@@ -180,10 +180,10 @@ fn changed_files_of_a_worktree_are_counted_from_where_it_left_the_project() {
 fn a_file_diff_is_against_the_base_and_a_new_file_is_marked_untracked() {
     let fx = Fx::new();
     let d = fx.app.files_diff(&fx.pid, Some("w1"), "README.md").unwrap();
-    let text = d["diff"].as_str().unwrap();
-    assert!(text.contains("+two") && text.contains("README.md"), "{text}");
+    assert_eq!((d["text"].as_str(), &d["added"], &d["removed"]), (Some("# one\ntwo\n"), &json!([2]), &json!([])));
+    assert_eq!((d["base_hidden"].as_bool(), d["notice"].as_str()), (Some(true), Some("Earlier content is hidden until the key check ships.")));
     let n = fx.app.files_diff(&fx.pid, Some("w1"), "src/new.rs").unwrap();
-    assert_eq!((n["diff"].as_str(), n["untracked"].as_bool()), (Some("diff --git a/src/new.rs b/src/new.rs\nnew file\n--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1,1 @@\n+new\n"), Some(true)));
+    assert_eq!((n["text"].as_str(), &n["added"], n["untracked"].as_bool()), (Some("new\n"), &json!([1]), Some(true)));
     for (p, want) in [("/etc/hosts", "invalid_args"), ("../x", "invalid_args"), ("", "invalid_args"), (".git/HEAD", "protected")] {
         assert_eq!(code(&fx.app.files_diff(&fx.pid, Some("w1"), p).unwrap_err()), want, "{p:?}");
     }
@@ -253,10 +253,11 @@ fn a_diff_inside_a_denied_folder_in_the_repo_is_refused_present_or_deleted() {
     // With the whole folder gone, the deleted path is still refused by name.
     fs::remove_dir_all(home.join(".claude")).unwrap();
     assert_eq!(code(&app.files_diff(&fx.pid, None, "u/.claude/vajra/state.json").unwrap_err()), "protected");
-    // A deleted file elsewhere still diffs.
+    // A deleted file elsewhere is reported as deleted, without its old content.
     fs::remove_file(fx.repo().join("src/lib.rs")).unwrap();
     let d = app.files_diff(&fx.pid, None, "src/lib.rs").unwrap();
-    assert!(d["diff"].as_str().unwrap().contains("-pub fn a() {}"), "{d}");
+    assert_eq!((d["kind"].as_str(), d["base_hidden"].as_bool()), (Some("deleted"), Some(true)));
+    assert!(!d.to_string().contains("pub fn a"), "{d}");
 }
 
 #[test]
@@ -286,51 +287,34 @@ fn key_in_base(fx: &Fx) {
 }
 
 #[test]
-fn a_key_committed_then_deleted_is_not_printed_as_the_minus_side() {
+fn a_key_committed_then_deleted_sends_no_base_bytes_at_all() {
     let fx = Fx::new();
     key_in_base(&fx);
     fs::remove_file(fx.repo().join("notes.txt")).unwrap();
-    let r = fx.app.files_diff(&fx.pid, None, "notes.txt");
-    assert!(!format!("{r:?}").contains("CANARY"), "{r:?}");
-    assert_eq!(code(&r.unwrap_err()), "protected");
+    let d = fx.app.files_diff(&fx.pid, None, "notes.txt").unwrap();
+    assert!(!d.to_string().contains("CANARY"), "{d}");
+    assert_eq!(d, json!({"path": "notes.txt", "base": d["base"], "kind": "deleted", "base_hidden": true, "notice": "Earlier content is hidden until the key check ships."}));
 }
 
 #[test]
-fn a_key_committed_then_replaced_is_not_printed_as_the_minus_side() {
+fn a_key_committed_then_replaced_sends_only_the_current_file() {
     let fx = Fx::new();
     key_in_base(&fx);
     // Break the link: an innocent file with its own inode replaces it.
     fs::remove_file(fx.repo().join("notes.txt")).unwrap();
     fs::write(fx.repo().join("notes.txt"), "hello\n").unwrap();
-    let r = fx.app.files_diff(&fx.pid, None, "notes.txt");
-    assert!(!format!("{r:?}").contains("CANARY"), "{r:?}");
-    assert_eq!(code(&r.unwrap_err()), "protected");
-    // The innocent working file itself still reads.
-    assert_eq!(fx.app.files_read(&fx.pid, None, "notes.txt").unwrap()["text"], "hello\n");
+    let d = fx.app.files_diff(&fx.pid, None, "notes.txt").unwrap();
+    assert!(!d.to_string().contains("CANARY"), "{d}");
+    // Only the current text, with line numbers and counts for the rest.
+    assert_eq!((d["text"].as_str(), &d["added"], &d["removed"]), (Some("hello\n"), &json!([1]), &json!([[0, 1]])));
 }
 
 #[test]
-fn a_copy_of_the_key_or_a_file_embedding_it_is_refused_by_content() {
+fn no_diff_answer_ever_carries_base_content() {
     let fx = Fx::new();
-    key_in_base(&fx);
-    // A checkout in a worktree makes a fresh file (own inode) with the key's bytes.
-    let wt2 = fx.repo().join(".claude/worktrees/w2");
-    git(&fx.repo(), &["worktree", "add", "-q", "-b", "worker-2", wt2.to_str().unwrap()]);
-    let r = fx.app.files_read(&fx.pid, Some("w2"), "notes.txt");
-    assert!(!format!("{r:?}").contains("CANARY"), "{r:?}");
-    assert_eq!(code(&r.unwrap_err()), "protected");
-    fs::write(fx.repo().join("big.md"), "# notes\nsee DUMMY-KEY-CANARY-ba5e0001 here\n").unwrap();
-    assert_eq!(code(&fx.app.files_read(&fx.pid, None, "big.md").unwrap_err()), "protected");
-    fs::write(fx.repo().join("pic.png"), "DUMMY-KEY-CANARY-ba5e0001").unwrap();
-    assert_eq!(code(&fx.app.files_read(&fx.pid, None, "pic.png").unwrap_err()), "protected", "as an image too");
-}
-
-#[test]
-fn a_key_shorter_than_the_minimum_matches_nothing() {
-    let fx = Fx::new();
-    let key = fx.dir.join("home/.claude/vajra").join(crate::vajra::allowlist::DENIED_NAME);
-    fs::write(&key, b"pub\n").unwrap();
-    assert_eq!(fx.app.files_read(&fx.pid, None, "src/lib.rs").unwrap()["kind"], "text");
+    fs::write(fx.repo().join("src/lib.rs"), "pub fn z() {}\n").unwrap();
+    let d = fx.app.files_diff(&fx.pid, None, "src/lib.rs").unwrap();
+    assert!(!d.to_string().contains("pub fn a"), "{d}");
 }
 
 #[test]
@@ -349,9 +333,10 @@ fn a_diff_is_built_from_the_checked_read_and_the_base_object() {
     // Modified, with the base read from git's objects even though the working file differs.
     fs::write(fx.repo().join("src/lib.rs"), "pub fn a() {}\npub fn b() {}\n").unwrap();
     let d = fx.app.files_diff(&fx.pid, None, "src/lib.rs").unwrap();
-    assert_eq!(d["diff"], "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n pub fn a() {}\n+pub fn b() {}\n");
+    assert_eq!((&d["added"], &d["removed"]), (&json!([2]), &json!([])));
     // Unchanged.
-    assert_eq!(fx.app.files_diff(&fx.pid, None, "README.md").unwrap()["diff"], "");
+    let u = fx.app.files_diff(&fx.pid, None, "README.md").unwrap();
+    assert_eq!((&u["added"], &u["removed"]), (&json!([]), &json!([])));
     // Binary at the working side.
     fs::write(fx.repo().join("README.md"), b"\0\x01").unwrap();
     assert_eq!(fx.app.files_diff(&fx.pid, None, "README.md").unwrap()["kind"], "binary");

@@ -146,16 +146,24 @@ pub struct Scope {
     root_id: (u64, u64),
     deny: Vec<PathBuf>,
     key: Vec<(u64, u64)>,
-    key_path: Option<PathBuf>,
 }
 
-/// Longest key file compared; a larger one is not the key.
-const KEY_READ_MAX: u64 = 4096;
-/// Shortest key content compared, so a stray short file can't make every file match.
-const KEY_MIN: usize = 16;
+/// A read buffer wiped (with volatile writes, so not optimised away) when dropped: bytes read but not sent (a file
+/// that grew past the cap, a binary file) don't linger in freed memory. Sent bytes are moved out first.
+pub struct Wiped(Vec<u8>);
 
-/// A buffer wiped (with volatile writes, so not optimised away) when dropped.
-struct Wiped(Vec<u8>);
+impl From<Vec<u8>> for Wiped {
+    fn from(v: Vec<u8>) -> Self {
+        Self(v)
+    }
+}
+
+impl std::ops::Deref for Wiped {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 impl Drop for Wiped {
     fn drop(&mut self) {
@@ -167,21 +175,9 @@ impl Drop for Wiped {
     }
 }
 
-/// The key's bytes for one comparison, or `None` when it is missing, a link, not a regular file or too large.
-fn read_key(path: &Path) -> Option<Wiped> {
-    let f = open_path(path, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK).ok()?;
-    let md = f.metadata().ok()?;
-    if !md.is_file() || md.len() > KEY_READ_MAX {
-        return None;
-    }
-    let mut buf = Wiped(Vec::with_capacity(KEY_READ_MAX as usize + 1));
-    (&f).take(KEY_READ_MAX + 1).read_to_end(&mut buf.0).ok()?;
-    (buf.0.len() as u64 <= KEY_READ_MAX).then_some(buf)
-}
-
 impl Scope {
     /// `root` must be an existing directory. `deny` are folders never shown (missing ones are skipped). `key` is the
-    /// signing key's path: `stat`ed here, and opened only by `holds_key` to compare content.
+    /// signing key's path: only `stat`ed for its identity, never opened or read (NFR-SEC-2).
     pub fn new(root: &Path, deny: &[PathBuf], key: &Path) -> Result<Self, Refused> {
         let root = root.canonicalize().map_err(io)?;
         let md = std::fs::metadata(&root).map_err(io)?;
@@ -193,19 +189,7 @@ impl Scope {
         let mut keyids: Vec<(u64, u64)> =
             [std::fs::symlink_metadata(key), std::fs::metadata(key)].into_iter().flatten().map(|m| (m.dev(), m.ino())).collect();
         keyids.dedup();
-        Ok(Self { root, root_id, deny, key: keyids, key_path: Some(key.to_path_buf()) })
-    }
-
-    /// Whether `bytes` contain the signing key's content anywhere. The key is read here and only here: opened without
-    /// following a link, a regular file of at most `KEY_READ_MAX` bytes, kept in a buffer wiped on drop for the length
-    /// of the comparison, never returned, logged or sent. A key that is missing, odd or shorter than `KEY_MIN` (after
-    /// trimming whitespace) matches nothing. A content match is the only way to catch a copy: a blob committed from a
-    /// hard link, or a file checked out from one, has its own inode.
-    pub fn holds_key(&self, bytes: &[u8]) -> bool {
-        let Some(path) = &self.key_path else { return false };
-        let Some(key) = read_key(path) else { return false };
-        let k = key.0.trim_ascii();
-        k.len() >= KEY_MIN && bytes.windows(k.len()).any(|w| w == k)
+        Ok(Self { root, root_id, deny, key: keyids })
     }
 
     pub fn root(&self) -> &Path {
@@ -353,28 +337,20 @@ impl Scope {
             return Ok(FileRead { size, content: Content::TooLarge { cap } });
         }
         clear_nonblock(&f)?;
-        let mut bytes = Vec::with_capacity(size as usize);
+        let mut buf = Wiped(Vec::with_capacity(size as usize));
         // One byte past the cap tells a file that grew since the stat.
-        f.take(cap + 1).read_to_end(&mut bytes).map_err(io)?;
-        if bytes.len() as u64 > cap {
-            return Ok(FileRead { size: bytes.len() as u64, content: Content::TooLarge { cap } });
-        }
-        // A copy of the key (a checked-out blob, a cp) has a fresh inode; its content still gives it away.
-        if self.holds_key(&bytes) {
-            return Err(Refused::Protected);
+        f.take(cap + 1).read_to_end(&mut buf.0).map_err(io)?;
+        if buf.0.len() as u64 > cap {
+            return Ok(FileRead { size: buf.0.len() as u64, content: Content::TooLarge { cap } });
         }
         if let Some(mime) = image {
-            return Ok(FileRead { size, content: Content::Image { mime, bytes } });
+            return Ok(FileRead { size, content: Content::Image { mime, bytes: std::mem::take(&mut buf.0) } });
         }
-        let content = if looks_binary(&bytes) {
-            Content::Binary
-        } else {
-            match String::from_utf8(bytes) {
-                Ok(s) => Content::Text(s),
-                Err(_) => Content::Binary,
-            }
-        };
-        Ok(FileRead { size, content })
+        if looks_binary(&buf.0) || std::str::from_utf8(&buf.0).is_err() {
+            return Ok(FileRead { size, content: Content::Binary });
+        }
+        let text = String::from_utf8(std::mem::take(&mut buf.0)).map_err(|_| Refused::Io("not UTF-8".into()))?;
+        Ok(FileRead { size, content: Content::Text(text) })
     }
 }
 

@@ -66,7 +66,8 @@ impl Allowlist {
         self.vajra_dir().join("campaigns")
     }
 
-    /// Where the protected signing key lives. Only for identity checks (`stat`); nothing ever opens it.
+    /// Where the protected signing key lives. The app only `stat`s it for its identity (device and inode), here and in
+    /// the Files panel's scope; nothing in the app opens or reads it (the engine's campaign script does that).
     pub fn key_path(&self) -> PathBuf {
         self.claude.join("vajra").join(DENIED_NAME)
     }

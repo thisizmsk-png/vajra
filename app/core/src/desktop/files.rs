@@ -257,7 +257,9 @@ impl App {
         }
         // Git never opens a working file here. The current side is read by `Scope` (every files_read rule: inside the
         // root, outside the denied folders, no links, a regular file, not the key by inode). The base side is the blob
-        // at the base commit, from git's object store. The core then diffs the two texts itself.
+        // at the base commit, from git's object store, used only to compute line marks and then wiped: no base content
+        // is sent. A key committed through a hard link lives on in a blob with its own identity, and the app may not
+        // read the key to recognise it (NFR-SEC-2), so earlier content stays hidden until the engine-side check ships.
         let scope = self.files_scope(&root)?;
         let new = match scope.read(path) {
             Ok(r) => match r.content {
@@ -292,26 +294,33 @@ impl App {
                 if o.code != Some(0) {
                     return Err(fail("git_failed", "git could not read this file at the base"));
                 }
-                // A key committed through a hard link lives on in the base blob: the minus side would print it.
-                if scope.holds_key(&o.stdout_raw) {
-                    return Err(refused(Refused::Protected));
-                }
-                if files::looks_binary(&o.stdout_raw) {
+                let blob = files::Wiped::from(o.stdout_raw);
+                if files::looks_binary(&blob) {
                     return Ok(json!({"path": path, "kind": "binary"}));
                 }
-                match String::from_utf8(o.stdout_raw) {
-                    Ok(t) => Some(t),
-                    Err(_) => return Ok(json!({"path": path, "kind": "binary"})),
-                }
+                // Lossy is fine: only line boundaries and equality are used, and nothing of it is sent.
+                Some(blob)
             }
             // A folder (tree) or a submodule (commit) at the base.
             Some(_) => return Err(refused(Refused::NotAFile)),
         };
-        if old.is_none() && new.is_none() {
-            return Err(refused(Refused::NotFound));
-        }
-        let diff = files::diff::unified(path, old.as_deref(), new.as_deref());
-        Ok(json!({"path": path, "base": base, "kind": "text", "diff": diff, "truncated": false, "untracked": old.is_none()}))
+        let notice = "Earlier content is hidden until the key check ships.";
+        let Some(new) = new else {
+            if old.is_none() {
+                return Err(refused(Refused::NotFound));
+            }
+            // Deleted since the base: nothing current to show, and the old content is not sent.
+            return Ok(json!({"path": path, "base": base, "kind": "deleted", "base_hidden": true, "notice": notice}));
+        };
+        let m = match &old {
+            Some(blob) => files::diff::marks(&String::from_utf8_lossy(blob), &new),
+            None => files::diff::Marks { added: (1..=new.split_inclusive('\n').count() as u32).collect(), removed: vec![] },
+        };
+        Ok(json!({
+            "path": path, "base": base, "kind": "text", "text": new,
+            "added": m.added, "removed": m.removed.iter().map(|(a, n)| json!([a, n])).collect::<Vec<_>>(),
+            "untracked": old.is_none(), "base_hidden": true, "notice": notice,
+        }))
     }
 }
 
