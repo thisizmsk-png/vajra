@@ -454,7 +454,8 @@ impl App {
             shown: Mutex::new(HashMap::new()),
             deciding: Mutex::new(Default::default()),
             _instance: instance,
-            bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
+            // Isolated git calls make their private dirs under the data dir, which no agent sandbox may write.
+            bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()).with_git_scratch(data.join("git-scratch")),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verify_slots: (Mutex::new(VERIFY_SLOTS), Condvar::new()),
             verify_queue_budget: VERIFY_QUEUE_BUDGET,

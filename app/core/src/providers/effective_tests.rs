@@ -195,7 +195,7 @@ fn the_diff_comes_from_git_for_a_run_that_only_edited_through_a_shell() {
     let sh = |cmd: &str| assert!(Command::new("/bin/sh").args(["-c", cmd]).current_dir(&repo).status().unwrap().success());
     sh("echo three >> a.txt; echo new > b.txt");
 
-    let bridge = Bridge::new(PathBuf::from("/nonexistent"));
+    let bridge = bridge();
     let d = diff_from_git(&bridge, &repo, "HEAD").expect("git answered");
     // One line appended to a.txt and one line in the new b.txt.
     assert_eq!(d, Diff { files: vec!["a.txt".into(), "b.txt".into()], files_total: 2, added: 2, removed: 0, partial: false, uncounted: 0 });
@@ -225,7 +225,7 @@ fn git_paths_are_real_paths_even_with_odd_characters_or_a_staged_rename() {
     for f in odd {
         std::fs::write(repo.join(f), "x\n").unwrap();
     }
-    let bridge = Bridge::new(PathBuf::from("/nonexistent"));
+    let bridge = bridge();
     let d = diff_from_git(&bridge, &repo, "HEAD").expect("git answered");
     let mut want: Vec<String> = vec!["keep.txt".into(), "new \"quoted\" name.txt".into()];
     want.extend(odd.iter().map(|s| s.to_string()));
@@ -255,7 +255,7 @@ fn a_run_that_only_created_files_counts_their_lines_as_added() {
     std::fs::write(repo.join("sub/two.txt"), "x\ny\n").unwrap();
     std::fs::write(repo.join("empty.txt"), "").unwrap();
     std::fs::write(repo.join("blob.bin"), b"\0\x01\x02\0").unwrap();
-    let bridge = Bridge::new(PathBuf::from("/nonexistent"));
+    let bridge = bridge();
     let d = diff_from_git(&bridge, &repo, "HEAD").expect("git answered");
     let mut files = d.files.clone();
     files.sort();
@@ -270,7 +270,7 @@ fn counting_new_files_stops_at_a_time_budget_keeps_listing_and_says_the_totals_a
     for i in 0..20 {
         std::fs::write(repo.join(format!("n{i:02}.txt")), "a\nb\n").unwrap();
     }
-    let bridge = Bridge::new(PathBuf::from("/nonexistent"));
+    let bridge = bridge();
     // No time at all: every new file is listed and none is counted.
     let d = diff_from_git_within(&bridge, &repo, "HEAD", Duration::ZERO).expect("git answered");
     assert_eq!((d.files_total, d.files.len(), d.added, d.partial, d.uncounted), (20, 20, 0, true, 20));
@@ -295,7 +295,7 @@ fn untracked_count_timing() {
             std::fs::write(repo.join(format!("n{i:03}.txt")), "a\nb\nc\n").unwrap();
         }
         let started = std::time::Instant::now();
-        let d = diff_from_git(&Bridge::new(PathBuf::from("/nonexistent")), &repo, "HEAD").unwrap();
+        let d = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
         println!("TIMING {n} new files: {:?} (added {}, partial {})", started.elapsed(), d.added, d.partial);
     }
 }
@@ -309,8 +309,9 @@ fn init_repo(repo: &Path) {
     git(repo, &["commit", "-q", "-m", "base"]);
 }
 
+/// A bridge with its own scratch folder for isolated git calls (the app's sits under its data dir).
 fn bridge() -> Bridge {
-    Bridge::new(PathBuf::from("/nonexistent"))
+    Bridge::new(PathBuf::from("/nonexistent")).with_git_scratch(tmp().join("git-scratch"))
 }
 
 /// What git itself counts for one new file: `git diff --numstat --no-index /dev/null <file>` (exit 1 when it differs).
@@ -516,7 +517,7 @@ fn a_git_that_cannot_answer_is_none_and_garbage_numstat_is_partial() {
         let bin = tmp().join(format!("git-{tag}"));
         std::fs::write(&bin, format!("#!/bin/sh\ncase \"$*\" in *'{on}'*) {then};; esac\nexec /usr/bin/git \"$@\"\n")).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let mut b = Bridge::new(PathBuf::from("/nonexistent"));
+        let mut b = bridge();
         b.git = bin;
         diff_from_git(&b, &repo, "HEAD")
     };

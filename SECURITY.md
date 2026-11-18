@@ -152,6 +152,15 @@ which reads the key itself so it never enters model context).
   blocks the agent from reading it, and the sandbox `denyRead` entry in
   `config/sandbox.json` enforces that at the OS level; without the sandbox, the
   signatures give tamper evidence, not tamper proofing.
+- **The desktop's git reads rest on the data dir being agent-proof.** Vajra
+  Desktop runs its read-only git calls (status, diff, log and the rest) with the
+  repository's own config files unread. Each call gets a private git folder,
+  made in a folder under the app's data dir, so a repo cannot name a filter,
+  diff driver, hook or fetch program for the app to run. That holds only while
+  no agent can write the app's data dir. This is the same launch-blocker
+  condition as the key: the agent sandboxes (the Codex Seatbelt profile and the
+  Claude worker sandbox) must deny writes there. The temp folder is never used,
+  because a sandbox may write it.
 - **Trust on first install.** The local signature records the files as they were
   when you installed. Check what you cloned (`git log`, `git verify-tag`) before
   running `install.sh`.

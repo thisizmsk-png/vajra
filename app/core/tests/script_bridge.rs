@@ -67,11 +67,21 @@ fn argv_for_each_fixed_request() {
     let dr = b.run(&Request::Doctor).unwrap();
     assert_eq!(dr.stdout, "PASS ok\n");
 
-    let g = b.run(&Request::Git { cwd: repo, args: vec!["rev-parse".into(), "--".into(), "a b".into()] }).unwrap();
-    assert_eq!(g.stdout, "[--no-pager]\n[-c]\n[core.fsmonitor=]\n[rev-parse]\n[--]\n[a b]\n");
+    // A git call's argv (`run` adds the isolation environment, tested on real git in `git_safety`).
+    let pre = "--no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.sshCommand=false -c protocol.allow=never \
+               -c credential.helper= -c submodule.recurse=false -c gc.auto=0 -c maintenance.auto=false";
+    let argv = |args: &[&str]| b.plan(&Request::Git { cwd: repo.clone(), args: args.iter().map(|a| a.to_string()).collect() }).unwrap().1.join(" ");
+    assert_eq!(argv(&["rev-parse", "--", "a b"]), format!("{pre} rev-parse -- a b"));
     // diff never runs a repo-configured external diff or textconv driver.
-    let g = b.run(&Request::Git { cwd: tmp(), args: vec!["diff".into(), "main".into(), "--".into()] }).unwrap();
-    assert_eq!(g.stdout, "[--no-pager]\n[-c]\n[core.fsmonitor=]\n[diff]\n[--no-ext-diff]\n[--no-textconv]\n[--ignore-submodules=all]\n[main]\n[--]\n");
+    assert_eq!(argv(&["diff", "main", "--"]), format!("{pre} diff --no-ext-diff --no-textconv --ignore-submodules=all main --"));
+    assert_eq!(argv(&["log", "-1"]), format!("{pre} log --no-ext-diff --no-textconv -1"));
+    // `--version` runs as before, outside a repo.
+    let v = b.run(&Request::Git { cwd: repo.clone(), args: vec!["--version".into()] }).unwrap();
+    assert!(v.stdout.ends_with("[--version]\n"), "{}", v.stdout);
+    // Outside a repo the fake git answers no work tree: the call is not run, with git's exit 128.
+    let g = b.run(&Request::Git { cwd: repo, args: vec!["status".into()] }).unwrap();
+    assert_eq!(g.code, Some(128));
+    assert!(!g.stdout.contains("[status]"), "{}", g.stdout);
 }
 
 #[test]
@@ -87,7 +97,7 @@ fn real_git_diff_ignores_repo_diff_external() {
     fs::write(repo.join("f.txt"), "a\n").unwrap();
     git(&["add", "f.txt"]);
     git(&["config", "diff.external", &format!("/usr/bin/touch {}", marker.display())]);
-    let b = Bridge::new(tmp());
+    let b = Bridge::new(tmp()).with_git_scratch(tmp());
     let o = b.run(&Request::Git { cwd: repo.clone(), args: vec!["diff".into(), "--cached".into(), "HEAD".into(), "--".into()] }).unwrap();
     assert!(!marker.exists(), "diff.external ran");
     assert!(o.stdout.contains("+a"), "{}", o.stdout);
