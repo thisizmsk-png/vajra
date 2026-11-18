@@ -111,7 +111,10 @@ impl App {
         let mut entries = Vec::new();
         for e in listing.entries {
             let rel = if path.is_empty() { e.name.clone() } else { format!("{path}/{}", e.name) };
-            let ign = ignored.iter().any(|i| i == &rel);
+            // git collapses an ignored folder (with no tracked file in it) into one record for the folder, so an entry
+            // inside a listed folder that is itself ignored, or sits in an ignored folder, is ignored too. A folder
+            // holding a tracked file is never collapsed: git names its ignored entries one by one instead.
+            let ign = ignored.iter().any(|i| i == &rel || rel.starts_with(&format!("{i}/")));
             if ign && !show_ignored {
                 continue;
             }
@@ -122,8 +125,11 @@ impl App {
 
     /// The entries directly in folder `rel` that git ignores (folders too), relative to the root.
     fn files_ignored(&self, root: &Path, rel: &str) -> Vec<String> {
-        let spec = if rel.is_empty() { ":(literal).".to_string() } else { format!(":(literal){rel}/") };
-        let Some(out) = self.files_git(root, &["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", &spec]) else {
+        // No trailing slash: inside an ignored folder git then names the collapsed ancestor (`target/` for
+        // `target/debug`), which marks every child; with one it fails ("directory entry not superset of prefix").
+        let spec = if rel.is_empty() { ":(literal).".to_string() } else { format!(":(literal){rel}") };
+        // A partial answer still marks what it holds; outside git (an error) nothing is ignored.
+        let Ok((out, _)) = self.files_git_records(root, &["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", &spec]) else {
             return Vec::new();
         };
         out.split(|&b| b == 0)
@@ -132,6 +138,25 @@ impl App {
             .filter(|p| !p.is_empty())
             .map(String::from)
             .collect()
+    }
+
+    /// A NUL-separated git answer: its whole records, and whether it was cut (over the bridge's cap, or slow). A cut
+    /// answer loses its last, possibly partial, record. A failed command is an error, never an empty answer.
+    fn files_git_records(&self, cwd: &Path, args: &[&str]) -> Result<(Vec<u8>, bool), Value> {
+        let o = self
+            .bridge
+            .run(&Request::Git { cwd: cwd.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() })
+            .map_err(|e| fail("git_failed", e))?;
+        let partial = o.truncated || o.timed_out;
+        if o.code != Some(0) && !partial {
+            return Err(fail("git_failed", "git could not list this tree"));
+        }
+        let mut out = o.stdout_raw;
+        if partial {
+            let keep = out.iter().rposition(|&b| b == 0).map_or(0, |i| i + 1);
+            out.truncate(keep);
+        }
+        Ok((out, partial))
     }
 
     /// `files_index`: every file path in the tree, for "Open file..." (fuzzy find by path). In a git repository it is
@@ -236,18 +261,16 @@ impl App {
             return Ok(json!({"base": null, "files": [], "truncated": false}));
         };
         // `--relative`: only paths under this folder, relative to it (a project may sit below the repository's top).
-        let mut changes = self
-            .files_git(&root, &["diff", "--name-status", "-z", "--no-renames", "--relative", &base, "--"])
-            .map(|b| parse_name_status(&b))
-            .unwrap_or_default();
-        if let Some(u) = self.files_git(&root, &["ls-files", "-z", "--others", "--exclude-standard"]) {
-            changes.extend(u.split(|&b| b == 0).filter_map(|p| std::str::from_utf8(p).ok()).filter(|p| !p.is_empty()).map(|p| Change { path: p.into(), status: 'A', from: None }));
-        }
+        // A cut answer keeps its whole records and sets `truncated`; a failed one is an error, never "no changes".
+        let (diff, cut_diff) = self.files_git_records(&root, &["diff", "--name-status", "-z", "--no-renames", "--relative", &base, "--"])?;
+        let mut changes = parse_name_status(&diff);
+        let (new, cut_new) = self.files_git_records(&root, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+        changes.extend(new.split(|&b| b == 0).filter_map(|p| std::str::from_utf8(p).ok()).filter(|p| !p.is_empty()).map(|p| Change { path: p.into(), status: 'A', from: None }));
         // A path inside a protected folder is not even named.
         changes.retain(|c| check_rel(&c.path).is_ok());
         let mut seen = HashMap::new();
         changes.retain(|c| seen.insert(c.path.clone(), ()).is_none());
-        let truncated = changes.len() > CHANGED_MAX;
+        let truncated = cut_diff || cut_new || changes.len() > CHANGED_MAX;
         let files: Vec<Value> = changes.into_iter().take(CHANGED_MAX).map(|c| json!({"path": c.path, "status": c.status.to_string(), "from": c.from})).collect();
         Ok(json!({"base": base, "files": files, "truncated": truncated}))
     }

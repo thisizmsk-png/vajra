@@ -394,6 +394,74 @@ fn a_project_below_the_repository_top_uses_its_own_paths_for_git() {
 }
 
 #[test]
+fn the_contents_of_an_ignored_folder_are_ignored_with_both_toggle_values() {
+    let fx = Fx::new();
+    fs::create_dir_all(fx.repo().join("target/debug")).unwrap();
+    fs::write(fx.repo().join("target/debug/app"), "x").unwrap();
+    for (p, kids) in [("target", vec!["debug", "out.o"]), ("target/debug", vec!["app"])] {
+        let shown = fx.app.files_list(&fx.pid, None, p, true).unwrap();
+        assert_eq!(names(&shown), kids, "{p}");
+        assert!(shown["entries"].as_array().unwrap().iter().all(|e| e["ignored"] == true), "{p}: {shown}");
+        assert_eq!(names(&fx.app.files_list(&fx.pid, None, p, false).unwrap()), Vec::<String>::new(), "{p}");
+    }
+}
+
+#[test]
+fn a_tracked_file_inside_an_ignored_folder_is_not_marked_ignored() {
+    let fx = Fx::new();
+    fs::write(fx.repo().join("target/keep.txt"), "kept").unwrap();
+    git(&fx.repo(), &["add", "-f", "target/keep.txt"]);
+    git(&fx.repo(), &["commit", "-q", "-m", "keep"]);
+    let all = fx.app.files_list(&fx.pid, None, "target", true).unwrap();
+    let ign: Vec<(String, bool)> = all["entries"].as_array().unwrap().iter().map(|e| (e["name"].as_str().unwrap().into(), e["ignored"].as_bool().unwrap())).collect();
+    assert_eq!(ign, vec![("keep.txt".to_string(), false), ("out.o".to_string(), true)]);
+    assert_eq!(names(&fx.app.files_list(&fx.pid, None, "target", false).unwrap()), vec!["keep.txt"]);
+}
+
+/// 6000 files of ~200-byte paths under one folder: either query's answer passes the bridge's 1 MiB cap.
+fn many_files(fx: &Fx) -> String {
+    let deep = format!("{}/", "c".repeat(190));
+    let dir = fx.repo().join(&deep);
+    fs::create_dir_all(&dir).unwrap();
+    for i in 0..6000 {
+        fs::write(dir.join(format!("f{i:04}.txt")), "").unwrap();
+    }
+    deep
+}
+
+fn changed_paths(v: &Value) -> Vec<String> {
+    v["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn capped_untracked_output_is_flagged_not_dropped() {
+    let fx = Fx::new();
+    let deep = many_files(&fx);
+    let c = fx.app.files_changed(&fx.pid, None).unwrap();
+    assert_eq!(c["truncated"], true);
+    let paths = changed_paths(&c);
+    assert!(!paths.is_empty());
+    assert!(paths.iter().all(|p| p.starts_with(&deep) && p.len() == deep.len() + 9), "no cut path");
+}
+
+#[test]
+fn capped_tracked_change_output_is_flagged_not_dropped() {
+    let fx = Fx::new();
+    let deep = many_files(&fx);
+    git(&fx.repo(), &["add", "."]);
+    git(&fx.repo(), &["commit", "-q", "-m", "many"]);
+    for i in 0..6000 {
+        fs::write(fx.repo().join(&deep).join(format!("f{i:04}.txt")), "changed").unwrap();
+    }
+    let c = fx.app.files_changed(&fx.pid, None).unwrap();
+    assert_eq!(c["truncated"], true);
+    let paths = changed_paths(&c);
+    assert!(!paths.is_empty());
+    assert!(c["files"].as_array().unwrap().iter().all(|f| f["status"] == "M"));
+    assert!(paths.iter().all(|p| p.starts_with(&deep) && p.len() == deep.len() + 9), "no cut path");
+}
+
+#[test]
 fn name_status_parses_renames_copies_and_deletes() {
     let raw = b"M\0a.rs\0A\0b.rs\0D\0c.rs\0R100\0old.rs\0new.rs\0C075\0x.rs\0y.rs\0T\0t.rs\0";
     let got: Vec<(String, char)> = parse_name_status(raw).into_iter().map(|c| (c.path, c.status)).collect();
